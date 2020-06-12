@@ -1,4 +1,5 @@
 alias ls='ls -G'
+alias maven='mvn'
 
 [[ -s "$HOME/.rvm/scripts/rvm" ]] && source "$HOME/.rvm/scripts/rvm" # Load RVM into a shell session *as a function*
 
@@ -12,7 +13,7 @@ export PATH="/usr/local/opt/gettext/bin:$PATH"
 [ -f /usr/local/etc/bash_completion ] && . /usr/local/etc/bash_completion
 
 
-export JAVA_HOME="/Library/Java/JavaVirtualMachines/jdk-14.jdk/Contents/Home/"
+export JAVA_HOME="/Library/Java/JavaVirtualMachines/adoptopenjdk-13.jdk/Contents/Home/"
 
 # Add RVM to PATH for scripting. Make sure this is the last PATH variable change.
 export PATH="$PATH:$HOME/.rvm/bin"
