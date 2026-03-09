@@ -14,6 +14,7 @@ These preferences apply across all repositories and sessions.
 - Always check a PR's status (open/merged/closed) before pushing commits to it
 - PR descriptions should be kept up to date with the actual changes — verify before finalizing
 - When reviewing PRs, focus on critical issues (bugs, security, logic errors) not style nitpicks
+- **After pushing commits to a PR**, monitor the CI check runs on the PR until they complete. Report the outcome (pass/fail) before considering the task done. If checks fail, investigate and fix before reporting success.
 
 ## Code Style & Languages
 - **Python** is the preferred scripting language for automation, data processing, and tooling
@@ -24,6 +25,7 @@ These preferences apply across all repositories and sessions.
 - Run `make lint` and `make test` before committing in repos that have a Makefile
 - Write unit tests for new functionality
 - Document changes to environment variables in the `README.md` file
+- **Linting philosophy**: When linting errors arise, **always fix the code to pass the linter** — do not suppress, ignore, or disable lint rules. Only disable a rule as a last resort if fixing the code is truly impossible or would make it significantly worse, and explain why in a comment. This applies to all linters (flake8, pylint, mypy, markdownlint, eslint, etc.).
 
 ## GitHub CLI & API
 - Prefer the **`gh` CLI** over raw API calls or curl when interacting with GitHub
