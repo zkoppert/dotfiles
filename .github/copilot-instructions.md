@@ -1,9 +1,9 @@
-# Zack Koppert — Global Copilot Instructions
+# Zack Koppert - Global Copilot Instructions
 
 These preferences apply across all repositories and sessions.
 
 ## General Preferences
-- Be direct and concise — skip preamble and get to the point
+- Be direct and concise - skip preamble and get to the point
 - When uncertain, ask clarifying questions rather than assuming
 - Prefer practical, working solutions over theoretical explanations
 - When automating repetitive work, build reusable tools (scripts, actions) not one-off fixes
@@ -54,13 +54,14 @@ When creating or modifying GitHub Actions workflows:
 - Match existing format/templates when extending reports — don't invent new layouts without asking
 
 ## Writing Style (for reports, evaluations, documentation authored on my behalf)
-- Use a conversational, direct tone — not corporate or stiff
-- Vary greetings and openings — don't default to "Hey team" every time
+- Use a conversational, direct tone - not corporate or stiff
+- Vary greetings and openings - don't default to "Hey team" every time
 - Use real names, not handles, when referring to people in narrative text
 - Back up qualitative assessments with specific evidence (links to PRs, issues, etc.)
 - Use `[PLACEHOLDER]` tags for subjective items that only I can fill in
-- Rating language: "Above expectations" / "Meets expectations" / "Below expectations" — not "Exceeds" or "Does not meet"
+- Rating language: "Above expectations" / "Meets expectations" / "Below expectations" - not "Exceeds" or "Does not meet"
 - When referencing GitHub artifacts, always include a clickable link
+- **Never use em dashes** (the long dash character). Use a regular hyphen with spaces ( - ) or rephrase the sentence instead.
 
 ## File & Project Organization
 - Store automation scripts in a `scripts/` directory
