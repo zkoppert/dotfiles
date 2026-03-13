@@ -78,7 +78,7 @@ When creating or modifying GitHub Actions workflows:
 
 ## My Open Source GitHub Actions — Shared Patterns
 
-The following conventions apply to my suite of GitHub Actions in the `github-community-projects` org: **contributors**, **evergreen**, **issue-metrics**, **stale-repos**, **cleanowners**, **measure-innersource**, and **pr-conflict-detector**. These repos share a consistent architecture — follow these patterns when working in any of them.
+The following conventions apply to my suite of GitHub Actions in the `github-community-projects` org: **contributors**, **evergreen**, **issue-metrics**, **stale-repos**, **cleanowners**, **measure-innersource**, **pr-conflict-detector**, and **ospo-reusable-workflows**. These repos share a consistent architecture — follow these patterns when working in any of them.
 
 ### Project Structure
 - **Flat module layout** — all Python source files live at the repo root (no `src/` directory)
