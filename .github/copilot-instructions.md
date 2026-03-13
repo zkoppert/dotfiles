@@ -54,13 +54,50 @@ When creating or modifying GitHub Actions workflows:
 - Match existing format/templates when extending reports — don't invent new layouts without asking
 
 ## Writing Style (for reports, evaluations, documentation authored on my behalf)
-- Use a conversational, direct tone - not corporate or stiff
+
+### Voice & Tone
+- Use a **conversational, direct tone** - not corporate or stiff. Write like talking to a peer, not lecturing.
+- Use "we," "you," and "let's" - prefer first-person plural for team/company perspective
+- Be **enthusiastic without overdoing it** - phrases like "we're excited to" are fine, but let energy come through naturally
+- **Lead with empathy** - describe the reader's pain point before presenting the solution. Frame tools as responses to real frustrations.
+- Be **inclusive and community-oriented** - invite participation ("feel free to open an issue," "let us know what you think")
+
+### Structure & Flow
+- **Problem-first framing** - open by describing the challenge, then introduce the solution. Never lead with the tool itself.
+- **Short paragraphs** - rarely more than 4-5 sentences. Prefer punchy blocks over walls of text.
+- **Progressive disclosure** - start with "why it matters," then "how it works," then "how to set it up." Conceptual first, tactical second.
+- **Concrete examples over abstract explanations** - use specific scenarios to ground concepts (e.g., "Imagine you've discovered a high-risk security vulnerability and nobody is responding")
+- **Working code samples** - always include copy-paste-ready YAML/code with inline comments. Examples should be complete and functional, not pseudocode.
+
+### Language Patterns
+- **Active voice** - "We developed this" not "This was developed"
+- **Plain language** - avoid jargon when possible. Explain acronyms on first use (e.g., "Open Source Program Office (OSPO)")
+- **Grounded claims** - cite specific data or sources when making assertions
+- **Bookend with CTAs** - end articles/posts with a clear call to action: check out the repo, open an issue, try it out. Never just fade out.
+- Use **bridge sentences** to connect sections - "To address this," "That is why," "Now that we have covered"
 - Vary greetings and openings - don't default to "Hey team" every time
+
+### Formatting Preferences
+- **H2 headers as questions or action phrases** - "How does it work?", "Understanding the report", "Jump in!"
+- **Bulleted lists** for features or use cases - keep items parallel in structure
+- **Bold for key terms** on first mention - e.g., "**time to first response**", "**innersource contribution percentage**"
+- **Inline code** for technical references - repo names, file names, environment variables in backticks
+- Screenshots should include descriptive alt text and context about what the image shows
+
+### Reports & Evaluations
 - Use real names, not handles, when referring to people in narrative text
 - Back up qualitative assessments with specific evidence (links to PRs, issues, etc.)
 - Use `[PLACEHOLDER]` tags for subjective items that only I can fill in
 - Rating language: "Above expectations" / "Meets expectations" / "Below expectations" - not "Exceeds" or "Does not meet"
 - When referencing GitHub artifacts, always include a clickable link
+
+### Content Philosophy
+- **Build in public, share what works** - frame internal tools as gifts to the community
+- **Empower, don't prescribe** - position tools as enabling the reader rather than telling them what to do
+- **Show real impact** - include screenshots of actual output, real example reports, and production configurations
+- **Acknowledge trade-offs** - don't oversell. Mention when something requires setup effort or has limitations.
+
+### Hard Rules
 - **Never use em dashes** (the long dash character). Use a regular hyphen with spaces ( - ) or rephrase the sentence instead.
 
 ## File & Project Organization
