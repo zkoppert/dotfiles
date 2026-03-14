@@ -26,6 +26,7 @@ These preferences apply across all repositories and sessions.
 - Prefer ecosystem tools (`pip install`, `npm init`, etc.) over manual configuration
 - Run `make lint` and `make test` before committing in repos that have a Makefile
 - Write unit tests for new functionality
+- **Local integration testing**: Always run new features end-to-end locally before merging, not just unit tests. MagicMock-based tests can pass even when calling methods that don't exist on the real class. For GitHub Actions, use the `.env` file with `DRY_RUN=true` to verify against real APIs.
 - Document changes to environment variables in the `README.md` file
 - **Linting philosophy**: When linting errors arise, **always fix the code to pass the linter** — do not suppress, ignore, or disable lint rules. Only disable a rule as a last resort if fixing the code is truly impossible or would make it significantly worse, and explain why in a comment. This applies to all linters (flake8, pylint, mypy, markdownlint, eslint, etc.).
 
