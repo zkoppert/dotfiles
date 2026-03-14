@@ -36,7 +36,7 @@ These preferences apply across all repositories and sessions.
 ## GitHub Actions Best Practices
 When creating or modifying GitHub Actions workflows:
 1. Always use the **latest release** of each action
-2. Pin actions to their **full commit SHA** (not tags) with a comment showing the human-readable version: `uses: actions/checkout@<sha> # v6.0.2`
+2. Pin actions to their **full commit SHA** (not tags) with a comment showing the **full version tag**: `uses: actions/checkout@<sha> # v6.0.2` (not just `# v6`)
 3. Validate workflow syntax before committing
 4. Use **dedicated tokens/secrets** for each workflow — do not reuse tokens across different workflows
 5. When filtering activity data for reports, exclude Dependabot PRs from summaries (they add noise)
