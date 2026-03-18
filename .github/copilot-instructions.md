@@ -11,6 +11,7 @@ These preferences apply across all repositories and sessions.
 
 ## Pull Requests
 - **Always create PRs as draft** unless I explicitly say otherwise
+- **Always assign me (`zkoppert`) as the assignee** when opening PRs - this helps me track work in progress and follow up
 - Always check a PR's status (open/merged/closed) before pushing commits to it
 - PR descriptions should be kept up to date with the actual changes — verify before finalizing
 - When reviewing PRs, focus on critical issues (bugs, security, logic errors) not style nitpicks
