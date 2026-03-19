@@ -17,6 +17,7 @@ These preferences apply across all repositories and sessions.
 - When reviewing PRs, focus on critical issues (bugs, security, logic errors) not style nitpicks
 - **Verify before flagging**: When reviewing code, always check source material (config files, upstream docs, official examples) before recommending changes. Do not flag something as a bug or missing requirement based on assumptions alone.
 - **Suggest code changes**: When posting PR comments that request specific code changes, use GitHub's suggestion blocks (````suggestion`) so the author can apply the fix directly.
+- **Additive tone in reviews**: Frame feedback as additive rather than corrective. Say "we've also got" instead of "but we've got". Use "I believe" to soften assertions about behavior you haven't directly verified (e.g., "I believe it passes because" not "It only passes because").
 - **Always confirm before approving PRs** unless explicitly told to approve. Asking to see the approval message is not the same as giving the go-ahead.
 - **After pushing commits to a PR**, monitor the CI check runs on the PR until they complete. Report the outcome (pass/fail) before considering the task done. If checks fail, investigate and fix before reporting success.
 
