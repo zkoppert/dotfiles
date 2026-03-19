@@ -14,6 +14,7 @@ These preferences apply across all repositories and sessions.
 - **Always assign me (`zkoppert`) as the assignee** when opening PRs - this helps me track work in progress and follow up
 - Always check a PR's status (open/merged/closed) before pushing commits to it
 - PR descriptions should be kept up to date with the actual changes — verify before finalizing
+- PR descriptions should always include a **Testing** section. Do not list linting results in the Testing section — linting is a given, not something to highlight. Focus on meaningful tests: unit tests, integration tests, manual verification, etc.
 - When reviewing PRs, focus on critical issues (bugs, security, logic errors) not style nitpicks
 - **Verify before flagging**: When reviewing code, always check source material (config files, upstream docs, official examples) before recommending changes. Do not flag something as a bug or missing requirement based on assumptions alone.
 - **Suggest code changes**: When posting PR comments that request specific code changes, use GitHub's suggestion blocks (````suggestion`) so the author can apply the fix directly.
