@@ -23,6 +23,7 @@ These preferences apply across all repositories and sessions.
 - **One point per comment**: Keep review comments focused on a single actionable suggestion. Don't dilute the feedback with secondary praise or unrelated observations.
 - **Be precise with references**: When referring to something (code, suggestions, links), make it obvious what "this" refers to - e.g., "this suggestion above" not just "this".
 - **Always confirm before approving PRs** unless explicitly told to approve. Asking to see the approval message is not the same as giving the go-ahead.
+- **Check existing review feedback before commenting**: When reviewing a PR, always read through existing review comments and threads first. Do not post a concern that has already been raised by another reviewer - it creates noise and makes it harder for the author to track actionable feedback.
 - **After pushing commits to a PR**, monitor the CI check runs on the PR until they complete. Report the outcome (pass/fail) before considering the task done. If checks fail, investigate and fix before reporting success.
 
 ## Code Style & Languages
