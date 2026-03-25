@@ -37,6 +37,7 @@ These preferences apply across all repositories and sessions.
 - **Local integration testing**: Always run new features end-to-end locally before merging, not just unit tests. MagicMock-based tests can pass even when calling methods that don't exist on the real class. For GitHub Actions, use the `.env` file with `DRY_RUN=true` to verify against real APIs.
 - Document changes to environment variables in the `README.md` file
 - **Linting philosophy**: When linting errors arise, **always fix the code to pass the linter** — do not suppress, ignore, or disable lint rules. Only disable a rule as a last resort if fixing the code is truly impossible or would make it significantly worse, and explain why in a comment. This applies to all linters (flake8, pylint, mypy, markdownlint, eslint, etc.).
+- **Cross-reference existing patterns**: When adding new code to a file that already has similar blocks (e.g., a new job in a workflow, a new route in a router, a new test in a suite), explicitly compare the new code against the existing code for naming conventions, formatting, and runtime behavior before committing. Don't pattern-match on the name you're defining - check how existing code actually references the same concept.
 
 ## GitHub CLI & API
 - Prefer the **`gh` CLI** over raw API calls or curl when interacting with GitHub
