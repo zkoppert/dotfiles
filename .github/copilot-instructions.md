@@ -139,6 +139,7 @@ When creating or modifying GitHub Actions workflows:
 - **Empower, don't prescribe** - position tools as enabling the reader rather than telling them what to do
 - **Show real impact** - include screenshots of actual output, real example reports, and production configurations
 - **Acknowledge trade-offs** - don't oversell. Mention when something requires setup effort or has limitations.
+- **Lift others up, not yourself** - avoid sounding boastful. The goal is to help the reader, not to impress them. Don't cite personal stats or scale to sound impressive.
 
 ### Hard Rules
 - **Never use em dashes** (the long dash character). Use a regular hyphen with spaces ( - ) or rephrase the sentence instead.
