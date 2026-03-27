@@ -27,6 +27,36 @@ These preferences apply across all repositories and sessions.
 - **Check existing review feedback before commenting**: When reviewing a PR, always read through existing review comments and threads first. Do not post a concern that has already been raised by another reviewer - it creates noise and makes it harder for the author to track actionable feedback.
 - **After pushing commits to a PR**, monitor the CI check runs on the PR until they complete. Report the outcome (pass/fail) before considering the task done. If checks fail, investigate and fix before reporting success.
 
+## Code Review Workflow
+When asked to review a PR (or conduct a self-review), follow this workflow automatically:
+
+### Multi-model review
+- Launch **at least 3 code review agents in parallel** using different models (e.g., Claude Opus, Claude Sonnet, GPT) to get diverse perspectives
+- Synthesize findings across all models - only surface issues that multiple models flag or that can be independently verified
+- Present a unified, deduplicated report organized by severity
+
+### Verification standard
+- **Every finding must be verified before reporting it.** Do not report potential issues based on assumptions alone.
+- Verify by reading the actual source files, checking call sites, tracing data flow, or running tests/experiments
+- Clearly label findings with verification status: **Verified** (confirmed by reading code or testing), **Observation** (plausible but depends on context outside the diff), or **Unverified** (could not confirm - include reasoning)
+- When a finding involves runtime behavior, write or run a test to confirm it rather than speculating
+
+### What to focus on
+- **Correctness over style** - only report bugs, logic errors, security issues, race conditions, type mismatches, and missing edge cases. Do not flag style, formatting, naming conventions, or subjective preferences.
+- **Check whether the author has addressed existing review feedback** - read through all review threads and comments before reporting. Note unresolved threads.
+- **Check for unintended behavioral changes** - compare new code against the existing patterns in the same file or module
+
+### Tone and voice
+- All review feedback must match the tone and voice described in the **Writing Style** section of these instructions
+- Use additive, curious framing - not corrective or prescriptive
+- For **first-time contributors**, lead with what was done well, be warm and specific about how to fix issues, and provide step-by-step guidance rather than terse criticism
+- For established contributors or teammates, be concise and direct
+
+### Drafting comments
+- If findings warrant PR comments, draft them in my voice and **show me the draft before posting**
+- When specific code changes are needed, use GitHub suggestion blocks
+- One actionable point per comment - do not bundle multiple concerns
+
 ## Code Style & Languages
 - **Python** is the preferred scripting language for automation, data processing, and tooling
 - Use `argparse` for CLI argument parsing in Python scripts
