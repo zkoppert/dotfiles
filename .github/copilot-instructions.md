@@ -8,6 +8,7 @@ These preferences apply across all repositories and sessions.
 - Prefer practical, working solutions over theoretical explanations
 - When automating repetitive work, build reusable tools (scripts, actions) not one-off fixes
 - Use parallel execution when possible to save time (e.g., multiple API calls, concurrent agents)
+- **Never call something a bug until it has been verified** - everything is a "potential bug" until properly confirmed. Use language like "potential bug," "possible issue," or "this looks like it might be a bug" until you have evidence.
 
 ## Pull Requests
 - **Always create PRs as draft** unless I explicitly say otherwise
