@@ -45,6 +45,7 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 - **Correctness over style** - only report bugs, logic errors, security issues, race conditions, type mismatches, and missing edge cases. Do not flag style, formatting, naming conventions, or subjective preferences.
 - **Check whether the author has addressed existing review feedback** - read through all review threads and comments before reporting. Note unresolved threads.
 - **Check for unintended behavioral changes** - compare new code against the existing patterns in the same file or module
+- **Check docstring/comment accuracy** - verify that docstrings, comments, and commit messages accurately describe what the code actually does. Flag cases where stated behavior differs from implemented behavior.
 
 ### Tone and voice
 - All review feedback must match the tone and voice described in the **Writing Style** section of these instructions
