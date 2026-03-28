@@ -6,12 +6,8 @@ set -e
 
 DOTFILES_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Symlink copilot instructions for VS Code and CLI
+# Symlink copilot instructions for Copilot CLI
 if [ -f "$DOTFILES_DIR/.github/copilot-instructions.md" ]; then
-  mkdir -p "$HOME/.github"
-  ln -sf "$DOTFILES_DIR/.github/copilot-instructions.md" "$HOME/.github/copilot-instructions.md"
-  echo "✓ Linked copilot-instructions.md → ~/.github/copilot-instructions.md"
-
   mkdir -p "$HOME/.copilot"
   ln -sf "$DOTFILES_DIR/.github/copilot-instructions.md" "$HOME/.copilot/copilot-instructions.md"
   echo "✓ Linked copilot-instructions.md → ~/.copilot/copilot-instructions.md"
