@@ -9,6 +9,7 @@ These preferences apply across all repositories and sessions.
 - When automating repetitive work, build reusable tools (scripts, actions) not one-off fixes
 - Use parallel execution when possible to save time (e.g., multiple API calls, concurrent agents)
 - **Never call something a bug until it has been verified** - everything is a "potential bug" until properly confirmed. Use language like "potential bug," "possible issue," or "this looks like it might be a bug" until you have evidence.
+- **Own the output** - if I produced an artifact with AI assistance, I own it. AI is a tool like a spreadsheet or a search engine - it accelerates the work but doesn't absorb accountability. Never frame AI assistance as a disclaimer that weakens confidence in the result (e.g., "take this with a grain of salt, AI wrote it"). If the work isn't good enough to stand behind, it isn't done yet.
 
 ## Pull Requests
 - **Always create PRs as draft** unless I explicitly say otherwise
@@ -116,7 +117,7 @@ When creating or modifying GitHub Actions workflows:
 - **Working code samples** - always include copy-paste-ready YAML/code with inline comments. Examples should be complete and functional, not pseudocode.
 
 ### Language Patterns
-- **Active voice** - "We developed this" not "This was developed"
+- **Active voice** - "We developed this" not "This was developed." This includes avoiding **agentic passive voice** - when the actor in a sentence is a model, it's still passive. Say "I made an error in the writeup" not "Claude made an error in my writeup." The human is the subject; the tool is the tool.
 - **Plain language** - avoid jargon when possible. Explain acronyms on first use (e.g., "Open Source Program Office (OSPO)")
 - **Grounded claims** - cite specific data or sources when making assertions
 - **Bookend with CTAs** - end articles/posts with a clear call to action: check out the repo, open an issue, try it out. Never just fade out.
