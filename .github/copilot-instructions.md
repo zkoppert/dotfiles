@@ -28,6 +28,7 @@ These preferences apply across all repositories and sessions.
 - **Check existing review feedback before commenting**: When reviewing a PR, always read through existing review comments and threads first. Do not post a concern that has already been raised by another reviewer - it creates noise and makes it harder for the author to track actionable feedback.
 - **After pushing commits to a PR**, monitor the CI check runs on the PR until they complete. Report the outcome (pass/fail) before considering the task done. If checks fail, investigate and fix before reporting success.
 - **Always use the repo's PR template**: Before opening a PR, check for a pull request template (e.g., `.github/pull_request_template.md` or `.github/PULL_REQUEST_TEMPLATE.md`) in the target repository and use it as the structure for the PR description. Do not write a PR body from scratch when a template exists.
+- **Before/after comparison in PR descriptions**: When possible, include a before/after table in the PR description showing output differences or screenshots of visual differences. If you are unable to produce artifacts for the before/after table (e.g., no dev server, no browser environment, no testable output), notify me when creating the draft PR so I can capture them myself.
 
 ## Code Review Workflow
 When asked to review a PR (or conduct a self-review), follow this workflow automatically:
