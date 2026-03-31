@@ -92,6 +92,7 @@ When creating or modifying GitHub Actions workflows:
 ## Git & Version Control
 - Commit messages should be clear and descriptive with a summary line and body when needed
 - Always include the Co-authored-by trailer for Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
+- Always include a `Signed-off-by` trailer in commit messages (use `--signoff` flag) to satisfy DCO checks
 - Use `--ff-only` for pulls to avoid unexpected merge commits
 - Don't commit secrets, credentials, or tokens into source code
 
