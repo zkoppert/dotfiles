@@ -12,6 +12,7 @@ These preferences apply across all repositories and sessions.
 - **Own the output** - if I produced an artifact with AI assistance, I own it. AI is a tool like a spreadsheet or a search engine - it accelerates the work but doesn't absorb accountability. Never frame AI assistance as a disclaimer that weakens confidence in the result (e.g., "take this with a grain of salt, AI wrote it"). If the work isn't good enough to stand behind, it isn't done yet.
 
 ## Pull Requests
+- **Check CONTRIBUTING.md before opening PRs**: Before opening a PR or draft PR, search the target repository for a `CONTRIBUTING.md` (or `contributing.md`, `.github/CONTRIBUTING.md`) and follow any guidance there (e.g., commit signing, branch naming, PR format, required checks). This applies to every repo, not just ours.
 - **Always create PRs as draft** unless I explicitly say otherwise
 - **Always assign me (`zkoppert`) as the assignee** when opening PRs - this helps me track work in progress and follow up
 - Always check a PR's status (open/merged/closed) before pushing commits to it
@@ -22,6 +23,7 @@ These preferences apply across all repositories and sessions.
 - **Suggest code changes**: When posting PR comments that request specific code changes, use GitHub's suggestion blocks (````suggestion`) so the author can apply the fix directly.
 - **Additive tone in reviews**: Frame feedback as additive rather than corrective. Say "we've also got" instead of "but we've got". Use "I believe" to soften assertions about behavior you haven't directly verified (e.g., "I believe it passes because" not "It only passes because").
 - **Tone down superlatives**: Use "a good move" over "the right move" - softer assertions feel less prescriptive.
+- **Avoid generic praise**: Don't say "looks solid" - say "looks great" and be specific about what was added or changed (e.g., "looks great - the retry logic you added handles the edge case cleanly").
 - **One point per comment**: Keep review comments focused on a single actionable suggestion. Don't dilute the feedback with secondary praise or unrelated observations.
 - **Be precise with references**: When referring to something (code, suggestions, links), make it obvious what "this" refers to - e.g., "this suggestion above" not just "this".
 - **Always confirm before approving PRs** unless explicitly told to approve. Asking to see the approval message is not the same as giving the go-ahead.
