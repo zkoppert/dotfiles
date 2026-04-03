@@ -49,6 +49,8 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 
 ### What to focus on
 - **Correctness over style** - only report bugs, logic errors, security issues, race conditions, type mismatches, and missing edge cases. Do not flag style, formatting, naming conventions, or subjective preferences.
+- **Unreachable code and error-path analysis** - do a focused pass to verify that every code path is actually reachable, especially fallback/else branches. Check that commands which can exit non-zero (e.g., `grep` with no matches, failed pipes under `set -eo pipefail`, empty globs) don't silently abort before reaching intended fallback logic. Trace each branch - not just the happy path - to confirm it can actually execute.
+- **Security-focused review** - do a dedicated pass specifically for security concerns. In particular, check for: script injection via unsanitized interpolation (e.g., `${{ }}` in GitHub Actions expanding attacker-controlled input before bash runs), command injection through variable expansion, secrets leaked into logs, and unsafe handling of user-controlled or PR-controlled data. Flag any path where external input flows into command execution without proper sanitization.
 - **Check whether the author has addressed existing review feedback** - read through all review threads and comments before reporting. Note unresolved threads.
 - **Check for unintended behavioral changes** - compare new code against the existing patterns in the same file or module
 - **Check docstring/comment accuracy** - verify that docstrings, comments, and commit messages accurately describe what the code actually does. Flag cases where stated behavior differs from implemented behavior.
