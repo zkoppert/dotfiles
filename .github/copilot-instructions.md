@@ -84,7 +84,7 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 - Use `--json` flag with `gh` for structured output that can be parsed programmatically
 - When searching across an org, use `gh search prs`, `gh search issues`, etc. with `--owner` filter
 - Always disable pagers: `git --no-pager`, `gh --no-pager`, or pipe to `cat`
-- **Gists**: I use gists frequently for drafts, sharing, and iteration. When editing gists programmatically, use `gh api` to fetch raw file content instead of `gh gist view --raw` (which prepends the description and causes duplication on re-upload)
+- **Gists**: I use gists frequently for drafts, sharing, and iteration. **Always create gists as private/secret by default** unless I explicitly ask for a public gist. When editing gists programmatically, use `gh api` to fetch raw file content instead of `gh gist view --raw` (which prepends the description and causes duplication on re-upload)
 
 ## GitHub Actions Best Practices
 When creating or modifying GitHub Actions workflows:
@@ -154,6 +154,7 @@ When creating or modifying GitHub Actions workflows:
 
 ### Hard Rules
 - **Never use em dashes** (the long dash character). Use a regular hyphen with spaces ( - ) or rephrase the sentence instead.
+- **Use "consistency" instead of "idempotency"** and **"consistent" instead of "idempotent"** in all written content (PRs, reviews, discussion posts, documentation, comments, etc.). These terms are more accessible to broader audiences.
 
 ## File & Project Organization
 - Store automation scripts in a `scripts/` directory
