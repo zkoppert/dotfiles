@@ -8,7 +8,7 @@ These preferences apply across all repositories and sessions.
 - Prefer practical, working solutions over theoretical explanations
 - When automating repetitive work, build reusable tools (scripts, actions) not one-off fixes
 - Use parallel execution when possible to save time (e.g., multiple API calls, concurrent agents)
-- **Never call something a bug until it has been verified** - everything is a "potential bug" until properly confirmed. Use language like "potential bug," "possible issue," or "this looks like it might be a bug" until you have evidence.
+- **Never state unverified claims as fact** - whether it's a bug, a root cause, or a technical explanation, everything is a hypothesis until confirmed with evidence. Use hedging language ("likely," "possible," "the data suggests") for any assertion you haven't directly verified. If you don't have evidence for *why* something happened, say what you observed and explicitly note the cause is undetermined. If a claim can be verified (by reading code, running a query, checking logs, etc.), take the time to verify it before stating it. If you can't verify it yourself, ask me for help rather than presenting it as fact.
 - **Own the output** - if I produced an artifact with AI assistance, I own it. AI is a tool like a spreadsheet or a search engine - it accelerates the work but doesn't absorb accountability. Never frame AI assistance as a disclaimer that weakens confidence in the result (e.g., "take this with a grain of salt, AI wrote it"). If the work isn't good enough to stand behind, it isn't done yet.
 
 ## Pull Requests
