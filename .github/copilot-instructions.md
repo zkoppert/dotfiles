@@ -111,10 +111,12 @@ When creating or modifying GitHub Actions workflows:
 
 ### Voice & Tone
 - Use a **conversational, direct tone** - not corporate or stiff. Write like talking to a peer, not lecturing.
-- Use "we," "you," and "let's" - prefer first-person plural for team/company perspective
+- **Be a relatable human** - share honest experiences and frustrations ("my brain was too fried to make sense of it") without being self-deprecating. Vulnerability about learnings builds trust; putting yourself down undermines it.
+- Use "we," "you," and "let's" - prefer first-person plural for team/company perspective. Use "I" when sharing personal experience or motivation.
 - Be **enthusiastic without overdoing it** - phrases like "we're excited to" are fine, but let energy come through naturally
-- **Lead with empathy** - describe the reader's pain point before presenting the solution. Frame tools as responses to real frustrations.
-- Be **inclusive and community-oriented** - invite participation ("feel free to open an issue," "let us know what you think")
+- **Lead with empathy** - describe the reader's pain point before presenting the solution. Frame tools as responses to real frustrations, ideally ones you've felt yourself.
+- Be **inclusive and community-oriented** - invite participation ("drop a comment," "let me know," "reach out")
+- **Warm closings** - end with something human ("Hopefully this makes FR 1% easier in the heat of an incident") not something corporate ("This is for you - let's make it as useful as possible")
 
 ### Structure & Flow
 - **Problem-first framing** - open by describing the challenge, then introduce the solution. Never lead with the tool itself.
@@ -125,7 +127,9 @@ When creating or modifying GitHub Actions workflows:
 
 ### Language Patterns
 - **Active voice** - "We developed this" not "This was developed." This includes avoiding **agentic passive voice** - when the actor in a sentence is a model, it's still passive. Say "I made an error in the writeup" not "Claude made an error in my writeup." The human is the subject; the tool is the tool.
-- **Plain language** - avoid jargon when possible. Explain acronyms on first use (e.g., "Open Source Program Office (OSPO)")
+- **Plain language** - write so the reader doesn't need a dictionary nearby. Avoid jargon when possible. Explain acronyms on first use (e.g., "Open Source Program Office (OSPO)"). Prefer "scroll through the sections to find what alerted you" over "locate the relevant SLO group."
+- **Narrative over mechanical** - describe what happened and why, not just what changed. "After using it during an incident, I realized..." beats "The following changes were made."
+- **Concise and direct** - say it in fewer words. Cut filler phrases, redundant explanations, and anything the reader can already see. If a table or link already has the info, don't repeat it in prose.
 - **Grounded claims** - cite specific data or sources when making assertions
 - **Bookend with CTAs** - end articles/posts with a clear call to action: check out the repo, open an issue, try it out. Never just fade out.
 - Use **bridge sentences** to connect sections - "To address this," "That is why," "Now that we have covered"
@@ -135,6 +139,7 @@ When creating or modifying GitHub Actions workflows:
 - **H2 headers as questions or action phrases** - "How does it work?", "Understanding the report", "Jump in!"
 - **Bulleted lists** for features or use cases - keep items parallel in structure
 - **Bold for key terms** on first mention - e.g., "**time to first response**", "**innersource contribution percentage**"
+- **Inline links always** - use `[descriptive text](url)` not raw URLs. Link text should describe the destination ("the [dashboard](url)" not "click [here](url)"). This applies to discussion posts, PR descriptions, Slack messages, and documentation.
 - **Inline code** for technical references - repo names, file names, environment variables in backticks
 - Screenshots should include descriptive alt text and context about what the image shows
 
