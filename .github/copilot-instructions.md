@@ -80,6 +80,16 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 - **Linting philosophy**: When linting errors arise, **always fix the code to pass the linter** — do not suppress, ignore, or disable lint rules. Only disable a rule as a last resort if fixing the code is truly impossible or would make it significantly worse, and explain why in a comment. This applies to all linters (flake8, pylint, mypy, markdownlint, eslint, etc.).
 - **Cross-reference existing patterns**: When adding new code to a file that already has similar blocks (e.g., a new job in a workflow, a new route in a router, a new test in a suite), explicitly compare the new code against the existing code for naming conventions, formatting, and runtime behavior before committing. Don't pattern-match on the name you're defining - check how existing code actually references the same concept.
 
+## Platform & System Design
+- **Design for safe contribution** - When creating new modules or features, always ask: "Could a PM or junior contributor add to this safely without understanding the whole system?" If no, the abstraction is wrong. Prefer designs where the blast radius of a bad change is small by default.
+- **Explicit domain boundaries** - When adding new functionality, identify and document which module owns which concern. Don't let unrelated capabilities leak across module boundaries (e.g., notification logic shouldn't touch payment logic). Flag boundary violations in reviews.
+- **Design for 10x** - When adding API calls, pagination, or data processing, always ask: what happens if the input is 10x larger than today? Add rate limiting and backoff by default, not as an afterthought.
+- **Semantic observability** - When adding error handling, include enough context to diagnose *who* is affected and *what change* caused it - not just the raw error. Log the feature, the actor, and the deployment version. Raw stack traces are the equivalent of useless dashboards.
+- **Self-healing and automatic rollback** - When designing CI/CD workflows or deployment pipelines, always include an automatic rollback path. Feature flags should be the default mechanism for shipping new behavior - so a bad change can be disabled without a redeploy.
+- **Guardrails over guidelines** - Where possible, encode pattern consistency as a lint rule or CI check rather than relying on human review to catch deviations. If a requirement matters, it should be a gate, not a suggestion.
+- **Assume imperfect changes** - Design systems so that a single bad commit, a hallucinated function call, or an incorrect configuration value can't cascade into a system-wide failure. Use input validation at boundaries, not just at the entry point. Treat every module boundary as a trust boundary.
+- **Conflict detection over conflict prevention** - Instead of relying on contributors to avoid conflicts (e.g., DB migrations, config changes), build detection into the pipeline. Conflicting migrations should be blocked automatically. Overlapping feature flags should raise a warning.
+
 ## GitHub CLI & API
 - Prefer the **`gh` CLI** over raw API calls or curl when interacting with GitHub
 - Use `--json` flag with `gh` for structured output that can be parsed programmatically
