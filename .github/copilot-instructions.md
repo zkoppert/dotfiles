@@ -182,6 +182,7 @@ When creating or modifying GitHub Actions workflows:
 ### Hard Rules
 - **Never use em dashes** (the long dash character). Use a regular hyphen with spaces ( - ) or rephrase the sentence instead.
 - **Use "consistency" instead of "idempotency"** and **"consistent" instead of "idempotent"** in all written content (PRs, reviews, discussion posts, documentation, comments, etc.). These terms are more accessible to broader audiences.
+- **Never use "per" to mean "according to" or "based on"** in any written content. Replace with "based on …". Examples: "per my last email", "per the docs", "per the PR description", "per Andi's recommendation" are all not allowed - use "based on my last email", "based on the docs", etc. "Per" as a unit/rate (e.g., "3 errors per second", "one point per comment", "one test file per module") is fine.
 
 ## File & Project Organization
 - Store automation scripts in a `scripts/` directory
