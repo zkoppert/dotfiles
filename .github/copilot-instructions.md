@@ -54,7 +54,7 @@ For context on this mindset, see [Kamil Gwozdz, "Reasons why your prompts suck (
 - **Be precise with references**: When referring to something (code, suggestions, links), make it obvious what "this" refers to - e.g., "this suggestion above" not just "this".
 - **Always confirm before approving PRs** unless explicitly told to approve. Asking to see the approval message is not the same as giving the go-ahead.
 - **Check existing review feedback before commenting**: When reviewing a PR, always read through existing review comments and threads first. Do not post a concern that has already been raised by another reviewer - it creates noise and makes it harder for the author to track actionable feedback.
-- **After addressing review feedback**, always reply to the original review comment explaining how the feedback was addressed (e.g., "Fixed in [commit SHA] - updated the message to say 'p95' instead of 'average'"). Resolve the conversation thread if the feedback is fully addressed. Don't leave reviewers wondering whether their feedback was seen or acted on.
+- **After addressing review feedback**, always reply to the original review comment. Open with a brief thanks to the reviewer, then explain how the feedback was addressed (e.g., "Thanks for the review! Fixed in [commit SHA] - updated the message to say 'p95' instead of 'average'"). Resolve the conversation thread if the feedback is fully addressed. Don't leave reviewers wondering whether their feedback was seen or acted on. Reply messages confirming addressed feedback can bundle multiple items together; the "one point per comment" rule applies to outbound comments raising concerns, not to replies.
 - **Multi-model review before opening PRs**: Always complete the multi-model Code Review Workflow (below) before opening a draft PR. Address any verified findings before pushing the PR. This catches issues early when they're cheapest to fix.
 - **Self-review before marking ready**: After all CI checks pass on a PR you authored (see the Harnesses section), run the multi-model Code Review Workflow again as a final self-review before telling me the PR is ready. Catch your own issues before reviewers have to.
 - **Always use the repo's PR template**: Before opening a PR, check for a pull request template (e.g., `.github/pull_request_template.md` or `.github/PULL_REQUEST_TEMPLATE.md`) in the target repository and use it as the structure for the PR description. Do not write a PR body from scratch when a template exists.
@@ -205,6 +205,70 @@ When creating or modifying GitHub Actions workflows:
 - **Use "consistency" instead of "idempotency"** and **"consistent" instead of "idempotent"** in all written content (PRs, reviews, discussion posts, documentation, comments, etc.). These terms are more accessible to broader audiences.
 - **Never use "per" to mean "according to" or "based on"** in any written content. Replace with "based on …". Examples: `per my last email`, `per the docs`, `per the PR description`, `per Andi's recommendation` are all not allowed - use "based on my last email", "based on the docs", etc. "Per" as a unit/rate (e.g., "3 errors per second", "one point per comment", "one test file per module") is fine.
 - **Lint drafts before posting**: run the `validate-style` skill (see the **Copilot Skills** section above) on any text destined for GitHub or Slack.
+
+### Worked Examples
+Concrete good/bad pairs for the situations I correct most often. Match the pattern, not just the rule. When in doubt, mimic the "Use" column.
+
+**PR description opening (problem-first, first person):**
+- Avoid:
+  > This PR adds retry logic to the webhook handler. The change uses exponential backoff with jitter.
+- Use:
+  > Webhook deliveries to the payments service are dropping 3% of events when the upstream is degraded, with no retry path. I added exponential backoff with jitter so transient failures recover automatically.
+- Why: leads with the user-visible problem and quantifies it, then names the fix. Uses "I added" instead of "This PR adds."
+
+**Slack proposal or request (BLUF, lead with the ask):**
+- Avoid:
+  > Hey team, sharing some context on the rate limiter rollout. We've been seeing variance across regions, the SLO is currently set at 99.5%, and there's been discussion about whether to raise the threshold. [several more paragraphs] ... so I'd like to raise the threshold to 99.9%.
+- Use:
+  > I'd like to raise the rate-limiter SLO from 99.5% to 99.9%. Context below.
+  >
+  > [supporting detail]
+- Why: the ask lands in the first sentence. Skim-readers can decide whether to engage without parsing the full message.
+
+**PR review reply (gratitude first, then what was addressed):**
+- Avoid:
+  > I addressed both points. Fixed the off-by-one in the loop bound and renamed the helper. Thanks for the review.
+- Use:
+  > Thanks for the review! I addressed both points - fixed the off-by-one in the loop bound in [SHA] and renamed the helper in [SHA].
+- Why: opens with appreciation (see Pull Requests rule above), then specifies which commits address which feedback. Makes it easy for the reviewer to verify.
+
+**PR review comment (additive, one point per comment, hedge unverified claims):**
+- Avoid:
+  > This is broken. The retry loop will spin forever if the upstream returns 500, and also the variable name is confusing, and I think the test should mock the clock.
+- Use:
+  > I believe this loop can spin indefinitely when the upstream returns 500 - the break condition only fires on 2xx. Worth adding a max-retry guard?
+  > ```suggestion
+  >     for attempt in range(MAX_RETRIES):
+  > ```
+- Why: one actionable point per comment. Uses "I believe" because the claim depends on call-site behavior the reviewer has not directly tested. Includes a suggestion block (posted as a top-level code fence in the PR comment body, not nested in a blockquote like the illustration here) so the fix is one click away. Drops the unrelated naming and test concerns into separate comments.
+
+**Status update about your own work (own the output, no AI disclaimers):**
+- Avoid:
+  > Here's the draft - take it with a grain of salt since AI wrote most of it.
+- Use:
+  > Here's the draft. I'd value a second pair of eyes on the rollback section.
+- Why: I own the artifact regardless of how it was produced. AI assistance is not a disclaimer that weakens confidence in the result.
+
+**Reporting an error you made (no agentic passive voice):**
+- Avoid:
+  > `<model>` made an error in the writeup - the latency number was off by 10x.
+- Use:
+  > I made an error in the writeup - the latency number was off by 10x. Corrected in [link].
+- Why: I am the actor. The model is the tool. Saying the model "made" or "wrote" something subtly transfers accountability away from the human.
+
+**Public-context references to internal work (no internal repo names in public):**
+- Avoid:
+  > We hit this same bug in example-org/internal-payments-service last quarter, see [link to private issue].
+- Use:
+  > We hit this same bug in a private internal service last quarter and fixed it by [brief description of the fix].
+- Why: public repos, discussions, and conference talks can be read by anyone. Anonymize internal repo names and link only to public artifacts.
+
+**Quantified impact in PR descriptions (concrete number beats vague claim):**
+- Avoid:
+  > This should make the dashboard faster.
+- Use:
+  > p95 dashboard load drops from 2.4s to 0.9s in local benchmarks (n=50). I'll watch the [production p95 panel](link) for one business day after merge to confirm.
+- Why: one concrete number plus a monitoring plan beats a vague qualitative claim. Even rough estimates ("saves ~20 min/week") count.
 
 ## File & Project Organization
 - Store automation scripts in a `scripts/` directory
