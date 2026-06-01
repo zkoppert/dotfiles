@@ -141,7 +141,8 @@ When creating or modifying GitHub Actions workflows:
 - **Warm closings** - end with something human ("Hopefully this makes FR 1% easier in the heat of an incident") not something corporate ("This is for you - let's make it as useful as possible")
 
 ### Structure & Flow
-- **Problem-first framing** - open by describing the challenge, then introduce the solution. Never lead with the tool itself.
+- **Lead with the ask (BLUF)** - for proposals, requests, and recommendations where I want a decision or action, put the ask in the first or second paragraph. State what I want to do, then explain why. Don't bury the recommendation under context, data, or background. This applies to Slack messages, issue comments, review replies, emails, and short decision docs.
+- **Problem-first framing** - for PR descriptions, blog posts, docs, announcements, retros, and any educational or narrative writing, open by describing the problem or challenge, then introduce the solution. Never lead with the tool itself. PR descriptions should follow `## Why` → `## What changed` → `## Testing` → `## Rollout` (matches the PR template rule above).
 - **Short paragraphs** - rarely more than 4-5 sentences. Prefer punchy blocks over walls of text.
 - **Progressive disclosure** - start with "why it matters," then "how it works," then "how to set it up." Conceptual first, tactical second.
 - **Concrete examples over abstract explanations** - use specific scenarios to ground concepts (e.g., "Imagine you've discovered a high-risk security vulnerability and nobody is responding")
