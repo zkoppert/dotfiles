@@ -14,6 +14,19 @@ These preferences apply across all repositories and sessions.
 - **Never guess the day of the week** — always determine it from the `<current_datetime>` tag in user messages or by running `date` in the shell. Do not calculate from anchor dates or estimate from memory.
 - **Never name internal repos, issues, or PRs in public contexts** - when writing PR descriptions, issue comments, discussion posts, or documentation in public repositories, do not reference internal/private repository names, issue numbers, or PR links. Anonymize them instead (e.g., "a private UI monorepo" or "an internal service repo"). Public repos include any repo visible to people outside the organization.
 
+## Harnesses (close the feedback loop before guessing)
+
+Before claiming work is done, build a way to *see* the output yourself. Don't make me the validation step when you can validate automatically. Spend time on the harness before spending time on the code.
+
+- **Tests are the default harness.** If a test suite exists, run it after every meaningful change and report the outcome before moving on. If a module has no tests, write minimal characterization tests before changing behavior, then use them as guardrails for the actual change.
+- **CI is the final harness.** Never consider work done until CI is green. After pushing to a PR, wait for CI to complete and verify all required jobs pass. If checks fail, investigate and fix before reporting success. Do not tell me a PR is ready while any required check is still red or pending.
+- **Use vision for visual work.** For UI or visual changes, take a screenshot with the available browser tooling and inspect it before reporting done. For generated documents (PDFs, Excel files, rendered Markdown), render them to images or open them and look at the actual output. Only ask me to capture screenshots when no agent-side tooling is available.
+- **Drive end-to-end flows.** For browser, CLI, or app work, click through the actual happy path with debugging tools and verify the behavior, not just the code. MagicMock-passing tests can hide real failures - this is why the existing "Local integration testing" rule matters.
+- **Harness-first when stuck.** If a fix doesn't work after two attempts, stop and *build a harness* (a test, a repro script, a log capture, a screenshot diff) before attempting fix three. Convergence comes from feedback loops, not from more guesses.
+- **Acknowledge harness gaps explicitly.** When a harness genuinely isn't possible (no dev server, no browser, no testable output), say so plainly and ask me to validate. Don't quietly skip the validation step and hope.
+
+For context on this mindset, see [Kamil Gwozdz, "Reasons why your prompts suck (part 1)"](https://kamilgwozdz.substack.com/p/reasons-why-your-prompts-suck-part).
+
 ## Pull Requests
 - **Check CONTRIBUTING.md before opening PRs**: Before opening a PR or draft PR, search the target repository for a `CONTRIBUTING.md` (or `contributing.md`, `.github/CONTRIBUTING.md`) and follow any guidance there (e.g., commit signing, branch naming, PR format, required checks). This applies to every repo, not just ours.
 - **Always create PRs as draft** unless I explicitly say otherwise
@@ -32,10 +45,9 @@ These preferences apply across all repositories and sessions.
 - **Be precise with references**: When referring to something (code, suggestions, links), make it obvious what "this" refers to - e.g., "this suggestion above" not just "this".
 - **Always confirm before approving PRs** unless explicitly told to approve. Asking to see the approval message is not the same as giving the go-ahead.
 - **Check existing review feedback before commenting**: When reviewing a PR, always read through existing review comments and threads first. Do not post a concern that has already been raised by another reviewer - it creates noise and makes it harder for the author to track actionable feedback.
-- **After pushing commits to a PR**, monitor the CI check runs on the PR until they complete. Report the outcome (pass/fail) before considering the task done. If checks fail, investigate and fix before reporting success.
 - **After addressing review feedback**, always reply to the original review comment explaining how the feedback was addressed (e.g., "Fixed in [commit SHA] - updated the message to say 'p95' instead of 'average'"). Resolve the conversation thread if the feedback is fully addressed. Don't leave reviewers wondering whether their feedback was seen or acted on.
 - **Multi-model review before opening PRs**: Always complete the multi-model Code Review Workflow (below) before opening a draft PR. Address any verified findings before pushing the PR. This catches issues early when they're cheapest to fix.
-- **Self-review before marking ready**: After all CI checks pass on a PR you authored, run the multi-model Code Review Workflow again as a final self-review before telling me the PR is ready. Catch your own issues before reviewers have to.
+- **Self-review before marking ready**: After all CI checks pass on a PR you authored (see the Harnesses section), run the multi-model Code Review Workflow again as a final self-review before telling me the PR is ready. Catch your own issues before reviewers have to.
 - **Always use the repo's PR template**: Before opening a PR, check for a pull request template (e.g., `.github/pull_request_template.md` or `.github/PULL_REQUEST_TEMPLATE.md`) in the target repository and use it as the structure for the PR description. Do not write a PR body from scratch when a template exists.
 - **Before/after comparison in PR descriptions**: When possible, include a before/after table in the PR description showing output differences or screenshots of visual differences. If you are unable to produce artifacts for the before/after table (e.g., no dev server, no browser environment, no testable output), notify me when creating the draft PR so I can capture them myself.
 - **Quantify impact in every PR** — include at least one concrete number: latency change, number of users affected, percentage of requests covered, time saved, error rate reduction. Even rough estimates ("saves ~20 min/week", "covers 7 of 7 SLOs") are better than no numbers at all. If impact is genuinely unknown, say so explicitly rather than omitting the section.
