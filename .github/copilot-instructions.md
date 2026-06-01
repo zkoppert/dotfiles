@@ -11,7 +11,7 @@ These preferences apply across all repositories and sessions.
 - **Never state unverified claims as fact** - whether it's a bug, a root cause, or a technical explanation, everything is a hypothesis until confirmed with evidence. Use hedging language ("likely," "possible," "the data suggests") for any assertion you haven't directly verified. If you don't have evidence for *why* something happened, say what you observed and explicitly note the cause is undetermined. If a claim can be verified (by reading code, running a query, checking logs, etc.), take the time to verify it before stating it. If you can't verify it yourself, ask me for help rather than presenting it as fact.
 - **Own the output** - if I produced an artifact with AI assistance, I own it. AI is a tool like a spreadsheet or a search engine - it accelerates the work but doesn't absorb accountability. Never frame AI assistance as a disclaimer that weakens confidence in the result (e.g., "take this with a grain of salt, AI wrote it"). If the work isn't good enough to stand behind, it isn't done yet.
 - **Capture side quests as issues** - when you discover bugs, optimization opportunities, or other improvements that are out of scope for the current task, don't silently ignore them. Prompt me to ask if I'd like to create a new GitHub issue in the repo to capture the work. This keeps us focused on the task at hand while ensuring we don't lose track of valuable findings that could trip us up later.
-- **Never guess the day of the week** — always determine it from the `<current_datetime>` tag in user messages or by running `date` in the shell. Do not calculate from anchor dates or estimate from memory.
+- **Never guess the day of the week** - always determine it from the `<current_datetime>` tag in user messages or by running `date` in the shell. Do not calculate from anchor dates or estimate from memory.
 - **Never name internal repos, issues, or PRs in public contexts** - when writing PR descriptions, issue comments, discussion posts, or documentation in public repositories, do not reference internal/private repository names, issue numbers, or PR links. Anonymize them instead (e.g., "a private UI monorepo" or "an internal service repo"). Public repos include any repo visible to people outside the organization.
 
 ## Harnesses (close the feedback loop before guessing)
@@ -32,9 +32,9 @@ For context on this mindset, see [Kamil Gwozdz, "Reasons why your prompts suck (
 - **Always create PRs as draft** unless I explicitly say otherwise
 - **Always assign me (`zkoppert`) as the assignee** when opening PRs - this helps me track work in progress and follow up
 - Always check a PR's status (open/merged/closed) before pushing commits to it
-- PR descriptions should be kept up to date with the actual changes — verify before finalizing
-- **Write PR descriptions in first person** — use "I" or "we" as the subject, not "This PR" or "This change." Active voice, first person: "I added retry logic" not "This PR adds retry logic." This matches the active voice rule in the Writing Style section.
-- PR descriptions should always include a **Testing** section. Do not list linting results in the Testing section — linting is a given, not something to highlight. Focus on meaningful tests: unit tests, integration tests, manual verification, etc.
+- PR descriptions should be kept up to date with the actual changes - verify before finalizing
+- **Write PR descriptions in first person** - use "I" or "we" as the subject, not "This PR" or "This change." Active voice, first person: "I added retry logic" not "This PR adds retry logic." This matches the active voice rule in the Writing Style section.
+- PR descriptions should always include a **Testing** section. Do not list linting results in the Testing section - linting is a given, not something to highlight. Focus on meaningful tests: unit tests, integration tests, manual verification, etc.
 - When reviewing PRs, focus on critical issues (bugs, security, logic errors) not style nitpicks
 - **Verify before flagging**: When reviewing code, always check source material (config files, upstream docs, official examples) before recommending changes. Do not flag something as a bug or missing requirement based on assumptions alone.
 - **Suggest code changes**: When posting PR comments that request specific code changes, use GitHub's suggestion blocks (````suggestion`) so the author can apply the fix directly.
@@ -50,11 +50,11 @@ For context on this mindset, see [Kamil Gwozdz, "Reasons why your prompts suck (
 - **Self-review before marking ready**: After all CI checks pass on a PR you authored (see the Harnesses section), run the multi-model Code Review Workflow again as a final self-review before telling me the PR is ready. Catch your own issues before reviewers have to.
 - **Always use the repo's PR template**: Before opening a PR, check for a pull request template (e.g., `.github/pull_request_template.md` or `.github/PULL_REQUEST_TEMPLATE.md`) in the target repository and use it as the structure for the PR description. Do not write a PR body from scratch when a template exists.
 - **Before/after comparison in PR descriptions**: When possible, include a before/after table in the PR description showing output differences or screenshots of visual differences. If you are unable to produce artifacts for the before/after table (e.g., no dev server, no browser environment, no testable output), notify me when creating the draft PR so I can capture them myself.
-- **Quantify impact in every PR** — include at least one concrete number: latency change, number of users affected, percentage of requests covered, time saved, error rate reduction. Even rough estimates ("saves ~20 min/week", "covers 7 of 7 SLOs") are better than no numbers at all. If impact is genuinely unknown, say so explicitly rather than omitting the section.
-- **Document tradeoffs and alternatives** — every PR description should include at least one sentence on what was considered and why this approach was chosen. For non-trivial changes, include an explicit "Tradeoffs" or "Alternatives considered" section. Even small PRs benefit from one line: "Chose to guard at the view layer rather than the controller because the feed data is already computed by this point."
-- **Use templates in every repo** — if the repo has a PR template, use it fully (don't leave sections blank). If the repo has no template, use this lightweight structure as a minimum: `## Why` (problem/motivation), `## What changed` (approach), `## Testing` (how it was verified), `## Rollout` (monitoring, feature flags, rollback plan). Prompt me to add a PR template to any repo that doesn't have one.
-- **Make non-visual work visible** — for backend, infrastructure, config, and workflow PRs, include at least one visual aid: a markdown table comparing old vs. new behavior, a mermaid diagram for architecture or flow changes, terminal output showing before/after, or a latency/error-rate table. Don't reserve screenshots only for UI changes.
-- **Include monitoring context in code PRs** — when a PR changes production behavior, include a link to the relevant Datadog dashboard, Splunk query, or SLO widget. Add a "What to watch after merge" note with the specific metric or alert that would surface a regression. Don't limit monitoring details to dedicated monitoring repos.
+- **Quantify impact in every PR** - include at least one concrete number: latency change, number of users affected, percentage of requests covered, time saved, error rate reduction. Even rough estimates ("saves ~20 min/week", "covers 7 of 7 SLOs") are better than no numbers at all. If impact is genuinely unknown, say so explicitly rather than omitting the section.
+- **Document tradeoffs and alternatives** - every PR description should include at least one sentence on what was considered and why this approach was chosen. For non-trivial changes, include an explicit "Tradeoffs" or "Alternatives considered" section. Even small PRs benefit from one line: "Chose to guard at the view layer rather than the controller because the feed data is already computed by this point."
+- **Use templates in every repo** - if the repo has a PR template, use it fully (don't leave sections blank). If the repo has no template, use this lightweight structure as a minimum: `## Why` (problem/motivation), `## What changed` (approach), `## Testing` (how it was verified), `## Rollout` (monitoring, feature flags, rollback plan). Prompt me to add a PR template to any repo that doesn't have one.
+- **Make non-visual work visible** - for backend, infrastructure, config, and workflow PRs, include at least one visual aid: a markdown table comparing old vs. new behavior, a mermaid diagram for architecture or flow changes, terminal output showing before/after, or a latency/error-rate table. Don't reserve screenshots only for UI changes.
+- **Include monitoring context in code PRs** - when a PR changes production behavior, include a link to the relevant Datadog dashboard, Splunk query, or SLO widget. Add a "What to watch after merge" note with the specific metric or alert that would surface a regression. Don't limit monitoring details to dedicated monitoring repos.
 
 ## Code Review Workflow
 When asked to review a PR (or conduct a self-review), follow this workflow automatically:
@@ -92,13 +92,13 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 ## Code Style & Languages
 - **Python** is the preferred scripting language for automation, data processing, and tooling
 - Use `argparse` for CLI argument parsing in Python scripts
-- Include proper error handling and logging — don't silently swallow errors
+- Include proper error handling and logging - don't silently swallow errors
 - Only add comments where code needs clarification; don't over-comment obvious logic
 - Prefer ecosystem tools (`pip install`, `npm init`, etc.) over manual configuration
 - Run `make lint` and `make test` before committing in repos that have a Makefile
 - Write unit tests for new functionality
 - Document changes to environment variables in the `README.md` file
-- **Linting philosophy**: When linting errors arise, **always fix the code to pass the linter** — do not suppress, ignore, or disable lint rules. Only disable a rule as a last resort if fixing the code is truly impossible or would make it significantly worse, and explain why in a comment. This applies to all linters (flake8, pylint, mypy, markdownlint, eslint, etc.).
+- **Linting philosophy**: When linting errors arise, **always fix the code to pass the linter** - do not suppress, ignore, or disable lint rules. Only disable a rule as a last resort if fixing the code is truly impossible or would make it significantly worse, and explain why in a comment. This applies to all linters (flake8, pylint, mypy, markdownlint, eslint, etc.).
 - **Cross-reference existing patterns**: When adding new code to a file that already has similar blocks (e.g., a new job in a workflow, a new route in a router, a new test in a suite), explicitly compare the new code against the existing code for naming conventions, formatting, and runtime behavior before committing. Don't pattern-match on the name you're defining - check how existing code actually references the same concept.
 
 ## Platform & System Design
@@ -124,7 +124,7 @@ When creating or modifying GitHub Actions workflows:
 1. Always use the **latest release** of each action
 2. Pin actions to their **full commit SHA** (not tags) with a comment showing the **full version tag**: `uses: actions/checkout@<sha> # v6.0.2` (not just `# v6`)
 3. Validate workflow syntax before committing
-4. Use **dedicated tokens/secrets** for each workflow — do not reuse tokens across different workflows
+4. Use **dedicated tokens/secrets** for each workflow - do not reuse tokens across different workflows
 5. When filtering activity data for reports, exclude Dependabot PRs from summaries (they add noise)
 
 ## Git & Version Control
@@ -136,9 +136,9 @@ When creating or modifying GitHub Actions workflows:
 
 ## Excel & Report Generation
 - Use **openpyxl** for Excel file creation in Python
-- Excel can only support one hyperlink per cell — use a separate References sheet for multiple links
+- Excel can only support one hyperlink per cell - use a separate References sheet for multiple links
 - For display in cells, use clean text (e.g., `github#418801`) without raw URLs
-- Match existing format/templates when extending reports — don't invent new layouts without asking
+- Match existing format/templates when extending reports - don't invent new layouts without asking
 
 ## Writing Style (for reports, evaluations, documentation authored on my behalf)
 
@@ -160,7 +160,7 @@ When creating or modifying GitHub Actions workflows:
 - **Working code samples** - always include copy-paste-ready YAML/code with inline comments. Examples should be complete and functional, not pseudocode.
 
 ### Language Patterns
-- **Active voice** - "We developed this" not "This was developed." This includes avoiding **agentic passive voice** - when the actor in a sentence is a model, it's still passive. Say "I made an error in the writeup" not "Claude made an error in my writeup." The human is the subject; the tool is the tool.
+- **Active voice** - "We developed this" not "This was developed." This includes avoiding **agentic passive voice** - when the actor in a sentence is a model, it's still passive. Say `I made an error in the writeup` not `Claude made an error in my writeup.` The human is the subject; the tool is the tool.
 - **Plain language** - write so the reader doesn't need a dictionary nearby. Avoid jargon when possible. Explain acronyms on first use (e.g., "Open Source Program Office (OSPO)"). Prefer "scroll through the sections to find what alerted you" over "locate the relevant SLO group."
 - **Narrative over mechanical** - describe what happened and why, not just what changed. "After using it during an incident, I realized..." beats "The following changes were made."
 - **Concise and direct** - say it in fewer words. Cut filler phrases, redundant explanations, and anything the reader can already see. If a table or link already has the info, don't repeat it in prose.
@@ -173,7 +173,7 @@ When creating or modifying GitHub Actions workflows:
 - **H2 headers as questions or action phrases** - "How does it work?", "Understanding the report", "Jump in!"
 - **Bulleted lists** for features or use cases - keep items parallel in structure
 - **Bold for key terms** on first mention - e.g., "**time to first response**", "**innersource contribution percentage**"
-- **Inline links always** - use `[descriptive text](url)` not raw URLs. Link text should describe the destination ("the [dashboard](url)" not "click [here](url)"). This applies to discussion posts, PR descriptions, Slack messages, and documentation.
+- **Inline links always** - use `[descriptive text](url)` not raw URLs. Link text should describe the destination ("the [dashboard](url)" not the literal `click [here](url)`). This applies to discussion posts, PR descriptions, Slack messages, and documentation.
 - **Inline code** for technical references - repo names, file names, environment variables in backticks
 - Screenshots should include descriptive alt text and context about what the image shows
 
@@ -194,8 +194,8 @@ When creating or modifying GitHub Actions workflows:
 ### Hard Rules
 - **Never use em dashes** (the long dash character). Use a regular hyphen with spaces ( - ) or rephrase the sentence instead.
 - **Use "consistency" instead of "idempotency"** and **"consistent" instead of "idempotent"** in all written content (PRs, reviews, discussion posts, documentation, comments, etc.). These terms are more accessible to broader audiences.
-- **Never use "per" to mean "according to" or "based on"** in any written content. Replace with "based on …". Examples: "per my last email", "per the docs", "per the PR description", "per Andi's recommendation" are all not allowed - use "based on my last email", "based on the docs", etc. "Per" as a unit/rate (e.g., "3 errors per second", "one point per comment", "one test file per module") is fine.
-- **Lint drafts before posting**: before posting any text to GitHub (PR descriptions, review comments, issues, discussions) or Slack, run the `validate-style` skill (auto-loaded from `~/.copilot/skills/validate-style/`). It catches em-dashes, "per" misuse, prayer-hands emoji, "click here" link text, "ISP incident", and agentic passive voice. Direct invocation: `python3 ~/.copilot/skills/validate-style/lint.py <file>` or `echo "text" | python3 ~/.copilot/skills/validate-style/lint.py -`.
+- **Never use "per" to mean "according to" or "based on"** in any written content. Replace with "based on …". Examples: `per my last email`, `per the docs`, `per the PR description`, `per Andi's recommendation` are all not allowed - use "based on my last email", "based on the docs", etc. "Per" as a unit/rate (e.g., "3 errors per second", "one point per comment", "one test file per module") is fine.
+- **Lint drafts before posting**: before posting any text to GitHub (PR descriptions, review comments, issues, discussions) or Slack, run the `validate-style` skill (auto-loaded from `~/.copilot/skills/validate-style/`). It catches em-dashes, "per" misuse, prayer-hands emoji, "click here" link text, the prefix `ISP incident`, and agentic passive voice. Direct invocation: `python3 ~/.copilot/skills/validate-style/lint.py <file>` or `echo "text" | python3 ~/.copilot/skills/validate-style/lint.py -`.
 
 ## File & Project Organization
 - Store automation scripts in a `scripts/` directory
@@ -204,18 +204,18 @@ When creating or modifying GitHub Actions workflows:
 - Add a `.gitignore` for common artifacts (`__pycache__/`, `*.pyc`, `.DS_Store`)
 
 ## macOS Environment
-- I run macOS — use macOS-compatible commands (e.g., `open` not `xdg-open`, `pbcopy` for clipboard)
+- I run macOS - use macOS-compatible commands (e.g., `open` not `xdg-open`, `pbcopy` for clipboard)
 - For scheduled tasks, prefer **launchd** plist over crontab
 - My repos live in `~/repos/`
 
 ---
 
-## My Open Source GitHub Actions — Shared Patterns
+## My Open Source GitHub Actions - Shared Patterns
 
-The following conventions apply to my suite of GitHub Actions in the `github-community-projects` org: **contributors**, **evergreen**, **issue-metrics**, **stale-repos**, **cleanowners**, **measure-innersource**, **pr-conflict-detector**, and **ospo-reusable-workflows**. These repos share a consistent architecture — follow these patterns when working in any of them.
+The following conventions apply to my suite of GitHub Actions in the `github-community-projects` org: **contributors**, **evergreen**, **issue-metrics**, **stale-repos**, **cleanowners**, **measure-innersource**, **pr-conflict-detector**, and **ospo-reusable-workflows**. These repos share a consistent architecture - follow these patterns when working in any of them.
 
 ### Project Structure
-- **Flat module layout** — all Python source files live at the repo root (no `src/` directory)
+- **Flat module layout** - all Python source files live at the repo root (no `src/` directory)
 - Common module split: `{main}.py`, `auth.py`, `env.py`, `markdown_writer.py` (or `markdown.py`)
 - Test files: `test_*.py` at root, one per module
 - Linter configs live in `.github/linters/` (not repo root)
@@ -234,14 +234,14 @@ The following conventions apply to my suite of GitHub Actions in the `github-com
 
 ### Linting & Formatting Stack
 All repos use the same 5-tool linting chain run via `make lint`:
-1. **flake8** — strict errors (E9, F63, F7, F82), then warnings with exit-zero; config at `.github/linters/.flake8`
-2. **isort** — import sorting; config at `.github/linters/.isort.cfg`
-3. **pylint** — minimum score 9.0; config at `.github/linters/.python-lint`
-4. **mypy** — type checking; config at `.github/linters/.mypy.ini`
-5. **black** — code formatting (no custom config)
+1. **flake8** - strict errors (E9, F63, F7, F82), then warnings with exit-zero; config at `.github/linters/.flake8`
+2. **isort** - import sorting; config at `.github/linters/.isort.cfg`
+3. **pylint** - minimum score 9.0; config at `.github/linters/.python-lint`
+4. **mypy** - type checking; config at `.github/linters/.mypy.ini`
+5. **black** - code formatting (no custom config)
 
 ### Testing
-- **pytest** with **pytest-cov** — minimum 80% code coverage (`--cov-fail-under=80`)
+- **pytest** with **pytest-cov** - minimum 80% code coverage (`--cov-fail-under=80`)
 - `.coveragerc` omits test files from coverage
 - Heavy use of `unittest.mock` (`MagicMock`, `@patch`) for GitHub API mocking
 - CI tests against Python 3.11 and 3.12 matrix (some repos also 3.13)
@@ -266,13 +266,13 @@ make clean   # Remove __pycache__ and .pyc files
 
 ### CI/CD Workflow Patterns
 Standard workflow set across all repos:
-- **python-ci.yml** — lint + test on push/PR to main (Python version matrix)
-- **docker-ci.yml** — build Docker image (linux/amd64)
-- **super-linter.yaml** — GitHub Super-Linter for markdown, YAML, shell
-- **release.yml** — automated semantic versioning releases to GHCR
-- **scorecard.yml** — OpenSSF security scorecard
-- **stale.yaml** — auto-close stale issues/PRs
-- **auto-labeler.yml** — PR label automation
+- **python-ci.yml** - lint + test on push/PR to main (Python version matrix)
+- **docker-ci.yml** - build Docker image (linux/amd64)
+- **super-linter.yaml** - GitHub Super-Linter for markdown, YAML, shell
+- **release.yml** - automated semantic versioning releases to GHCR
+- **scorecard.yml** - OpenSSF security scorecard
+- **stale.yaml** - auto-close stale issues/PRs
+- **auto-labeler.yml** - PR label automation
 - All actions pinned to SHA with version comments
 - Default permissions: read-only (`persist-credentials: false`)
 

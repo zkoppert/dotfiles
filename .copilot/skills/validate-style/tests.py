@@ -302,5 +302,71 @@ class TestCLI(unittest.TestCase):
             os.unlink(path)
 
 
+class TestCodeRegionMasking(unittest.TestCase):
+    def test_em_dash_inside_inline_code_is_ignored(self):
+        text = "The rule forbids `foo \u2014 bar` as an example.\n"
+        self.assertEqual(find_violations(text), [])
+
+    def test_em_dash_in_prose_still_flagged_when_line_has_code(self):
+        text = "We saw `clean code` and then prose \u2014 with an em-dash.\n"
+        violations = find_violations(text)
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0].rule, "no-em-dash")
+
+    def test_per_inside_inline_code_is_ignored(self):
+        text = "Avoid examples like `per the docs` in the rule listing.\n"
+        self.assertEqual(find_violations(text), [])
+
+    def test_agentic_passive_inside_inline_code_is_ignored(self):
+        text = 'Counter-example: `Claude wrote this` - do not phrase it that way.\n'
+        self.assertEqual(find_violations(text), [])
+
+    def test_em_dash_inside_fenced_block_is_ignored(self):
+        text = (
+            "Before the fence.\n"
+            "```\n"
+            "literal \u2014 em-dash here\n"
+            "literal per the docs\n"
+            "```\n"
+            "After the fence.\n"
+        )
+        self.assertEqual(find_violations(text), [])
+
+    def test_em_dash_after_fenced_block_is_flagged(self):
+        text = (
+            "```\n"
+            "code with \u2014 inside\n"
+            "```\n"
+            "Now in prose \u2014 here.\n"
+        )
+        violations = find_violations(text)
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0].rule, "no-em-dash")
+        self.assertEqual(violations[0].line, 4)
+
+    def test_tilde_fenced_block_is_respected(self):
+        text = (
+            "~~~yaml\n"
+            "key: value \u2014 with em-dash\n"
+            "~~~\n"
+        )
+        self.assertEqual(find_violations(text), [])
+
+    def test_unclosed_fence_masks_remainder(self):
+        text = (
+            "Prose first.\n"
+            "```\n"
+            "code with \u2014 em-dash\n"
+            "more code per the docs\n"
+        )
+        self.assertEqual(find_violations(text), [])
+
+    def test_columns_remain_accurate_after_masking(self):
+        prefix = "Outside `code span here` then \u2014 dash"
+        violations = find_violations(prefix + "\n")
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0].column, prefix.index("\u2014") + 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

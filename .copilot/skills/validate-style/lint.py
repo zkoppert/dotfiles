@@ -57,6 +57,55 @@ AGENTIC_PASSIVE_PATTERN = re.compile(
 )
 
 
+FENCE_OPEN_PATTERN = re.compile(r"^(\s{0,3})(`{3,}|~{3,})")
+INLINE_CODE_PATTERN = re.compile(r"`[^`\n]+`")
+
+
+def _blank_preserving_newline(line: str) -> str:
+    """Return a same-length string of spaces, preserving any trailing newline."""
+    if line.endswith("\n"):
+        return " " * (len(line) - 1) + "\n"
+    return " " * len(line)
+
+
+def mask_code_regions(text: str) -> str:
+    """Replace Markdown fenced code blocks and inline code spans with spaces.
+
+    Preserves character offsets so line and column numbers stay accurate.
+    Rules quoted inside backticks (e.g., examples in documentation) are
+    masked out so the linter does not flag them as violations.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    for line in lines:
+        if not in_fence:
+            m = FENCE_OPEN_PATTERN.match(line)
+            if m:
+                in_fence = True
+                fence_char = m.group(2)[0]
+                fence_len = len(m.group(2))
+                out.append(_blank_preserving_newline(line))
+                continue
+            out.append(INLINE_CODE_PATTERN.sub(
+                lambda mo: " " * len(mo.group(0)),
+                line,
+            ))
+        else:
+            stripped = line.lstrip()
+            if (
+                stripped.startswith(fence_char * fence_len)
+                and set(stripped.rstrip()) <= {fence_char}
+            ):
+                in_fence = False
+                fence_char = ""
+                fence_len = 0
+            out.append(_blank_preserving_newline(line))
+    return "".join(out)
+
+
 RULES = [
     (
         "no-em-dash",
@@ -103,8 +152,9 @@ RULES = [
 
 
 def find_violations(text: str) -> list[Violation]:
+    masked = mask_code_regions(text)
     violations: list[Violation] = []
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    for lineno, line in enumerate(masked.splitlines(), start=1):
         for rule_name, pattern, message in RULES:
             for match in pattern.finditer(line):
                 violations.append(
