@@ -14,6 +14,15 @@ These preferences apply across all repositories and sessions.
 - **Never guess the day of the week** - always determine it from the `<current_datetime>` tag in user messages or by running `date` in the shell. Do not calculate from anchor dates or estimate from memory.
 - **Never name internal repos, issues, or PRs in public contexts** - when writing PR descriptions, issue comments, discussion posts, or documentation in public repositories, do not reference internal/private repository names, issue numbers, or PR links. Anonymize them instead (e.g., "a private UI monorepo" or "an internal service repo"). Public repos include any repo visible to people outside the organization.
 
+## Copilot Skills
+
+Skills under `~/.copilot/skills/` are auto-loaded in every session and are available regardless of which repository I'm working in. **Always check whether a relevant skill exists before doing the work manually**, and **always run the skill when its trigger conditions apply** - don't wait to be reminded.
+
+Currently installed:
+- **`validate-style`** - lints any text I'm about to post (PR descriptions, review comments, issues, discussion posts, Slack messages, commit messages, docs) for em-dashes, "per" misuse, the prayer-hands emoji, the literal phrase `click here`, the prefix `ISP incident`, and agentic passive voice (`Claude made an error` style). Run it on **every draft before posting**, not just when something looks off. Direct invocation: `python3 ~/.copilot/skills/validate-style/lint.py <file>` or `echo "text" | python3 ~/.copilot/skills/validate-style/lint.py -`. The skill is `gh pr ready`-aware via `~/.copilot/wrappers/gh-pr-ready-guard`.
+
+If a new skill is added under `~/.copilot/skills/<name>/`, read its `SKILL.md` to learn when to invoke it. New skills should generally be added to this list so future sessions surface them.
+
 ## Harnesses (close the feedback loop before guessing)
 
 Before claiming work is done, build a way to *see* the output yourself. Don't make me the validation step when you can validate automatically. Spend time on the harness before spending time on the code.
@@ -195,7 +204,7 @@ When creating or modifying GitHub Actions workflows:
 - **Never use em dashes** (the long dash character). Use a regular hyphen with spaces ( - ) or rephrase the sentence instead.
 - **Use "consistency" instead of "idempotency"** and **"consistent" instead of "idempotent"** in all written content (PRs, reviews, discussion posts, documentation, comments, etc.). These terms are more accessible to broader audiences.
 - **Never use "per" to mean "according to" or "based on"** in any written content. Replace with "based on …". Examples: `per my last email`, `per the docs`, `per the PR description`, `per Andi's recommendation` are all not allowed - use "based on my last email", "based on the docs", etc. "Per" as a unit/rate (e.g., "3 errors per second", "one point per comment", "one test file per module") is fine.
-- **Lint drafts before posting**: before posting any text to GitHub (PR descriptions, review comments, issues, discussions) or Slack, run the `validate-style` skill (auto-loaded from `~/.copilot/skills/validate-style/`). It catches em-dashes, "per" misuse, prayer-hands emoji, "click here" link text, the prefix `ISP incident`, and agentic passive voice. Direct invocation: `python3 ~/.copilot/skills/validate-style/lint.py <file>` or `echo "text" | python3 ~/.copilot/skills/validate-style/lint.py -`.
+- **Lint drafts before posting**: run the `validate-style` skill (see the **Copilot Skills** section above) on any text destined for GitHub or Slack.
 
 ## File & Project Organization
 - Store automation scripts in a `scripts/` directory
