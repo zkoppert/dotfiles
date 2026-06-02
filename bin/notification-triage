@@ -1,0 +1,12 @@
+#!/bin/bash
+# Wrapper for launchd: ensures PATH is set so `gh` is findable, then
+# execs the triage script. Logs are routed via the plist.
+set -euo pipefail
+
+# Brew prepends /opt/homebrew/bin in interactive shells; replicate here
+# so `gh` and `python3` are on PATH when launchd invokes us directly.
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+exec /usr/bin/env python3 \
+  "$HOME/repos/dotfiles/.copilot/skills/triage-notifications/triage.py" \
+  "$@"

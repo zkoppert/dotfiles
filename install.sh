@@ -58,4 +58,39 @@ if [ -x "$DOTFILES_DIR/bin/gh-pr-ready-guard" ]; then
   done
 fi
 
+# Install notification-triage launchd agent (macOS only).
+# The wrapper itself goes in ~/.local/bin so it stays on PATH for ad-hoc runs,
+# and the plist gets symlinked into ~/Library/LaunchAgents so launchctl can
+# pick it up on a cron-like schedule (every 2h, 08:00-18:00, Mon-Fri).
+TRIAGE_WRAPPER="$DOTFILES_DIR/bin/notification-triage"
+TRIAGE_PLIST="$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"
+if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ]; then
+  mkdir -p "$HOME/.local/bin"
+  TRIAGE_BIN_TARGET="$HOME/.local/bin/notification-triage"
+  if [ -L "$TRIAGE_BIN_TARGET" ] || [ ! -e "$TRIAGE_BIN_TARGET" ]; then
+    ln -sfn "$TRIAGE_WRAPPER" "$TRIAGE_BIN_TARGET"
+    echo "✓ Linked notification-triage → ~/.local/bin/notification-triage"
+  else
+    echo "⚠ $TRIAGE_BIN_TARGET exists and is not a symlink - skipping"
+  fi
+
+  if [ -f "$TRIAGE_PLIST" ]; then
+    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+    PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.notification-triage.plist"
+    if [ -L "$PLIST_TARGET" ] || [ ! -e "$PLIST_TARGET" ]; then
+      # launchctl bootstrap (modern) or load -w (legacy) both work fine here;
+      # unload first so re-runs are consistent (no error if it isn't loaded).
+      launchctl unload "$PLIST_TARGET" >/dev/null 2>&1 || true
+      ln -sfn "$TRIAGE_PLIST" "$PLIST_TARGET"
+      if launchctl load "$PLIST_TARGET" 2>/dev/null; then
+        echo "✓ Loaded launchd agent com.zkoppert.notification-triage"
+      else
+        echo "⚠ launchctl load failed for $PLIST_TARGET - check 'launchctl error' and ~/Library/Logs/notification-triage.log"
+      fi
+    else
+      echo "⚠ $PLIST_TARGET exists and is not a symlink - skipping (delete it manually if you want the dotfiles version)"
+    fi
+  fi
+fi
+
 echo "Dotfiles install complete."

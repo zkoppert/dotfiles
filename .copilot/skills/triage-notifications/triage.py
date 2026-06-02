@@ -1,0 +1,653 @@
+#!/usr/bin/env python3
+"""Notification triage: classify GitHub notifications and route them to todo.yml.
+
+For each unread notification from `gh api /notifications`, this tool:
+
+1. Classifies it as one of:
+   - DROP            (safe to mark-read without confirmation)
+   - QUADRANT_Q1     (high-confidence: actionable now, goes straight to Q1)
+   - INBOX           (actionable but needs human triage)
+2. For DROP items: marks the thread read on GitHub.
+3. For Q1/INBOX items: adds an entry to ~/repos/zkoppert-todo/todo.yml
+   (deduped by notification thread_id).
+4. Scans active todos for items in `done` status with a recorded
+   notification thread_id and marks those notifications read on GitHub
+   (the "mark-read-on-done" loop).
+5. Triggers a macOS notification if any new actionable items were added.
+
+Designed to be safe to re-run (consistent: a second run produces no
+duplicate todos and no spurious mark-reads).
+
+Usage:
+    triage.py [--dry-run] [--todo-file PATH] [--no-notify] [--verbose]
+
+Exit codes:
+    0  Triage completed (with or without items found)
+    1  Error reading config, todo file, or hitting the API
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+from ruamel.yaml import YAML
+from ruamel.yaml import YAMLError as _RuamelYAMLError
+
+# Round-trip YAML loader/dumper preserves comments, key order, and quoting
+# in zkoppert-todo's todo.yml. Plain `yaml.safe_dump` drops every comment,
+# which would silently destroy the manually maintained section headers.
+_RT_YAML = YAML(typ="rt")
+_RT_YAML.preserve_quotes = True
+_RT_YAML.width = 4096
+_RT_YAML.indent(mapping=2, sequence=4, offset=2)
+# todo.yml is hand-edited and can occasionally end up with duplicate keys
+# inside an item (e.g. two `due:` entries). PyYAML silently kept the last
+# value; ruamel raises by default. Match the historical behavior so the
+# triage tool stays unblocked, but log warnings via the loader.
+_RT_YAML.allow_duplicate_keys = True
+
+# Allowlist of GitHub logins whose review_requested notifications auto-route
+# to Q1. Currently Zack's direct reports plus his manager - kept narrow on
+# purpose so cross-team requests still hit inbox for review.
+NUX_TEAM_LOGINS_Q1: set[str] = {
+    "iansan5653",   # Ian
+    "andimiya",     # Andi
+    "sutterj",      # Jacob
+    "francisfuzz",  # Francis
+    "Hkly",         # Hannah
+    "depoll",       # David Poll (manager)
+}
+
+# Reasons that route straight to Q1 regardless of author.
+Q1_REASONS: set[str] = {
+    "mention",
+    "assign",
+    "security_alert",
+}
+
+# Subject states that are candidates for the drop bucket.
+CLOSED_STATES: set[str] = {"closed", "merged"}
+
+DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
+
+# Buckets the classifier can return.
+BUCKET_DROP = "DROP"
+BUCKET_Q1 = "QUADRANT_Q1"
+BUCKET_INBOX = "INBOX"
+
+logger = logging.getLogger("triage")
+
+
+@dataclass
+class Classification:
+    """The outcome of classifying a single notification."""
+
+    bucket: str
+    reason: str  # Human-readable justification for the bucket choice.
+
+
+@dataclass
+class TriageStats:
+    """Tally of what happened during one run, for the digest."""
+
+    fetched: int = 0
+    dropped: int = 0
+    added_q1: int = 0
+    added_inbox: int = 0
+    already_tracked: int = 0
+    marked_read_on_done: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+def run_gh(args: list[str], *, timeout: int = 60) -> str:
+    """Run `gh <args>` and return stdout, or raise on non-zero exit."""
+    cmd = ["gh", *args]
+    logger.debug("running: %s", " ".join(cmd))
+    result = subprocess.run(
+        cmd, check=True, capture_output=True, text=True, timeout=timeout
+    )
+    return result.stdout
+
+
+def fetch_notifications() -> list[dict[str, Any]]:
+    """Return all unread notifications for the authenticated user."""
+    # `--slurp` returns a JSON array-of-arrays (one inner array per page),
+    # which is safe to parse regardless of titles that contain `][`.
+    raw = run_gh(["api", "/notifications", "--paginate", "--slurp"]).strip()
+    if not raw:
+        return []
+    try:
+        pages = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("fetch_notifications: could not parse slurp output: %s", exc)
+        return []
+    merged: list[dict[str, Any]] = []
+    if isinstance(pages, list):
+        for page in pages:
+            if isinstance(page, list):
+                merged.extend(page)
+            elif isinstance(page, dict):
+                merged.append(page)
+    return merged
+
+
+def fetch_thread_state(notif: dict[str, Any]) -> str | None:
+    """Return the subject state for a notification, or None on failure.
+
+    Used to decide whether comment-style notifications are on
+    closed/merged subjects (drop bucket). Only called for the small set of
+    notifications where the state actually changes the classification.
+    """
+    subject = notif.get("subject") or {}
+    url = subject.get("url")
+    if not url:
+        return None
+    # Strip the api prefix; `gh api` accepts paths.
+    path = url.replace("https://api.github.com", "")
+    try:
+        out = run_gh(["api", path], timeout=20)
+        return (json.loads(out).get("state") or "").lower()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            json.JSONDecodeError) as exc:
+        logger.warning("fetch_thread_state failed for %s: %s", path, exc)
+        return None
+
+
+def fetch_subject_author(notif: dict[str, Any]) -> str | None:
+    """Return the GitHub login that opened the subject (PR or issue).
+
+    Used for `review_requested` notifications: GitHub doesn't include the
+    requester in the notification payload, so we use the PR author as a
+    pragmatic proxy. This handles the dominant NUX-team case where a
+    teammate opens a PR and adds Zack as reviewer in the same step.
+    Returns None on any API or parse failure.
+    """
+    subject = notif.get("subject") or {}
+    url = subject.get("url")
+    if not url:
+        return None
+    path = url.replace("https://api.github.com", "")
+    try:
+        out = run_gh(["api", path], timeout=20)
+        return ((json.loads(out).get("user") or {}).get("login")) or None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            json.JSONDecodeError) as exc:
+        logger.warning("fetch_subject_author failed for %s: %s", path, exc)
+        return None
+
+
+def fetch_latest_comment(
+    notif: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    """Return (author_login, body) for the latest comment on a notification.
+
+    Returns (None, None) if unavailable. Used to detect super-linter posts
+    and bot-noise comments that don't @-mention the user.
+    """
+    subject = notif.get("subject") or {}
+    latest = subject.get("latest_comment_url")
+    if not latest:
+        return None, None
+    path = latest.replace("https://api.github.com", "")
+    try:
+        out = run_gh(["api", path], timeout=20)
+        data = json.loads(out)
+        author = (data.get("user") or {}).get("login")
+        body = data.get("body") or ""
+        return author, body
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            json.JSONDecodeError) as exc:
+        logger.warning("fetch_latest_comment failed for %s: %s", path, exc)
+        return None, None
+
+
+def is_super_linter(author: str | None, body: str | None) -> bool:
+    """Return True if the latest comment looks like a super-linter post."""
+    if author and author.lower() in {"super-linter", "super-linter[bot]"}:
+        return True
+    if body and "super-linter" in body.lower():
+        return True
+    return False
+
+
+def mentions_me(body: str | None, my_login: str) -> bool:
+    """Return True if `body` contains an @-mention of `my_login` or `me`."""
+    if not body:
+        return False
+    needle = f"@{my_login.lower()}"
+    return needle in body.lower()
+
+
+def classify(
+    notif: dict[str, Any],
+    *,
+    my_login: str,
+    q1_logins: set[str],
+    state_fetcher=fetch_thread_state,
+    comment_fetcher=fetch_latest_comment,
+    subject_author_fetcher=fetch_subject_author,
+) -> Classification:
+    """Decide which bucket a notification belongs in.
+
+    `state_fetcher`, `comment_fetcher`, and `subject_author_fetcher` are
+    injectable so tests can avoid network calls. They default to the live
+    API helpers.
+    """
+    reason = (notif.get("reason") or "").lower()
+    subject = notif.get("subject") or {}
+    subject_type = (subject.get("type") or "").lower()
+
+    if reason == "review_requested":
+        # Auto-Q1 only when the PR author is on the narrow allowlist.
+        # GitHub doesn't put the requester in the notification payload, and
+        # the latest comment author is unrelated to who clicked "request
+        # review". Use the PR author as a pragmatic proxy: the dominant
+        # NUX-team case is teammates opening their own PR and adding Zack
+        # as reviewer in one step. Fall through to inbox if we can't
+        # confirm.
+        author = subject_author_fetcher(notif)
+        if author and author in q1_logins:
+            return Classification(
+                BUCKET_Q1,
+                f"review_requested on PR by teammate @{author}",
+            )
+        return Classification(
+            BUCKET_INBOX,
+            "review_requested - PR author not on Q1 allowlist (or unknown)",
+        )
+
+    if reason in Q1_REASONS:
+        return Classification(BUCKET_Q1, f"{reason} → Q1")
+
+    if reason == "manual":
+        # Subscribed deliberately. Surface as actionable but let user
+        # triage rather than force Q1.
+        return Classification(BUCKET_INBOX, "manual subscription")
+
+    if reason == "comment":
+        state = state_fetcher(notif)
+        if state in CLOSED_STATES:
+            return Classification(
+                BUCKET_DROP, f"comment on {state} {subject_type}"
+            )
+        author, body = comment_fetcher(notif)
+        if mentions_me(body, my_login):
+            return Classification(BUCKET_Q1, f"@mention in comment by @{author}")
+        if is_super_linter(author, body):
+            return Classification(BUCKET_DROP, "super-linter comment without @mention")
+        return Classification(BUCKET_INBOX, "comment thread (not closed)")
+
+    if reason == "ci_activity":
+        # CI on someone else's PR is generally noise; on Zack's own PRs
+        # it's still in his GitHub UI and rarely needs todo tracking.
+        return Classification(BUCKET_DROP, "ci_activity")
+
+    if reason == "subscribed":
+        state = state_fetcher(notif)
+        if state in CLOSED_STATES:
+            return Classification(
+                BUCKET_DROP, f"subscribed notice on {state} {subject_type}"
+            )
+        return Classification(BUCKET_INBOX, "subscribed thread (not closed)")
+
+    # Unknown reason: be safe and surface for human triage.
+    return Classification(BUCKET_INBOX, f"unknown reason '{reason}' - inbox by default")
+
+
+def make_todo_id(notif: dict[str, Any]) -> str:
+    """Build a stable kebab-case id from a notification."""
+    subject = notif.get("subject") or {}
+    subject_type = (subject.get("type") or "thread").lower()
+    title = subject.get("title") or "notification"
+    repo = (notif.get("repository") or {}).get("full_name") or "unknown"
+    repo_slug = repo.split("/")[-1].lower()
+    # Pull a number out of the subject url if present (PR/issue number).
+    url = subject.get("url") or ""
+    match = re.search(r"/(\d+)$", url)
+    number = match.group(1) if match else notif.get("id", "x")
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40].strip("-")
+    if not slug:
+        slug = "notif"
+    return f"notif-{repo_slug}-{subject_type}-{number}-{slug}"
+
+
+def web_url(notif: dict[str, Any]) -> str:
+    """Convert an api.github.com subject url to the human-facing url."""
+    subject = notif.get("subject") or {}
+    url = subject.get("url") or ""
+    # /repos/owner/repo/pulls/123 → /owner/repo/pull/123
+    # /repos/owner/repo/issues/45 → /owner/repo/issues/45
+    web = url.replace("https://api.github.com/repos/", "https://github.com/")
+    web = web.replace("/pulls/", "/pull/")
+    return web or ((notif.get("repository") or {}).get("html_url", ""))
+
+
+def build_todo_entry(
+    notif: dict[str, Any],
+    classification: Classification,
+) -> dict[str, Any]:
+    """Construct a todo.yml-shaped entry from a notification."""
+    subject = notif.get("subject") or {}
+    repo = (notif.get("repository") or {}).get("full_name") or "unknown"
+    today = datetime.date.today().isoformat()
+    title = subject.get("title") or "Untitled notification"
+    reason = notif.get("reason") or "unknown"
+
+    entry: dict[str, Any] = {
+        "id": make_todo_id(notif),
+        "title": f"{title} ({repo})",
+        "description": f"GitHub notification - reason: {reason}. {classification.reason}.",
+        "category": "process",
+        "source": "github-notification",
+        "added": today,
+        "notes": "",
+        "notification": {
+            "thread_id": str(notif.get("id")),
+            "url": web_url(notif),
+            "reason": reason,
+            "repo": repo,
+        },
+    }
+
+    if classification.bucket == BUCKET_Q1:
+        entry.update(
+            {
+                "urgency": "high",
+                "importance": "high",
+                "quadrant": "q1_do_first",
+                "status": "pending",
+            }
+        )
+    return entry
+
+
+def load_todo(path: Path) -> dict[str, Any]:
+    """Load todo.yml, returning at least the top-level keys we expect.
+
+    Uses round-trip YAML so that comments, key order, and quoting from the
+    user-maintained todo.yml survive the read-modify-write cycle in
+    `write_todo_atomic`.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"todo file not found: {path}")
+    with path.open("r", encoding="utf-8") as fh:
+        data = _RT_YAML.load(fh) or {}
+    data.setdefault("inbox", [])
+    data.setdefault("prioritized", {})
+    data["prioritized"].setdefault("q1_do_first", [])
+    data.setdefault("done", [])
+    return data
+
+
+def write_todo_atomic(path: Path, data: dict[str, Any]) -> None:
+    """Write todo.yml atomically (temp file + rename) to avoid corruption.
+
+    Uses round-trip YAML so existing comments and structure in todo.yml
+    are preserved when this function rewrites the file.
+    """
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=".todo-", suffix=".yml", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+            _RT_YAML.dump(data, fh)
+        shutil.move(tmp_path, path)
+    except Exception:
+        if Path(tmp_path).exists():
+            os.unlink(tmp_path)
+        raise
+
+
+def existing_thread_ids(data: dict[str, Any]) -> set[str]:
+    """Return all notification.thread_id values already in todo.yml.
+
+    Looks across inbox, all prioritized quadrants, in_progress, blocked,
+    in_review, and done so we never double-add.
+    """
+    ids: set[str] = set()
+
+    def collect(items: Any) -> None:
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            notif = item.get("notification") or {}
+            thread_id = notif.get("thread_id")
+            if thread_id:
+                ids.add(str(thread_id))
+
+    collect(data.get("inbox"))
+    collect(data.get("done"))
+    for key in ("in_progress", "blocked", "in_review"):
+        collect(data.get(key))
+    prioritized = data.get("prioritized") or {}
+    for items in prioritized.values():
+        collect(items)
+    return ids
+
+
+def items_to_mark_read(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return items with a thread_id whose notification can be marked read.
+
+    Items in the top-level `done:` section are completed by definition:
+    zkoppert-todo doesn't carry a `status` field there (entries have
+    `id`/`title`/`completed`/`category`). So `done:` membership alone is
+    proof of completion. All other sections still require `status: done`
+    because they hold work-in-flight items where status drives this loop.
+    """
+    ready: list[dict[str, Any]] = []
+
+    def scan(items: Any, *, require_status_done: bool) -> None:
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if require_status_done and item.get("status") != "done":
+                continue
+            notif = item.get("notification") or {}
+            if not notif.get("thread_id"):
+                continue
+            if notif.get("marked_read"):
+                continue
+            ready.append(item)
+
+    scan(data.get("done"), require_status_done=False)
+    prioritized = data.get("prioritized") or {}
+    for items in prioritized.values():
+        scan(items, require_status_done=True)
+    for key in ("in_progress", "blocked", "in_review"):
+        scan(data.get(key), require_status_done=True)
+    return ready
+
+
+def mark_thread_read(thread_id: str) -> None:
+    """PATCH the GitHub notification thread to mark it read."""
+    run_gh(["api", "-X", "PATCH", f"/notifications/threads/{thread_id}"], timeout=20)
+
+
+def macos_notify(title: str, message: str) -> None:
+    """Best-effort macOS notification via osascript. Silent on failure."""
+    try:
+        script = (
+            f'display notification "{message}" '
+            f'with title "{title}" sound name "default"'
+        )
+        subprocess.run(
+            ["osascript", "-e", script],
+            check=False, capture_output=True, timeout=5,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError) as exc:
+        logger.debug("macos_notify failed: %s", exc)
+
+
+def get_my_login() -> str:
+    """Return the authenticated gh user login."""
+    out = run_gh(["api", "/user"])
+    return json.loads(out)["login"]
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Triage GitHub notifications into ~/repos/zkoppert-todo/todo.yml.",
+    )
+    parser.add_argument(
+        "--todo-file",
+        type=Path,
+        default=DEFAULT_TODO_FILE,
+        help=f"Path to todo.yml (default: {DEFAULT_TODO_FILE}).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Classify and report, but do not modify todo.yml or call PATCH.",
+    )
+    parser.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="Skip the macOS notification even if actionable items were added.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable debug logging.",
+    )
+    return parser.parse_args(argv)
+
+
+def run(args: argparse.Namespace) -> TriageStats:
+    """Main entrypoint - returns stats so tests can assert behaviour."""
+    stats = TriageStats()
+
+    try:
+        my_login = get_my_login()
+        logger.debug("authenticated as @%s", my_login)
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        stats.errors.append(f"failed to fetch /user: {exc}")
+        return stats
+
+    try:
+        notifications = fetch_notifications()
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        stats.errors.append(f"failed to fetch notifications: {exc}")
+        return stats
+
+    stats.fetched = len(notifications)
+    logger.info("fetched %d notification(s)", stats.fetched)
+
+    try:
+        data = load_todo(args.todo_file)
+    except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+        stats.errors.append(f"failed to load todo file: {exc}")
+        return stats
+
+    seen_ids = existing_thread_ids(data)
+    new_q1: list[dict[str, Any]] = []
+    new_inbox: list[dict[str, Any]] = []
+
+    for notif in notifications:
+        thread_id = str(notif.get("id") or "")
+        if thread_id and thread_id in seen_ids:
+            stats.already_tracked += 1
+            continue
+        classification = classify(
+            notif,
+            my_login=my_login,
+            q1_logins=NUX_TEAM_LOGINS_Q1,
+        )
+        logger.debug(
+            "thread %s → %s (%s)",
+            thread_id, classification.bucket, classification.reason,
+        )
+        if classification.bucket == BUCKET_DROP:
+            stats.dropped += 1
+            if not args.dry_run:
+                try:
+                    mark_thread_read(thread_id)
+                except subprocess.CalledProcessError as exc:
+                    stats.errors.append(
+                        f"mark-read failed for thread {thread_id}: {exc}"
+                    )
+            continue
+        entry = build_todo_entry(notif, classification)
+        if classification.bucket == BUCKET_Q1:
+            new_q1.append(entry)
+            stats.added_q1 += 1
+        else:
+            new_inbox.append(entry)
+            stats.added_inbox += 1
+
+    # Mark-read-on-done loop: scan tracked items now marked done.
+    ready = items_to_mark_read(data)
+    for item in ready:
+        notif_meta = item["notification"]
+        thread_id = str(notif_meta["thread_id"])
+        if not args.dry_run:
+            try:
+                mark_thread_read(thread_id)
+                notif_meta["marked_read"] = True
+                notif_meta["marked_read_at"] = datetime.date.today().isoformat()
+                stats.marked_read_on_done += 1
+            except subprocess.CalledProcessError as exc:
+                stats.errors.append(
+                    f"mark-read-on-done failed for thread {thread_id}: {exc}"
+                )
+        else:
+            stats.marked_read_on_done += 1
+
+    # Append new entries to todo.yml.
+    if (new_q1 or new_inbox or stats.marked_read_on_done) and not args.dry_run:
+        data["inbox"].extend(new_inbox)
+        data["prioritized"]["q1_do_first"].extend(new_q1)
+        try:
+            write_todo_atomic(args.todo_file, data)
+        except OSError as exc:
+            stats.errors.append(f"failed to write todo file: {exc}")
+            return stats
+
+    new_actionable = stats.added_q1 + stats.added_inbox
+    if new_actionable and not args.no_notify:
+        title = "Notification triage"
+        message = (
+            f"{stats.added_q1} new Q1, {stats.added_inbox} to inbox "
+            f"({stats.dropped} dropped)"
+        )
+        macos_notify(title, message)
+
+    return stats
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s %(message)s",
+    )
+    stats = run(args)
+    print(
+        f"fetched={stats.fetched} added_q1={stats.added_q1} "
+        f"added_inbox={stats.added_inbox} dropped={stats.dropped} "
+        f"already_tracked={stats.already_tracked} "
+        f"marked_read_on_done={stats.marked_read_on_done}"
+    )
+    for err in stats.errors:
+        print(f"ERROR: {err}", file=sys.stderr)
+    return 1 if stats.errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
