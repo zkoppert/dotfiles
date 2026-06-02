@@ -53,11 +53,6 @@ _RT_YAML = YAML(typ="rt")
 _RT_YAML.preserve_quotes = True
 _RT_YAML.width = 4096
 _RT_YAML.indent(mapping=2, sequence=4, offset=2)
-# todo.yml is hand-edited and can occasionally end up with duplicate keys
-# inside an item (e.g. two `due:` entries). PyYAML silently kept the last
-# value; ruamel raises by default. Match the historical behavior so the
-# triage tool stays unblocked, but log warnings via the loader.
-_RT_YAML.allow_duplicate_keys = True
 
 # Allowlist of GitHub logins whose review_requested notifications auto-route
 # to Q1. Currently Zack's direct reports plus his manager - kept narrow on
