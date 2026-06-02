@@ -966,12 +966,25 @@ def test_check_subject_stale_discussion_null_data_drops():
     assert reason == "deleted"
 
 
-def test_check_subject_stale_discussion_could_not_resolve_drops():
+def test_check_subject_stale_discussion_could_not_resolve_keeps():
+    # GraphQL "Could not resolve" is ambiguous between "deleted" and
+    # "private repo / access revoked", so we treat every GraphQL error as
+    # UNKNOWN and let the pruner keep the entry.
     parsed = {"owner": "o", "repo": "r", "kind": "discussion", "number": 1}
     err = _called_process_error(1, "Could not resolve to a Repository with the name")
     with _mock_run_gh(side_effect=err):
         action, _ = triage.check_subject_stale(parsed)
-    assert action == triage.STALE_DROP
+    assert action == triage.STALE_UNKNOWN
+
+
+def test_check_subject_stale_discussion_repository_null_keeps():
+    # ``repository: null`` can mean deleted OR access revoked - keep, don't drop.
+    parsed = {"owner": "o", "repo": "r", "kind": "discussion", "number": 1}
+    body = json.dumps({"data": {"repository": None}})
+    with _mock_run_gh(return_value=body):
+        action, reason = triage.check_subject_stale(parsed)
+    assert action == triage.STALE_UNKNOWN
+    assert reason == "repository null"
 
 
 def test_check_subject_stale_unsupported_kind():
@@ -1390,3 +1403,61 @@ def test_run_prune_dry_run_does_not_mark_thread_read(todo_file):
 
     assert stats.pruned_stale == 1
     assert patch_calls == [], "dry-run must not PATCH threads"
+
+
+def test_prune_stale_inbox_skips_non_dict_notification():
+    # A user-edited todo.yml could put a string (or anything else) under
+    # ``notification``. The pruner must keep the entry instead of crashing
+    # with AttributeError on ``.get()``.
+    data = {
+        "inbox": [
+            {
+                "id": "weird",
+                "source": "github-notification",
+                "notification": "not a dict",
+            },
+            {
+                "id": "also-weird",
+                "source": "github-notification",
+                "notification": ["list", "instead", "of", "dict"],
+            },
+        ]
+    }
+    stats = triage.TriageStats()
+    # If the pruner ever calls run_gh on these, that's also a bug - mock it
+    # to raise so we'd notice.
+    with _mock_run_gh(side_effect=AssertionError("should not be called")):
+        triage.prune_stale_inbox(data, stats)
+    assert len(data["inbox"]) == 2
+    assert stats.pruned_stale == 0
+    assert stats.errors == []
+
+
+def test_prune_stale_inbox_handles_mark_read_timeout():
+    # ``run_gh`` can raise subprocess.TimeoutExpired, not just
+    # CalledProcessError. A timeout during mark-read must be logged and the
+    # drop must still proceed - it must not crash the prune loop.
+    data = {
+        "inbox": [
+            {
+                "id": "stale-with-timeout",
+                "source": "github-notification",
+                "notification": {
+                    "url": "https://github.com/o/r/issues/1",
+                    "thread_id": "12345",
+                },
+            }
+        ]
+    }
+    stats = triage.TriageStats()
+    timeout_exc = subprocess.TimeoutExpired(cmd=["gh"], timeout=20)
+    with patch(
+        "triage.check_subject_stale",
+        MagicMock(return_value=(triage.STALE_DROP, "closed issue")),
+    ), patch("triage.mark_thread_read", MagicMock(side_effect=timeout_exc)):
+        triage.prune_stale_inbox(data, stats)
+    assert data["inbox"] == []  # drop still happened
+    assert stats.pruned_stale == 1
+    assert len(stats.errors) == 1
+    assert "12345" in stats.errors[0]
+    assert "mark-read failed" in stats.errors[0]

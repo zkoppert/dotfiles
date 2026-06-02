@@ -553,8 +553,7 @@ def _is_not_found_error(exc: subprocess.CalledProcessError) -> bool:
     """Detect a 404 from `gh api` error output.
 
     `gh` writes errors like ``gh: HTTP 404: Not Found (...)`` to stderr on
-    REST 404s, and ``Could not resolve to a ...`` on GraphQL repo/discussion
-    not-found. Both cases mean "the subject is gone".
+    REST 404s. We only treat that exact case as "the subject is gone".
 
     We deliberately do NOT match a bare ``"not found"`` substring because
     GitHub returns HTTP 403 with body ``{"message": "Not Found"}`` for
@@ -562,9 +561,18 @@ def _is_not_found_error(exc: subprocess.CalledProcessError) -> bool:
     and `gh` renders that as ``gh: HTTP 403: Not Found``. Treating that as
     "deleted" would silently drop inbox items for repos the user no longer
     has access to.
+
+    We also deliberately do NOT match ``"could not resolve"`` from GraphQL
+    because that same message is returned both when the repo / discussion
+    has been deleted AND when the token has lost access to a private repo
+    (enumeration protection at the GraphQL layer). We can't distinguish the
+    two cases, so the discussion checker treats every GraphQL error as
+    UNKNOWN and lets the pruner keep the entry. Discussions that are gone
+    while we still have repo access surface through the ``discussion: null``
+    path in ``_check_discussion_stale`` instead.
     """
     stderr = (exc.stderr or "").lower() if getattr(exc, "stderr", None) else ""
-    return "http 404" in stderr or "could not resolve" in stderr
+    return "http 404" in stderr
 
 
 def _check_pr_or_issue_stale(parsed: dict[str, Any]) -> tuple[str, str]:
@@ -641,10 +649,17 @@ def _check_discussion_stale(parsed: dict[str, Any]) -> tuple[str, str]:
         payload = json.loads(raw)
     except json.JSONDecodeError:
         return (STALE_UNKNOWN, "invalid json")
-    disc = ((payload.get("data") or {}).get("repository") or {}).get("discussion")
+    repo_node = (payload.get("data") or {}).get("repository")
+    if repo_node is None:
+        # ``repository: null`` here means GraphQL couldn't surface the repo
+        # (deleted OR token has no access). We can't tell which, so be
+        # conservative and keep the entry rather than silently dropping
+        # something the user lost access to.
+        return (STALE_UNKNOWN, "repository null")
+    disc = repo_node.get("discussion")
     if disc is None:
-        # GraphQL returns null for the discussion when the repo or number is
-        # gone but doesn't always raise a stderr error - treat as deleted.
+        # We have repo access (repo_node is a real object), so a null
+        # discussion means the discussion itself is gone - safe to drop.
         return (STALE_DROP, "deleted")
     if disc.get("locked"):
         return (STALE_DROP, "locked discussion")
@@ -701,7 +716,13 @@ def prune_stale_inbox(
         if entry.get("source") != "github-notification":
             kept.append(entry)
             continue
-        notif = entry.get("notification") or {}
+        notif = entry.get("notification")
+        if not isinstance(notif, dict):
+            # A user-edited todo.yml could put a string (or anything else)
+            # under ``notification``. Be conservative and keep the entry
+            # rather than crash on ``.get()`` below.
+            kept.append(entry)
+            continue
         url = notif.get("url", "")
         parsed = parse_github_url(url)
         if parsed is None:
@@ -716,7 +737,10 @@ def prune_stale_inbox(
             if thread_id and not dry_run:
                 try:
                     mark_thread_read(str(thread_id))
-                except subprocess.CalledProcessError as exc:
+                except (
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                ) as exc:
                     stats.errors.append(
                         f"prune mark-read failed for thread {thread_id}: {exc}"
                     )
