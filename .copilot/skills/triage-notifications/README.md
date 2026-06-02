@@ -145,10 +145,6 @@ python3 -m pytest tests.py -v
 - **A new GitHub notification reason appears**: classifier defaults to
   INBOX rather than DROP. Check the inbox bucket for unfamiliar items
   and update `Q1_REASONS` / `CLOSED_STATES` in `triage.py` if needed.
-- **Duplicate keys in `todo.yml`**: ruamel is configured with
-  `allow_duplicate_keys = True` so the tool stays unblocked. If you
-  notice unexpected values for a field, grep `todo.yml` for that key to
-  catch accidental duplicates from hand-editing.
 - **Pruner dropped something I wanted to keep**: the pruner only drops
   on a hard "stale" signal (closed PR, closed issue, locked discussion,
   answered Q&A discussion, or 404). If a subject reopens after being
