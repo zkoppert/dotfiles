@@ -69,6 +69,27 @@ A launchd plist runs the tool every two hours on weekdays at 8, 10,
 To pause: `launchctl unload ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist`
 To resume: `launchctl load ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist`
 
+## Inbox pruning
+
+After classifying new notifications, the script walks the inbox bucket
+and drops anything whose underlying GitHub subject is now stale:
+
+- closed or merged PRs
+- closed issues
+- locked discussions
+- answered Q&A discussions
+- subjects that 404 (deleted)
+
+A closed-but-unlocked regular discussion is kept because it can still
+receive activity. Only entries with `source: github-notification` are
+touched, so manually added inbox items are left alone. Errors other
+than 404 (timeout, 5xx, parse failure) keep the entry to avoid dropping
+things during transient issues. When the pruner drops an entry, it
+also marks the underlying GitHub notification thread read so the next
+cron cycle doesn't re-fetch the unread thread and re-add it. Pruner
+stats land in the final summary line as `pruned_stale=N` plus a
+`pruned_breakdown:` line when anything was dropped.
+
 ## Ad-hoc usage
 
 ```bash
@@ -82,6 +103,10 @@ python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py \
 # Skip the macOS notification (useful during testing)
 python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py \
   --no-notify
+
+# Skip the inbox pruner (still classifies new notifications)
+python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py \
+  --no-prune
 ```
 
 ## Requirements
@@ -120,3 +145,14 @@ python3 -m pytest tests.py -v
 - **A new GitHub notification reason appears**: classifier defaults to
   INBOX rather than DROP. Check the inbox bucket for unfamiliar items
   and update `Q1_REASONS` / `CLOSED_STATES` in `triage.py` if needed.
+- **Pruner dropped something I wanted to keep**: the pruner only drops
+  on a hard "stale" signal (closed PR, closed issue, locked discussion,
+  answered Q&A discussion, or 404). If a subject reopens after being
+  pruned and you still care about it, run triage again and the
+  notification will come back through the inbox. To audit what was
+  dropped, check the cron log
+  (`~/Library/Logs/notification-triage.log`) or run with `--verbose` -
+  each drop logs `pruned inbox item <id> (<reason>)`. To disable the
+  pruner entirely for a run, pass `--no-prune`. To recover a specific
+  entry, the previous version of `todo.yml` lives in
+  `~/repos/zkoppert-todo`'s git history.

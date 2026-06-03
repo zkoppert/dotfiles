@@ -41,6 +41,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from ruamel.yaml import YAML
@@ -58,12 +59,12 @@ _RT_YAML.indent(mapping=2, sequence=4, offset=2)
 # to Q1. Currently Zack's direct reports plus his manager - kept narrow on
 # purpose so cross-team requests still hit inbox for review.
 NUX_TEAM_LOGINS_Q1: set[str] = {
-    "iansan5653",   # Ian
-    "andimiya",     # Andi
-    "sutterj",      # Jacob
+    "iansan5653",  # Ian
+    "andimiya",  # Andi
+    "sutterj",  # Jacob
     "francisfuzz",  # Francis
-    "Hkly",         # Hannah
-    "depoll",       # David Poll (manager)
+    "Hkly",  # Hannah
+    "depoll",  # David Poll (manager)
 }
 
 # Reasons that route straight to Q1 regardless of author.
@@ -104,7 +105,15 @@ class TriageStats:
     added_inbox: int = 0
     already_tracked: int = 0
     marked_read_on_done: int = 0
+    pruned_stale: int = 0
+    pruned_by_reason: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+
+
+# Pruner return sentinels for check_subject_stale().
+STALE_DROP = "drop"  # Confirmed stale; safe to drop.
+STALE_KEEP = "keep"  # Confirmed still active; keep.
+STALE_UNKNOWN = "unknown"  # Could not determine (transient error); keep.
 
 
 def run_gh(args: list[str], *, timeout: int = 60) -> str:
@@ -155,8 +164,11 @@ def fetch_thread_state(notif: dict[str, Any]) -> str | None:
     try:
         out = run_gh(["api", path], timeout=20)
         return (json.loads(out).get("state") or "").lower()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-            json.JSONDecodeError) as exc:
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+    ) as exc:
         logger.warning("fetch_thread_state failed for %s: %s", path, exc)
         return None
 
@@ -178,8 +190,11 @@ def fetch_subject_author(notif: dict[str, Any]) -> str | None:
     try:
         out = run_gh(["api", path], timeout=20)
         return ((json.loads(out).get("user") or {}).get("login")) or None
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-            json.JSONDecodeError) as exc:
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+    ) as exc:
         logger.warning("fetch_subject_author failed for %s: %s", path, exc)
         return None
 
@@ -203,8 +218,11 @@ def fetch_latest_comment(
         author = (data.get("user") or {}).get("login")
         body = data.get("body") or ""
         return author, body
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-            json.JSONDecodeError) as exc:
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+    ) as exc:
         logger.warning("fetch_latest_comment failed for %s: %s", path, exc)
         return None, None
 
@@ -275,9 +293,7 @@ def classify(
     if reason == "comment":
         state = state_fetcher(notif)
         if state in CLOSED_STATES:
-            return Classification(
-                BUCKET_DROP, f"comment on {state} {subject_type}"
-            )
+            return Classification(BUCKET_DROP, f"comment on {state} {subject_type}")
         author, body = comment_fetcher(notif)
         if mentions_me(body, my_login):
             return Classification(BUCKET_Q1, f"@mention in comment by @{author}")
@@ -420,7 +436,9 @@ def existing_thread_ids(data: dict[str, Any]) -> set[str]:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            notif = item.get("notification") or {}
+            notif = item.get("notification")
+            if not isinstance(notif, dict):
+                continue
             thread_id = notif.get("thread_id")
             if thread_id:
                 ids.add(str(thread_id))
@@ -454,7 +472,9 @@ def items_to_mark_read(data: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             if require_status_done and item.get("status") != "done":
                 continue
-            notif = item.get("notification") or {}
+            notif = item.get("notification")
+            if not isinstance(notif, dict):
+                continue
             if not notif.get("thread_id"):
                 continue
             if notif.get("marked_read"):
@@ -484,7 +504,9 @@ def macos_notify(title: str, message: str) -> None:
         )
         subprocess.run(
             ["osascript", "-e", script],
-            check=False, capture_output=True, timeout=5,
+            check=False,
+            capture_output=True,
+            timeout=5,
         )
     except (subprocess.SubprocessError, FileNotFoundError) as exc:
         logger.debug("macos_notify failed: %s", exc)
@@ -494,6 +516,251 @@ def get_my_login() -> str:
     """Return the authenticated gh user login."""
     out = run_gh(["api", "/user"])
     return json.loads(out)["login"]
+
+
+_GH_PATH_RE = re.compile(
+    r"^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/"
+    r"(?P<kind>pull|issues|discussions)/(?P<number>\d+)"
+)
+
+
+def parse_github_url(url: str) -> dict[str, Any] | None:
+    """Parse a github.com web URL into its owner/repo/kind/number parts.
+
+    Returns ``None`` for URLs that don't point at a PR, issue, or discussion
+    (release pages, commit URLs, repo root, malformed input, etc.). The
+    pruner uses ``None`` as the signal to leave an entry alone.
+    """
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    if parsed.netloc not in ("github.com", "www.github.com"):
+        return None
+    match = _GH_PATH_RE.match(parsed.path)
+    if not match:
+        return None
+    kind_raw = match.group("kind")
+    # Normalize: "pull" -> "pr", "issues" -> "issue", "discussions" -> "discussion".
+    kind = {"pull": "pr", "issues": "issue", "discussions": "discussion"}[kind_raw]
+    return {
+        "owner": match.group("owner"),
+        "repo": match.group("repo"),
+        "kind": kind,
+        "number": int(match.group("number")),
+    }
+
+
+def _is_not_found_error(exc: subprocess.CalledProcessError) -> bool:
+    """Detect a 404 from `gh api` error output.
+
+    `gh` writes errors like ``gh: HTTP 404: Not Found (...)`` to stderr on
+    REST 404s. We only treat that exact case as "the subject is gone".
+
+    We deliberately do NOT match a bare ``"not found"`` substring because
+    GitHub returns HTTP 403 with body ``{"message": "Not Found"}`` for
+    private repos where access has been revoked (enumeration protection),
+    and `gh` renders that as ``gh: HTTP 403: Not Found``. Treating that as
+    "deleted" would silently drop inbox items for repos the user no longer
+    has access to.
+
+    We also deliberately do NOT match ``"could not resolve"`` from GraphQL
+    because that same message is returned both when the repo / discussion
+    has been deleted AND when the token has lost access to a private repo
+    (enumeration protection at the GraphQL layer). We can't distinguish the
+    two cases, so the discussion checker treats every GraphQL error as
+    UNKNOWN and lets the pruner keep the entry. Discussions that are gone
+    while we still have repo access surface through the ``discussion: null``
+    path in ``_check_discussion_stale`` instead.
+    """
+    stderr = (exc.stderr or "").lower() if getattr(exc, "stderr", None) else ""
+    return "http 404" in stderr
+
+
+def _check_pr_or_issue_stale(parsed: dict[str, Any]) -> tuple[str, str]:
+    owner, repo, kind, number = (
+        parsed["owner"],
+        parsed["repo"],
+        parsed["kind"],
+        parsed["number"],
+    )
+    api_path = (
+        f"/repos/{owner}/{repo}/pulls/{number}"
+        if kind == "pr"
+        else f"/repos/{owner}/{repo}/issues/{number}"
+    )
+    try:
+        raw = run_gh(["api", api_path], timeout=20)
+    except subprocess.CalledProcessError as exc:
+        if _is_not_found_error(exc):
+            return (STALE_DROP, "deleted")
+        return (STALE_UNKNOWN, f"api error: {exc.returncode}")
+    except subprocess.TimeoutExpired:
+        return (STALE_UNKNOWN, "api timeout")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return (STALE_UNKNOWN, "invalid json")
+    state = (data.get("state") or "").lower()
+    if state != "closed":
+        return (STALE_KEEP, f"{kind} state={state}")
+    if kind == "pr":
+        return (STALE_DROP, "merged" if data.get("merged_at") else "closed pr")
+    return (STALE_DROP, "closed issue")
+
+
+_DISCUSSION_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    discussion(number: $number) {
+      closed
+      locked
+      answerChosenAt
+      category { isAnswerable }
+    }
+  }
+}
+""".strip()
+
+
+def _check_discussion_stale(parsed: dict[str, Any]) -> tuple[str, str]:
+    owner, repo, number = parsed["owner"], parsed["repo"], parsed["number"]
+    try:
+        raw = run_gh(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={_DISCUSSION_QUERY}",
+                "-F",
+                f"owner={owner}",
+                "-F",
+                f"repo={repo}",
+                "-F",
+                f"number={number}",
+            ],
+            timeout=20,
+        )
+    except subprocess.CalledProcessError as exc:
+        if _is_not_found_error(exc):
+            return (STALE_DROP, "deleted")
+        return (STALE_UNKNOWN, f"graphql error: {exc.returncode}")
+    except subprocess.TimeoutExpired:
+        return (STALE_UNKNOWN, "graphql timeout")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return (STALE_UNKNOWN, "invalid json")
+    repo_node = (payload.get("data") or {}).get("repository")
+    if repo_node is None:
+        # ``repository: null`` here means GraphQL couldn't surface the repo
+        # (deleted OR token has no access). We can't tell which, so be
+        # conservative and keep the entry rather than silently dropping
+        # something the user lost access to.
+        return (STALE_UNKNOWN, "repository null")
+    disc = repo_node.get("discussion")
+    if disc is None:
+        # We have repo access (repo_node is a real object), so a null
+        # discussion means the discussion itself is gone - safe to drop.
+        return (STALE_DROP, "deleted")
+    if disc.get("locked"):
+        return (STALE_DROP, "locked discussion")
+    is_qa = (disc.get("category") or {}).get("isAnswerable")
+    if is_qa and disc.get("answerChosenAt"):
+        return (STALE_DROP, "answered Q&A")
+    return (STALE_KEEP, "discussion still open")
+
+
+def check_subject_stale(parsed: dict[str, Any]) -> tuple[str, str]:
+    """Decide if a parsed GitHub subject is stale enough to drop from inbox.
+
+    Returns a ``(action, reason)`` tuple where action is one of
+    ``STALE_DROP``, ``STALE_KEEP``, or ``STALE_UNKNOWN``. The reason is a
+    short human-readable string used in summary logging.
+
+    Error policy: a confirmed 404 from the API means "drop" because the
+    subject is gone. Every other error (network, 5xx, rate limit, parse
+    failure) returns UNKNOWN, which the pruner treats as "keep" so we never
+    drop an item based on a transient failure.
+    """
+    kind = parsed.get("kind")
+    if kind in ("pr", "issue"):
+        return _check_pr_or_issue_stale(parsed)
+    if kind == "discussion":
+        return _check_discussion_stale(parsed)
+    return (STALE_UNKNOWN, f"unsupported kind: {kind}")
+
+
+def prune_stale_inbox(
+    data: dict[str, Any], stats: TriageStats, dry_run: bool = False
+) -> None:
+    """Drop stale github-notification entries from ``data['inbox']`` in place.
+
+    Only inbox items where ``source == 'github-notification'`` and whose URL
+    parses as a PR / issue / discussion are checked. Anything else is left
+    untouched so manually added inbox items aren't affected. Updates
+    ``stats.pruned_stale`` and ``stats.pruned_by_reason``.
+
+    When an entry is dropped in live mode, the underlying GitHub notification
+    thread is also marked read so it doesn't reappear on the next cron cycle.
+    A mark-read failure is logged via ``stats.errors`` but does not block the
+    drop, matching the existing DROP-bucket policy.
+    """
+    inbox = data.get("inbox")
+    if not inbox:
+        return
+    checked = 0
+    kept: list[Any] = []
+    for entry in inbox:
+        if not isinstance(entry, dict):
+            kept.append(entry)
+            continue
+        if entry.get("source") != "github-notification":
+            kept.append(entry)
+            continue
+        notif = entry.get("notification")
+        if not isinstance(notif, dict):
+            # A user-edited todo.yml could put a string (or anything else)
+            # under ``notification``. Be conservative and keep the entry
+            # rather than crash on ``.get()`` below.
+            kept.append(entry)
+            continue
+        url = notif.get("url", "")
+        parsed = parse_github_url(url)
+        if parsed is None:
+            kept.append(entry)
+            continue
+        checked += 1
+        action, reason = check_subject_stale(parsed)
+        if action == STALE_DROP:
+            stats.pruned_stale += 1
+            stats.pruned_by_reason[reason] = stats.pruned_by_reason.get(reason, 0) + 1
+            thread_id = notif.get("thread_id")
+            if thread_id and not dry_run:
+                try:
+                    mark_thread_read(str(thread_id))
+                except (
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                ) as exc:
+                    stats.errors.append(
+                        f"prune mark-read failed for thread {thread_id}: {exc}"
+                    )
+            logger.info(
+                "pruned inbox item %s (%s)",
+                entry.get("id"),
+                reason,
+            )
+            continue
+        kept.append(entry)
+    data["inbox"] = kept
+    logger.debug(
+        "pruner checked %d github-notification inbox items, dropped %d",
+        checked,
+        stats.pruned_stale,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -515,6 +782,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-notify",
         action="store_true",
         help="Skip the macOS notification even if actionable items were added.",
+    )
+    parser.add_argument(
+        "--no-prune",
+        action="store_true",
+        help="Skip the inbox staleness pruner (still classifies new notifications).",
     )
     parser.add_argument(
         "--verbose",
@@ -566,14 +838,19 @@ def run(args: argparse.Namespace) -> TriageStats:
         )
         logger.debug(
             "thread %s → %s (%s)",
-            thread_id, classification.bucket, classification.reason,
+            thread_id,
+            classification.bucket,
+            classification.reason,
         )
         if classification.bucket == BUCKET_DROP:
             stats.dropped += 1
             if not args.dry_run:
                 try:
                     mark_thread_read(thread_id)
-                except subprocess.CalledProcessError as exc:
+                except (
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                ) as exc:
                     stats.errors.append(
                         f"mark-read failed for thread {thread_id}: {exc}"
                     )
@@ -597,15 +874,26 @@ def run(args: argparse.Namespace) -> TriageStats:
                 notif_meta["marked_read"] = True
                 notif_meta["marked_read_at"] = datetime.date.today().isoformat()
                 stats.marked_read_on_done += 1
-            except subprocess.CalledProcessError as exc:
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+            ) as exc:
                 stats.errors.append(
                     f"mark-read-on-done failed for thread {thread_id}: {exc}"
                 )
         else:
             stats.marked_read_on_done += 1
 
+    # Inbox pruner: drop github-notification items whose subject is now
+    # closed/merged/locked/answered. Runs even on --dry-run (so we can see
+    # what would be pruned) but the write itself is gated below.
+    if not args.no_prune:
+        prune_stale_inbox(data, stats, dry_run=args.dry_run)
+
     # Append new entries to todo.yml.
-    if (new_q1 or new_inbox or stats.marked_read_on_done) and not args.dry_run:
+    if (
+        new_q1 or new_inbox or stats.marked_read_on_done or stats.pruned_stale
+    ) and not args.dry_run:
         data["inbox"].extend(new_inbox)
         data["prioritized"]["q1_do_first"].extend(new_q1)
         try:
@@ -637,8 +925,15 @@ def main(argv: list[str] | None = None) -> int:
         f"fetched={stats.fetched} added_q1={stats.added_q1} "
         f"added_inbox={stats.added_inbox} dropped={stats.dropped} "
         f"already_tracked={stats.already_tracked} "
-        f"marked_read_on_done={stats.marked_read_on_done}"
+        f"marked_read_on_done={stats.marked_read_on_done} "
+        f"pruned_stale={stats.pruned_stale}"
     )
+    if stats.pruned_by_reason:
+        breakdown = ", ".join(
+            f"{reason}={count}"
+            for reason, count in sorted(stats.pruned_by_reason.items())
+        )
+        print(f"pruned_breakdown: {breakdown}")
     for err in stats.errors:
         print(f"ERROR: {err}", file=sys.stderr)
     return 1 if stats.errors else 0
