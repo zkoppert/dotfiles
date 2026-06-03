@@ -5,7 +5,7 @@ items into `~/repos/zkoppert-todo/todo.yml`, and mark notifications read
 on GitHub once the corresponding todo is done.
 
 Designed to be safe to re-run: deduped by `notification.thread_id`, so a
-second run produces no duplicate todos and no spurious mark-reads.
+second run produces no duplicate todos and no spurious mark-dones.
 
 ## What problem this solves
 
@@ -56,9 +56,10 @@ Each new entry carries a `notification` block:
 
 When you move the todo to `status: done`, the next triage run will:
 
-1. PATCH `/notifications/threads/{thread_id}` to mark it read on GitHub.
-2. Add `marked_read: true` and `marked_read_at: <today>` to the
-   `notification` block so it isn't marked-read twice.
+1. DELETE `/notifications/threads/{thread_id}` to mark it done on GitHub
+   (removes it from the inbox and moves it to the Done tab).
+2. Add `marked_done: true` and `marked_done_at: <today>` to the
+   `notification` block so it isn't marked-done twice.
 
 ## Schedule
 
