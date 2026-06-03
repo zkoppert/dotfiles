@@ -436,7 +436,9 @@ def existing_thread_ids(data: dict[str, Any]) -> set[str]:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            notif = item.get("notification") or {}
+            notif = item.get("notification")
+            if not isinstance(notif, dict):
+                continue
             thread_id = notif.get("thread_id")
             if thread_id:
                 ids.add(str(thread_id))
@@ -470,7 +472,9 @@ def items_to_mark_read(data: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             if require_status_done and item.get("status") != "done":
                 continue
-            notif = item.get("notification") or {}
+            notif = item.get("notification")
+            if not isinstance(notif, dict):
+                continue
             if not notif.get("thread_id"):
                 continue
             if notif.get("marked_read"):
@@ -843,7 +847,10 @@ def run(args: argparse.Namespace) -> TriageStats:
             if not args.dry_run:
                 try:
                     mark_thread_read(thread_id)
-                except subprocess.CalledProcessError as exc:
+                except (
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                ) as exc:
                     stats.errors.append(
                         f"mark-read failed for thread {thread_id}: {exc}"
                     )
@@ -867,7 +874,10 @@ def run(args: argparse.Namespace) -> TriageStats:
                 notif_meta["marked_read"] = True
                 notif_meta["marked_read_at"] = datetime.date.today().isoformat()
                 stats.marked_read_on_done += 1
-            except subprocess.CalledProcessError as exc:
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+            ) as exc:
                 stats.errors.append(
                     f"mark-read-on-done failed for thread {thread_id}: {exc}"
                 )

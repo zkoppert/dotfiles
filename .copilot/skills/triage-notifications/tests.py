@@ -406,6 +406,35 @@ def test_items_to_mark_read_skips_in_progress_without_done_status():
     assert triage.items_to_mark_read(data) == []
 
 
+def test_existing_thread_ids_skips_non_dict_notification():
+    # A user-edited todo.yml could set ``notification:`` to a string or
+    # list. The function must skip those entries, not crash with
+    # AttributeError on ``str.get(...)``.
+    data = {
+        "inbox": [
+            {"id": "ok", "notification": {"thread_id": "111"}},
+            {"id": "bad-str", "notification": "not a dict"},
+            {"id": "bad-list", "notification": ["unexpected"]},
+        ],
+        "done": [],
+    }
+    assert triage.existing_thread_ids(data) == {"111"}
+
+
+def test_items_to_mark_read_skips_non_dict_notification():
+    # Same defensive guard as existing_thread_ids: a non-dict
+    # ``notification:`` value must be ignored, not crash the run.
+    data = {
+        "done": [
+            {"id": "ok", "notification": {"thread_id": "111"}},
+            {"id": "bad", "notification": "not a dict"},
+        ],
+    }
+    items = triage.items_to_mark_read(data)
+    titles = [i["id"] for i in items]
+    assert titles == ["ok"]
+
+
 def test_load_todo_creates_missing_sections(tmp_path):
     todo_path = tmp_path / "todo.yml"
     todo_path.write_text("# empty\n")
@@ -1461,3 +1490,77 @@ def test_prune_stale_inbox_handles_mark_read_timeout():
     assert len(stats.errors) == 1
     assert "12345" in stats.errors[0]
     assert "mark-read failed" in stats.errors[0]
+
+
+def test_run_bucket_drop_handles_mark_read_timeout(todo_file):
+    # The BUCKET_DROP mark-read site in run() must catch TimeoutExpired,
+    # not just CalledProcessError. Otherwise a slow GitHub PATCH crashes
+    # the whole run before the YAML write happens.
+    notif = _notif("ci_activity", id="555")
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "PATCH" in cmd:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=20)
+        responses = {
+            "/user": json.dumps({"login": "zkoppert"}),
+            "/notifications": json.dumps([notif]),
+        }
+        idx = cmd.index("api")
+        after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
+        path = after[0] if after else ""
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=responses.get(path, ""), stderr=""
+        )
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        stats = triage.run(args)
+    assert stats.dropped == 1
+    assert any("555" in e and "mark-read failed" in e for e in stats.errors)
+
+
+def test_run_marks_read_on_done_handles_timeout(todo_file):
+    # The mark-read-on-done site in run() must catch TimeoutExpired too.
+    # A timeout must be logged in stats.errors and must not stop the run
+    # before the YAML write.
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {
+                    "q1_do_first": [
+                        {
+                            "id": "doneone",
+                            "title": "x",
+                            "status": "done",
+                            "notification": {"thread_id": "777"},
+                        },
+                    ],
+                },
+                "done": [],
+            }
+        )
+    )
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "PATCH" in cmd:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=20)
+        responses = {
+            "/user": json.dumps({"login": "zkoppert"}),
+            "/notifications": json.dumps([]),
+        }
+        idx = cmd.index("api")
+        after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
+        path = after[0] if after else ""
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=responses.get(path, ""), stderr=""
+        )
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        stats = triage.run(args)
+    assert any("777" in e and "mark-read-on-done failed" in e for e in stats.errors)
+    # The YAML write still happened - the run did not crash mid-way.
+    data = yaml.safe_load(todo_file.read_text())
+    entry = data["prioritized"]["q1_do_first"][0]
+    assert entry["notification"].get("marked_read") is not True
