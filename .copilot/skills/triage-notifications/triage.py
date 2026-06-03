@@ -4,19 +4,19 @@
 For each unread notification from `gh api /notifications`, this tool:
 
 1. Classifies it as one of:
-   - DROP            (safe to mark-read without confirmation)
+   - DROP            (safe to mark-done without confirmation)
    - QUADRANT_Q1     (high-confidence: actionable now, goes straight to Q1)
    - INBOX           (actionable but needs human triage)
-2. For DROP items: marks the thread read on GitHub.
+2. For DROP items: marks the thread done on GitHub (deletes from inbox).
 3. For Q1/INBOX items: adds an entry to ~/repos/zkoppert-todo/todo.yml
    (deduped by notification thread_id).
 4. Scans active todos for items in `done` status with a recorded
-   notification thread_id and marks those notifications read on GitHub
-   (the "mark-read-on-done" loop).
+   notification thread_id and marks those notifications done on GitHub
+   (the "mark-done-on-completed" loop).
 5. Triggers a macOS notification if any new actionable items were added.
 
 Designed to be safe to re-run (consistent: a second run produces no
-duplicate todos and no spurious mark-reads).
+duplicate todos and no spurious mark-dones).
 
 Usage:
     triage.py [--dry-run] [--todo-file PATH] [--no-notify] [--verbose]
@@ -104,7 +104,7 @@ class TriageStats:
     added_q1: int = 0
     added_inbox: int = 0
     already_tracked: int = 0
-    marked_read_on_done: int = 0
+    marked_done: int = 0
     pruned_stale: int = 0
     pruned_by_reason: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
@@ -453,8 +453,8 @@ def existing_thread_ids(data: dict[str, Any]) -> set[str]:
     return ids
 
 
-def items_to_mark_read(data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return items with a thread_id whose notification can be marked read.
+def items_to_mark_done(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return items with a thread_id whose notification can be marked done.
 
     Items in the top-level `done:` section are completed by definition:
     zkoppert-todo doesn't carry a `status` field there (entries have
@@ -477,7 +477,7 @@ def items_to_mark_read(data: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             if not notif.get("thread_id"):
                 continue
-            if notif.get("marked_read"):
+            if notif.get("marked_done"):
                 continue
             ready.append(item)
 
@@ -490,9 +490,15 @@ def items_to_mark_read(data: dict[str, Any]) -> list[dict[str, Any]]:
     return ready
 
 
-def mark_thread_read(thread_id: str) -> None:
-    """PATCH the GitHub notification thread to mark it read."""
-    run_gh(["api", "-X", "PATCH", f"/notifications/threads/{thread_id}"], timeout=20)
+def mark_thread_done(thread_id: str) -> None:
+    """DELETE the GitHub notification thread to mark it done.
+
+    DELETE moves the thread out of the inbox into the Done tab, matching
+    the behavior of the Done button in the GitHub UI. This is distinct
+    from PATCH, which only clears the unread/bold indicator while the
+    thread stays in the inbox.
+    """
+    run_gh(["api", "-X", "DELETE", f"/notifications/threads/{thread_id}"], timeout=20)
 
 
 def macos_notify(title: str, message: str) -> None:
@@ -704,8 +710,8 @@ def prune_stale_inbox(
     ``stats.pruned_stale`` and ``stats.pruned_by_reason``.
 
     When an entry is dropped in live mode, the underlying GitHub notification
-    thread is also marked read so it doesn't reappear on the next cron cycle.
-    A mark-read failure is logged via ``stats.errors`` but does not block the
+    thread is also marked done so it doesn't reappear on the next cron cycle.
+    A mark-done failure is logged via ``stats.errors`` but does not block the
     drop, matching the existing DROP-bucket policy.
     """
     inbox = data.get("inbox")
@@ -740,13 +746,13 @@ def prune_stale_inbox(
             thread_id = notif.get("thread_id")
             if thread_id and not dry_run:
                 try:
-                    mark_thread_read(str(thread_id))
+                    mark_thread_done(str(thread_id))
                 except (
                     subprocess.CalledProcessError,
                     subprocess.TimeoutExpired,
                 ) as exc:
                     stats.errors.append(
-                        f"prune mark-read failed for thread {thread_id}: {exc}"
+                        f"prune mark-done failed for thread {thread_id}: {exc}"
                     )
             logger.info(
                 "pruned inbox item %s (%s)",
@@ -776,7 +782,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Classify and report, but do not modify todo.yml or call PATCH.",
+        help="Classify and report, but do not modify todo.yml or call DELETE.",
     )
     parser.add_argument(
         "--no-notify",
@@ -846,13 +852,13 @@ def run(args: argparse.Namespace) -> TriageStats:
             stats.dropped += 1
             if not args.dry_run:
                 try:
-                    mark_thread_read(thread_id)
+                    mark_thread_done(thread_id)
                 except (
                     subprocess.CalledProcessError,
                     subprocess.TimeoutExpired,
                 ) as exc:
                     stats.errors.append(
-                        f"mark-read failed for thread {thread_id}: {exc}"
+                        f"mark-done failed for thread {thread_id}: {exc}"
                     )
             continue
         entry = build_todo_entry(notif, classification)
@@ -863,26 +869,26 @@ def run(args: argparse.Namespace) -> TriageStats:
             new_inbox.append(entry)
             stats.added_inbox += 1
 
-    # Mark-read-on-done loop: scan tracked items now marked done.
-    ready = items_to_mark_read(data)
+    # Mark-done-on-completed loop: scan tracked items now marked done.
+    ready = items_to_mark_done(data)
     for item in ready:
         notif_meta = item["notification"]
         thread_id = str(notif_meta["thread_id"])
         if not args.dry_run:
             try:
-                mark_thread_read(thread_id)
-                notif_meta["marked_read"] = True
-                notif_meta["marked_read_at"] = datetime.date.today().isoformat()
-                stats.marked_read_on_done += 1
+                mark_thread_done(thread_id)
+                notif_meta["marked_done"] = True
+                notif_meta["marked_done_at"] = datetime.date.today().isoformat()
+                stats.marked_done += 1
             except (
                 subprocess.CalledProcessError,
                 subprocess.TimeoutExpired,
             ) as exc:
                 stats.errors.append(
-                    f"mark-read-on-done failed for thread {thread_id}: {exc}"
+                    f"mark-done-on-completed failed for thread {thread_id}: {exc}"
                 )
         else:
-            stats.marked_read_on_done += 1
+            stats.marked_done += 1
 
     # Inbox pruner: drop github-notification items whose subject is now
     # closed/merged/locked/answered. Runs even on --dry-run (so we can see
@@ -892,7 +898,7 @@ def run(args: argparse.Namespace) -> TriageStats:
 
     # Append new entries to todo.yml.
     if (
-        new_q1 or new_inbox or stats.marked_read_on_done or stats.pruned_stale
+        new_q1 or new_inbox or stats.marked_done or stats.pruned_stale
     ) and not args.dry_run:
         data["inbox"].extend(new_inbox)
         data["prioritized"]["q1_do_first"].extend(new_q1)
@@ -925,7 +931,7 @@ def main(argv: list[str] | None = None) -> int:
         f"fetched={stats.fetched} added_q1={stats.added_q1} "
         f"added_inbox={stats.added_inbox} dropped={stats.dropped} "
         f"already_tracked={stats.already_tracked} "
-        f"marked_read_on_done={stats.marked_read_on_done} "
+        f"marked_done={stats.marked_done} "
         f"pruned_stale={stats.pruned_stale}"
     )
     if stats.pruned_by_reason:

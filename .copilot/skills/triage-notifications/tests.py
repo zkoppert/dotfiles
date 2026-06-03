@@ -336,7 +336,7 @@ def test_build_todo_entry_inbox_has_no_quadrant_fields():
 
 
 # ----------------------------------------------------------------------
-# load_todo / write_todo_atomic / existing_thread_ids / items_to_mark_read
+# load_todo / write_todo_atomic / existing_thread_ids / items_to_mark_done
 # ----------------------------------------------------------------------
 
 
@@ -357,7 +357,7 @@ def _sample_todo() -> dict:
                     "id": "b2",
                     "title": "q1-done-already-marked",
                     "status": "done",
-                    "notification": {"thread_id": "999", "marked_read": True},
+                    "notification": {"thread_id": "999", "marked_done": True},
                 },
             ],
             "q2_schedule": [],
@@ -382,16 +382,16 @@ def test_existing_thread_ids_covers_all_sections():
     assert ids == {"111", "222", "333", "999"}
 
 
-def test_items_to_mark_read_picks_done_with_thread_id():
+def test_items_to_mark_done_picks_done_with_thread_id():
     # `done-archived` has no `status` field but lives in the `done:`
     # section, so it must still be picked up. `q1` has status=done and a
-    # thread_id, so it's picked up. The marked_read item is skipped.
-    items = triage.items_to_mark_read(_sample_todo())
+    # thread_id, so it's picked up. The marked_done item is skipped.
+    items = triage.items_to_mark_done(_sample_todo())
     titles = sorted(i["title"] for i in items)
     assert titles == ["done-archived", "q1"]
 
 
-def test_items_to_mark_read_skips_in_progress_without_done_status():
+def test_items_to_mark_done_skips_in_progress_without_done_status():
     data = {
         "in_progress": [
             {
@@ -403,7 +403,7 @@ def test_items_to_mark_read_skips_in_progress_without_done_status():
         ],
         "done": [],
     }
-    assert triage.items_to_mark_read(data) == []
+    assert triage.items_to_mark_done(data) == []
 
 
 def test_existing_thread_ids_skips_non_dict_notification():
@@ -421,7 +421,7 @@ def test_existing_thread_ids_skips_non_dict_notification():
     assert triage.existing_thread_ids(data) == {"111"}
 
 
-def test_items_to_mark_read_skips_non_dict_notification():
+def test_items_to_mark_done_skips_non_dict_notification():
     # Same defensive guard as existing_thread_ids: a non-dict
     # ``notification:`` value must be ignored, not crash the run.
     data = {
@@ -430,7 +430,7 @@ def test_items_to_mark_read_skips_non_dict_notification():
             {"id": "bad", "notification": "not a dict"},
         ],
     }
-    items = triage.items_to_mark_read(data)
+    items = triage.items_to_mark_done(data)
     titles = [i["id"] for i in items]
     assert titles == ["ok"]
 
@@ -575,13 +575,13 @@ def test_run_adds_q1_for_mention(todo_file):
     assert q1[0]["quadrant"] == "q1_do_first"
 
 
-def test_run_drops_ci_activity_and_marks_read(todo_file):
+def test_run_drops_ci_activity_and_marks_done(todo_file):
     notif = _notif("ci_activity", id="555")
-    patch_calls: list[tuple] = []
+    delete_calls: list[tuple] = []
 
     def fake_run(cmd, *args, **kwargs):
-        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "PATCH" in cmd:
-            patch_calls.append(tuple(cmd))
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(tuple(cmd))
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         responses = {
             "/user": json.dumps({"login": "zkoppert"}),
@@ -602,7 +602,7 @@ def test_run_drops_ci_activity_and_marks_read(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
     assert stats.dropped == 1
-    assert any("/notifications/threads/555" in " ".join(c) for c in patch_calls)
+    assert any("/notifications/threads/555" in " ".join(c) for c in delete_calls)
 
 
 def test_run_dry_run_does_not_write(todo_file):
@@ -620,7 +620,7 @@ def test_run_dry_run_does_not_write(todo_file):
     assert todo_file.read_text() == before
 
 
-def test_run_marks_read_on_done(todo_file):
+def test_run_marks_done_on_completed(todo_file):
     todo_file.write_text(
         yaml.safe_dump(
             {
@@ -640,12 +640,12 @@ def test_run_marks_read_on_done(todo_file):
         )
     )
 
-    patch_paths: list[str] = []
+    delete_paths: list[str] = []
 
     def fake_run(cmd, *args, **kwargs):
-        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "PATCH" in cmd:
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
             # last positional is the path
-            patch_paths.append(cmd[-1])
+            delete_paths.append(cmd[-1])
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         responses = {
             "/user": json.dumps({"login": "zkoppert"}),
@@ -665,12 +665,12 @@ def test_run_marks_read_on_done(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
 
-    assert stats.marked_read_on_done == 1
-    assert any("/notifications/threads/777" in p for p in patch_paths)
+    assert stats.marked_done == 1
+    assert any("/notifications/threads/777" in p for p in delete_paths)
     data = yaml.safe_load(todo_file.read_text())
     entry = data["prioritized"]["q1_do_first"][0]
-    assert entry["notification"]["marked_read"] is True
-    assert entry["notification"]["marked_read_at"] == (
+    assert entry["notification"]["marked_done"] is True
+    assert entry["notification"]["marked_done_at"] == (
         datetime.date.today().isoformat()
     )
 
@@ -1287,10 +1287,11 @@ def test_run_prunes_and_writes_when_live(todo_file):
     assert ids == ["active-1"]
 
 
-def test_run_prune_marks_thread_read_so_it_does_not_reappear(todo_file):
-    """Regression: pruner must mark the underlying thread read, otherwise the
-    next cron cycle re-fetches the unread notification and re-adds the inbox
-    entry the pruner just dropped (verified bug from gpt-5.4 review).
+def test_run_prune_marks_thread_done_so_it_does_not_reappear(todo_file):
+    """Regression: pruner must mark the underlying thread done (DELETE),
+    otherwise the next cron cycle re-fetches the unread notification and
+    re-adds the inbox entry the pruner just dropped (verified bug from
+    gpt-5.4 review).
     """
     todo_file.write_text(
         yaml.safe_dump(
@@ -1323,12 +1324,12 @@ def test_run_prune_marks_thread_read_so_it_does_not_reappear(todo_file):
         },
         "repository": {"full_name": "o/r"},
     }
-    patch_calls: list[tuple] = []
+    delete_calls: list[tuple] = []
 
     def fake_run(cmd, *args, **kwargs):
         joined = " ".join(cmd)
-        if "-X" in cmd and "PATCH" in cmd:
-            patch_calls.append(tuple(cmd))
+        if "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(tuple(cmd))
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if "/user" in joined:
             return subprocess.CompletedProcess(
@@ -1355,11 +1356,11 @@ def test_run_prune_marks_thread_read_so_it_does_not_reappear(todo_file):
 
     assert stats_first.pruned_stale == 1
     assert any(
-        "/notifications/threads/123" in " ".join(c) for c in patch_calls
-    ), "pruner must PATCH the thread so the next run doesn't re-add it"
+        "/notifications/threads/123" in " ".join(c) for c in delete_calls
+    ), "pruner must DELETE the thread so the next run doesn't re-add it"
 
     # Simulate next cron cycle: GitHub now omits the thread (it's been marked
-    # read), so nothing should be re-added.
+    # done via DELETE), so nothing should be re-added.
     def fake_run_after(cmd, *args, **kwargs):
         joined = " ".join(cmd)
         if "/user" in joined:
@@ -1382,8 +1383,8 @@ def test_run_prune_marks_thread_read_so_it_does_not_reappear(todo_file):
     assert data["inbox"] == []
 
 
-def test_run_prune_dry_run_does_not_mark_thread_read(todo_file):
-    """Dry-run must not PATCH /notifications/threads even during pruning."""
+def test_run_prune_dry_run_does_not_mark_thread_done(todo_file):
+    """Dry-run must not DELETE /notifications/threads even during pruning."""
     todo_file.write_text(
         yaml.safe_dump(
             {
@@ -1402,12 +1403,12 @@ def test_run_prune_dry_run_does_not_mark_thread_read(todo_file):
             }
         )
     )
-    patch_calls: list[tuple] = []
+    delete_calls: list[tuple] = []
 
     def fake_run(cmd, *args, **kwargs):
         joined = " ".join(cmd)
-        if "-X" in cmd and "PATCH" in cmd:
-            patch_calls.append(tuple(cmd))
+        if "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(tuple(cmd))
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if "/user" in joined:
             return subprocess.CompletedProcess(
@@ -1431,7 +1432,7 @@ def test_run_prune_dry_run_does_not_mark_thread_read(todo_file):
         stats = triage.run(args)
 
     assert stats.pruned_stale == 1
-    assert patch_calls == [], "dry-run must not PATCH threads"
+    assert delete_calls == [], "dry-run must not DELETE threads"
 
 
 def test_prune_stale_inbox_skips_non_dict_notification():
@@ -1462,9 +1463,9 @@ def test_prune_stale_inbox_skips_non_dict_notification():
     assert stats.errors == []
 
 
-def test_prune_stale_inbox_handles_mark_read_timeout():
+def test_prune_stale_inbox_handles_mark_done_timeout():
     # ``run_gh`` can raise subprocess.TimeoutExpired, not just
-    # CalledProcessError. A timeout during mark-read must be logged and the
+    # CalledProcessError. A timeout during mark-done must be logged and the
     # drop must still proceed - it must not crash the prune loop.
     data = {
         "inbox": [
@@ -1483,23 +1484,23 @@ def test_prune_stale_inbox_handles_mark_read_timeout():
     with patch(
         "triage.check_subject_stale",
         MagicMock(return_value=(triage.STALE_DROP, "closed issue")),
-    ), patch("triage.mark_thread_read", MagicMock(side_effect=timeout_exc)):
+    ), patch("triage.mark_thread_done", MagicMock(side_effect=timeout_exc)):
         triage.prune_stale_inbox(data, stats)
     assert data["inbox"] == []  # drop still happened
     assert stats.pruned_stale == 1
     assert len(stats.errors) == 1
     assert "12345" in stats.errors[0]
-    assert "mark-read failed" in stats.errors[0]
+    assert "mark-done failed" in stats.errors[0]
 
 
-def test_run_bucket_drop_handles_mark_read_timeout(todo_file):
-    # The BUCKET_DROP mark-read site in run() must catch TimeoutExpired,
-    # not just CalledProcessError. Otherwise a slow GitHub PATCH crashes
+def test_run_bucket_drop_handles_mark_done_timeout(todo_file):
+    # The BUCKET_DROP mark-done site in run() must catch TimeoutExpired,
+    # not just CalledProcessError. Otherwise a slow GitHub DELETE crashes
     # the whole run before the YAML write happens.
     notif = _notif("ci_activity", id="555")
 
     def fake_run(cmd, *args, **kwargs):
-        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "PATCH" in cmd:
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=20)
         responses = {
             "/user": json.dumps({"login": "zkoppert"}),
@@ -1516,11 +1517,11 @@ def test_run_bucket_drop_handles_mark_read_timeout(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
     assert stats.dropped == 1
-    assert any("555" in e and "mark-read failed" in e for e in stats.errors)
+    assert any("555" in e and "mark-done failed" in e for e in stats.errors)
 
 
-def test_run_marks_read_on_done_handles_timeout(todo_file):
-    # The mark-read-on-done site in run() must catch TimeoutExpired too.
+def test_run_marks_done_on_completed_handles_timeout(todo_file):
+    # The mark-done-on-completed site in run() must catch TimeoutExpired too.
     # A timeout must be logged in stats.errors and must not stop the run
     # before the YAML write.
     todo_file.write_text(
@@ -1543,7 +1544,7 @@ def test_run_marks_read_on_done_handles_timeout(todo_file):
     )
 
     def fake_run(cmd, *args, **kwargs):
-        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "PATCH" in cmd:
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=20)
         responses = {
             "/user": json.dumps({"login": "zkoppert"}),
@@ -1559,8 +1560,10 @@ def test_run_marks_read_on_done_handles_timeout(todo_file):
     with patch("triage.subprocess.run", side_effect=fake_run):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
-    assert any("777" in e and "mark-read-on-done failed" in e for e in stats.errors)
+    assert any(
+        "777" in e and "mark-done-on-completed failed" in e for e in stats.errors
+    )
     # The YAML write still happened - the run did not crash mid-way.
     data = yaml.safe_load(todo_file.read_text())
     entry = data["prioritized"]["q1_do_first"][0]
-    assert entry["notification"].get("marked_read") is not True
+    assert entry["notification"].get("marked_done") is not True

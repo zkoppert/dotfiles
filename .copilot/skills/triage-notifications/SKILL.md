@@ -1,6 +1,6 @@
 ---
 name: triage-notifications
-description: Triggers when the user says "triage my notifications", "run notification triage", "what GitHub notifications need attention", "clear my notifications", or any similar request to process their unread GitHub notifications. Runs the dotfiles triage tool which classifies each unread notification, drops noise (CI runs, comments on closed threads, super-linter posts without @mentions), routes high-confidence items (mentions, assignments, security alerts, review requests from NUX teammates) straight to Q1 in ~/repos/zkoppert-todo/todo.yml, sends everything else to inbox, and marks notifications read on GitHub once the corresponding todo moves to done. Safe to re-run (deduped by thread_id).
+description: Triggers when the user says "triage my notifications", "run notification triage", "what GitHub notifications need attention", "clear my notifications", or any similar request to process their unread GitHub notifications. Runs the dotfiles triage tool which classifies each unread notification, drops noise (CI runs, comments on closed threads, super-linter posts without @mentions), routes high-confidence items (mentions, assignments, security alerts, review requests from NUX teammates) straight to Q1 in ~/repos/zkoppert-todo/todo.yml, sends everything else to inbox, and marks notifications done on GitHub (removing them from the inbox) once the corresponding todo moves to done. Safe to re-run (deduped by thread_id).
 ---
 
 # Triage GitHub Notifications
@@ -27,9 +27,9 @@ buried in GitHub noise.
    teammates → Q1; everything else → INBOX).
 3. Adds Q1 and INBOX entries to `~/repos/zkoppert-todo/todo.yml`
    (deduped by `notification.thread_id`).
-4. Marks DROP threads read on GitHub (no human confirmation).
+4. Marks DROP threads done on GitHub (no human confirmation), which removes them from the inbox.
 5. Scans the todo file for items previously created by this tool that
-   have moved to `status: done` and marks those notifications read.
+   have moved to `status: done` and marks those notifications done.
 
 A launchd job (`com.zkoppert.notification-triage.plist`) runs this every
 two hours on weekdays at 8/10/12/14/16/18. This skill is for ad-hoc
@@ -44,7 +44,7 @@ notification if anything actionable was added):
 python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py
 ```
 
-Preview without writing or PATCHing:
+Preview without writing or calling DELETE:
 
 ```bash
 python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py \
@@ -54,7 +54,7 @@ python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py \
 ## After running
 
 1. Read the printed summary line (`fetched=N added_q1=N added_inbox=N
-   dropped=N already_tracked=N marked_read_on_done=N`).
+   dropped=N already_tracked=N marked_done=N`).
 2. If anything landed in Q1, tell the user the count and the titles so
    they know what they're being asked to do.
 3. If `errors` lines appear on stderr, surface them so the user can
