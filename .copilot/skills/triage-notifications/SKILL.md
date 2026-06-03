@@ -29,7 +29,7 @@ buried in GitHub noise.
    (deduped by `notification.thread_id`).
 4. Marks DROP threads done on GitHub (no human confirmation), which removes them from the inbox.
 5. Scans the todo file for items previously created by this tool that
-   have moved to `status: done` and marks those notifications read.
+   have moved to `status: done` and marks those notifications done.
 
 A launchd job (`com.zkoppert.notification-triage.plist`) runs this every
 two hours on weekdays at 8/10/12/14/16/18. This skill is for ad-hoc
@@ -44,7 +44,7 @@ notification if anything actionable was added):
 python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py
 ```
 
-Preview without writing or PATCHing:
+Preview without writing or calling DELETE:
 
 ```bash
 python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py \

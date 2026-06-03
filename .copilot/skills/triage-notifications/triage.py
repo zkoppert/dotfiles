@@ -782,7 +782,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Classify and report, but do not modify todo.yml or call PATCH.",
+        help="Classify and report, but do not modify todo.yml or call DELETE.",
     )
     parser.add_argument(
         "--no-notify",

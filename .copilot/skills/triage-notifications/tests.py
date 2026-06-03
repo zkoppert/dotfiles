@@ -1288,9 +1288,10 @@ def test_run_prunes_and_writes_when_live(todo_file):
 
 
 def test_run_prune_marks_thread_done_so_it_does_not_reappear(todo_file):
-    """Regression: pruner must mark the underlying thread read, otherwise the
-    next cron cycle re-fetches the unread notification and re-adds the inbox
-    entry the pruner just dropped (verified bug from gpt-5.4 review).
+    """Regression: pruner must mark the underlying thread done (DELETE),
+    otherwise the next cron cycle re-fetches the unread notification and
+    re-adds the inbox entry the pruner just dropped (verified bug from
+    gpt-5.4 review).
     """
     todo_file.write_text(
         yaml.safe_dump(
@@ -1359,7 +1360,7 @@ def test_run_prune_marks_thread_done_so_it_does_not_reappear(todo_file):
     ), "pruner must DELETE the thread so the next run doesn't re-add it"
 
     # Simulate next cron cycle: GitHub now omits the thread (it's been marked
-    # read), so nothing should be re-added.
+    # done via DELETE), so nothing should be re-added.
     def fake_run_after(cmd, *args, **kwargs):
         joined = " ".join(cmd)
         if "/user" in joined:

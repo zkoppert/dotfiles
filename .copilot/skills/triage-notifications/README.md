@@ -1,8 +1,9 @@
 # triage-notifications
 
 Classify unread GitHub notifications, auto-drop noise, route actionable
-items into `~/repos/zkoppert-todo/todo.yml`, and mark notifications read
-on GitHub once the corresponding todo is done.
+items into `~/repos/zkoppert-todo/todo.yml`, and mark notifications done
+on GitHub (removing them from the inbox) once the corresponding todo
+is done.
 
 Designed to be safe to re-run: deduped by `notification.thread_id`, so a
 second run produces no duplicate todos and no spurious mark-dones.
@@ -86,8 +87,8 @@ receive activity. Only entries with `source: github-notification` are
 touched, so manually added inbox items are left alone. Errors other
 than 404 (timeout, 5xx, parse failure) keep the entry to avoid dropping
 things during transient issues. When the pruner drops an entry, it
-also marks the underlying GitHub notification thread read so the next
-cron cycle doesn't re-fetch the unread thread and re-add it. Pruner
+also marks the underlying GitHub notification thread done (DELETE) so
+the next cron cycle doesn't re-fetch the unread thread and re-add it. Pruner
 stats land in the final summary line as `pruned_stale=N` plus a
 `pruned_breakdown:` line when anything was dropped.
 
