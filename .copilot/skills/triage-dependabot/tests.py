@@ -1,0 +1,1274 @@
+"""Tests for triage_dependabot.
+
+The strategy mirrors triage-notifications/tests.py: mock every subprocess
+boundary, exercise the decision tree branches one at a time, then drive
+``run()`` end-to-end with fully mocked gh/copilot/state calls.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+import pytest
+
+import triage_dependabot as td
+
+# ---------------------------------------------------------------------------
+# parse_pr_subject / is_dependabot_pr
+# ---------------------------------------------------------------------------
+
+
+def test_parse_pr_subject_returns_repo_and_number() -> None:
+    notif = {
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/zkoppert/dotfiles/pulls/42",
+        }
+    }
+    assert td.parse_pr_subject(notif) == ("zkoppert/dotfiles", 42)
+
+
+def test_parse_pr_subject_ignores_non_pull_requests() -> None:
+    notif = {"subject": {"type": "Issue", "url": "x"}}
+    assert td.parse_pr_subject(notif) is None
+
+
+def test_parse_pr_subject_returns_none_for_malformed_url() -> None:
+    assert td.parse_pr_subject({"subject": {"type": "PullRequest", "url": ""}}) is None
+    assert td.parse_pr_subject({"subject": {"type": "PullRequest", "url": "x"}}) is None
+    assert (
+        td.parse_pr_subject(
+            {"subject": {"type": "PullRequest", "url": "https://api.github.com/foo"}}
+        )
+        is None
+    )
+
+
+def test_parse_pr_subject_returns_none_when_subject_missing() -> None:
+    assert td.parse_pr_subject({}) is None
+
+
+def test_is_dependabot_pr_true_for_known_logins() -> None:
+    assert td.is_dependabot_pr({"author": {"login": "dependabot[bot]"}})
+    assert td.is_dependabot_pr({"author": {"login": "dependabot-preview[bot]"}})
+
+
+def test_is_dependabot_pr_false_for_humans_and_missing() -> None:
+    assert not td.is_dependabot_pr({"author": {"login": "zkoppert"}})
+    assert not td.is_dependabot_pr({})
+
+
+def test_is_bot_helper() -> None:
+    assert td._is_bot("renovate[bot]")
+    assert td._is_bot("dependabot[bot]")
+    assert not td._is_bot("zkoppert")
+
+
+# ---------------------------------------------------------------------------
+# Semver bump detection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        ("Bump foo from 1.2.3 to 1.2.4", td.BUMP_PATCH),
+        ("Bump foo from 1.2.3 to 1.3.0", td.BUMP_MINOR),
+        ("Bump foo from 1.2.3 to 2.0.0", td.BUMP_MAJOR),
+        ("Bump foo from v1.2.3 to v1.2.4", td.BUMP_PATCH),
+        ("chore(deps): update foo", td.BUMP_UNKNOWN),
+        ("", td.BUMP_UNKNOWN),
+        ("Bump foo from 1 to 2", td.BUMP_MAJOR),
+    ],
+)
+def test_parse_bump_from_title(title: str, expected: str) -> None:
+    assert td.parse_bump_from_title(title) == expected
+
+
+def test_parse_bump_from_body_returns_highest_for_grouped() -> None:
+    body = (
+        "Bumps the prod group with 2 updates:\n"
+        "- Bumps foo from 1.2.3 to 1.2.4\n"
+        "- Bumps bar from 1.0.0 to 2.0.0\n"
+    )
+    assert td.parse_bump_from_body(body) == td.BUMP_MAJOR
+
+
+def test_parse_bump_from_body_empty() -> None:
+    assert td.parse_bump_from_body("") == td.BUMP_UNKNOWN
+    assert td.parse_bump_from_body("no version info here") == td.BUMP_UNKNOWN
+
+
+def test_detect_bump_grouped_uses_body() -> None:
+    pr = {
+        "title": "Bump the npm group with 3 updates",
+        "body": "- bumps a from 1.0.0 to 1.0.1\n- bumps b from 2.0.0 to 3.0.0",
+    }
+    assert td.detect_bump(pr) == td.BUMP_MAJOR
+
+
+def test_detect_bump_title_when_not_grouped() -> None:
+    assert (
+        td.detect_bump({"title": "Bump foo from 1.0.0 to 1.0.1", "body": ""})
+        == td.BUMP_PATCH
+    )
+
+
+def test_detect_bump_falls_back_to_body() -> None:
+    pr = {"title": "chore(deps): update", "body": "Bumps foo from 1.0.0 to 2.0.0"}
+    assert td.detect_bump(pr) == td.BUMP_MAJOR
+
+
+def test_detect_bump_does_not_misclassify_groupdate() -> None:
+    # Substring match on "group" used to misclassify the "groupdate" package
+    # as a grouped PR. The grouped pattern requires "bump the X group".
+    pr = {
+        "title": "Bump groupdate from 6.4.0 to 6.4.1",
+        "body": "",
+    }
+    assert td.detect_bump(pr) == td.BUMP_PATCH
+
+
+def test_detect_bump_grouped_pattern_recognised() -> None:
+    # The strict "bump the X group" pattern should still match real grouped PRs
+    # even when the title also names the group.
+    pr = {
+        "title": "Bump the rspec-suite group with 4 updates",
+        "body": "- bumps rspec from 3.0 to 3.1\n- bumps rspec-mocks from 3.0 to 3.1",
+    }
+    assert td.detect_bump(pr) == td.BUMP_MINOR
+
+
+# ---------------------------------------------------------------------------
+# Coverage detection
+# ---------------------------------------------------------------------------
+
+
+def test_detect_repo_coverage_extracts_highest_value() -> None:
+    files = {
+        "pyproject.toml": "[tool.coverage.report]\nfail_under = 75",
+        "Makefile": "test:\n\tpytest --cov-fail-under=92",
+    }
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        for name, body in files.items():
+            if name in args[1]:
+                return body
+        raise FileNotFoundError(args[1])
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
+        assert td.detect_repo_coverage("zkoppert/dotfiles") == 92
+
+
+def test_detect_repo_coverage_returns_none_when_no_signal() -> None:
+    with mock.patch.object(
+        td, "run_gh", side_effect=td.subprocess.CalledProcessError(1, "gh")
+    ):
+        assert td.detect_repo_coverage("z/r") is None
+
+
+# ---------------------------------------------------------------------------
+# Human-activity / CI / rebase
+# ---------------------------------------------------------------------------
+
+
+def test_humans_engaged_skips_self_and_bots() -> None:
+    pr = {
+        "comments": [
+            {"author": {"login": "zkoppert"}, "body": "ok"},
+            {"author": {"login": "dependabot[bot]"}, "body": "ok"},
+        ],
+        "reviews": [],
+    }
+    assert not td.humans_engaged(pr, my_login="zkoppert")
+
+
+def test_humans_engaged_true_when_human_comment_present() -> None:
+    pr = {
+        "comments": [{"author": {"login": "iansan5653"}, "body": "lgtm"}],
+        "reviews": [],
+    }
+    assert td.humans_engaged(pr, my_login="zkoppert")
+
+
+def test_humans_engaged_true_when_human_review_present() -> None:
+    pr = {
+        "comments": [],
+        "reviews": [{"author": {"login": "andimiya"}, "state": "APPROVED"}],
+    }
+    assert td.humans_engaged(pr, my_login="zkoppert")
+
+
+def test_humans_engaged_handles_missing_login() -> None:
+    pr = {"comments": [{"author": None, "body": "anon"}], "reviews": []}
+    assert not td.humans_engaged(pr, my_login="zkoppert")
+
+
+def test_summarize_checks_states() -> None:
+    assert td.summarize_checks({}) == "none"
+    assert (
+        td.summarize_checks({"statusCheckRollup": [{"conclusion": "SUCCESS"}]})
+        == "passing"
+    )
+    assert (
+        td.summarize_checks(
+            {
+                "statusCheckRollup": [
+                    {"status": "IN_PROGRESS"},
+                    {"conclusion": "SUCCESS"},
+                ]
+            }
+        )
+        == "pending"
+    )
+    assert (
+        td.summarize_checks(
+            {
+                "statusCheckRollup": [
+                    {"conclusion": "FAILURE"},
+                    {"conclusion": "SUCCESS"},
+                ]
+            }
+        )
+        == "failing"
+    )
+
+
+def test_summarize_checks_action_required_is_failing() -> None:
+    # ACTION_REQUIRED, STARTUP_FAILURE and STALE all indicate the check needs
+    # attention and should not be treated as passing for auto-merge purposes.
+    for conclusion in ("ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"):
+        rollup = {"statusCheckRollup": [{"conclusion": conclusion}]}
+        assert td.summarize_checks(rollup) == "failing", conclusion
+
+
+def test_summarize_checks_neutral_and_skipped_are_passing() -> None:
+    rollup = {
+        "statusCheckRollup": [
+            {"conclusion": "SUCCESS"},
+            {"conclusion": "NEUTRAL"},
+            {"conclusion": "SKIPPED"},
+        ]
+    }
+    assert td.summarize_checks(rollup) == "passing"
+
+
+def test_summarize_checks_unknown_conclusion_is_failing() -> None:
+    # An unrecognised future check conclusion is treated as failing so we err
+    # toward flag-for-review rather than auto-merge.
+    rollup = {"statusCheckRollup": [{"conclusion": "MYSTERY_STATE"}]}
+    assert td.summarize_checks(rollup) == "failing"
+
+
+def test_needs_rebase_comment_true_when_no_prior_comment() -> None:
+    pr = {"comments": [], "commits": []}
+    assert td.needs_rebase_comment(pr, my_login="zkoppert")
+
+
+def test_needs_rebase_comment_suppressed_when_rebase_newer_than_push() -> None:
+    pr = {
+        "comments": [
+            {
+                "author": {"login": "zkoppert"},
+                "body": "@dependabot rebase",
+                "createdAt": "2026-06-05T10:00:00Z",
+            }
+        ],
+        "commits": [{"committedDate": "2026-06-05T09:00:00Z"}],
+    }
+    assert not td.needs_rebase_comment(pr, my_login="zkoppert")
+
+
+def test_needs_rebase_comment_true_when_push_newer_than_rebase() -> None:
+    pr = {
+        "comments": [
+            {
+                "author": {"login": "zkoppert"},
+                "body": "@dependabot rebase",
+                "createdAt": "2026-06-05T08:00:00Z",
+            }
+        ],
+        "commits": [{"committedDate": "2026-06-05T10:00:00Z"}],
+    }
+    assert td.needs_rebase_comment(pr, my_login="zkoppert")
+
+
+def test_needs_rebase_comment_true_when_commits_missing_date() -> None:
+    pr = {
+        "comments": [
+            {
+                "author": {"login": "zkoppert"},
+                "body": "@dependabot rebase",
+                "createdAt": "2026-06-05T08:00:00Z",
+            }
+        ],
+        "commits": [{}],
+    }
+    assert td.needs_rebase_comment(pr, my_login="zkoppert")
+
+
+# ---------------------------------------------------------------------------
+# Security classification
+# ---------------------------------------------------------------------------
+
+
+def test_classify_security_via_copilot_security() -> None:
+    with mock.patch.object(td, "_run_copilot", return_value="security"):
+        assert td.classify_security_via_copilot({"title": "x", "body": ""}) is True
+
+
+def test_classify_security_via_copilot_normal() -> None:
+    with mock.patch.object(td, "_run_copilot", return_value="normal"):
+        assert td.classify_security_via_copilot({"title": "x", "body": ""}) is False
+
+
+def test_classify_security_via_copilot_unparseable() -> None:
+    with mock.patch.object(td, "_run_copilot", return_value="maybe?"):
+        assert td.classify_security_via_copilot({"title": "x", "body": ""}) is None
+
+
+def test_classify_security_via_copilot_ignores_substring_in_explanation() -> None:
+    # An LLM that returns "not a security release; normal" used to be classified
+    # as security because the substring "security" appeared. The exact-token match
+    # uses only the final word, so this correctly resolves to normal (False).
+    with mock.patch.object(
+        td,
+        "_run_copilot",
+        return_value="not a security release; normal",
+    ):
+        assert td.classify_security_via_copilot({"title": "x", "body": ""}) is False
+
+
+def test_classify_security_via_copilot_ignores_explanation_without_keyword() -> None:
+    # Explanatory text whose last token is not "security" or "normal" should
+    # produce None rather than a false-positive classification.
+    with mock.patch.object(
+        td,
+        "_run_copilot",
+        return_value="this is not a security release; please review further",
+    ):
+        assert td.classify_security_via_copilot({"title": "x", "body": ""}) is None
+
+
+def test_classify_security_via_copilot_empty_output() -> None:
+    with mock.patch.object(td, "_run_copilot", return_value=""):
+        assert td.classify_security_via_copilot({"title": "x", "body": ""}) is None
+
+
+def test_classify_security_via_copilot_failure() -> None:
+    with mock.patch.object(td, "_run_copilot", return_value=None):
+        assert td.classify_security_via_copilot({"title": "x", "body": ""}) is None
+
+
+def test_is_security_change_falls_back_to_regex() -> None:
+    pr = {"title": "Bump foo", "body": "Fixes CVE-2026-0001"}
+    with mock.patch.object(td, "classify_security_via_copilot", return_value=None):
+        assert td.is_security_change(pr, use_copilot=True)
+
+
+def test_is_security_change_no_signal() -> None:
+    pr = {"title": "Bump foo from 1 to 2", "body": "ordinary changelog"}
+    assert not td.is_security_change(pr, use_copilot=False)
+
+
+def test_run_copilot_returns_none_on_missing_binary() -> None:
+    with mock.patch.object(
+        td.subprocess, "run", side_effect=FileNotFoundError("copilot")
+    ):
+        assert td._run_copilot("x", timeout=1) is None
+
+
+def test_run_copilot_returns_stdout_on_success() -> None:
+    result = mock.MagicMock(stdout="hello\n")
+    with mock.patch.object(td.subprocess, "run", return_value=result):
+        assert td._run_copilot("x", timeout=1) == "hello\n"
+
+
+def test_run_copilot_defaults_to_no_tools() -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str], **_: Any) -> Any:
+        captured["cmd"] = cmd
+        return mock.MagicMock(stdout="ok\n")
+
+    with mock.patch.object(td.subprocess, "run", side_effect=fake_run):
+        td._run_copilot("x", timeout=1)
+
+    assert "--allow-all-tools" not in captured["cmd"]
+
+
+def test_run_copilot_passes_allow_tools_when_requested() -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd: list[str], **_: Any) -> Any:
+        captured["cmd"] = cmd
+        return mock.MagicMock(stdout="ok\n")
+
+    with mock.patch.object(td.subprocess, "run", side_effect=fake_run):
+        td._run_copilot("x", timeout=1, allow_tools=True)
+
+    assert "--allow-all-tools" in captured["cmd"]
+
+
+# ---------------------------------------------------------------------------
+# State file / cooldown
+# ---------------------------------------------------------------------------
+
+
+def test_load_state_missing_returns_empty(tmp_path: Path) -> None:
+    assert td.load_state(tmp_path / "missing.json") == {}
+
+
+def test_load_state_corrupt_returns_empty(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text("{not json")
+    assert td.load_state(state_file) == {}
+
+
+def test_save_state_and_load_state_roundtrip(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    td.save_state(state_file, {"https://github.com/o/r/pull/1": 1.0})
+    assert td.load_state(state_file) == {"https://github.com/o/r/pull/1": 1.0}
+
+
+def test_in_cooldown() -> None:
+    state = {"u": 100.0}
+    assert td.in_cooldown(state, "u", now=200.0)
+    assert not td.in_cooldown(state, "u", now=100.0 + td.ACTION_COOLDOWN_SECONDS + 1)
+    assert not td.in_cooldown(state, "other", now=100.0)
+
+
+# ---------------------------------------------------------------------------
+# Decision tree (one test per branch)
+# ---------------------------------------------------------------------------
+
+
+def _base_pr(**overrides: Any) -> dict[str, Any]:
+    pr: dict[str, Any] = {
+        "number": 1,
+        "title": "Bump foo from 1.0.0 to 1.0.1",
+        "body": "",
+        "author": {"login": "dependabot[bot]"},
+        "state": "open",
+        "isDraft": False,
+        "mergeStateStatus": "clean",
+        "url": "https://github.com/o/r/pull/1",
+        "labels": [],
+        "reviews": [],
+        "comments": [],
+        "commits": [{"committedDate": "2026-06-01T00:00:00Z"}],
+        "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+    }
+    pr.update(overrides)
+    return pr
+
+
+def _decide(
+    pr: dict[str, Any], *, coverage: int | None = 95, **kwargs: Any
+) -> td.Decision:
+    return td.decide(
+        pr,
+        my_login="zkoppert",
+        repo="o/r",
+        coverage_lookup=lambda _r: coverage,
+        use_copilot=False,
+        **kwargs,
+    )
+
+
+def test_decide_skip_when_closed() -> None:
+    assert _decide(_base_pr(state="closed")).outcome == td.OUTCOME_SKIP
+
+
+def test_decide_flag_when_draft() -> None:
+    assert _decide(_base_pr(isDraft=True)).outcome == td.OUTCOME_FLAG
+
+
+def test_decide_flag_when_human_engaged() -> None:
+    pr = _base_pr(comments=[{"author": {"login": "iansan5653"}, "body": "hi"}])
+    assert _decide(pr).outcome == td.OUTCOME_FLAG
+
+
+def test_decide_rebase_when_behind() -> None:
+    decision = _decide(_base_pr(mergeStateStatus="behind"))
+    assert decision.outcome == td.OUTCOME_REBASE
+
+
+def test_decide_rebase_suppressed_when_already_requested() -> None:
+    pr = _base_pr(
+        mergeStateStatus="behind",
+        comments=[
+            {
+                "author": {"login": "zkoppert"},
+                "body": "@dependabot rebase",
+                "createdAt": "2026-06-02T00:00:00Z",
+            }
+        ],
+    )
+    assert _decide(pr).outcome == td.OUTCOME_SKIP
+
+
+def test_decide_flag_major_bump_low_coverage() -> None:
+    pr = _base_pr(title="Bump foo from 1.0.0 to 2.0.0")
+    assert _decide(pr, coverage=50).outcome == td.OUTCOME_FLAG
+
+
+def test_decide_flag_major_bump_unknown_coverage() -> None:
+    pr = _base_pr(title="Bump foo from 1.0.0 to 2.0.0")
+    assert _decide(pr, coverage=None).outcome == td.OUTCOME_FLAG
+
+
+def test_decide_flag_when_coverage_lookup_raises() -> None:
+    # If coverage_lookup blows up unexpectedly, decide() must catch it and
+    # treat coverage as unknown rather than letting the whole run crash.
+    def boom(_repo: str) -> int | None:
+        raise RuntimeError("coverage lookup exploded")
+
+    pr = _base_pr(title="Bump foo from 1.0.0 to 2.0.0")
+    decision = td.decide(
+        pr,
+        my_login="zkoppert",
+        repo="o/r",
+        coverage_lookup=boom,
+        use_copilot=False,
+    )
+    assert decision.outcome == td.OUTCOME_FLAG
+
+
+def test_decide_merge_major_bump_high_coverage() -> None:
+    pr = _base_pr(title="Bump foo from 1.0.0 to 2.0.0")
+    assert _decide(pr, coverage=95).outcome == td.OUTCOME_MERGE
+
+
+def test_decide_skip_ci_pending() -> None:
+    pr = _base_pr(statusCheckRollup=[{"status": "IN_PROGRESS"}])
+    assert _decide(pr).outcome == td.OUTCOME_SKIP
+
+
+def test_decide_flag_ci_failing() -> None:
+    pr = _base_pr(statusCheckRollup=[{"conclusion": "FAILURE"}])
+    assert _decide(pr).outcome == td.OUTCOME_FLAG
+
+
+def test_decide_merge_happy_path() -> None:
+    decision = _decide(_base_pr())
+    assert decision.outcome == td.OUTCOME_MERGE
+    assert not decision.is_security
+
+
+def test_decide_label_and_merge_when_security() -> None:
+    pr = _base_pr(body="Fixes CVE-2026-1234")
+    decision = _decide(pr)
+    assert decision.outcome == td.OUTCOME_LABEL_AND_MERGE
+    assert decision.is_security
+
+
+# ---------------------------------------------------------------------------
+# todo.yml integration
+# ---------------------------------------------------------------------------
+
+
+def test_make_todo_id_normalizes() -> None:
+    assert td.make_todo_id("zkoppert/My_Repo.99", 7) == "dependabot-my-repo-99-pr-7"
+
+
+def test_build_flag_entry_schema() -> None:
+    pr = _base_pr(number=42, title="Bump foo", url="https://github.com/o/r/pull/42")
+    entry = td.build_flag_entry(
+        pr,
+        "o/r",
+        {"id": "thread-123", "reason": "subscribed"},
+        td.Decision(td.OUTCOME_FLAG, "ci failing", bump=td.BUMP_MAJOR),
+    )
+    assert entry["id"] == "dependabot-r-pr-42"
+    assert entry["quadrant"] == "q1_do_first"
+    assert entry["category"] == "process"
+    assert entry["source"] == "dependabot-triage"
+    assert entry["notification"]["thread_id"] == "thread-123"
+    assert entry["notification"]["pr_number"] == 42
+    assert entry["notification"]["bump"] == td.BUMP_MAJOR
+
+
+def test_existing_thread_ids_walks_all_buckets() -> None:
+    data = {
+        "inbox": [{"notification": {"thread_id": "a"}}],
+        "done": [{"notification": {"thread_id": "b"}}],
+        "in_progress": [{"notification": {"thread_id": "c"}}],
+        "blocked": [{"notification": {"thread_id": "d"}}],
+        "in_review": [{"notification": {"thread_id": "e"}}],
+        "prioritized": {
+            "q1_do_first": [{"notification": {"thread_id": "f"}}],
+            "q2_schedule": [{"notification": {"thread_id": "g"}}],
+        },
+    }
+    assert td.existing_thread_ids(data) == {"a", "b", "c", "d", "e", "f", "g"}
+
+
+def test_existing_thread_ids_handles_missing_and_garbage() -> None:
+    data = {
+        "inbox": "not a list",
+        "prioritized": {"q1_do_first": [None, {"notification": "garbage"}, {}]},
+    }
+    assert td.existing_thread_ids(data) == set()
+
+
+def test_load_todo_missing_raises(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        td.load_todo(tmp_path / "absent.yml")
+
+
+def test_load_and_write_todo_roundtrip(tmp_path: Path) -> None:
+    path = tmp_path / "todo.yml"
+    path.write_text(
+        "inbox: []\n" "prioritized:\n" "  q1_do_first: []\n" "done: []\n",
+        encoding="utf-8",
+    )
+    data = td.load_todo(path)
+    data["inbox"].append({"id": "x"})
+    td.write_todo_atomic(path, data)
+    reloaded = td.load_todo(path)
+    assert reloaded["inbox"][0]["id"] == "x"
+
+
+def test_write_todo_atomic_cleans_up_on_failure(tmp_path: Path) -> None:
+    path = tmp_path / "todo.yml"
+    path.write_text("inbox: []\n", encoding="utf-8")
+
+    with mock.patch.object(td.shutil, "move", side_effect=OSError("boom")):
+        with pytest.raises(OSError):
+            td.write_todo_atomic(path, {"inbox": []})
+
+    leftovers = list(tmp_path.glob(".todo-*"))
+    assert leftovers == []
+
+
+# ---------------------------------------------------------------------------
+# Action executors (dry-run + live)
+# ---------------------------------------------------------------------------
+
+
+def test_do_merge_dry_run_no_subprocess() -> None:
+    with mock.patch.object(td, "run_gh") as mocked:
+        td.do_merge("o/r", 1, dry_run=True)
+    mocked.assert_not_called()
+
+
+def test_do_merge_invokes_gh() -> None:
+    with mock.patch.object(td, "run_gh") as mocked:
+        td.do_merge("o/r", 1, dry_run=False)
+    mocked.assert_called_once()
+    args = mocked.call_args[0][0]
+    assert "--auto" in args
+    assert "--squash" in args
+    assert "--delete-branch" in args
+
+
+def test_do_rebase_comment_dry_run() -> None:
+    with mock.patch.object(td, "run_gh") as mocked:
+        td.do_rebase_comment("o/r", 1, dry_run=True)
+    mocked.assert_not_called()
+
+
+def test_do_rebase_comment_invokes_gh() -> None:
+    with mock.patch.object(td, "run_gh") as mocked:
+        td.do_rebase_comment("o/r", 1, dry_run=False)
+    mocked.assert_called_once()
+    args = mocked.call_args[0][0]
+    assert "@dependabot rebase" in args
+
+
+def test_do_add_label_dry_run() -> None:
+    with mock.patch.object(td, "run_gh") as mocked:
+        td.do_add_label("o/r", 1, "release", dry_run=True)
+    mocked.assert_not_called()
+
+
+def test_do_add_label_invokes_gh() -> None:
+    with mock.patch.object(td, "run_gh") as mocked:
+        td.do_add_label("o/r", 1, "release", dry_run=False)
+    mocked.assert_called_once()
+
+
+def test_mark_thread_done_dry_run() -> None:
+    with mock.patch.object(td, "run_gh") as mocked:
+        td.mark_thread_done("t1", dry_run=True)
+    mocked.assert_not_called()
+
+
+def test_mark_thread_done_uses_delete() -> None:
+    with mock.patch.object(td, "run_gh") as mocked:
+        td.mark_thread_done("t1", dry_run=False)
+    args = mocked.call_args[0][0]
+    assert "DELETE" in args
+    assert "/notifications/threads/t1" in args
+
+
+# ---------------------------------------------------------------------------
+# gh wrappers
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_notifications_parses_paginated_pages() -> None:
+    pages = [[{"id": "1"}], [{"id": "2"}]]
+    with mock.patch.object(td, "run_gh", return_value=json.dumps(pages)):
+        assert td.fetch_notifications() == [{"id": "1"}, {"id": "2"}]
+
+
+def test_fetch_notifications_empty_when_no_output() -> None:
+    with mock.patch.object(td, "run_gh", return_value=""):
+        assert td.fetch_notifications() == []
+
+
+def test_fetch_notifications_handles_bad_json() -> None:
+    with mock.patch.object(td, "run_gh", return_value="not json"):
+        assert td.fetch_notifications() == []
+
+
+def test_fetch_pr_returns_parsed_json() -> None:
+    with mock.patch.object(td, "run_gh", return_value='{"number": 1}'):
+        assert td.fetch_pr("o/r", 1) == {"number": 1}
+
+
+def test_fetch_pr_returns_none_on_error() -> None:
+    with mock.patch.object(
+        td, "run_gh", side_effect=td.subprocess.CalledProcessError(1, "gh")
+    ):
+        assert td.fetch_pr("o/r", 1) is None
+
+
+def test_fetch_pr_returns_none_on_bad_json() -> None:
+    with mock.patch.object(td, "run_gh", return_value="not json"):
+        assert td.fetch_pr("o/r", 1) is None
+
+
+def test_get_my_login_returns_login_field() -> None:
+    with mock.patch.object(td, "run_gh", return_value='{"login": "zkoppert"}'):
+        assert td.get_my_login() == "zkoppert"
+
+
+def test_get_my_login_raises_on_missing_login() -> None:
+    with mock.patch.object(td, "run_gh", return_value="{}"):
+        with pytest.raises(LookupError):
+            td.get_my_login()
+
+
+def test_get_my_login_raises_on_non_dict_payload() -> None:
+    with mock.patch.object(td, "run_gh", return_value="[]"):
+        with pytest.raises(LookupError):
+            td.get_my_login()
+
+
+def test_fetch_repo_labels_returns_names() -> None:
+    # --slurp wraps each page in an outer array.
+    out = json.dumps([[{"name": "bug"}, {"name": "release"}, {"name": ""}]])
+    with mock.patch.object(td, "run_gh", return_value=out):
+        assert td.fetch_repo_labels("o/r") == {"bug", "release"}
+
+
+def test_fetch_repo_labels_flattens_multiple_pages() -> None:
+    # Repos with more than one page of labels (>30) need both pages flattened.
+    out = json.dumps(
+        [
+            [{"name": "bug"}, {"name": "release"}],
+            [{"name": "security"}, {"name": "dependencies"}],
+        ]
+    )
+    with mock.patch.object(td, "run_gh", return_value=out):
+        assert td.fetch_repo_labels("o/r") == {
+            "bug",
+            "release",
+            "security",
+            "dependencies",
+        }
+
+
+def test_fetch_repo_labels_returns_empty_on_error() -> None:
+    with mock.patch.object(
+        td, "run_gh", side_effect=td.subprocess.CalledProcessError(1, "gh")
+    ):
+        assert td.fetch_repo_labels("o/r") == set()
+
+
+def test_fetch_repo_labels_returns_empty_on_bad_json() -> None:
+    with mock.patch.object(td, "run_gh", return_value="not json"):
+        assert td.fetch_repo_labels("o/r") == set()
+
+
+# ---------------------------------------------------------------------------
+# parse_args + run() end-to-end
+# ---------------------------------------------------------------------------
+
+
+def test_parse_args_defaults() -> None:
+    args = td.parse_args([])
+    assert args.todo_file == td.DEFAULT_TODO_FILE
+    assert args.state_file == td.DEFAULT_STATE_FILE
+    assert not args.dry_run
+    assert not args.no_copilot_subagent
+    assert args.allowed_repo == []
+    assert not args.no_notify
+    assert not args.verbose
+
+
+def test_parse_args_passes_through() -> None:
+    args = td.parse_args(
+        [
+            "--dry-run",
+            "--allowed-repo",
+            "o/r",
+            "--allowed-repo",
+            "o/r2",
+            "--no-copilot-subagent",
+            "--no-notify",
+            "--verbose",
+        ]
+    )
+    assert args.dry_run
+    assert args.no_copilot_subagent
+    assert args.allowed_repo == ["o/r", "o/r2"]
+    assert args.no_notify
+    assert args.verbose
+
+
+def _make_args(tmp_path: Path, **overrides: Any) -> argparse.Namespace:
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first: []\ndone: []\n",
+        encoding="utf-8",
+    )
+    defaults = dict(
+        todo_file=todo_file,
+        state_file=tmp_path / "state.json",
+        dry_run=False,
+        no_copilot_subagent=True,
+        allowed_repo=[],
+        no_notify=True,
+        verbose=False,
+    )
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+def test_run_end_to_end_merges_and_flags(tmp_path: Path) -> None:
+    """Drive run() through one MERGE and one FLAG outcome."""
+    notif_merge = {
+        "id": "thread-merge",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/1",
+        },
+    }
+    notif_flag = {
+        "id": "thread-flag",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r2/pulls/2",
+        },
+    }
+
+    pr_merge = _base_pr(number=1, url="https://github.com/o/r1/pull/1")
+    pr_flag = _base_pr(
+        number=2,
+        url="https://github.com/o/r2/pull/2",
+        title="Bump foo from 1.0.0 to 2.0.0",
+    )
+
+    def fake_fetch_pr(repo: str, number: int) -> dict[str, Any]:
+        return pr_merge if number == 1 else pr_flag
+
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif_merge, notif_flag]
+    ), mock.patch.object(
+        td, "fetch_pr", side_effect=fake_fetch_pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=50
+    ), mock.patch.object(
+        td, "do_merge"
+    ) as do_merge_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_done_mock:
+        stats = td.run(args)
+
+    assert stats.fetched == 2
+    assert stats.dependabot == 2
+    assert stats.merged == 1
+    assert stats.flagged == 1
+    do_merge_mock.assert_called_once_with("o/r1", 1, dry_run=False)
+    mark_done_mock.assert_called_once_with("thread-merge", dry_run=False)
+
+    reloaded = td.load_todo(args.todo_file)
+    flags = reloaded["prioritized"]["q1_do_first"]
+    assert len(flags) == 1
+    assert flags[0]["notification"]["thread_id"] == "thread-flag"
+
+    state = td.load_state(args.state_file)
+    assert "https://github.com/o/r1/pull/1" in state
+    assert "https://github.com/o/r2/pull/2" in state
+
+
+def test_run_skips_already_tracked_thread(tmp_path: Path) -> None:
+    notif = {
+        "id": "thread-flag",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/9",
+        },
+    }
+    pr = _base_pr(number=9, title="Bump foo from 1 to 2")
+
+    args = _make_args(tmp_path)
+    args.todo_file.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: existing\n"
+        "      notification:\n"
+        "        thread_id: thread-flag\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=None
+    ):
+        stats = td.run(args)
+
+    assert stats.already_tracked == 1
+    assert stats.flagged == 0
+
+
+def test_run_respects_cooldown(tmp_path: Path) -> None:
+    notif = {
+        "id": "t",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/1",
+        },
+    }
+    pr = _base_pr(url="https://github.com/o/r/pull/1")
+
+    args = _make_args(tmp_path)
+    now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+    args.state_file.parent.mkdir(parents=True, exist_ok=True)
+    args.state_file.write_text(json.dumps({"https://github.com/o/r/pull/1": now}))
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "do_merge"
+    ) as do_merge_mock:
+        stats = td.run(args)
+
+    assert stats.cooldown == 1
+    do_merge_mock.assert_not_called()
+
+
+def test_run_filters_by_allowed_repo(tmp_path: Path) -> None:
+    notif_in = {
+        "id": "in",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/keep/me/pulls/1",
+        },
+    }
+    notif_out = {
+        "id": "out",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/skip/me/pulls/1",
+        },
+    }
+    args = _make_args(tmp_path, allowed_repo=["keep/me"])
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif_in, notif_out]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=_base_pr()
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=99
+    ), mock.patch.object(
+        td, "do_merge"
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ):
+        stats = td.run(args)
+
+    assert stats.dependabot == 1
+
+
+def test_run_handles_label_and_merge_with_release_label(tmp_path: Path) -> None:
+    notif = {
+        "id": "sec",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/3",
+        },
+    }
+    pr = _base_pr(
+        number=3,
+        title="Bump foo from 1.0.0 to 1.0.2",
+        body="Fixes CVE-2026-0001",
+        url="https://github.com/o/r/pull/3",
+    )
+
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=95
+    ), mock.patch.object(
+        td, "fetch_repo_labels", return_value={"release", "bug"}
+    ), mock.patch.object(
+        td, "do_add_label"
+    ) as add_label_mock, mock.patch.object(
+        td, "do_merge"
+    ) as do_merge_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ):
+        stats = td.run(args)
+
+    assert stats.labeled_and_merged == 1
+    add_label_mock.assert_called_once_with("o/r", 3, "release", dry_run=False)
+    do_merge_mock.assert_called_once()
+
+
+def test_run_label_and_merge_skips_label_when_repo_lacks_it(tmp_path: Path) -> None:
+    notif = {
+        "id": "sec",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/3",
+        },
+    }
+    pr = _base_pr(
+        number=3, body="Fixes CVE-2026-0001", url="https://github.com/o/r/pull/3"
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=95
+    ), mock.patch.object(
+        td, "fetch_repo_labels", return_value={"bug"}
+    ), mock.patch.object(
+        td, "do_add_label"
+    ) as add_label_mock, mock.patch.object(
+        td, "do_merge"
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ):
+        stats = td.run(args)
+
+    assert stats.labeled_and_merged == 1
+    add_label_mock.assert_not_called()
+
+
+def test_run_skips_non_pr_notifications(tmp_path: Path) -> None:
+    notif = {"id": "n", "subject": {"type": "Issue", "url": "x"}}
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(td, "fetch_notifications", return_value=[notif]):
+        stats = td.run(args)
+
+    assert stats.dependabot == 0
+
+
+def test_run_skips_non_dependabot_authors(tmp_path: Path) -> None:
+    notif = {
+        "id": "n",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/1",
+        },
+    }
+    pr = _base_pr(author={"login": "iansan5653"})
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ):
+        stats = td.run(args)
+
+    assert stats.dependabot == 0
+
+
+def test_run_records_error_when_user_fetch_fails(tmp_path: Path) -> None:
+    args = _make_args(tmp_path)
+    with mock.patch.object(
+        td,
+        "get_my_login",
+        side_effect=td.subprocess.CalledProcessError(1, "gh"),
+    ):
+        stats = td.run(args)
+    assert stats.errors
+
+
+def test_run_records_error_when_user_fetch_times_out(tmp_path: Path) -> None:
+    args = _make_args(tmp_path)
+    with mock.patch.object(
+        td,
+        "get_my_login",
+        side_effect=td.subprocess.TimeoutExpired("gh", 60),
+    ):
+        stats = td.run(args)
+    assert stats.errors
+
+
+def test_run_records_error_when_user_response_is_malformed(tmp_path: Path) -> None:
+    args = _make_args(tmp_path)
+    with mock.patch.object(
+        td,
+        "get_my_login",
+        side_effect=LookupError("unexpected /user response"),
+    ):
+        stats = td.run(args)
+    assert stats.errors
+
+
+def test_run_records_error_when_notifications_fetch_fails(tmp_path: Path) -> None:
+    args = _make_args(tmp_path)
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td,
+        "fetch_notifications",
+        side_effect=td.subprocess.CalledProcessError(1, "gh"),
+    ):
+        stats = td.run(args)
+    assert stats.errors
+
+
+def test_run_records_error_when_notifications_fetch_times_out(tmp_path: Path) -> None:
+    args = _make_args(tmp_path)
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td,
+        "fetch_notifications",
+        side_effect=td.subprocess.TimeoutExpired("gh", 60),
+    ):
+        stats = td.run(args)
+    assert stats.errors
+
+
+def test_run_dry_run_does_not_mutate(tmp_path: Path) -> None:
+    notif = {
+        "id": "t",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/1",
+        },
+    }
+    pr = _base_pr()
+    args = _make_args(tmp_path, dry_run=True)
+    original = args.todo_file.read_text(encoding="utf-8")
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=99
+    ):
+        stats = td.run(args)
+
+    assert stats.merged == 1
+    assert args.todo_file.read_text(encoding="utf-8") == original
+    assert not args.state_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# main()
+# ---------------------------------------------------------------------------
+
+
+def test_main_returns_zero_when_no_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text("inbox: []\nprioritized:\n  q1_do_first: []\ndone: []\n")
+    state_file = tmp_path / "state.json"
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(td, "fetch_notifications", return_value=[]):
+        rc = td.main(
+            [
+                "--todo-file",
+                str(todo_file),
+                "--state-file",
+                str(state_file),
+                "--no-notify",
+            ]
+        )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "fetched=0" in captured.out
+
+
+def test_main_returns_one_when_errors(tmp_path: Path) -> None:
+    with mock.patch.object(
+        td,
+        "get_my_login",
+        side_effect=td.subprocess.CalledProcessError(1, "gh"),
+    ):
+        rc = td.main(
+            [
+                "--todo-file",
+                str(tmp_path / "todo.yml"),
+                "--state-file",
+                str(tmp_path / "state.json"),
+                "--no-notify",
+            ]
+        )
+    assert rc == 1
+
+
+def test_macos_notify_swallows_errors() -> None:
+    with mock.patch.object(
+        td.subprocess, "run", side_effect=FileNotFoundError("osascript")
+    ):
+        td.macos_notify("title", "msg")  # should not raise

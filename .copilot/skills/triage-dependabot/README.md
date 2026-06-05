@@ -1,0 +1,191 @@
+# triage-dependabot
+
+Hourly skill that scans GitHub notifications, filters to Dependabot PRs,
+and applies one of four discrete outcomes per PR. It is the companion to
+the `triage-notifications` skill, focused entirely on the dependency
+upgrade firehose so I stop hand-merging routine bumps and stop letting
+risky ones rot.
+
+## What problem this solves
+
+Dependabot generates a notification per PR per push. Most of them are
+patch bumps with green CI that I rubber-stamp - that work belongs in
+automation. A minority are major version jumps, security advisories with
+behavior changes, or builds where my coverage is too low to trust the
+green CI. Those still need eyes, but they get buried in the rubber-stamp
+queue and slip until they break something. This skill separates the two
+piles automatically.
+
+## Decision tree
+
+For each unread notification whose subject is a `PullRequest` authored
+by `dependabot[bot]` or `dependabot-preview[bot]`:
+
+| Condition | Outcome |
+| --- | --- |
+| PR closed or merged | skip and mark notification done |
+| Draft PR | flag-for-review |
+| Any non-bot human (other than me) reviewed or commented | flag-for-review |
+| `mergeStateStatus` is `behind` or `dirty` | rebase (suppressed if my last rebase comment is newer than the latest dependabot push) |
+| Bump is major / minor / unknown AND repo coverage threshold below 90 | flag-for-review |
+| CI status pending | skip this run; next hour retries |
+| CI status failing | flag-for-review |
+| Security release (Copilot sub-agent or regex on title/body) AND repo defines a `release` label | label-and-merge |
+| Otherwise | merge |
+
+The script never auto-merges when uncertainty exists - sub-agent
+timeouts, unknown bump kinds, and missing coverage signals all route to
+`flag-for-review`.
+
+### Coverage detection
+
+The script reads `pyproject.toml`, `setup.cfg`, `Makefile`, `tox.ini`,
+and `.coveragerc` on the repo's default branch via `gh api` and looks
+for `--cov-fail-under=N` or `fail_under = N`. When no signal exists, the
+threshold is treated as below 90, which means non-patch bumps in repos
+without a configured threshold are flagged for review. This is the
+conservative default.
+
+## Outputs
+
+- **Auto-merge**: `gh pr merge --auto --squash --delete-branch` and the
+  notification is marked done.
+- **Rebase**: `gh pr comment --body "@dependabot rebase"`; the
+  notification stays open so the next push triggers another evaluation.
+- **Label-and-merge**: `gh pr edit --add-label release` (only if the
+  repo defines a `release` label) followed by auto-merge.
+- **Flag-for-review**: a Q1 entry in
+  `~/repos/zkoppert-todo/todo.yml` under
+  `prioritized.q1_do_first`, with `source: dependabot-triage`,
+  `notification.thread_id` for dedup, the PR url, and the reason in
+  `description`.
+
+## Per-PR cooldown
+
+`~/Library/Logs/triage-dependabot-state.json` records the last action
+timestamp per PR url. Re-runs within `ACTION_COOLDOWN_SECONDS` (3600)
+skip the same PR so an unrefreshed notification stream cannot trigger a
+duplicate merge.
+
+## Integration with zkoppert-todo
+
+Flagged PRs are written using the same notification schema as
+`triage-notifications` (`thread_id`, `url`, `reason`, `repo`) plus
+`pr_number` and `bump`. Dedup keys off `notification.thread_id` and is
+checked against `inbox`, every `prioritized` quadrant, `in_progress`,
+`blocked`, `in_review`, and `done`.
+
+When the user moves a flagged todo to `done`, the existing
+`triage-notifications` mark-done loop will catch it on its next run and
+DELETE the underlying notification thread.
+
+## Schedule
+
+`com.zkoppert.triage-dependabot.plist` runs hourly on weekdays from
+08:00 through 18:00 (eleven runs per weekday, fifty-five per week). The
+`RunAtLoad` key is false so loading the plist does not trigger an
+immediate run.
+
+To install:
+
+```bash
+ln -sf "$HOME/repos/dotfiles/LaunchAgents/com.zkoppert.triage-dependabot.plist" \
+  "$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist"
+launchctl load -w "$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist"
+```
+
+To unload:
+
+```bash
+launchctl unload -w "$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist"
+```
+
+Logs go to `~/Library/Logs/triage-dependabot.log`.
+
+## Ad-hoc usage
+
+```bash
+# Default run (mutating).
+python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py
+
+# Preview only.
+python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py \
+  --dry-run --verbose
+
+# Process a single repo while testing rule changes.
+python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py \
+  --allowed-repo zkoppert/dotfiles
+
+# Skip the Copilot sub-agent (regex-only security classification).
+python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py \
+  --no-copilot-subagent
+```
+
+## Requirements
+
+- `gh` CLI authenticated with `notifications`, `repo`, and `read:org`
+  scopes.
+- `copilot` CLI on `PATH` when running with the sub-agent enabled
+  (default). The skill falls back to a regex classifier on any sub-agent
+  failure, so the `--no-copilot-subagent` flag is for explicit opt-out
+  rather than failure recovery.
+- Python 3.11+ with `ruamel.yaml` and `pyyaml`.
+
+## Privacy
+
+The script reads only repos accessible to the authenticated `gh` user.
+Sub-agent invocations send the PR title and the first 4000 characters of
+the body to Copilot CLI; nothing else leaves the local machine. The
+state file in `~/Library/Logs` is a flat JSON map of PR url to
+timestamp.
+
+## Tests
+
+`tests.py` covers the decision tree branches, semver detection (single
+and grouped bumps), coverage parsing, human-activity detection, rebase
+suppression, and the cooldown state file. Run with:
+
+```bash
+cd ~/repos/dotfiles/.copilot/skills/triage-dependabot
+python3 -m pytest tests.py -v
+```
+
+## Failure modes and recovery
+
+- `gh auth` expired: every gh call raises and the run exits with status
+  1. Re-authenticate and the next hour's run resumes.
+- `copilot` missing or unauthenticated: sub-agent classification returns
+  None and the regex fallback runs. No data is lost.
+- Coverage detection request fails: treated as unknown coverage, which
+  routes non-patch bumps to `flag-for-review` until the request
+  recovers.
+- State file corruption: load returns `{}` so every PR is re-evaluated
+  on the next run. The worst case is one duplicate merge attempt which
+  `gh` will reject as a no-op once the PR is auto-merging.
+
+## Known limitations
+
+These are tracked for a follow-up PR rather than blocking this one. Each
+has a narrow blast radius given the hourly cron with a 10-30 second run
+window, but they're worth surfacing.
+
+- **Manual edits to `todo.yml` during a run can be overwritten.** The
+  script reads the file at the start and writes it atomically at the end.
+  If I edit `todo.yml` by hand in between, my edits are lost when the
+  triage script's writeback overwrites the file. Mitigation under
+  consideration: file locking via `fcntl.flock`, or re-reading and
+  diffing immediately before write.
+- **Per-PR cooldown state has a read-then-write race across overlapping
+  runs.** The launchd schedule runs hourly and a single invocation
+  finishes well under a minute, so two runs should not overlap in
+  practice. If they ever do, the second run can clobber the first run's
+  state updates. Mitigation under consideration: lock the state file for
+  the duration of each run.
+
+## Adding new outcomes
+
+The decision tree lives in `decide()` in `triage_dependabot.py`. New
+outcomes should be added as `OUTCOME_*` constants, with a matching
+executor function and a `stats` counter. Always default the new branch
+to `flag-for-review` while the rule is being tuned, then promote once
+it proves safe across at least one week of runs.
