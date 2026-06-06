@@ -721,6 +721,24 @@ def test_remove_stale_entries_handles_garbage_data() -> None:
     assert data["prioritized"]["q1_do_first"] == []
 
 
+def test_remove_stale_entries_mutates_buckets_in_place() -> None:
+    """Bucket list/dict references must be preserved so ruamel CommentedSeq
+    objects keep their round-trip comment metadata."""
+    inbox = [{"notification": {"thread_id": "T"}}, {"id": "keep"}]
+    q1 = [{"notification": {"thread_id": "T"}}]
+    prioritized = {"q1_do_first": q1}
+    data = {"inbox": inbox, "prioritized": prioritized}
+
+    removed = td.remove_stale_entries(data, thread_id="T", pr_url=None)
+
+    assert removed == 2
+    assert data["inbox"] is inbox
+    assert data["prioritized"] is prioritized
+    assert data["prioritized"]["q1_do_first"] is q1
+    assert inbox == [{"id": "keep"}]
+    assert q1 == []
+
+
 def test_load_todo_missing_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         td.load_todo(tmp_path / "absent.yml")

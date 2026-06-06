@@ -847,25 +847,31 @@ def remove_stale_entries(
 
     removed = 0
 
-    def prune(items: Any) -> list[Any]:
+    def prune(items: Any) -> None:
+        """Remove matching entries from a sequence in place.
+
+        Using slice assignment preserves the original sequence type
+        (e.g., ruamel's ``CommentedSeq``) so round-trip comments and
+        formatting are not lost.
+        """
         nonlocal removed
         if not isinstance(items, list):
-            return items
+            return
         kept: list[Any] = []
         for item in items:
             if matches(item):
                 removed += 1
                 continue
             kept.append(item)
-        return kept
+        items[:] = kept
 
     for key in ("inbox", "done", "in_progress", "blocked", "in_review"):
         if key in data:
-            data[key] = prune(data[key])
+            prune(data[key])
     prioritized = data.get("prioritized")
     if isinstance(prioritized, dict):
-        for quadrant_key, items in list(prioritized.items()):
-            prioritized[quadrant_key] = prune(items)
+        for _quadrant_key, items in list(prioritized.items()):
+            prune(items)
     return removed
 
 
@@ -1009,9 +1015,10 @@ def _cleanup_stale_entries(
     Returns the number of entries removed (or that would be removed in dry-run).
     """
     if dry_run:
-        # Count without mutating by running the helper on a shallow copy of
-        # each bucket. Re-using remove_stale_entries on a deep copy is the
-        # simplest way to keep the matching logic in one place.
+        # Count without mutating by running the helper on shallow copies of
+        # each bucket. The matching logic only walks one level deep into each
+        # entry, so a shallow copy is enough to prevent in-place removal from
+        # touching the real lists in ``data``.
         preview = {
             "inbox": list(data.get("inbox") or []),
             "done": list(data.get("done") or []),
