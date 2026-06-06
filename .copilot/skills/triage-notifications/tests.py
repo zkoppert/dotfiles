@@ -122,6 +122,33 @@ def test_classify_security_alert_on_my_own_pr_still_goes_to_q1():
     assert c.bucket == triage.BUCKET_Q1
 
 
+def test_classify_self_assign_on_non_pr_still_goes_to_q1():
+    """The self-author skip is scoped to PullRequest subjects. A self-
+    assigned Issue, Discussion, or other subject type should still
+    route to Q1 the way it did before."""
+    notif = _notif("assign")
+    notif["subject"]["type"] = "Issue"
+    notif["subject"]["url"] = (
+        "https://api.github.com/repos/zkoppert/example/issues/42"
+    )
+    fetcher_called = []
+
+    def fetcher(n):
+        fetcher_called.append(n)
+        return "zkoppert"
+
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: None,
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=fetcher,
+    )
+    assert c.bucket == triage.BUCKET_Q1
+    assert fetcher_called == [], "fetcher should be skipped for non-PR subjects"
+
+
 def test_classify_manual_goes_to_inbox():
     c = triage.classify(
         _notif("manual"),
