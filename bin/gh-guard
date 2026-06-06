@@ -17,11 +17,25 @@
 #   - `gh pr ready`:  set ZACK_CONFIRMED_PR_READY=1 in the same invocation.
 #   - `gh pr create`: write a non-empty review summary to
 #       <repo>/.git/copilot-pr-review/<current-branch>.md
-#     AND set ZACK_CONFIRMED_PR_CREATE=1. The marker file must be >=200 bytes
-#     so a bare `touch` does not satisfy it — actual review content has to
-#     land there before the PR can be opened. If the wrapper cannot resolve
-#     the current repo or branch (e.g., `gh pr create` invoked outside a
-#     checkout), the env var alone is accepted as a fallback.
+#     AND set ZACK_CONFIRMED_PR_CREATE=1 in the same invocation. The marker
+#     file must be >=200 bytes so a bare `touch` does not satisfy it — actual
+#     review content has to land there before the PR can be opened. Both
+#     conditions are required when invoked inside a git checkout. If the
+#     wrapper cannot resolve the current repo or branch (e.g., `gh pr create`
+#     invoked outside a checkout or on detached HEAD), the env var alone is
+#     accepted as a fallback because no marker path can be derived.
+#
+# Known limitations (PATH-shim is a soft guard, not adversarial):
+#   - `gh api repos/.../pulls` and `gh api graphql` createPullRequest mutations
+#     are NOT gated. Guarding all of `gh api` would block too much. Treat the
+#     wrapper as a convention enforcer, not an adversarial gate.
+#   - User-defined `gh alias` expansions (e.g. `gh alias set prc 'pr create'`)
+#     bypass the matcher because aliases are resolved inside real `gh` after
+#     the wrapper has already dispatched. Avoid aliasing the guarded
+#     subcommands.
+#   - Direct invocation by real path (e.g. `~/repos/dotfiles/bin/gh-guard`)
+#     instead of via the `~/.local/bin/gh` symlink can pick the symlink back
+#     as REAL_GH and fork-recurse. Use the symlink, not the real path.
 #
 # Install:
 #   ln -sf "$PWD/bin/gh-guard" ~/.local/bin/gh
@@ -108,6 +122,22 @@ elif [ "$subcmd" = "pr" ] && [ "$op" = "create" ]; then
   is_pr_create=1
 fi
 
+# Help flags after the op (e.g. `gh pr create --help`, `gh pr ready -h`) are
+# not seen by the parser above because it breaks at `op`. Scan the full
+# argument list and let help requests pass through unguarded so agents can
+# introspect flags without tripping the gate.
+if [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ]; then
+  for a in "$@"; do
+    case "$a" in
+      --help|-h|help)
+        is_pr_create=0
+        is_pr_ready=0
+        break
+        ;;
+    esac
+  done
+fi
+
 # --- gh pr ready ---------------------------------------------------------
 if [ "$is_pr_ready" = "1" ]; then
   if [ -t 0 ] && [ -t 1 ]; then
@@ -152,11 +182,16 @@ if [ "$is_pr_create" = "1" ]; then
 
   marker_ok=0
   marker_path=""
+  in_repo=0
   if [ -n "$repo_root" ] && [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
-    safe_branch="$(printf '%s' "$branch" | tr '/' '_')"
+    in_repo=1
+    # Encode `/` and `%` losslessly so distinct branches never collide on the
+    # marker filename. `feat/foo` becomes `feat%2Ffoo.md`; a literal underscore
+    # branch like `feat_foo` stays `feat_foo.md`.
+    safe_branch="$(printf '%s' "$branch" | sed -e 's/%/%25/g' -e 's|/|%2F|g')"
     marker_path="$repo_root/.git/copilot-pr-review/$safe_branch.md"
     if [ -f "$marker_path" ]; then
-      size="$(wc -c < "$marker_path" | tr -d ' ')"
+      size="$(wc -c < "$marker_path" 2>/dev/null | tr -d ' ' || echo 0)"
       if [ "${size:-0}" -ge 200 ]; then
         marker_ok=1
       fi
@@ -178,33 +213,58 @@ if [ "$is_pr_create" = "1" ]; then
       *) echo "Aborted." >&2; exit 1 ;;
     esac
   else
-    if [ "$marker_ok" = "1" ] || [ "${ZACK_CONFIRMED_PR_CREATE:-}" = "1" ]; then
-      :
+    pass=0
+    if [ "$in_repo" = "1" ]; then
+      # Inside a resolvable repo: require BOTH the review marker and the env var.
+      if [ "$marker_ok" = "1" ] && [ "${ZACK_CONFIRMED_PR_CREATE:-}" = "1" ]; then
+        pass=1
+      fi
     else
-      cat >&2 <<EOF
+      # Outside a resolvable repo (no checkout, detached HEAD): no marker path
+      # can be derived, so the env var alone is the only available signal.
+      if [ "${ZACK_CONFIRMED_PR_CREATE:-}" = "1" ]; then
+        pass=1
+      fi
+    fi
+
+    if [ "$pass" = "0" ]; then
+      if [ "$in_repo" = "1" ]; then
+        cat >&2 <<EOF
 gh-guard: \`gh pr create\` blocked.
 
 Reason: Zack's rule is "always complete the multi-model Code Review Workflow
 before opening a PR." This wrapper prevents skipping that step from automation.
 
-To unblock, do BOTH of the following:
+To unblock, do BOTH of the following in the same invocation:
 
   1. Run at least 3 code-review agents in parallel (different models),
      synthesize their findings, address any verified issues, and write the
      synthesized review (>=200 bytes) to:
 
-         ${marker_path:-<repo>/.git/copilot-pr-review/<branch>.md}
+         $marker_path
 
-  2. Set the explicit confirmation env var in the same invocation:
+  2. Set the explicit confirmation env var:
 
          ZACK_CONFIRMED_PR_CREATE=1 gh pr create <args>
 
-If the marker file already exists and is non-empty, the env var alone is
-sufficient — the marker check passed.
-
-If you are running outside a git checkout (no repo or branch resolvable),
-ZACK_CONFIRMED_PR_CREATE=1 alone is accepted as a fallback.
+Both the marker file AND the env var are required when running inside a git
+checkout. Marker status this invocation: marker_ok=$marker_ok (>=200 bytes
+required); ZACK_CONFIRMED_PR_CREATE='${ZACK_CONFIRMED_PR_CREATE:-}'.
 EOF
+      else
+        cat >&2 <<EOF
+gh-guard: \`gh pr create\` blocked.
+
+Reason: Zack's rule is "always complete the multi-model Code Review Workflow
+before opening a PR." This wrapper prevents skipping that step from automation.
+
+You appear to be running outside a resolvable git checkout (no repo root or
+branch detectable; branch was '${branch:-}'). The marker-file check is
+unavailable, so the only signal is the env var. Set it explicitly:
+
+  ZACK_CONFIRMED_PR_CREATE=1 gh pr create <args>
+EOF
+      fi
       exit 1
     fi
   fi
