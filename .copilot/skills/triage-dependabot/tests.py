@@ -76,6 +76,40 @@ def test_is_bot_helper() -> None:
     assert not td._is_bot("zkoppert")
 
 
+def test_skipped_dependency_match_in_title() -> None:
+    pr = {"title": "Bump super-linter/super-linter from 7.0.0 to 8.0.0", "body": ""}
+    assert td.skipped_dependency_match(pr) == "super-linter/super-linter"
+
+
+def test_skipped_dependency_match_in_grouped_body() -> None:
+    # Grouped Dependabot PRs hide the dependency name behind a generic title and
+    # list each bump in the body. The helper must check the body too.
+    pr = {
+        "title": "chore(deps): bump the github-actions group",
+        "body": (
+            "Bumps the github-actions group with 1 update:\n"
+            "- [super-linter/super-linter](https://github.com/super-linter/super-linter) "
+            "from 7.0.0 to 8.0.0\n"
+        ),
+    }
+    assert td.skipped_dependency_match(pr) == "super-linter/super-linter"
+
+
+def test_skipped_dependency_match_case_insensitive() -> None:
+    pr = {"title": "Bump Super-Linter/Super-Linter from 7 to 8", "body": ""}
+    match = td.skipped_dependency_match(pr)
+    assert match is not None
+    assert match.lower() == "super-linter/super-linter"
+
+
+def test_skipped_dependency_match_negative() -> None:
+    pr = {"title": "Bump actions/checkout from 4 to 5", "body": "no skips here"}
+    assert td.skipped_dependency_match(pr) is None
+    # Bare "super-linter" must NOT match (we require the action coordinate).
+    pr_bare = {"title": "Refactor super-linter test fixture", "body": ""}
+    assert td.skipped_dependency_match(pr_bare) is None
+
+
 # ---------------------------------------------------------------------------
 # Semver bump detection
 # ---------------------------------------------------------------------------
@@ -1441,6 +1475,126 @@ def test_run_skips_non_dependabot_authors(tmp_path: Path) -> None:
         stats = td.run(args)
 
     assert stats.dependabot == 0
+
+
+def test_run_skips_super_linter_pr(tmp_path: Path) -> None:
+    """Super-linter Dependabot PRs are excluded entirely: no fetch_repo_labels,
+    no merge, no flag, and they do not count toward stats.dependabot."""
+    notif = {
+        "id": "thread-super-linter",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/42",
+        },
+    }
+    pr = _base_pr(
+        number=42,
+        url="https://github.com/o/r/pull/42",
+        title="Bump super-linter/super-linter from 7.0.0 to 8.0.0",
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "fetch_repo_labels"
+    ) as fetch_labels_mock, mock.patch.object(
+        td, "do_merge"
+    ) as merge_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock:
+        stats = td.run(args)
+
+    assert stats.skipped_dependency == 1
+    assert stats.dependabot == 0
+    assert stats.merged == 0
+    assert stats.flagged == 0
+    fetch_labels_mock.assert_not_called()
+    merge_mock.assert_not_called()
+    # Skipped dependencies stay in the inbox - do not clear the notification.
+    mark_mock.assert_not_called()
+    # Cooldown state must be written so the hourly cron doesn't re-fetch the
+    # same long-lived super-linter PR every hour forever.
+    saved = td.load_state(args.state_file)
+    assert "https://github.com/o/r/pull/42" in saved
+
+
+def test_run_skips_fetch_when_pr_url_already_in_cooldown(tmp_path: Path) -> None:
+    """A PR already in the cooldown state file must NOT be fetched: the cooldown
+    check happens before fetch_pr so we don't burn a `gh pr view` API call per
+    cron run on long-lived PRs (e.g. super-linter Dependabot bumps that sit
+    open for days awaiting human review)."""
+    notif = {
+        "id": "thread-cached",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/42",
+        },
+    }
+    args = _make_args(tmp_path)
+    # Pre-populate cooldown state for the same URL the run loop will derive
+    # from the notification subject.
+    args.state_file.write_text(
+        '{"https://github.com/o/r/pull/42": 9999999999.0}',
+        encoding="utf-8",
+    )
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr"
+    ) as fetch_pr_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock:
+        stats = td.run(args)
+
+    fetch_pr_mock.assert_not_called()
+    mark_mock.assert_not_called()
+    assert stats.cooldown == 1
+    assert stats.dependabot == 0
+
+
+def test_run_skips_closed_super_linter_pr_clears_notification(tmp_path: Path) -> None:
+    """Closed/merged super-linter PRs are terminal: clear the notification so it
+    doesn't reappear next hour, but still don't merge or label."""
+    notif = {
+        "id": "thread-super-linter-closed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/43",
+        },
+    }
+    pr = _base_pr(
+        number=43,
+        url="https://github.com/o/r/pull/43",
+        title="Bump super-linter/super-linter from 7.0.0 to 8.0.0",
+        state="closed",
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "do_merge"
+    ) as merge_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock:
+        stats = td.run(args)
+
+    assert stats.skipped_dependency == 1
+    assert stats.dependabot == 0
+    merge_mock.assert_not_called()
+    mark_mock.assert_called_once_with("thread-super-linter-closed", dry_run=False)
 
 
 def test_run_marks_thread_done_for_closed_pr(tmp_path: Path) -> None:

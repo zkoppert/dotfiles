@@ -97,6 +97,17 @@ SECURITY_REGEX = re.compile(
     r"\b(cve-\d{4}-\d+|ghsa-[a-z0-9-]+|security|vulnerabilit)", re.IGNORECASE
 )
 
+# Dependencies the triage skill must never auto-act on. Notifications whose
+# Dependabot PR title or body references one of these are skipped entirely
+# (no flag, no merge, no rebase comment). The PR stays in the notifications
+# inbox so it can be reviewed manually. Patterns match the action / package
+# coordinate (e.g. ``super-linter/super-linter``) rather than a bare name to
+# avoid false positives on repos that legitimately ship files named after
+# the tool.
+SKIPPED_DEPENDENCY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"super-linter/super-linter", re.IGNORECASE),
+)
+
 # Regexes for semver bumps in PR titles like "Bump foo from 1.2.3 to 1.2.4".
 _VERSION_BUMP_RE = re.compile(
     r"from\s+v?(\d+)(?:\.(\d+))?(?:\.(\d+))?[^\s]*\s+to\s+v?(\d+)(?:\.(\d+))?(?:\.(\d+))?",
@@ -117,6 +128,7 @@ class TriageStats:
     labeled_and_merged: int = 0
     flagged: int = 0
     skipped: int = 0
+    skipped_dependency: int = 0
     cooldown: int = 0
     already_tracked: int = 0
     stale_removed: int = 0
@@ -256,6 +268,23 @@ def is_dependabot_pr(pr: dict[str, Any]) -> bool:
     """Return True if the PR was authored by Dependabot."""
     author = (pr.get("author") or {}).get("login") or ""
     return author in DEPENDABOT_LOGINS
+
+
+def skipped_dependency_match(pr: dict[str, Any]) -> str | None:
+    """Return the matched coordinate if the PR touches a skipped dependency.
+
+    Checks the PR title first and falls back to the body so grouped
+    Dependabot PRs - which omit the dependency name from the title and list
+    each bump in the body - are still recognized. Returns the matched
+    substring (useful for logging) or None when nothing matches.
+    """
+    title = pr.get("title") or ""
+    body = pr.get("body") or ""
+    for pattern in SKIPPED_DEPENDENCY_PATTERNS:
+        match = pattern.search(title) or pattern.search(body)
+        if match:
+            return match.group(0)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1101,10 +1130,45 @@ def run(args: argparse.Namespace) -> TriageStats:
         repo, number = parsed
         if allowed and repo not in allowed:
             continue
+        candidate_url = f"https://github.com/{repo}/pull/{number}"
+        if in_cooldown(state, candidate_url, now=now):
+            stats.cooldown += 1
+            logger.info("cooldown active for %s, skipping (pre-fetch)", candidate_url)
+            continue
         pr = fetch_pr(repo, number)
         if pr is None:
             continue
         if not is_dependabot_pr(pr):
+            continue
+        skipped_dep = skipped_dependency_match(pr)
+        if skipped_dep:
+            pr_state = (pr.get("state") or "").lower()
+            thread_id = str(notif.get("id") or "")
+            pr_url = pr.get("url") or ""
+            if pr_state in {"closed", "merged"}:
+                logger.info(
+                    "%s#%d -> excluded dependency %s already %s, clearing notification",
+                    repo,
+                    number,
+                    skipped_dep,
+                    pr_state,
+                )
+                stats.skipped_dependency += 1
+                if thread_id:
+                    mark_thread_done(thread_id, dry_run=args.dry_run)
+                    stats.stale_removed += _cleanup_stale_entries(
+                        data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
+                    )
+                continue
+            logger.info(
+                "%s#%d -> skipping excluded dependency %s",
+                repo,
+                number,
+                skipped_dep,
+            )
+            stats.skipped_dependency += 1
+            if pr_url:
+                state[pr_url] = now
             continue
         stats.dependabot += 1
         thread_id = str(notif.get("id") or "")
@@ -1207,8 +1271,8 @@ def main(argv: list[str] | None = None) -> int:
         f"fetched={stats.fetched} dependabot={stats.dependabot} "
         f"merged={stats.merged} labeled={stats.labeled_and_merged} "
         f"rebased={stats.rebased} flagged={stats.flagged} "
-        f"skipped={stats.skipped} cooldown={stats.cooldown} "
-        f"already_tracked={stats.already_tracked} "
+        f"skipped={stats.skipped} skipped_dependency={stats.skipped_dependency} "
+        f"cooldown={stats.cooldown} already_tracked={stats.already_tracked} "
         f"stale_removed={stats.stale_removed}"
     )
     for err in stats.errors:
