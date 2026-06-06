@@ -58,6 +58,12 @@ def test_is_dependabot_pr_true_for_known_logins() -> None:
     assert td.is_dependabot_pr({"author": {"login": "dependabot-preview[bot]"}})
 
 
+def test_is_dependabot_pr_true_for_app_prefixed_login() -> None:
+    # `gh pr view --json author` returns App author logins prefixed with `app/`.
+    assert td.is_dependabot_pr({"author": {"login": "app/dependabot"}})
+    assert td.is_dependabot_pr({"author": {"login": "app/dependabot-preview"}})
+
+
 def test_is_dependabot_pr_false_for_humans_and_missing() -> None:
     assert not td.is_dependabot_pr({"author": {"login": "zkoppert"}})
     assert not td.is_dependabot_pr({})
@@ -66,6 +72,7 @@ def test_is_dependabot_pr_false_for_humans_and_missing() -> None:
 def test_is_bot_helper() -> None:
     assert td._is_bot("renovate[bot]")
     assert td._is_bot("dependabot[bot]")
+    assert td._is_bot("app/dependabot")
     assert not td._is_bot("zkoppert")
 
 
