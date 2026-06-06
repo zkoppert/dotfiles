@@ -97,15 +97,26 @@ SECURITY_REGEX = re.compile(
     r"\b(cve-\d{4}-\d+|ghsa-[a-z0-9-]+|security|vulnerabilit)", re.IGNORECASE
 )
 
-# Dependencies the triage skill must never auto-act on. Notifications whose
-# Dependabot PR title or body references one of these are skipped entirely
-# (no flag, no merge, no rebase comment). The PR stays in the notifications
-# inbox so it can be reviewed manually. Patterns match the action / package
-# coordinate (e.g. ``super-linter/super-linter``) rather than a bare name to
-# avoid false positives on repos that legitimately ship files named after
-# the tool.
+# Dependencies the triage skill must never auto-merge / rebase / label. When
+# a Dependabot PR title or body references one of these, the action is to
+# skip the PR but still clear the notification if the user is not directly
+# being asked to act (reason ∈ EXCLUDED_DEP_AUTO_CLEAR_REASONS). For
+# ``@mention``/``team_mention``/``author`` reasons the notification stays in
+# the inbox so the user can respond directly. Patterns match the action /
+# package coordinate (e.g. ``super-linter/super-linter``) rather than a
+# bare name to avoid false positives on repos that legitimately ship files
+# named after the tool.
 SKIPPED_DEPENDENCY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"super-linter/super-linter", re.IGNORECASE),
+)
+
+# Notification reasons that count as "passive subscription" - if a PR is
+# excluded from action AND we got notified for one of these reasons, mark
+# the thread done so it stops cluttering the inbox. Any other reason
+# (mention, team_mention, author, manual) leaves the notification alone so
+# the user can act directly.
+EXCLUDED_DEP_AUTO_CLEAR_REASONS: frozenset[str] = frozenset(
+    {"review_requested", "subscribed", "ci_activity"}
 )
 
 # Regexes for semver bumps in PR titles like "Bump foo from 1.2.3 to 1.2.4".
@@ -1167,7 +1178,32 @@ def run(args: argparse.Namespace) -> TriageStats:
                 skipped_dep,
             )
             stats.skipped_dependency += 1
-            if pr_url:
+            reason = (notif.get("reason") or "").lower()
+            cleared = True
+            if thread_id and reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS:
+                logger.info(
+                    "%s#%d -> clearing notification (reason=%s)",
+                    repo,
+                    number,
+                    reason,
+                )
+                try:
+                    mark_thread_done(thread_id, dry_run=args.dry_run)
+                    stats.stale_removed += _cleanup_stale_entries(
+                        data,
+                        thread_id=thread_id,
+                        pr_url=pr_url,
+                        dry_run=args.dry_run,
+                    )
+                except (
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                ) as exc:
+                    stats.errors.append(
+                        f"mark-done failed for excluded-dep {pr_url}: {exc}"
+                    )
+                    cleared = False
+            if pr_url and cleared:
                 state[pr_url] = now
             continue
         stats.dependabot += 1

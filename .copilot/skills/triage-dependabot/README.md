@@ -24,6 +24,8 @@ by `dependabot[bot]` or `dependabot-preview[bot]`:
 | Condition | Outcome |
 | --- | --- |
 | PR closed or merged | skip and mark notification done |
+| Title or body references an excluded dependency (e.g. `super-linter/super-linter`) AND notification reason is `review_requested`, `subscribed`, or `ci_activity` | skip and mark notification done |
+| Title or body references an excluded dependency AND notification reason is `mention`, `team_mention`, `author`, or `manual` | skip, leave notification in inbox for direct response |
 | Draft PR | flag-for-review |
 | Any non-bot human (other than me) reviewed or commented | flag-for-review |
 | `mergeStateStatus` is `behind` or `dirty` | rebase (suppressed if my last rebase comment is newer than the latest dependabot push) |
@@ -36,6 +38,17 @@ by `dependabot[bot]` or `dependabot-preview[bot]`:
 The script never auto-merges when uncertainty exists - sub-agent
 timeouts, unknown bump kinds, and missing coverage signals all route to
 `flag-for-review`.
+
+### Excluded dependencies
+
+`SKIPPED_DEPENDENCY_PATTERNS` in `triage_dependabot.py` lists package
+coordinates the script must never auto-act on (currently
+`super-linter/super-linter`). These PRs always skip the action branches,
+but the notification handling depends on the reason: passive reasons
+(`review_requested`, `subscribed`, `ci_activity`) auto-clear so the
+inbox stops accumulating, while actionable reasons (`mention`,
+`team_mention`, `author`, `manual`) leave the notification in place so
+the user can respond directly.
 
 ### Coverage detection
 
