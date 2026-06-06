@@ -1166,10 +1166,22 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
                 stats.skipped_dependency += 1
                 if thread_id:
-                    mark_thread_done(thread_id, dry_run=args.dry_run)
-                    stats.stale_removed += _cleanup_stale_entries(
-                        data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
-                    )
+                    try:
+                        mark_thread_done(thread_id, dry_run=args.dry_run)
+                        stats.stale_removed += _cleanup_stale_entries(
+                            data,
+                            thread_id=thread_id,
+                            pr_url=pr_url,
+                            dry_run=args.dry_run,
+                        )
+                    except (
+                        subprocess.CalledProcessError,
+                        subprocess.TimeoutExpired,
+                    ) as exc:
+                        stats.errors.append(
+                            f"mark-done failed for closed excluded-dep "
+                            f"{pr_url}: {exc}"
+                        )
                 continue
             logger.info(
                 "%s#%d -> skipping excluded dependency %s",
