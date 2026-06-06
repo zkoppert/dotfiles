@@ -1640,3 +1640,343 @@ def test_run_marks_done_on_completed_handles_timeout(todo_file):
     data = yaml.safe_load(todo_file.read_text())
     entry = data["prioritized"]["q1_do_first"][0]
     assert entry["notification"].get("marked_done") is not True
+
+
+# ----------------------------------------------------------------------
+# prune_stale_notifications: quadrant sweep
+# ----------------------------------------------------------------------
+
+
+def _stale_notification_entry(entry_id: str, pr_number: int) -> dict:
+    """Helper: a tracked github-notification entry pointing at a PR URL."""
+    return {
+        "id": entry_id,
+        "source": "github-notification",
+        "notification": {
+            "url": f"https://github.com/o/r/pull/{pr_number}",
+            "thread_id": f"thr-{pr_number}",
+        },
+    }
+
+
+def _all_prs_merged(cmd, *args, **kwargs):
+    return json.dumps({"state": "closed", "merged_at": "2024-01-01T00:00:00Z"})
+
+
+def test_prune_stale_notifications_drops_from_q1_do_first():
+    stats = triage.TriageStats()
+    data = {
+        "inbox": [],
+        "prioritized": {
+            "q1_do_first": [
+                _stale_notification_entry("q1-pr", 100),
+            ]
+        },
+    }
+    with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
+        "triage.mark_thread_done"
+    ):
+        triage.prune_stale_notifications(data, stats)
+    assert data["prioritized"]["q1_do_first"] == []
+    assert stats.pruned_stale == 1
+
+
+def test_prune_stale_notifications_drops_from_q2_schedule():
+    stats = triage.TriageStats()
+    data = {
+        "inbox": [],
+        "prioritized": {
+            "q2_schedule": [
+                _stale_notification_entry("q2-pr", 200),
+            ]
+        },
+    }
+    with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
+        "triage.mark_thread_done"
+    ):
+        triage.prune_stale_notifications(data, stats)
+    assert data["prioritized"]["q2_schedule"] == []
+    assert stats.pruned_stale == 1
+
+
+def test_prune_stale_notifications_drops_from_q3_and_q4():
+    stats = triage.TriageStats()
+    data = {
+        "inbox": [],
+        "prioritized": {
+            "q3_delegate": [_stale_notification_entry("q3-pr", 300)],
+            "q4_eliminate": [_stale_notification_entry("q4-pr", 400)],
+        },
+    }
+    with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
+        "triage.mark_thread_done"
+    ):
+        triage.prune_stale_notifications(data, stats)
+    assert data["prioritized"]["q3_delegate"] == []
+    assert data["prioritized"]["q4_eliminate"] == []
+    assert stats.pruned_stale == 2
+
+
+def test_prune_stale_notifications_sweeps_inbox_and_quadrants_together():
+    stats = triage.TriageStats()
+    data = {
+        "inbox": [_stale_notification_entry("inbox-pr", 1)],
+        "prioritized": {
+            "q1_do_first": [_stale_notification_entry("q1-pr", 2)],
+            "q2_schedule": [_stale_notification_entry("q2-pr", 3)],
+        },
+    }
+    with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
+        "triage.mark_thread_done"
+    ):
+        triage.prune_stale_notifications(data, stats)
+    assert data["inbox"] == []
+    assert data["prioritized"]["q1_do_first"] == []
+    assert data["prioritized"]["q2_schedule"] == []
+    assert stats.pruned_stale == 3
+
+
+def test_prune_stale_notifications_keeps_active_quadrant_entries():
+    stats = triage.TriageStats()
+    data = {
+        "inbox": [],
+        "prioritized": {
+            "q2_schedule": [
+                _stale_notification_entry("active-pr", 500),
+                _stale_notification_entry("stale-pr", 501),
+            ]
+        },
+    }
+
+    def mixed_states(cmd, *args, **kwargs):
+        joined = " ".join(cmd)
+        if "/pulls/500" in joined:
+            return json.dumps({"state": "open"})
+        if "/pulls/501" in joined:
+            return json.dumps({"state": "closed", "merged_at": "x"})
+        raise AssertionError(f"unexpected gh call: {cmd}")
+
+    with patch("triage.run_gh", side_effect=mixed_states), patch(
+        "triage.mark_thread_done"
+    ):
+        triage.prune_stale_notifications(data, stats)
+    ids = [e["id"] for e in data["prioritized"]["q2_schedule"]]
+    assert ids == ["active-pr"]
+    assert stats.pruned_stale == 1
+
+
+def test_prune_stale_notifications_keeps_non_github_quadrant_entries():
+    """Manually added quadrant todos must never be touched, even if they
+    happen to have a github.com URL stashed somewhere."""
+    stats = triage.TriageStats()
+    manual = {
+        "id": "manual-q2",
+        "source": "manual",
+        "notification": {"url": "https://github.com/o/r/pull/999"},
+    }
+    no_source = {
+        "id": "bare-q2",
+        "title": "Plain todo with no source field",
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {"q2_schedule": [manual, no_source]},
+    }
+    with patch("triage.run_gh") as run_gh_mock:
+        triage.prune_stale_notifications(data, stats)
+    run_gh_mock.assert_not_called()
+    assert len(data["prioritized"]["q2_schedule"]) == 2
+    assert stats.pruned_stale == 0
+
+
+def test_prune_stale_notifications_handles_missing_prioritized_key():
+    """An older or partially populated todo.yml may have no
+    ``prioritized`` key at all - the pruner must not crash."""
+    stats = triage.TriageStats()
+    data = {"inbox": []}
+    triage.prune_stale_notifications(data, stats)
+    assert stats.pruned_stale == 0
+
+
+def test_prune_stale_notifications_handles_missing_quadrant():
+    """Only some quadrants may exist - skip absent ones cleanly."""
+    stats = triage.TriageStats()
+    data = {
+        "inbox": [],
+        "prioritized": {
+            "q2_schedule": [_stale_notification_entry("only-q2", 700)],
+            # no q1_do_first, q3_delegate, q4_eliminate
+        },
+    }
+    with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
+        "triage.mark_thread_done"
+    ):
+        triage.prune_stale_notifications(data, stats)
+    assert data["prioritized"]["q2_schedule"] == []
+    assert stats.pruned_stale == 1
+
+
+def test_prune_stale_notifications_dry_run_skips_mark_done():
+    stats = triage.TriageStats()
+    data = {
+        "inbox": [],
+        "prioritized": {
+            "q1_do_first": [_stale_notification_entry("dry-pr", 800)],
+        },
+    }
+    with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
+        "triage.mark_thread_done"
+    ) as mark_done_mock:
+        triage.prune_stale_notifications(data, stats, dry_run=True)
+    # The entry is still removed from the in-memory structure (caller
+    # decides whether to persist), but no DELETE was sent to GitHub.
+    assert data["prioritized"]["q1_do_first"] == []
+    mark_done_mock.assert_not_called()
+
+
+def test_prune_stale_inbox_alias_points_at_new_pruner():
+    """Backwards-compat alias still works and sweeps quadrants too."""
+    assert triage.prune_stale_inbox is triage.prune_stale_notifications
+
+
+# ----------------------------------------------------------------------
+# classify(): subject-state check at intake for actionable reasons
+# ----------------------------------------------------------------------
+
+
+def test_classify_drops_review_requested_on_closed_pr():
+    notif = _notif("review_requested")
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "closed",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "closed" in c.reason and "review_requested" in c.reason
+
+
+def test_classify_drops_review_requested_on_merged_pr():
+    c = triage.classify(
+        _notif("review_requested"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "merged",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_classify_drops_mention_on_closed_pr():
+    c = triage.classify(
+        _notif("mention"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "closed",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_classify_drops_assign_on_closed_issue():
+    issue_notif = _notif(
+        "assign",
+        subject={
+            "title": "Closed issue",
+            "url": "https://api.github.com/repos/o/r/issues/42",
+            "latest_comment_url": None,
+            "type": "Issue",
+        },
+    )
+    c = triage.classify(
+        issue_notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "closed",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_classify_drops_manual_on_closed_subject():
+    c = triage.classify(
+        _notif("manual"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "closed",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_classify_keeps_mention_on_open_subject():
+    """Regression guard: open subjects still flow through to Q1."""
+    c = triage.classify(
+        _notif("mention"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_Q1
+
+
+def test_classify_keeps_review_requested_on_open_pr():
+    """Regression guard: open PR review requests still flow through."""
+    c = triage.classify(
+        _notif("review_requested"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket != triage.BUCKET_DROP
+
+
+def test_classify_keeps_assign_when_state_unknown():
+    """If state_fetcher returns None (network blip, parse failure), the
+    classifier must fall through to normal classification - never drop on
+    unknown state."""
+    c = triage.classify(
+        _notif("assign"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: None,
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_Q1
+
+
+def test_classify_skips_state_check_for_non_subject_types():
+    """A security_alert subject (RepositoryVulnerabilityAlert) has no
+    PR/issue state - classifier must not even call state_fetcher and must
+    route normally to Q1."""
+    sec_notif = _notif(
+        "security_alert",
+        subject={
+            "title": "Vuln",
+            "url": "https://api.github.com/repos/o/r/dependabot/alerts/1",
+            "latest_comment_url": None,
+            "type": "RepositoryVulnerabilityAlert",
+        },
+    )
+    fetcher = MagicMock(return_value=None)
+    c = triage.classify(
+        sec_notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=fetcher,
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    fetcher.assert_not_called()
+    assert c.bucket == triage.BUCKET_Q1

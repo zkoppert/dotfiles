@@ -77,6 +77,18 @@ Q1_REASONS: set[str] = {
 # Subject states that are candidates for the drop bucket.
 CLOSED_STATES: set[str] = {"closed", "merged"}
 
+# Reasons that get a subject-state check at classify time. If the PR / issue
+# is already closed/merged when the notification first arrives, drop it
+# instead of routing to a quadrant or inbox - there is nothing left to do.
+STATEFUL_REASONS: set[str] = {
+    "review_requested",
+    "mention",
+    "assign",
+    "manual",
+    "team_mention",
+    "author",
+}
+
 DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
 
 # Buckets the classifier can return.
@@ -262,6 +274,20 @@ def classify(
     reason = (notif.get("reason") or "").lower()
     subject = notif.get("subject") or {}
     subject_type = (subject.get("type") or "").lower()
+
+    # Cheap early drop: if the subject is already closed/merged when the
+    # notification first lands, there is nothing left to do. Only check
+    # reasons that route to inbox/Q1, and only when the subject is the
+    # kind of resource whose state actually means "done". Conservative on
+    # error: state_fetcher returns None for network/parse failures, which
+    # falls through to the normal classification path.
+    if reason in STATEFUL_REASONS and subject_type in {"pullrequest", "issue"}:
+        state = state_fetcher(notif)
+        if state in CLOSED_STATES:
+            return Classification(
+                BUCKET_DROP,
+                f"{reason} on {state} {subject_type}",
+            )
 
     if reason == "review_requested":
         # Auto-Q1 only when the PR author is on the narrow allowlist.
@@ -708,27 +734,27 @@ def check_subject_stale(parsed: dict[str, Any]) -> tuple[str, str]:
     return (STALE_UNKNOWN, f"unsupported kind: {kind}")
 
 
-def prune_stale_inbox(
-    data: dict[str, Any], stats: TriageStats, dry_run: bool = False
-) -> None:
-    """Drop stale github-notification entries from ``data['inbox']`` in place.
+def _check_and_drop_stale(
+    entries: list[Any],
+    stats: TriageStats,
+    *,
+    section: str,
+    dry_run: bool,
+) -> tuple[list[Any], int]:
+    """Filter one list of todo entries, dropping the stale github-notification ones.
 
-    Only inbox items where ``source == 'github-notification'`` and whose URL
-    parses as a PR / issue / discussion are checked. Anything else is left
-    untouched so manually added inbox items aren't affected. Updates
-    ``stats.pruned_stale`` and ``stats.pruned_by_reason``.
+    Returns ``(kept_entries, checked_count)``. Mutates ``stats`` in place:
+    increments ``pruned_stale``, updates ``pruned_by_reason``, appends to
+    ``errors`` on mark-done failures. ``section`` is included in log lines so
+    inbox vs. quadrant drops are distinguishable in the cron log.
 
-    When an entry is dropped in live mode, the underlying GitHub notification
-    thread is also marked done so it doesn't reappear on the next cron cycle.
-    A mark-done failure is logged via ``stats.errors`` but does not block the
-    drop, matching the existing DROP-bucket policy.
+    Stale-detection and mark-done policy match the original inbox pruner:
+    only confirmed-closed subjects drop, transient errors keep the entry,
+    and a mark-done failure is logged but does not block the drop.
     """
-    inbox = data.get("inbox")
-    if not inbox:
-        return
-    checked = 0
     kept: list[Any] = []
-    for entry in inbox:
+    checked = 0
+    for entry in entries:
         if not isinstance(entry, dict):
             kept.append(entry)
             continue
@@ -737,9 +763,6 @@ def prune_stale_inbox(
             continue
         notif = entry.get("notification")
         if not isinstance(notif, dict):
-            # A user-edited todo.yml could put a string (or anything else)
-            # under ``notification``. Be conservative and keep the entry
-            # rather than crash on ``.get()`` below.
             kept.append(entry)
             continue
         url = notif.get("url", "")
@@ -764,18 +787,78 @@ def prune_stale_inbox(
                         f"prune mark-done failed for thread {thread_id}: {exc}"
                     )
             logger.info(
-                "pruned inbox item %s (%s)",
+                "pruned %s item %s (%s)",
+                section,
                 entry.get("id"),
                 reason,
             )
             continue
         kept.append(entry)
-    data["inbox"] = kept
+    return kept, checked
+
+
+# Quadrants that the pruner sweeps in addition to ``inbox``. Order is
+# stable for predictable log output but does not affect correctness.
+PRUNE_QUADRANTS: tuple[str, ...] = (
+    "q1_do_first",
+    "q2_schedule",
+    "q3_delegate",
+    "q4_eliminate",
+)
+
+
+def prune_stale_notifications(
+    data: dict[str, Any], stats: TriageStats, dry_run: bool = False
+) -> None:
+    """Drop stale github-notification entries from inbox and all quadrants.
+
+    Walks ``data['inbox']`` and each quadrant in ``data['prioritized']``,
+    dropping entries where ``source == 'github-notification'`` and whose
+    subject URL parses as a PR / issue / discussion that is now closed,
+    merged, locked, or answered. Manually added items (any other
+    ``source``) are left alone, as are entries with unparseable URLs.
+
+    This is the only mechanism that cleans entries already promoted to a
+    quadrant - ``classify()`` only sees fresh notifications because the
+    ``run()`` loop skips ``already_tracked`` thread IDs. Without this
+    sweep, a Q2 PR that gets merged sits in the quadrant forever unless
+    the user manually marks it done.
+
+    Drop policy matches the original inbox pruner: confirmed-closed →
+    drop + mark thread done; transient errors → keep; mark-done failures
+    → log to ``stats.errors`` but still drop the local entry.
+    """
+    total_checked = 0
+    inbox = data.get("inbox")
+    if inbox:
+        kept, checked = _check_and_drop_stale(
+            inbox, stats, section="inbox", dry_run=dry_run
+        )
+        data["inbox"] = kept
+        total_checked += checked
+
+    prioritized = data.get("prioritized") or {}
+    for quadrant in PRUNE_QUADRANTS:
+        entries = prioritized.get(quadrant)
+        if not entries:
+            continue
+        kept, checked = _check_and_drop_stale(
+            entries, stats, section=quadrant, dry_run=dry_run
+        )
+        prioritized[quadrant] = kept
+        total_checked += checked
+
     logger.debug(
-        "pruner checked %d github-notification inbox items, dropped %d",
-        checked,
+        "pruner checked %d github-notification entries across inbox + quadrants, dropped %d",
+        total_checked,
         stats.pruned_stale,
     )
+
+
+# Backward-compatible alias for the old single-section pruner. The
+# function now sweeps quadrants too despite the legacy name, so external
+# callers keep working without code changes.
+prune_stale_inbox = prune_stale_notifications
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -899,11 +982,12 @@ def run(args: argparse.Namespace) -> TriageStats:
         else:
             stats.marked_done += 1
 
-    # Inbox pruner: drop github-notification items whose subject is now
-    # closed/merged/locked/answered. Runs even on --dry-run (so we can see
-    # what would be pruned) but the write itself is gated below.
+    # Stale-notification pruner: drop github-notification entries from
+    # inbox and quadrants whose subject is now closed/merged/locked/
+    # answered. Runs even on --dry-run (so we can see what would be
+    # pruned) but the write itself is gated below.
     if not args.no_prune:
-        prune_stale_inbox(data, stats, dry_run=args.dry_run)
+        prune_stale_notifications(data, stats, dry_run=args.dry_run)
 
     # Append new entries to todo.yml.
     if (
