@@ -1115,6 +1115,101 @@ def test_run_dry_run_previews_stale_cleanup_without_mutating(tmp_path: Path) -> 
     assert reloaded["inbox"][0]["id"] == "notif-old-entry"
 
 
+def test_run_cleans_stale_inbox_entries_on_label_and_merge(tmp_path: Path) -> None:
+    """A pre-existing notif-* entry should be removed after a label+merge auto-action."""
+    notif = {
+        "id": "thread-lam",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/3",
+        },
+    }
+    pr = _base_pr(
+        number=3,
+        title="Bump foo from 1.0.0 to 1.0.2",
+        body="Fixes CVE-2026-0001",
+        url="https://github.com/o/r/pull/3",
+    )
+
+    args = _make_args(tmp_path)
+    args.todo_file.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: notif-q1-stale\n"
+        "      title: review dependabot security PR\n"
+        "      notification:\n"
+        "        thread_id: thread-lam\n"
+        "        url: https://github.com/o/r/pull/3\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=95
+    ), mock.patch.object(
+        td, "fetch_repo_labels", return_value={"release"}
+    ), mock.patch.object(
+        td, "do_add_label"
+    ), mock.patch.object(
+        td, "do_merge"
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ):
+        stats = td.run(args)
+
+    assert stats.labeled_and_merged == 1
+    assert stats.stale_removed == 1
+    reloaded = td.load_todo(args.todo_file)
+    assert reloaded["prioritized"]["q1_do_first"] == []
+
+
+def test_run_cleans_stale_inbox_entries_on_terminal_skip(tmp_path: Path) -> None:
+    """Closed-PR notifications should also sweep their pre-existing notif-* entries."""
+    notif = {
+        "id": "thread-closed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/9",
+        },
+    }
+    pr = _base_pr(number=9, url="https://github.com/o/r/pull/9", state="closed")
+
+    args = _make_args(tmp_path)
+    args.todo_file.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first: []\n"
+        "done:\n"
+        "  - id: notif-done-stale\n"
+        "    notification:\n"
+        "      thread_id: thread-closed\n",
+        encoding="utf-8",
+    )
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ):
+        stats = td.run(args)
+
+    assert stats.skipped == 1
+    assert stats.stale_removed == 1
+    reloaded = td.load_todo(args.todo_file)
+    assert reloaded["done"] == []
+
+
 def test_run_skips_already_tracked_thread(tmp_path: Path) -> None:
     notif = {
         "id": "thread-flag",
