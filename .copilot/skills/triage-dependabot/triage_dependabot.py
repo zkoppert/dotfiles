@@ -1179,6 +1179,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             )
             stats.skipped_dependency += 1
             reason = (notif.get("reason") or "").lower()
+            cleared = True
             if thread_id and reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS:
                 logger.info(
                     "%s#%d -> clearing notification (reason=%s)",
@@ -1186,8 +1187,23 @@ def run(args: argparse.Namespace) -> TriageStats:
                     number,
                     reason,
                 )
-                mark_thread_done(thread_id, dry_run=args.dry_run)
-            if pr_url:
+                try:
+                    mark_thread_done(thread_id, dry_run=args.dry_run)
+                    stats.stale_removed += _cleanup_stale_entries(
+                        data,
+                        thread_id=thread_id,
+                        pr_url=pr_url,
+                        dry_run=args.dry_run,
+                    )
+                except (
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                ) as exc:
+                    stats.errors.append(
+                        f"mark-done failed for excluded-dep {pr_url}: {exc}"
+                    )
+                    cleared = False
+            if pr_url and cleared:
                 state[pr_url] = now
             continue
         stats.dependabot += 1

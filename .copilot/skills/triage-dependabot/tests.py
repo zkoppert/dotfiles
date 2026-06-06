@@ -1928,3 +1928,142 @@ def test_excluded_dep_auto_clear_reasons_constant() -> None:
     assert td.EXCLUDED_DEP_AUTO_CLEAR_REASONS == frozenset(
         {"review_requested", "subscribed", "ci_activity"}
     )
+
+
+def test_run_excluded_dep_clear_calls_cleanup_stale(tmp_path: Path) -> None:
+    """When clearing a passive excluded-dep notification, the script must also
+    scrub any matching todo entries. Otherwise a stale entry written before
+    the dependency was excluded would persist forever in todo.yml."""
+    notif = {
+        "id": "thread-with-stale",
+        "reason": "review_requested",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/42",
+        },
+    }
+    pr = _base_pr(
+        number=42,
+        url="https://github.com/o/r/pull/42",
+        title="Bump super-linter/super-linter from 7.0.0 to 8.0.0",
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ), mock.patch.object(
+        td, "_cleanup_stale_entries", return_value=2
+    ) as cleanup_mock:
+        stats = td.run(args)
+
+    assert stats.skipped_dependency == 1
+    assert stats.stale_removed == 2
+    cleanup_mock.assert_called_once_with(
+        mock.ANY,
+        thread_id="thread-with-stale",
+        pr_url="https://github.com/o/r/pull/42",
+        dry_run=False,
+    )
+
+
+def test_run_excluded_dep_mark_done_failure_does_not_abort_run(
+    tmp_path: Path,
+) -> None:
+    """A GitHub API failure during mark_thread_done must not abort the whole
+    cron. The error is appended to stats.errors, cooldown state is NOT
+    written so the next run can retry, and run() continues to process other
+    notifications."""
+    notif1 = {
+        "id": "thread-fail",
+        "reason": "review_requested",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/42",
+        },
+    }
+    notif2 = {
+        "id": "thread-ok",
+        "reason": "review_requested",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/43",
+        },
+    }
+    pr1 = _base_pr(
+        number=42,
+        url="https://github.com/o/r/pull/42",
+        title="Bump super-linter/super-linter from 7.0.0 to 8.0.0",
+    )
+    pr2 = _base_pr(
+        number=43,
+        url="https://github.com/o/r/pull/43",
+        title="Bump super-linter/super-linter from 8.0.0 to 8.0.1",
+    )
+    args = _make_args(tmp_path)
+
+    def side_effect(thread_id: str, dry_run: bool = False) -> None:
+        if thread_id == "thread-fail":
+            raise td.subprocess.CalledProcessError(1, ["gh"])
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif1, notif2]
+    ), mock.patch.object(
+        td, "fetch_pr", side_effect=[pr1, pr2]
+    ), mock.patch.object(
+        td, "mark_thread_done", side_effect=side_effect
+    ):
+        stats = td.run(args)
+
+    assert stats.skipped_dependency == 2
+    assert any("mark-done failed" in e for e in stats.errors)
+    saved = td.load_state(args.state_file)
+    assert "https://github.com/o/r/pull/42" not in saved
+    assert "https://github.com/o/r/pull/43" in saved
+
+
+def test_run_excluded_dep_mention_writes_cooldown_without_mark_done(
+    tmp_path: Path,
+) -> None:
+    """A non-clearing reason (mention) still writes cooldown so the script
+    doesn't fetch_pr the same notification every hour."""
+    notif = {
+        "id": "thread-mention",
+        "reason": "mention",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/42",
+        },
+    }
+    pr = _base_pr(
+        number=42,
+        url="https://github.com/o/r/pull/42",
+        title="Bump super-linter/super-linter from 7.0.0 to 8.0.0",
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock, mock.patch.object(
+        td, "_cleanup_stale_entries"
+    ) as cleanup_mock:
+        stats = td.run(args)
+
+    assert stats.skipped_dependency == 1
+    mark_mock.assert_not_called()
+    cleanup_mock.assert_not_called()
+    saved = td.load_state(args.state_file)
+    assert "https://github.com/o/r/pull/42" in saved
