@@ -116,12 +116,19 @@ class TriageStats:
 
 @dataclass
 class Decision:
-    """Outcome plus the human-readable reason for it."""
+    """Outcome plus the human-readable reason for it.
+
+    ``terminal`` marks a decision whose state on GitHub will not change on a
+    later run (e.g. the PR is already closed). The triage loop marks the
+    notification thread done for terminal skips so we don't re-process the
+    same closed PR every hour.
+    """
 
     outcome: str
     reason: str
     bump: str = BUMP_UNKNOWN
     is_security: bool = False
+    terminal: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -616,7 +623,7 @@ def decide(
     """
     state = (pr.get("state") or "").lower()
     if state in {"closed", "merged"}:
-        return Decision(OUTCOME_SKIP, "pr already closed")
+        return Decision(OUTCOME_SKIP, "pr already closed", terminal=True)
 
     if pr.get("isDraft"):
         return Decision(OUTCOME_FLAG, "pr is a draft")
@@ -631,7 +638,13 @@ def decide(
         return Decision(OUTCOME_SKIP, "rebase already requested, waiting on dependabot")
 
     bump = detect_bump(pr)
-    if bump in {BUMP_MAJOR, BUMP_MINOR, BUMP_UNKNOWN}:
+    if bump == BUMP_UNKNOWN:
+        return Decision(
+            OUTCOME_FLAG,
+            "unable to parse bump from pr title",
+            bump=bump,
+        )
+    if bump in {BUMP_MAJOR, BUMP_MINOR}:
         try:
             coverage = coverage_lookup(repo)
         except Exception as exc:  # pylint: disable=broad-except
@@ -1025,6 +1038,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     stats.flagged += 1
                     state[pr_url] = now
             else:
+                if decision.terminal and thread_id:
+                    mark_thread_done(thread_id, dry_run=args.dry_run)
                 stats.skipped += 1
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             stats.errors.append(f"action {decision.outcome} failed for {pr_url}: {exc}")

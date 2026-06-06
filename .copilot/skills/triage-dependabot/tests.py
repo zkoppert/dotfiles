@@ -482,7 +482,25 @@ def _decide(
 
 
 def test_decide_skip_when_closed() -> None:
-    assert _decide(_base_pr(state="closed")).outcome == td.OUTCOME_SKIP
+    decision = _decide(_base_pr(state="closed"))
+    assert decision.outcome == td.OUTCOME_SKIP
+    assert decision.terminal is True
+
+
+def test_decide_skip_when_ci_pending_is_not_terminal() -> None:
+    # CI may go green on the next run, so the notification must come back.
+    decision = _decide(_base_pr(statusCheckRollup=[{"status": "IN_PROGRESS"}]))
+    assert decision.outcome == td.OUTCOME_SKIP
+    assert decision.terminal is False
+
+
+def test_decide_flag_unknown_bump_even_with_high_coverage() -> None:
+    # Unparseable titles should always route to flag-for-review - high
+    # coverage is not a license to merge something the parser couldn't read.
+    pr = _base_pr(title="chore(deps): refresh transitive dependencies")
+    decision = _decide(pr, coverage=99)
+    assert decision.outcome == td.OUTCOME_FLAG
+    assert decision.bump == td.BUMP_UNKNOWN
 
 
 def test_decide_flag_when_draft() -> None:
@@ -1130,6 +1148,64 @@ def test_run_skips_non_dependabot_authors(tmp_path: Path) -> None:
         stats = td.run(args)
 
     assert stats.dependabot == 0
+
+
+def test_run_marks_thread_done_for_closed_pr(tmp_path: Path) -> None:
+    """Closed PR notifications must be cleared so they don't reappear next run."""
+    notif = {
+        "id": "thread-closed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/9",
+        },
+    }
+    pr = _base_pr(number=9, url="https://github.com/o/r/pull/9", state="closed")
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_done_mock:
+        stats = td.run(args)
+
+    assert stats.skipped == 1
+    mark_done_mock.assert_called_once_with("thread-closed", dry_run=False)
+
+
+def test_run_does_not_mark_thread_done_for_transient_skip(tmp_path: Path) -> None:
+    """CI-pending skips must NOT mark the thread done - we want to retry next hour."""
+    notif = {
+        "id": "thread-pending",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/10",
+        },
+    }
+    pr = _base_pr(
+        number=10,
+        url="https://github.com/o/r/pull/10",
+        statusCheckRollup=[{"status": "IN_PROGRESS"}],
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_done_mock:
+        stats = td.run(args)
+
+    assert stats.skipped == 1
+    mark_done_mock.assert_not_called()
 
 
 def test_run_records_error_when_user_fetch_fails(tmp_path: Path) -> None:
