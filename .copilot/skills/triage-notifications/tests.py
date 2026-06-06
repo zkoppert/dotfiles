@@ -50,6 +50,7 @@ def test_classify_mention_goes_to_q1():
         q1_logins=set(),
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q1
 
@@ -61,6 +62,7 @@ def test_classify_assign_goes_to_q1():
         q1_logins=set(),
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q1
 
@@ -74,6 +76,77 @@ def test_classify_security_alert_goes_to_q1():
         comment_fetcher=lambda _: (None, None),
     )
     assert c.bucket == triage.BUCKET_Q1
+
+
+def test_classify_assign_on_my_own_pr_goes_to_inbox():
+    """Self-assign or CODEOWNERS auto-assign on a PR I authored is a
+    'waiting on reviewers' status update, not a Q1 action item."""
+    c = triage.classify(
+        _notif("assign"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: None,
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
+    )
+    assert c.bucket == triage.BUCKET_INBOX
+    assert "authored" in c.reason
+
+
+def test_classify_mention_on_my_own_pr_goes_to_inbox():
+    """An @-mention in the body of a PR I wrote is not someone pulling
+    me in - it's me referencing myself."""
+    c = triage.classify(
+        _notif("mention"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: None,
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "ZKoppert",
+    )
+    assert c.bucket == triage.BUCKET_INBOX
+    assert "authored" in c.reason
+
+
+def test_classify_security_alert_on_my_own_pr_still_goes_to_q1():
+    """The signal in a security_alert is the vulnerability, not the
+    assignment, so authorship shouldn't downgrade it."""
+    c = triage.classify(
+        _notif("security_alert"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: None,
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
+    )
+    assert c.bucket == triage.BUCKET_Q1
+
+
+def test_classify_self_assign_on_non_pr_still_goes_to_q1():
+    """The self-author skip is scoped to PullRequest subjects. A self-
+    assigned Issue, Discussion, or other subject type should still
+    route to Q1 the way it did before."""
+    notif = _notif("assign")
+    notif["subject"]["type"] = "Issue"
+    notif["subject"]["url"] = (
+        "https://api.github.com/repos/zkoppert/example/issues/42"
+    )
+    fetcher_called = []
+
+    def fetcher(n):
+        fetcher_called.append(n)
+        return "zkoppert"
+
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: None,
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=fetcher,
+    )
+    assert c.bucket == triage.BUCKET_Q1
+    assert fetcher_called == [], "fetcher should be skipped for non-PR subjects"
 
 
 def test_classify_manual_goes_to_inbox():

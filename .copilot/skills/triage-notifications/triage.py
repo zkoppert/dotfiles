@@ -283,6 +283,15 @@ def classify(
         )
 
     if reason in Q1_REASONS:
+        if reason in {"assign", "mention"}:
+            subject_type = (notif.get("subject") or {}).get("type")
+            if subject_type == "PullRequest":
+                author = subject_author_fetcher(notif)
+                if author and author.lower() == my_login.lower():
+                    return Classification(
+                        BUCKET_INBOX,
+                        f"{reason} on PR I authored - status update only",
+                    )
         return Classification(BUCKET_Q1, f"{reason} → Q1")
 
     if reason == "manual":
