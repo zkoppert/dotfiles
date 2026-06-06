@@ -1,0 +1,273 @@
+#!/bin/bash
+# gh wrapper that guards specific gh subcommands against accidental or
+# unconfirmed use:
+#
+#   1. `gh pr ready`  — marks a draft PR ready and notifies reviewers.
+#   2. `gh pr create` — opens a PR; Zack's rule is "always run multi-model
+#      code review before opening a PR." Without enforcement the rule is
+#      easy to skip, so this wrapper blocks PR creation until a review
+#      marker exists.
+#
+# Behavior:
+#   - In an interactive shell (TTY): prompt for confirmation before running.
+#   - In a non-interactive shell (e.g., an agent's bash tool): refuse unless
+#     the per-command confirmation condition is met.
+#
+# Per-command confirmation:
+#   - `gh pr ready`:  set ZACK_CONFIRMED_PR_READY=1 in the same invocation.
+#   - `gh pr create`: write a non-empty review summary to
+#       <repo>/.git/copilot-pr-review/<current-branch>.md
+#     AND set ZACK_CONFIRMED_PR_CREATE=1 in the same invocation. The marker
+#     file must be >=200 bytes so a bare `touch` does not satisfy it — actual
+#     review content has to land there before the PR can be opened. Both
+#     conditions are required when invoked inside a git checkout. If the
+#     wrapper cannot resolve the current repo or branch (e.g., `gh pr create`
+#     invoked outside a checkout or on detached HEAD), the env var alone is
+#     accepted as a fallback because no marker path can be derived.
+#
+# Known limitations (PATH-shim is a soft guard, not adversarial):
+#   - `gh api repos/.../pulls` and `gh api graphql` createPullRequest mutations
+#     are NOT gated. Guarding all of `gh api` would block too much. Treat the
+#     wrapper as a convention enforcer, not an adversarial gate.
+#   - User-defined `gh alias` expansions (e.g. `gh alias set prc 'pr create'`)
+#     bypass the matcher because aliases are resolved inside real `gh` after
+#     the wrapper has already dispatched. Avoid aliasing the guarded
+#     subcommands.
+#   - Direct invocation by real path (e.g. `~/repos/dotfiles/bin/gh-guard`)
+#     instead of via the `~/.local/bin/gh` symlink can pick the symlink back
+#     as REAL_GH and fork-recurse. Use the symlink, not the real path.
+#
+# Install:
+#   ln -sf "$PWD/bin/gh-guard" ~/.local/bin/gh
+#   Then ensure ~/.local/bin is first on PATH.
+#
+# Pass-through:
+#   Every gh subcommand other than the guarded ones is exec'd against the
+#   real gh binary with no modifications.
+
+set -euo pipefail
+
+# Find the real gh binary by skipping our own directory in PATH.
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF_REAL_PATH="$(cd "$(dirname "$(readlink "$0" 2>/dev/null || echo "$0")")" && pwd)"
+
+REAL_GH=""
+IFS=':' read -ra PATH_ENTRIES <<< "$PATH"
+for entry in "${PATH_ENTRIES[@]}"; do
+  [ -z "$entry" ] && continue
+  candidate="$entry/gh"
+  [ ! -x "$candidate" ] && continue
+  resolved_dir="$(cd "$entry" 2>/dev/null && pwd || echo "$entry")"
+  if [ "$resolved_dir" = "$SCRIPT_PATH" ] || [ "$resolved_dir" = "$SELF_REAL_PATH" ]; then
+    continue
+  fi
+  REAL_GH="$candidate"
+  break
+done
+
+if [ -z "$REAL_GH" ]; then
+  echo "gh-guard: real gh binary not found in PATH" >&2
+  echo "gh-guard: PATH=$PATH" >&2
+  exit 127
+fi
+
+# Parse the subcommand and operation, accounting for gh's global flags that
+# may precede the subcommand (e.g. `gh -R owner/repo pr ready`).
+subcmd=""
+op=""
+{
+  args=("$@")
+  i=0
+  while [ $i -lt ${#args[@]} ]; do
+    arg="${args[$i]}"
+    case "$arg" in
+      -R|--repo|-H|--hostname|--token)
+        i=$((i + 2))
+        ;;
+      --repo=*|--hostname=*|--token=*|--*=*)
+        i=$((i + 1))
+        ;;
+      --version|--help|-h)
+        break
+        ;;
+      -*)
+        i=$((i + 1))
+        ;;
+      *)
+        if [ -z "$subcmd" ]; then
+          subcmd="$arg"
+          i=$((i + 1))
+        elif [ -z "$op" ]; then
+          op="$arg"
+          break
+        fi
+        ;;
+    esac
+  done
+}
+
+is_pr_ready=0
+is_pr_create=0
+if [ "$subcmd" = "pr" ] && [ "$op" = "ready" ]; then
+  is_pr_ready=1
+  # `--undo` reverts a ready PR back to draft and does NOT notify reviewers,
+  # so it should not trigger the guard.
+  for a in "$@"; do
+    if [ "$a" = "--undo" ]; then
+      is_pr_ready=0
+      break
+    fi
+  done
+elif [ "$subcmd" = "pr" ] && [ "$op" = "create" ]; then
+  is_pr_create=1
+fi
+
+# Help flags after the op (e.g. `gh pr create --help`, `gh pr ready -h`) are
+# not seen by the parser above because it breaks at `op`. Scan the full
+# argument list and let help requests pass through unguarded so agents can
+# introspect flags without tripping the gate.
+if [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ]; then
+  for a in "$@"; do
+    case "$a" in
+      --help|-h|help)
+        is_pr_create=0
+        is_pr_ready=0
+        break
+        ;;
+    esac
+  done
+fi
+
+# --- gh pr ready ---------------------------------------------------------
+if [ "$is_pr_ready" = "1" ]; then
+  if [ -t 0 ] && [ -t 1 ]; then
+    echo "About to run: gh $*" >&2
+    echo "This marks the PR ready for review and notifies reviewers." >&2
+    printf "Continue? [y/N] " >&2
+    read -r ans
+    case "$ans" in
+      y|Y|yes|YES|Yes) ;;
+      *) echo "Aborted." >&2; exit 1 ;;
+    esac
+  else
+    if [ "${ZACK_CONFIRMED_PR_READY:-}" != "1" ]; then
+      cat >&2 <<'EOF'
+gh-guard: `gh pr ready` blocked.
+
+Reason: Zack's rule is "never mark draft PRs ready without explicit ask."
+This wrapper prevents accidental notifications to reviewers from automation.
+
+If Zack has explicitly confirmed that this PR should be marked ready, set:
+
+  ZACK_CONFIRMED_PR_READY=1 gh pr ready <args>
+
+Otherwise, leave the PR as draft and ask Zack first.
+EOF
+      exit 1
+    fi
+  fi
+fi
+
+# --- gh pr create --------------------------------------------------------
+if [ "$is_pr_create" = "1" ]; then
+  # Try to resolve the current repo and branch so we can check the per-branch
+  # review marker. If either lookup fails, the marker check is skipped and we
+  # fall back to the env var alone.
+  repo_root=""
+  branch=""
+  if git rev-parse --show-toplevel >/dev/null 2>&1; then
+    repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  fi
+
+  marker_ok=0
+  marker_path=""
+  in_repo=0
+  if [ -n "$repo_root" ] && [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
+    in_repo=1
+    # Encode `/` and `%` losslessly so distinct branches never collide on the
+    # marker filename. `feat/foo` becomes `feat%2Ffoo.md`; a literal underscore
+    # branch like `feat_foo` stays `feat_foo.md`.
+    safe_branch="$(printf '%s' "$branch" | sed -e 's/%/%25/g' -e 's|/|%2F|g')"
+    marker_path="$repo_root/.git/copilot-pr-review/$safe_branch.md"
+    if [ -f "$marker_path" ]; then
+      size="$(wc -c < "$marker_path" 2>/dev/null | tr -d ' ' || echo 0)"
+      if [ "${size:-0}" -ge 200 ]; then
+        marker_ok=1
+      fi
+    fi
+  fi
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    echo "About to run: gh $*" >&2
+    if [ "$marker_ok" = "1" ]; then
+      echo "Multi-model review marker found at $marker_path" >&2
+    else
+      echo "No multi-model review marker found." >&2
+      echo "Zack's rule: run the multi-model Code Review Workflow before opening a PR." >&2
+    fi
+    printf "Continue? [y/N] " >&2
+    read -r ans
+    case "$ans" in
+      y|Y|yes|YES|Yes) ;;
+      *) echo "Aborted." >&2; exit 1 ;;
+    esac
+  else
+    pass=0
+    if [ "$in_repo" = "1" ]; then
+      # Inside a resolvable repo: require BOTH the review marker and the env var.
+      if [ "$marker_ok" = "1" ] && [ "${ZACK_CONFIRMED_PR_CREATE:-}" = "1" ]; then
+        pass=1
+      fi
+    else
+      # Outside a resolvable repo (no checkout, detached HEAD): no marker path
+      # can be derived, so the env var alone is the only available signal.
+      if [ "${ZACK_CONFIRMED_PR_CREATE:-}" = "1" ]; then
+        pass=1
+      fi
+    fi
+
+    if [ "$pass" = "0" ]; then
+      if [ "$in_repo" = "1" ]; then
+        cat >&2 <<EOF
+gh-guard: \`gh pr create\` blocked.
+
+Reason: Zack's rule is "always complete the multi-model Code Review Workflow
+before opening a PR." This wrapper prevents skipping that step from automation.
+
+To unblock, do BOTH of the following in the same invocation:
+
+  1. Run at least 3 code-review agents in parallel (different models),
+     synthesize their findings, address any verified issues, and write the
+     synthesized review (>=200 bytes) to:
+
+         $marker_path
+
+  2. Set the explicit confirmation env var:
+
+         ZACK_CONFIRMED_PR_CREATE=1 gh pr create <args>
+
+Both the marker file AND the env var are required when running inside a git
+checkout. Marker status this invocation: marker_ok=$marker_ok (>=200 bytes
+required); ZACK_CONFIRMED_PR_CREATE='${ZACK_CONFIRMED_PR_CREATE:-}'.
+EOF
+      else
+        cat >&2 <<EOF
+gh-guard: \`gh pr create\` blocked.
+
+Reason: Zack's rule is "always complete the multi-model Code Review Workflow
+before opening a PR." This wrapper prevents skipping that step from automation.
+
+You appear to be running outside a resolvable git checkout (no repo root or
+branch detectable; branch was '${branch:-}'). The marker-file check is
+unavailable, so the only signal is the env var. Set it explicitly:
+
+  ZACK_CONFIRMED_PR_CREATE=1 gh pr create <args>
+EOF
+      fi
+      exit 1
+    fi
+  fi
+fi
+
+exec "$REAL_GH" "$@"

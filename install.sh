@@ -29,14 +29,14 @@ if [ -d "$DOTFILES_DIR/.copilot/skills" ]; then
   done
 fi
 
-# Install gh pr ready guard as a PATH shim at ~/.local/bin/gh.
-# Guards `gh pr ready` against accidental/unconfirmed runs.
-if [ -x "$DOTFILES_DIR/bin/gh-pr-ready-guard" ]; then
+# Install gh guard wrapper as a PATH shim at ~/.local/bin/gh.
+# Guards both `gh pr ready` and `gh pr create` against accidental/unreviewed runs.
+if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
   mkdir -p "$HOME/.local/bin"
   GH_TARGET="$HOME/.local/bin/gh"
   if [ -L "$GH_TARGET" ] || [ ! -e "$GH_TARGET" ]; then
-    ln -sfn "$DOTFILES_DIR/bin/gh-pr-ready-guard" "$GH_TARGET"
-    echo "✓ Linked gh wrapper → ~/.local/bin/gh (intercepts 'gh pr ready')"
+    ln -sfn "$DOTFILES_DIR/bin/gh-guard" "$GH_TARGET"
+    echo "✓ Linked gh wrapper → ~/.local/bin/gh (intercepts 'gh pr ready' and 'gh pr create')"
   else
     echo "⚠ $GH_TARGET exists and is not a symlink - skipping gh wrapper install"
     echo "  Move or remove the existing file and re-run install.sh to enable the guard."
