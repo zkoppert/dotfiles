@@ -1477,11 +1477,15 @@ def test_run_skips_non_dependabot_authors(tmp_path: Path) -> None:
     assert stats.dependabot == 0
 
 
-def test_run_skips_super_linter_pr(tmp_path: Path) -> None:
-    """Super-linter Dependabot PRs are excluded entirely: no fetch_repo_labels,
-    no merge, no flag, and they do not count toward stats.dependabot."""
+def test_run_skips_super_linter_pr_with_mention_keeps_notification(
+    tmp_path: Path,
+) -> None:
+    """Super-linter Dependabot PRs are excluded from action. If the reason is
+    ``mention`` (or any non-auto-clear reason) the notification stays in the
+    inbox so the user can respond directly."""
     notif = {
         "id": "thread-super-linter",
+        "reason": "mention",
         "subject": {
             "type": "PullRequest",
             "url": "https://api.github.com/repos/o/r/pulls/42",
@@ -1515,7 +1519,7 @@ def test_run_skips_super_linter_pr(tmp_path: Path) -> None:
     assert stats.flagged == 0
     fetch_labels_mock.assert_not_called()
     merge_mock.assert_not_called()
-    # Skipped dependencies stay in the inbox - do not clear the notification.
+    # @mention reason: leave the notification so the user can respond.
     mark_mock.assert_not_called()
     # Cooldown state must be written so the hourly cron doesn't re-fetch the
     # same long-lived super-linter PR every hour forever.
@@ -1795,3 +1799,132 @@ def test_macos_notify_swallows_errors() -> None:
         td.subprocess, "run", side_effect=FileNotFoundError("osascript")
     ):
         td.macos_notify("title", "msg")  # should not raise
+
+
+def _run_skipped_super_linter_with_reason(
+    tmp_path: Path, reason: str
+) -> tuple[td.TriageStats, mock.MagicMock]:
+    """Helper: run() against a single open super-linter PR with the given
+    notification reason. Returns the stats plus the mark_thread_done mock so
+    callers can assert on call count."""
+    notif = {
+        "id": f"thread-super-linter-{reason}",
+        "reason": reason,
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/42",
+        },
+    }
+    pr = _base_pr(
+        number=42,
+        url="https://github.com/o/r/pull/42",
+        title="Bump super-linter/super-linter from 7.0.0 to 8.0.0",
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "do_merge"
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock:
+        stats = td.run(args)
+    return stats, mark_mock
+
+
+def test_run_skips_super_linter_pr_with_review_requested_clears_notification(
+    tmp_path: Path,
+) -> None:
+    """``review_requested`` on an excluded dependency is a passive ping - clear
+    the notification so the inbox stops accumulating super-linter PRs."""
+    stats, mark_mock = _run_skipped_super_linter_with_reason(
+        tmp_path, "review_requested"
+    )
+    assert stats.skipped_dependency == 1
+    assert stats.dependabot == 0
+    mark_mock.assert_called_once_with(
+        "thread-super-linter-review_requested", dry_run=False
+    )
+
+
+def test_run_skips_super_linter_pr_with_subscribed_clears_notification(
+    tmp_path: Path,
+) -> None:
+    """``subscribed`` is also a passive reason: clear excluded-dep notifications
+    rather than letting them sit in the inbox."""
+    stats, mark_mock = _run_skipped_super_linter_with_reason(tmp_path, "subscribed")
+    assert stats.skipped_dependency == 1
+    mark_mock.assert_called_once_with(
+        "thread-super-linter-subscribed", dry_run=False
+    )
+
+
+def test_run_skips_super_linter_pr_with_ci_activity_clears_notification(
+    tmp_path: Path,
+) -> None:
+    """CI activity on an excluded dep is noise - clear the notification."""
+    stats, mark_mock = _run_skipped_super_linter_with_reason(tmp_path, "ci_activity")
+    assert stats.skipped_dependency == 1
+    mark_mock.assert_called_once_with(
+        "thread-super-linter-ci_activity", dry_run=False
+    )
+
+
+def test_run_skips_super_linter_pr_with_team_mention_keeps_notification(
+    tmp_path: Path,
+) -> None:
+    """``team_mention`` is an actionable reason: do NOT auto-clear; the user
+    should respond directly."""
+    stats, mark_mock = _run_skipped_super_linter_with_reason(tmp_path, "team_mention")
+    assert stats.skipped_dependency == 1
+    mark_mock.assert_not_called()
+
+
+def test_run_excluded_dep_dry_run_does_not_mark_thread_done(tmp_path: Path) -> None:
+    """Dry-run mode must not invoke the GitHub mark-done call even for
+    auto-clear reasons; it should still emit the log line."""
+    notif = {
+        "id": "thread-dry-run",
+        "reason": "review_requested",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/42",
+        },
+    }
+    pr = _base_pr(
+        number=42,
+        url="https://github.com/o/r/pull/42",
+        title="Bump super-linter/super-linter from 7.0.0 to 8.0.0",
+    )
+    args = _make_args(tmp_path)
+    args.dry_run = True
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock:
+        stats = td.run(args)
+
+    assert stats.skipped_dependency == 1
+    # mark_thread_done is still invoked, but with dry_run=True so it should be
+    # a no-op inside the function itself. The script's contract is "respect
+    # dry_run at the call boundary".
+    mark_mock.assert_called_once_with("thread-dry-run", dry_run=True)
+
+
+def test_excluded_dep_auto_clear_reasons_constant() -> None:
+    """Locks in the canonical set of passive reasons. Adding a new reason here
+    is a deliberate behavior change and should require updating tests."""
+    assert td.EXCLUDED_DEP_AUTO_CLEAR_REASONS == frozenset(
+        {"review_requested", "subscribed", "ci_activity"}
+    )
