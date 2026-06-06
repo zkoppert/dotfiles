@@ -71,10 +71,12 @@ A launchd plist runs the tool every two hours on weekdays at 8, 10,
 To pause: `launchctl unload ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist`
 To resume: `launchctl load ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist`
 
-## Inbox pruning
+## Pruning stale notifications
 
-After classifying new notifications, the script walks the inbox bucket
-and drops anything whose underlying GitHub subject is now stale:
+After classifying new notifications, the script walks the inbox **and
+all four quadrants** (`q1_do_first`, `q2_schedule`, `q3_delegate`,
+`q4_eliminate`) and drops anything whose underlying GitHub subject is
+now stale:
 
 - closed or merged PRs
 - closed issues
@@ -82,13 +84,18 @@ and drops anything whose underlying GitHub subject is now stale:
 - answered Q&A discussions
 - subjects that 404 (deleted)
 
+The classifier also performs the same closed/merged check at intake
+time, so a notification that arrives on an already-closed subject (e.g.
+a `review_requested` review that landed before the cron ran) is dropped
+immediately instead of being routed to a quadrant.
+
 A closed-but-unlocked regular discussion is kept because it can still
 receive activity. Only entries with `source: github-notification` are
-touched, so manually added inbox items are left alone. Errors other
-than 404 (timeout, 5xx, parse failure) keep the entry to avoid dropping
-things during transient issues. When the pruner drops an entry, it
-also marks the underlying GitHub notification thread done (DELETE) so
-the next cron cycle doesn't re-fetch the unread thread and re-add it. Pruner
+touched, so manually added items are left alone. Errors other than 404
+(timeout, 5xx, parse failure) keep the entry to avoid dropping things
+during transient issues. When the pruner drops an entry, it also marks
+the underlying GitHub notification thread done (DELETE) so the next
+cron cycle doesn't re-fetch the unread thread and re-add it. Pruner
 stats land in the final summary line as `pruned_stale=N` plus a
 `pruned_breakdown:` line when anything was dropped.
 
