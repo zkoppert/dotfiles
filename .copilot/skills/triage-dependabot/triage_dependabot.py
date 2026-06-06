@@ -119,6 +119,7 @@ class TriageStats:
     skipped: int = 0
     cooldown: int = 0
     already_tracked: int = 0
+    stale_removed: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -811,6 +812,69 @@ def existing_thread_ids(data: dict[str, Any]) -> set[str]:
     return ids
 
 
+def remove_stale_entries(
+    data: dict[str, Any],
+    *,
+    thread_id: str | None = None,
+    pr_url: str | None = None,
+) -> int:
+    """Drop todo entries that point at a notification we just resolved.
+
+    Once we auto-merge a Dependabot PR (or close-skip it), any pre-existing
+    inbox or quadrant entry tracking that same PR is now stale — the PR is
+    gone but the entry still says "review this". Match by
+    ``notification.thread_id`` first (1:1 with the GitHub thread we marked
+    done), and fall back to ``notification.url`` so we catch the case where
+    an earlier notification thread tracked the same PR under a different id.
+
+    Mutates ``data`` in place and returns the number of entries removed
+    across all buckets.
+    """
+    if not thread_id and not pr_url:
+        return 0
+
+    def matches(item: Any) -> bool:
+        if not isinstance(item, dict):
+            return False
+        notif = item.get("notification")
+        if not isinstance(notif, dict):
+            return False
+        if thread_id and str(notif.get("thread_id") or "") == thread_id:
+            return True
+        if pr_url and notif.get("url") == pr_url:
+            return True
+        return False
+
+    removed = 0
+
+    def prune(items: Any) -> None:
+        """Remove matching entries from a sequence in place.
+
+        Using slice assignment preserves the original sequence type
+        (e.g., ruamel's ``CommentedSeq``) so round-trip comments and
+        formatting are not lost.
+        """
+        nonlocal removed
+        if not isinstance(items, list):
+            return
+        kept: list[Any] = []
+        for item in items:
+            if matches(item):
+                removed += 1
+                continue
+            kept.append(item)
+        items[:] = kept
+
+    for key in ("inbox", "done", "in_progress", "blocked", "in_review"):
+        if key in data:
+            prune(data[key])
+    prioritized = data.get("prioritized")
+    if isinstance(prioritized, dict):
+        for _quadrant_key, items in list(prioritized.items()):
+            prune(items)
+    return removed
+
+
 def make_todo_id(repo: str, number: int) -> str:
     repo_slug = repo.split("/")[-1].lower()
     repo_slug = re.sub(r"[^a-z0-9]+", "-", repo_slug).strip("-")
@@ -939,6 +1003,52 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _cleanup_stale_entries(
+    data: dict[str, Any],
+    *,
+    thread_id: str | None,
+    pr_url: str | None,
+    dry_run: bool,
+) -> int:
+    """Wrapper that previews the cleanup in dry-run mode and skips mutation.
+
+    Returns the number of entries removed (or that would be removed in dry-run).
+    """
+    if dry_run:
+        # Count without mutating by running the helper on shallow copies of
+        # each bucket. The matching logic only walks one level deep into each
+        # entry, so a shallow copy is enough to prevent in-place removal from
+        # touching the real lists in ``data``.
+        preview = {
+            "inbox": list(data.get("inbox") or []),
+            "done": list(data.get("done") or []),
+            "in_progress": list(data.get("in_progress") or []),
+            "blocked": list(data.get("blocked") or []),
+            "in_review": list(data.get("in_review") or []),
+            "prioritized": {
+                k: list(v or []) for k, v in (data.get("prioritized") or {}).items()
+            },
+        }
+        count = remove_stale_entries(preview, thread_id=thread_id, pr_url=pr_url)
+        if count:
+            logger.info(
+                "dry-run: would remove %d stale todo entry(ies) for thread=%s url=%s",
+                count,
+                thread_id,
+                pr_url,
+            )
+        return count
+    count = remove_stale_entries(data, thread_id=thread_id, pr_url=pr_url)
+    if count:
+        logger.info(
+            "removed %d stale todo entry(ies) for thread=%s url=%s",
+            count,
+            thread_id,
+            pr_url,
+        )
+    return count
+
+
 def run(args: argparse.Namespace) -> TriageStats:
     """Main entrypoint. Returns stats so tests can assert behaviour."""
     stats = TriageStats()
@@ -1026,6 +1136,9 @@ def run(args: argparse.Namespace) -> TriageStats:
                 mark_thread_done(thread_id, dry_run=args.dry_run)
                 stats.merged += 1
                 state[pr_url] = now
+                stats.stale_removed += _cleanup_stale_entries(
+                    data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
+                )
             elif decision.outcome == OUTCOME_LABEL_AND_MERGE:
                 labels = fetch_repo_labels(repo)
                 if "release" in labels:
@@ -1034,6 +1147,9 @@ def run(args: argparse.Namespace) -> TriageStats:
                 mark_thread_done(thread_id, dry_run=args.dry_run)
                 stats.labeled_and_merged += 1
                 state[pr_url] = now
+                stats.stale_removed += _cleanup_stale_entries(
+                    data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
+                )
             elif decision.outcome == OUTCOME_REBASE:
                 do_rebase_comment(repo, number, dry_run=args.dry_run)
                 stats.rebased += 1
@@ -1048,12 +1164,16 @@ def run(args: argparse.Namespace) -> TriageStats:
             else:
                 if decision.terminal and thread_id:
                     mark_thread_done(thread_id, dry_run=args.dry_run)
+                    stats.stale_removed += _cleanup_stale_entries(
+                        data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
+                    )
                 stats.skipped += 1
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             stats.errors.append(f"action {decision.outcome} failed for {pr_url}: {exc}")
 
-    if new_flags and not args.dry_run:
-        data["prioritized"]["q1_do_first"].extend(new_flags)
+    if (new_flags or stats.stale_removed) and not args.dry_run:
+        if new_flags:
+            data["prioritized"]["q1_do_first"].extend(new_flags)
         try:
             write_todo_atomic(args.todo_file, data)
         except OSError as exc:
@@ -1068,7 +1188,8 @@ def run(args: argparse.Namespace) -> TriageStats:
     ):
         message = (
             f"merged={stats.merged} labeled={stats.labeled_and_merged} "
-            f"rebased={stats.rebased} flagged={stats.flagged}"
+            f"rebased={stats.rebased} flagged={stats.flagged} "
+            f"stale_removed={stats.stale_removed}"
         )
         macos_notify("Dependabot triage", message)
 
@@ -1087,7 +1208,8 @@ def main(argv: list[str] | None = None) -> int:
         f"merged={stats.merged} labeled={stats.labeled_and_merged} "
         f"rebased={stats.rebased} flagged={stats.flagged} "
         f"skipped={stats.skipped} cooldown={stats.cooldown} "
-        f"already_tracked={stats.already_tracked}"
+        f"already_tracked={stats.already_tracked} "
+        f"stale_removed={stats.stale_removed}"
     )
     for err in stats.errors:
         print(f"ERROR: {err}", file=sys.stderr)

@@ -642,6 +642,103 @@ def test_existing_thread_ids_handles_missing_and_garbage() -> None:
     assert td.existing_thread_ids(data) == set()
 
 
+def test_remove_stale_entries_matches_by_thread_id() -> None:
+    data = {
+        "inbox": [
+            {"id": "stale", "notification": {"thread_id": "T1"}},
+            {"id": "keep", "notification": {"thread_id": "T2"}},
+        ],
+        "done": [],
+        "prioritized": {"q1_do_first": []},
+    }
+    removed = td.remove_stale_entries(data, thread_id="T1", pr_url=None)
+    assert removed == 1
+    assert [item["id"] for item in data["inbox"]] == ["keep"]
+
+
+def test_remove_stale_entries_matches_by_pr_url_fallback() -> None:
+    data = {
+        "inbox": [
+            {"id": "stale", "notification": {"thread_id": "OLD", "url": "https://example/pr/1"}},
+            {"id": "keep", "notification": {"thread_id": "OTHER", "url": "https://example/pr/2"}},
+        ],
+        "prioritized": {"q1_do_first": []},
+    }
+    removed = td.remove_stale_entries(data, thread_id="T-new", pr_url="https://example/pr/1")
+    assert removed == 1
+    assert [item["id"] for item in data["inbox"]] == ["keep"]
+
+
+def test_remove_stale_entries_walks_all_buckets() -> None:
+    data = {
+        "inbox": [{"notification": {"thread_id": "T"}}],
+        "done": [{"notification": {"thread_id": "T"}}],
+        "in_progress": [{"notification": {"thread_id": "T"}}],
+        "blocked": [{"notification": {"thread_id": "T"}}],
+        "in_review": [{"notification": {"thread_id": "T"}}],
+        "prioritized": {
+            "q1_do_first": [{"notification": {"thread_id": "T"}}],
+            "q2_schedule": [{"notification": {"thread_id": "T"}}],
+            "q3_delegate": [{"notification": {"thread_id": "T"}}],
+            "q4_eliminate": [{"notification": {"thread_id": "T"}}],
+        },
+    }
+    removed = td.remove_stale_entries(data, thread_id="T", pr_url=None)
+    assert removed == 9
+    for bucket in ("inbox", "done", "in_progress", "blocked", "in_review"):
+        assert data[bucket] == []
+    for quadrant in data["prioritized"].values():
+        assert quadrant == []
+
+
+def test_remove_stale_entries_no_match_returns_zero() -> None:
+    data = {
+        "inbox": [{"id": "x", "notification": {"thread_id": "T1"}}],
+        "prioritized": {"q1_do_first": []},
+    }
+    removed = td.remove_stale_entries(data, thread_id="NOPE", pr_url="https://nope")
+    assert removed == 0
+    assert len(data["inbox"]) == 1
+
+
+def test_remove_stale_entries_empty_inputs_short_circuit() -> None:
+    data = {"inbox": [{"notification": {"thread_id": "T"}}]}
+    assert td.remove_stale_entries(data, thread_id=None, pr_url=None) == 0
+    assert td.remove_stale_entries(data, thread_id="", pr_url="") == 0
+
+
+def test_remove_stale_entries_handles_garbage_data() -> None:
+    data = {
+        "inbox": "not a list",
+        "done": [None, "string", {"notification": "garbage"}, {}],
+        "prioritized": {
+            "q1_do_first": [{"notification": {"thread_id": "T"}}],
+            "q2_schedule": None,
+        },
+    }
+    removed = td.remove_stale_entries(data, thread_id="T", pr_url=None)
+    assert removed == 1
+    assert data["prioritized"]["q1_do_first"] == []
+
+
+def test_remove_stale_entries_mutates_buckets_in_place() -> None:
+    """Bucket list/dict references must be preserved so ruamel CommentedSeq
+    objects keep their round-trip comment metadata."""
+    inbox = [{"notification": {"thread_id": "T"}}, {"id": "keep"}]
+    q1 = [{"notification": {"thread_id": "T"}}]
+    prioritized = {"q1_do_first": q1}
+    data = {"inbox": inbox, "prioritized": prioritized}
+
+    removed = td.remove_stale_entries(data, thread_id="T", pr_url=None)
+
+    assert removed == 2
+    assert data["inbox"] is inbox
+    assert data["prioritized"] is prioritized
+    assert data["prioritized"]["q1_do_first"] is q1
+    assert inbox == [{"id": "keep"}]
+    assert q1 == []
+
+
 def test_load_todo_missing_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         td.load_todo(tmp_path / "absent.yml")
@@ -940,6 +1037,195 @@ def test_run_end_to_end_merges_and_flags(tmp_path: Path) -> None:
     state = td.load_state(args.state_file)
     assert "https://github.com/o/r1/pull/1" in state
     assert "https://github.com/o/r2/pull/2" in state
+
+
+def test_run_cleans_stale_inbox_entries_on_merge(tmp_path: Path) -> None:
+    """A pre-existing notif-* entry should be removed after the PR auto-merges."""
+    notif = {
+        "id": "thread-merge",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/1",
+        },
+    }
+    pr = _base_pr(number=1, url="https://github.com/o/r1/pull/1")
+
+    args = _make_args(tmp_path)
+    args.todo_file.write_text(
+        "inbox:\n"
+        "  - id: notif-old-entry\n"
+        "    title: review dependabot PR\n"
+        "    notification:\n"
+        "      thread_id: thread-merge\n"
+        "      url: https://github.com/o/r1/pull/1\n"
+        "      reason: subscribed\n"
+        "prioritized:\n"
+        "  q1_do_first: []\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=50
+    ), mock.patch.object(
+        td, "do_merge"
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ):
+        stats = td.run(args)
+
+    assert stats.merged == 1
+    assert stats.stale_removed == 1
+    reloaded = td.load_todo(args.todo_file)
+    assert reloaded["inbox"] == []
+
+
+def test_run_dry_run_previews_stale_cleanup_without_mutating(tmp_path: Path) -> None:
+    """Dry-run should count stale entries it would remove but not write the file."""
+    notif = {
+        "id": "thread-merge",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/1",
+        },
+    }
+    pr = _base_pr(number=1, url="https://github.com/o/r1/pull/1")
+
+    args = _make_args(tmp_path, dry_run=True)
+    args.todo_file.write_text(
+        "inbox:\n"
+        "  - id: notif-old-entry\n"
+        "    notification:\n"
+        "      thread_id: thread-merge\n"
+        "prioritized:\n"
+        "  q1_do_first: []\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=50
+    ), mock.patch.object(
+        td, "do_merge"
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ):
+        stats = td.run(args)
+
+    assert stats.stale_removed == 1
+    reloaded = td.load_todo(args.todo_file)
+    # Dry-run must NOT mutate the file on disk.
+    assert len(reloaded["inbox"]) == 1
+    assert reloaded["inbox"][0]["id"] == "notif-old-entry"
+
+
+def test_run_cleans_stale_inbox_entries_on_label_and_merge(tmp_path: Path) -> None:
+    """A pre-existing notif-* entry should be removed after a label+merge auto-action."""
+    notif = {
+        "id": "thread-lam",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/3",
+        },
+    }
+    pr = _base_pr(
+        number=3,
+        title="Bump foo from 1.0.0 to 1.0.2",
+        body="Fixes CVE-2026-0001",
+        url="https://github.com/o/r/pull/3",
+    )
+
+    args = _make_args(tmp_path)
+    args.todo_file.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: notif-q1-stale\n"
+        "      title: review dependabot security PR\n"
+        "      notification:\n"
+        "        thread_id: thread-lam\n"
+        "        url: https://github.com/o/r/pull/3\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=95
+    ), mock.patch.object(
+        td, "fetch_repo_labels", return_value={"release"}
+    ), mock.patch.object(
+        td, "do_add_label"
+    ), mock.patch.object(
+        td, "do_merge"
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ):
+        stats = td.run(args)
+
+    assert stats.labeled_and_merged == 1
+    assert stats.stale_removed == 1
+    reloaded = td.load_todo(args.todo_file)
+    assert reloaded["prioritized"]["q1_do_first"] == []
+
+
+def test_run_cleans_stale_inbox_entries_on_terminal_skip(tmp_path: Path) -> None:
+    """Closed-PR notifications should also sweep their pre-existing notif-* entries."""
+    notif = {
+        "id": "thread-closed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/9",
+        },
+    }
+    pr = _base_pr(number=9, url="https://github.com/o/r/pull/9", state="closed")
+
+    args = _make_args(tmp_path)
+    args.todo_file.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first: []\n"
+        "done:\n"
+        "  - id: notif-done-stale\n"
+        "    notification:\n"
+        "      thread_id: thread-closed\n",
+        encoding="utf-8",
+    )
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ):
+        stats = td.run(args)
+
+    assert stats.skipped == 1
+    assert stats.stale_removed == 1
+    reloaded = td.load_todo(args.todo_file)
+    assert reloaded["done"] == []
 
 
 def test_run_skips_already_tracked_thread(tmp_path: Path) -> None:
