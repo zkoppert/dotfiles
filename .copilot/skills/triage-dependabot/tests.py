@@ -2069,3 +2069,61 @@ def test_run_excluded_dep_mention_writes_cooldown_without_mark_done(
     cleanup_mock.assert_not_called()
     saved = td.load_state(args.state_file)
     assert "https://github.com/o/r/pull/42" in saved
+
+
+def test_run_closed_excluded_dep_mark_done_failure_does_not_abort_run(
+    tmp_path: Path,
+) -> None:
+    """Mirrors the open-PR resilience test for the closed/merged excluded-dep
+    branch: a GitHub API failure during mark_thread_done must not abort the
+    cron, the error is recorded, and run() continues processing other
+    notifications."""
+    notif1 = {
+        "id": "thread-closed-fail",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/42",
+        },
+    }
+    notif2 = {
+        "id": "thread-closed-ok",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/43",
+        },
+    }
+    pr1 = _base_pr(
+        number=42,
+        url="https://github.com/o/r/pull/42",
+        title="Bump super-linter/super-linter from 7.0.0 to 8.0.0",
+        state="closed",
+    )
+    pr2 = _base_pr(
+        number=43,
+        url="https://github.com/o/r/pull/43",
+        title="Bump super-linter/super-linter from 8.0.0 to 8.0.1",
+        state="closed",
+    )
+    args = _make_args(tmp_path)
+
+    def side_effect(thread_id: str, dry_run: bool = False) -> None:
+        if thread_id == "thread-closed-fail":
+            raise td.subprocess.CalledProcessError(1, ["gh"])
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif1, notif2]
+    ), mock.patch.object(
+        td, "fetch_pr", side_effect=[pr1, pr2]
+    ), mock.patch.object(
+        td, "mark_thread_done", side_effect=side_effect
+    ):
+        stats = td.run(args)
+
+    assert stats.skipped_dependency == 2
+    assert any(
+        "mark-done failed for closed excluded-dep" in e for e in stats.errors
+    )
