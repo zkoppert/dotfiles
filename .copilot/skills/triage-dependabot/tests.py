@@ -1885,9 +1885,11 @@ def test_run_skips_super_linter_pr_with_team_mention_keeps_notification(
     mark_mock.assert_not_called()
 
 
-def test_run_excluded_dep_dry_run_does_not_mark_thread_done(tmp_path: Path) -> None:
-    """Dry-run mode must not invoke the GitHub mark-done call even for
-    auto-clear reasons; it should still emit the log line."""
+def test_run_excluded_dep_dry_run_propagates_dry_run_flag(tmp_path: Path) -> None:
+    """Dry-run mode must still invoke mark_thread_done at the call boundary,
+    but with dry_run=True so the function itself short-circuits before
+    touching the GitHub API. The script's contract is "respect dry_run at
+    the call site"; the no-op behavior lives inside mark_thread_done."""
     notif = {
         "id": "thread-dry-run",
         "reason": "review_requested",
