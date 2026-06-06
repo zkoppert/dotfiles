@@ -56,7 +56,15 @@ _RT_YAML.indent(mapping=2, sequence=4, offset=2)
 DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
 DEFAULT_STATE_FILE = Path.home() / "Library" / "Logs" / "triage-dependabot-state.json"
 
-DEPENDABOT_LOGINS: set[str] = {"dependabot[bot]", "dependabot-preview[bot]"}
+DEPENDABOT_LOGINS: set[str] = {
+    "dependabot[bot]",
+    "dependabot-preview[bot]",
+    # `gh pr view --json author` returns GitHub App author logins prefixed
+    # with `app/` (e.g. `app/dependabot`). Both formats need to match
+    # because notification payloads and PR payloads use different formats.
+    "app/dependabot",
+    "app/dependabot-preview",
+}
 
 # Outcome constants.
 OUTCOME_MERGE = "merge"
