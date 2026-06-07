@@ -22,7 +22,7 @@ they merged - the cron would never see them again to clean them up.
 
 ## How it classifies
 
-Three early-exit drops fire before the reason-based classifier, in this order:
+Four early-exit drops fire before the reason-based classifier, in this order:
 
 1. **Title-pattern drop** - repetitive system-generated noise (regex match
    on `subject.title`). Currently catches titles shaped like
