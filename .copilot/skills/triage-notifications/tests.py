@@ -624,7 +624,7 @@ def test_run_dedupes_already_tracked(todo_file):
 
     responses = {
         "/user": json.dumps({"login": "zkoppert"}),
-        "/notifications": json.dumps([_notif("mention")]),
+        "/notifications?all=true": json.dumps([_notif("mention")]),
     }
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
@@ -636,7 +636,7 @@ def test_run_dedupes_already_tracked(todo_file):
 def test_run_adds_q1_for_mention(todo_file):
     responses = {
         "/user": json.dumps({"login": "zkoppert"}),
-        "/notifications": json.dumps([_notif("mention")]),
+        "/notifications?all=true": json.dumps([_notif("mention")]),
     }
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
@@ -658,7 +658,7 @@ def test_run_drops_ci_activity_and_marks_done(todo_file):
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         responses = {
             "/user": json.dumps({"login": "zkoppert"}),
-            "/notifications": json.dumps([notif]),
+            "/notifications?all=true": json.dumps([notif]),
         }
         # find path
         idx = cmd.index("api")
@@ -682,7 +682,7 @@ def test_run_dry_run_does_not_write(todo_file):
     before = todo_file.read_text()
     responses = {
         "/user": json.dumps({"login": "zkoppert"}),
-        "/notifications": json.dumps([_notif("mention")]),
+        "/notifications?all=true": json.dumps([_notif("mention")]),
     }
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
         args = triage.parse_args(
@@ -722,7 +722,7 @@ def test_run_marks_done_on_completed(todo_file):
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         responses = {
             "/user": json.dumps({"login": "zkoppert"}),
-            "/notifications": json.dumps([]),
+            "/notifications?all=true": json.dumps([]),
         }
         idx = cmd.index("api")
         after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
@@ -751,7 +751,7 @@ def test_run_marks_done_on_completed(todo_file):
 def test_run_handles_empty_notifications(todo_file):
     responses = {
         "/user": json.dumps({"login": "zkoppert"}),
-        "/notifications": "[]",
+        "/notifications?all=true": "[]",
     }
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
@@ -763,7 +763,7 @@ def test_run_handles_empty_notifications(todo_file):
 def test_main_returns_zero_on_success(todo_file):
     responses = {
         "/user": json.dumps({"login": "zkoppert"}),
-        "/notifications": "[]",
+        "/notifications?all=true": "[]",
     }
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
         rc = triage.main(["--todo-file", str(todo_file), "--no-notify"])
@@ -1238,7 +1238,7 @@ def test_run_no_prune_skips_pruner(todo_file):
     )
     responses = {
         "/user": json.dumps({"login": "zkoppert"}),
-        "/notifications": json.dumps([]),
+        "/notifications?all=true": json.dumps([]),
     }
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
         args = triage.parse_args(
@@ -1577,7 +1577,7 @@ def test_run_bucket_drop_handles_mark_done_timeout(todo_file):
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=20)
         responses = {
             "/user": json.dumps({"login": "zkoppert"}),
-            "/notifications": json.dumps([notif]),
+            "/notifications?all=true": json.dumps([notif]),
         }
         idx = cmd.index("api")
         after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
@@ -1621,7 +1621,7 @@ def test_run_marks_done_on_completed_handles_timeout(todo_file):
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=20)
         responses = {
             "/user": json.dumps({"login": "zkoppert"}),
-            "/notifications": json.dumps([]),
+            "/notifications?all=true": json.dumps([]),
         }
         idx = cmd.index("api")
         after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
@@ -2463,3 +2463,521 @@ def test_title_drop_patterns_constant_seeded():
     assert any("intermittent test failure" in p for p in sources)
     assert any("flaky test" in p for p in sources)
     assert any("test flake" in p for p in sources)
+
+
+# --- Tests for read-notification sweep + done-archive (PR sweep-read-closed) ---
+
+
+def _read_notif(reason: str, *, subject_type: str = "PullRequest", title: str = "Some PR") -> dict:
+    """A notification the user has already viewed on github.com."""
+    return {
+        "id": "9999",
+        "reason": reason,
+        "unread": False,
+        "repository": {"full_name": "github/example"},
+        "subject": {
+            "title": title,
+            "url": "https://api.github.com/repos/github/example/pulls/42",
+            "latest_comment_url": None,
+            "type": subject_type,
+        },
+    }
+
+
+def test_classify_read_open_notification_returns_keep():
+    """Already-viewed open notifications must KEEP - don't re-route to inbox
+    once the user has clicked on them."""
+    c = triage.classify(
+        _read_notif("manual"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_KEEP
+    assert "already-read" in c.reason
+
+
+def test_classify_unread_notification_does_not_return_keep():
+    """The read-skip guard must NOT short-circuit unread notifications -
+    those go through the full reason-based classifier."""
+    notif = _read_notif("manual")
+    notif["unread"] = True
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket != triage.BUCKET_KEEP
+
+
+def test_classify_read_closed_pr_still_drops_via_state_check():
+    """Read notifications on closed/merged subjects must still drop -
+    KEEP only applies when no drop rule fired."""
+    c = triage.classify(
+        _read_notif("author"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "closed",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "closed pullrequest" in c.reason
+
+
+def test_classify_drop_sets_archive_to_done_when_zack_is_pr_author():
+    """A closed/merged PR I authored must flag archive_to_done so the
+    work shows up in todo.yml's done section for biannual reflection."""
+    c = triage.classify(
+        _read_notif("author"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "merged",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert c.archive_to_done is True
+
+
+def test_classify_drop_does_not_archive_when_zack_is_not_author():
+    """A closed/merged PR somebody else authored still drops, but never
+    archives - those aren't my completed work."""
+    c = triage.classify(
+        _read_notif("assign"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "closed",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "andimiya",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert c.archive_to_done is False
+
+
+def test_classify_drop_does_not_archive_for_issues():
+    """Issues never archive to done even when I'm the closer - the
+    biannual reflection use case is about shipped PR work, not closed
+    issues."""
+    notif = _read_notif("author", subject_type="Issue", title="Some issue")
+    notif["subject"]["url"] = "https://api.github.com/repos/github/example/issues/42"
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "closed",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert c.archive_to_done is False
+
+
+def test_classify_drop_does_not_call_author_fetcher_for_issues():
+    """Avoid the extra API call for issues - we never archive issues so
+    skip the author lookup entirely."""
+    fetcher_calls = []
+
+    def fetcher(_):
+        fetcher_calls.append(_)
+        return "zkoppert"
+
+    notif = _read_notif("author", subject_type="Issue", title="Some issue")
+    notif["subject"]["url"] = "https://api.github.com/repos/github/example/issues/42"
+    triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "closed",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=fetcher,
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert fetcher_calls == []
+
+
+def test_build_done_archive_entry_has_expected_shape():
+    """The archived done entry must include the fields the biannual
+    reflection workflow expects: link, title, completed date, source."""
+    entry = triage.build_done_archive_entry(_read_notif("author"))
+    assert entry["status"] == "done"
+    assert entry["source"] == "github-notification-auto-archive"
+    assert entry["link"] == "https://github.com/github/example/pull/42"
+    assert "github/example" in entry["title"]
+    assert entry["completed"]  # ISO date string set
+
+
+def test_run_archives_to_done_and_marks_notification_done(todo_file):
+    """End-to-end: a read+merged PR I authored must (a) DELETE the
+    notification, (b) append a done entry to todo.yml."""
+    notif = _read_notif("author")
+    notif["id"] = "888"
+
+    delete_calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        responses = {
+            "/user": json.dumps({"login": "zkoppert"}),
+            "/notifications?all=true": json.dumps([notif]),
+            "/repos/github/example/pulls/42": json.dumps(
+                {
+                    "state": "closed",
+                    "merged_at": "2026-06-07T00:00:00Z",
+                    "locked": False,
+                    "user": {"login": "zkoppert"},
+                }
+            ),
+        }
+        idx = cmd.index("api")
+        after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
+        path = after[0] if after else ""
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=responses.get(path, ""), stderr=""
+        )
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        stats = triage.run(args)
+
+    assert stats.dropped == 1
+    assert stats.archived_to_done == 1
+    assert any("/notifications/threads/888" in " ".join(c) for c in delete_calls)
+    # Done section should now have one new auto-archive entry.
+    data = yaml.safe_load(todo_file.read_text())
+    archived = [
+        e
+        for e in data.get("done", [])
+        if e.get("source") == "github-notification-auto-archive"
+    ]
+    assert len(archived) == 1
+
+
+def test_run_skipped_read_does_not_add_to_inbox_or_delete(todo_file):
+    """A read+open notification must not be re-added to inbox AND must
+    not be marked done on GitHub - it just falls out of the loop."""
+    notif = _read_notif("manual")
+    notif["id"] = "777"
+
+    delete_calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        responses = {
+            "/user": json.dumps({"login": "zkoppert"}),
+            "/notifications?all=true": json.dumps([notif]),
+            "/repos/github/example/pulls/42": json.dumps(
+                {"state": "open", "locked": False}
+            ),
+        }
+        idx = cmd.index("api")
+        after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
+        path = after[0] if after else ""
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=responses.get(path, ""), stderr=""
+        )
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        stats = triage.run(args)
+
+    assert stats.skipped_read == 1
+    assert stats.added_inbox == 0
+    assert stats.added_q1 == 0
+    assert delete_calls == []
+
+
+def test_fetch_notifications_uses_all_true_query():
+    """Sanity guard: the cron MUST request `?all=true` so it picks up
+    notifications the user has read but not deleted. The whole sweep
+    rule depends on this."""
+    captured = []
+
+    def fake_run(cmd, *args, **kwargs):
+        captured.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        triage.fetch_notifications()
+
+    assert any("/notifications?all=true" in arg for c in captured for arg in c)
+
+
+# --- Tests for review-feedback fixes: KEEP wrapper, archive dedup, prune-archive ---
+
+
+def test_classify_read_ci_activity_still_drops():
+    """ci_activity is always-drop noise - read status must not flip it to KEEP."""
+    notif = _read_notif("ci_activity")
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP, (
+        "read ci_activity must drop so the notification gets cleared, "
+        "not lingered as KEEP"
+    )
+
+
+def test_classify_read_comment_on_closed_pr_still_drops():
+    """Read comments on already-closed PRs must still drop - otherwise
+    they linger in the all=true fetch forever."""
+    notif = _read_notif("comment")
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "closed",
+        comment_fetcher=lambda _: ("someone", "body"),
+        subject_author_fetcher=lambda _: "andi",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "closed" in c.reason
+
+
+def test_classify_read_subscribed_on_closed_pr_still_drops():
+    """Read subscribed-thread notice on a closed PR must drop too."""
+    notif = _read_notif("subscribed")
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "merged",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_classify_read_super_linter_comment_still_drops():
+    """Super-linter comments are noise regardless of read status."""
+    notif = _read_notif("comment")
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: ("super-linter", "lint failed"),
+        subject_author_fetcher=lambda _: "andi",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "super-linter" in c.reason
+
+
+def test_classify_read_inbox_routing_swaps_to_keep():
+    """Read notification that would otherwise route to INBOX must swap
+    to KEEP. (manual subscription on open subject routes to INBOX.)"""
+    notif = _read_notif("manual")
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "andi",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_KEEP
+    assert "already-read" in c.reason
+    assert "INBOX" in c.reason  # mentions what it would have been
+
+
+def test_classify_read_q1_mention_swaps_to_keep():
+    """Read notification that would route to Q1 also swaps to KEEP -
+    user already saw the mention and chose not to act on it."""
+    notif = _read_notif("mention")
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "andi",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_KEEP
+    assert "Q1" in c.reason
+
+
+def test_build_done_archive_entry_includes_notification_thread_id():
+    """Archive entries MUST carry notification.thread_id so a failed
+    mark_thread_done DELETE on one run doesn't cause duplicate archive
+    writes on every subsequent run."""
+    notif = {
+        "id": "55555",
+        "reason": "author",
+        "repository": {"full_name": "github/example"},
+        "subject": {
+            "title": "Some PR",
+            "url": "https://api.github.com/repos/github/example/pulls/42",
+            "type": "PullRequest",
+        },
+    }
+    entry = triage.build_done_archive_entry(notif)
+    assert "notification" in entry
+    assert entry["notification"]["thread_id"] == "55555"
+    assert entry["notification"]["repo"] == "github/example"
+
+
+def test_existing_thread_ids_finds_archived_entries():
+    """existing_thread_ids must include archive entries so re-archive
+    is suppressed when the prior DELETE failed and the notification
+    reappears on the next fetch."""
+    notif = {
+        "id": "77777",
+        "reason": "author",
+        "repository": {"full_name": "github/example"},
+        "subject": {
+            "title": "X",
+            "url": "https://api.github.com/repos/github/example/pulls/42",
+            "type": "PullRequest",
+        },
+    }
+    archived = triage.build_done_archive_entry(notif)
+    data = {"inbox": [], "done": [archived], "prioritized": {}}
+    ids = triage.existing_thread_ids(data)
+    assert "77777" in ids
+
+
+def test_build_done_archive_entry_from_tracked_carries_thread_id():
+    """Pruner-built archive entries also carry the original
+    notification.thread_id so dedup works on subsequent runs."""
+    tracked = {
+        "id": "pr-merged",
+        "title": "Cleanup script (github/example)",
+        "source": "github-notification",
+        "notification": {
+            "thread_id": "tid-123",
+            "url": "https://api.github.com/repos/github/example/pulls/42",
+            "reason": "author",
+            "repo": "github/example",
+        },
+    }
+    entry = triage.build_done_archive_entry_from_tracked(tracked)
+    assert entry["status"] == "done"
+    assert entry["source"] == "github-notification-auto-archive"
+    assert entry["notification"]["thread_id"] == "tid-123"
+    assert entry["notification"]["reason"] == "author"
+    assert entry["title"] == "Cleanup script (github/example)"
+
+
+def _stale_self_authored_entry(entry_id: str, pr_number: int) -> dict:
+    """Tracked entry for a PR I authored, ready to be archived on prune."""
+    return {
+        "id": entry_id,
+        "title": f"My PR #{pr_number} (github/example)",
+        "source": "github-notification",
+        "notification": {
+            "url": f"https://github.com/github/example/pull/{pr_number}",
+            "thread_id": f"thr-{pr_number}",
+            "reason": "author",
+            "repo": "github/example",
+        },
+    }
+
+
+def test_prune_archives_self_authored_pr_to_done():
+    """When the pruner drops a tracked PR with reason=author, it must
+    add an entry to data['done'] so the work survives for biannual
+    reflection."""
+    stats = triage.TriageStats()
+    entry = _stale_self_authored_entry("my-pr", 42)
+    data = {"inbox": [entry], "prioritized": {}, "done": []}
+    with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
+        "triage.mark_thread_done"
+    ):
+        triage.prune_stale_notifications(data, stats)
+    assert data["inbox"] == []
+    assert len(data["done"]) == 1
+    assert data["done"][0]["source"] == "github-notification-auto-archive"
+    assert data["done"][0]["notification"]["thread_id"] == "thr-42"
+    assert stats.archived_to_done == 1
+
+
+def test_prune_does_not_archive_non_author_pr():
+    """A tracked PR with reason!=author (e.g., mention, review_requested)
+    still drops on close but must not get archived as my work."""
+    stats = triage.TriageStats()
+    entry = _stale_self_authored_entry("mention-pr", 99)
+    entry["notification"]["reason"] = "mention"
+    data = {"inbox": [entry], "prioritized": {}, "done": []}
+    with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
+        "triage.mark_thread_done"
+    ):
+        triage.prune_stale_notifications(data, stats)
+    assert data["inbox"] == []
+    assert data["done"] == []
+    assert stats.archived_to_done == 0
+
+
+def test_prune_does_not_archive_self_authored_issue():
+    """Only PRs get archived - reason=author on an issue (rare) still
+    drops but does not pollute the done section."""
+    stats = triage.TriageStats()
+    entry = _stale_self_authored_entry("my-issue", 7)
+    entry["notification"]["url"] = "https://github.com/github/example/issues/7"
+    data = {"inbox": [entry], "prioritized": {}, "done": []}
+    with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
+        "triage.mark_thread_done"
+    ):
+        triage.prune_stale_notifications(data, stats)
+    assert data["inbox"] == []
+    assert data["done"] == []
+    assert stats.archived_to_done == 0
+
+
+def test_prune_archives_from_quadrant_too():
+    """Quadrant-tracked self-authored PRs also get archived on close."""
+    stats = triage.TriageStats()
+    entry = _stale_self_authored_entry("q1-mine", 11)
+    data = {
+        "inbox": [],
+        "prioritized": {"q1_do_first": [entry]},
+        "done": [],
+    }
+    with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
+        "triage.mark_thread_done"
+    ):
+        triage.prune_stale_notifications(data, stats)
+    assert data["prioritized"]["q1_do_first"] == []
+    assert len(data["done"]) == 1
+    assert data["done"][0]["notification"]["thread_id"] == "thr-11"
+
+
+def test_prune_archive_visible_to_dedup_on_next_run():
+    """End-to-end: after pruner archives a self-authored PR, the
+    archive entry's thread_id is in existing_thread_ids - so even if
+    mark_thread_done failed and GitHub re-delivers the notification,
+    the run loop's already_tracked check will catch it."""
+    stats = triage.TriageStats()
+    entry = _stale_self_authored_entry("dedupe-test", 88)
+    data = {"inbox": [entry], "prioritized": {}, "done": []}
+    with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
+        "triage.mark_thread_done"
+    ):
+        triage.prune_stale_notifications(data, stats)
+    ids = triage.existing_thread_ids(data)
+    assert "thr-88" in ids

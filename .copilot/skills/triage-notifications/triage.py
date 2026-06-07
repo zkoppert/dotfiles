@@ -126,6 +126,10 @@ DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
 BUCKET_DROP = "DROP"
 BUCKET_Q1 = "QUADRANT_Q1"
 BUCKET_INBOX = "INBOX"
+# Read notification that didn't match any drop rule. Already-viewed open
+# subjects fall here so the cron leaves them where the user put them
+# (don't re-add to inbox, don't mark notification done).
+BUCKET_KEEP = "KEEP"
 
 logger = logging.getLogger("triage")
 
@@ -136,6 +140,10 @@ class Classification:
 
     bucket: str
     reason: str  # Human-readable justification for the bucket choice.
+    # When BUCKET_DROP fires on a closed/merged PR I authored, also append
+    # an entry to todo.yml's `done` section so the work shows up in
+    # biannual reflections.
+    archive_to_done: bool = False
 
 
 @dataclass
@@ -150,6 +158,8 @@ class TriageStats:
     marked_done: int = 0
     pruned_stale: int = 0
     pruned_by_reason: dict[str, int] = field(default_factory=dict)
+    archived_to_done: int = 0
+    skipped_read: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -170,10 +180,19 @@ def run_gh(args: list[str], *, timeout: int = 60) -> str:
 
 
 def fetch_notifications() -> list[dict[str, Any]]:
-    """Return all unread notifications for the authenticated user."""
+    """Return all notifications for the authenticated user.
+
+    Uses `?all=true` so we see notifications the user has already viewed
+    on github.com (marked read) but not deleted. This is what lets the
+    cron clean up merged/closed subjects after the fact - the previous
+    unread-only fetch never re-saw a notification once the user clicked
+    it, so closed PRs piled up in the inbox indefinitely.
+    """
     # `--slurp` returns a JSON array-of-arrays (one inner array per page),
     # which is safe to parse regardless of titles that contain `][`.
-    raw = run_gh(["api", "/notifications", "--paginate", "--slurp"]).strip()
+    raw = run_gh(
+        ["api", "/notifications?all=true", "--paginate", "--slurp"]
+    ).strip()
     if not raw:
         return []
     try:
@@ -377,6 +396,48 @@ def classify(
     `state_fetcher`, `comment_fetcher`, `subject_author_fetcher`, and
     `human_commenter_fetcher` are injectable so tests can avoid network
     calls. They default to the live API helpers.
+
+    Read-notification override: if `_classify_internal` would have routed
+    a read notification (``unread is False``) to INBOX or Q1, swap to
+    BUCKET_KEEP instead. DROP results pass through unchanged so the
+    cleanup paths (``ci_activity``, ``comment``/``subscribed`` on closed
+    subjects, super-linter comments) still mark and delete the
+    notification. This guarantees noise gets cleared regardless of
+    read-status, while user-already-viewed actionable items aren't
+    re-added to the inbox on every cron tick.
+    """
+    result = _classify_internal(
+        notif,
+        my_login=my_login,
+        q1_logins=q1_logins,
+        state_fetcher=state_fetcher,
+        comment_fetcher=comment_fetcher,
+        subject_author_fetcher=subject_author_fetcher,
+        human_commenter_fetcher=human_commenter_fetcher,
+    )
+    if result.bucket in {BUCKET_INBOX, BUCKET_Q1} and notif.get("unread") is False:
+        return Classification(
+            BUCKET_KEEP,
+            f"already-read; would have been {result.bucket} ({result.reason})",
+        )
+    return result
+
+
+def _classify_internal(
+    notif: dict[str, Any],
+    *,
+    my_login: str,
+    q1_logins: set[str],
+    state_fetcher=fetch_thread_state,
+    comment_fetcher=fetch_latest_comment,
+    subject_author_fetcher=fetch_subject_author,
+    human_commenter_fetcher=fetch_pr_human_commenters,
+) -> Classification:
+    """Raw classification before the read-notification KEEP override.
+
+    Split out from `classify` so the KEEP override can be applied
+    uniformly to INBOX/Q1 results without short-circuiting the DROP
+    branches that follow in this function.
     """
     reason = (notif.get("reason") or "").lower()
     subject = notif.get("subject") or {}
@@ -404,9 +465,19 @@ def classify(
     if reason in STATEFUL_REASONS and subject_type in {"pullrequest", "issue"}:
         state = state_fetcher(notif)
         if state in CLOSED_STATES:
+            # Archive the work to todo.yml's `done` section when I'm the
+            # PR author so biannual reflection has the history. Issues
+            # are skipped: I rarely "complete" an issue by closing it,
+            # and PR-as-shipped-work is the cleaner signal.
+            archive = False
+            if subject_type == "pullrequest":
+                author = subject_author_fetcher(notif)
+                if author and author.lower() == my_login.lower():
+                    archive = True
             return Classification(
                 BUCKET_DROP,
                 f"{reason} on {state} {subject_type}",
+                archive_to_done=archive,
             )
 
     # Self-authored `Enable Dependabot` housekeeping PRs are pure noise
@@ -428,6 +499,12 @@ def classify(
                 BUCKET_DROP,
                 "self-authored Enable Dependabot PR with no human commenters",
             )
+
+    # Already-viewed notifications that would otherwise route to
+    # inbox/Q1 are handled by the `classify` wrapper which post-processes
+    # the result of this function. The DROP rules above already fire for
+    # read notifications too, so noise like `ci_activity` and
+    # comment-on-closed still get cleaned up regardless of read status.
 
     if reason == "review_requested":
         # Auto-Q1 only when the PR author is on the narrow allowlist.
@@ -558,6 +635,94 @@ def build_todo_entry(
             }
         )
     return entry
+
+
+def build_done_archive_entry(notif: dict[str, Any]) -> dict[str, Any]:
+    """Construct a done-archive entry for a closed/merged PR I authored.
+
+    Used when classify() returns BUCKET_DROP with archive_to_done=True
+    so the work is captured in todo.yml's `done` section for biannual
+    reflection. Kept minimal on purpose - the cron knows the PR title,
+    link, repo, and the date of the closing event but nothing about
+    impact or context, so leave room for the user to enrich later.
+
+    Includes a ``notification`` block so ``existing_thread_ids`` can
+    dedupe future runs. Without that block, a failed ``mark_thread_done``
+    DELETE would cause the same notification to be re-archived on every
+    subsequent cron tick until the DELETE eventually succeeded.
+    """
+    subject = notif.get("subject") or {}
+    repo = (notif.get("repository") or {}).get("full_name") or "unknown"
+    today = datetime.date.today().isoformat()
+    title = subject.get("title") or "Untitled PR"
+    return {
+        "id": make_todo_id(notif),
+        "title": f"{title} ({repo})",
+        "description": (
+            "Auto-archived from GitHub notifications: PR I authored was "
+            "closed or merged."
+        ),
+        "category": "technical",
+        "source": "github-notification-auto-archive",
+        "added": today,
+        "due": None,
+        "urgency": "medium",
+        "importance": "medium",
+        "quadrant": "q1_do_first",
+        "status": "done",
+        "completed": today,
+        "link": web_url(notif),
+        "notes": "",
+        "notification": {
+            "thread_id": str(notif.get("id") or ""),
+            "url": web_url(notif),
+            "reason": (notif.get("reason") or "").lower(),
+            "repo": repo,
+        },
+    }
+
+
+def build_done_archive_entry_from_tracked(entry: dict[str, Any]) -> dict[str, Any]:
+    """Build a done-archive entry from an existing tracked todo entry.
+
+    Used by ``prune_stale_notifications`` when it drops an inbox/quadrant
+    entry whose original notification ``reason`` was ``"author"`` (i.e.
+    the PR was mine). Without this archive step, self-authored PRs that
+    were first tracked while open and then merged later would silently
+    vanish from todo.yml instead of landing in ``done`` for biannual
+    reflection.
+
+    The tracked entry's title was formatted as ``"{title} ({repo})"``
+    by ``build_todo_entry`` at fetch time, so we reuse it verbatim
+    rather than re-decorating.
+    """
+    notif = entry.get("notification") or {}
+    today = datetime.date.today().isoformat()
+    return {
+        "id": entry.get("id") or "archived-notification",
+        "title": entry.get("title") or "Auto-archived PR",
+        "description": (
+            "Auto-archived from GitHub notifications: tracked PR I "
+            "authored closed or merged after sitting in inbox/quadrant."
+        ),
+        "category": "technical",
+        "source": "github-notification-auto-archive",
+        "added": today,
+        "due": None,
+        "urgency": "medium",
+        "importance": "medium",
+        "quadrant": "q1_do_first",
+        "status": "done",
+        "completed": today,
+        "link": notif.get("url") or "",
+        "notes": "",
+        "notification": {
+            "thread_id": str(notif.get("thread_id") or ""),
+            "url": notif.get("url") or "",
+            "reason": notif.get("reason") or "author",
+            "repo": notif.get("repo") or "unknown",
+        },
+    }
 
 
 def load_todo(path: Path) -> dict[str, Any]:
@@ -880,19 +1045,28 @@ def _check_and_drop_stale(
     *,
     section: str,
     dry_run: bool,
-) -> tuple[list[Any], int]:
+) -> tuple[list[Any], int, list[dict[str, Any]]]:
     """Filter one list of todo entries, dropping the stale github-notification ones.
 
-    Returns ``(kept_entries, checked_count)``. Mutates ``stats`` in place:
-    increments ``pruned_stale``, updates ``pruned_by_reason``, appends to
-    ``errors`` on mark-done failures. ``section`` is included in log lines so
-    inbox vs. quadrant drops are distinguishable in the cron log.
+    Returns ``(kept_entries, checked_count, archive_entries)``. Mutates
+    ``stats`` in place: increments ``pruned_stale``, updates
+    ``pruned_by_reason``, appends to ``errors`` on mark-done failures.
+    ``section`` is included in log lines so inbox vs. quadrant drops are
+    distinguishable in the cron log.
 
     Stale-detection and mark-done policy match the original inbox pruner:
     only confirmed-closed subjects drop, transient errors keep the entry,
     and a mark-done failure is logged but does not block the drop.
+
+    Archive policy: when a dropped entry's stored
+    ``notification.reason == "author"`` and the parsed URL kind is
+    ``"pr"``, build a ``done``-shaped archive entry and return it.
+    Callers append these to ``data["done"]`` so self-authored PRs that
+    were first tracked open and later merged still land in the biannual
+    reflection archive instead of vanishing silently.
     """
     kept: list[Any] = []
+    archive: list[dict[str, Any]] = []
     checked = 0
     for entry in entries:
         if not isinstance(entry, dict):
@@ -915,6 +1089,12 @@ def _check_and_drop_stale(
         if action == STALE_DROP:
             stats.pruned_stale += 1
             stats.pruned_by_reason[reason] = stats.pruned_by_reason.get(reason, 0) + 1
+            if (
+                parsed.get("kind") == "pr"
+                and (notif.get("reason") or "").lower() == "author"
+            ):
+                archive.append(build_done_archive_entry_from_tracked(entry))
+                stats.archived_to_done += 1
             thread_id = notif.get("thread_id")
             if thread_id and not dry_run:
                 try:
@@ -934,7 +1114,7 @@ def _check_and_drop_stale(
             )
             continue
         kept.append(entry)
-    return kept, checked
+    return kept, checked, archive
 
 
 # Quadrants that the pruner sweeps in addition to ``inbox``. Order is
@@ -967,14 +1147,24 @@ def prune_stale_notifications(
     Drop policy matches the original inbox pruner: confirmed-closed →
     drop + mark thread done; transient errors → keep; mark-done failures
     → log to ``stats.errors`` but still drop the local entry.
+
+    Archive: when a dropped entry's stored ``notification.reason`` was
+    ``"author"`` (so the PR was mine) and the URL kind is a PR, an
+    archive entry is appended to ``data["done"]`` before the inbox/
+    quadrant entry is discarded. This catches the dominant
+    self-authored-PR lifecycle (open → tracked in inbox → merged later)
+    which classify() can no longer see because the run loop skips
+    ``already_tracked`` thread ids.
     """
     total_checked = 0
+    archive_entries: list[dict[str, Any]] = []
     inbox = data.get("inbox")
     if inbox:
-        kept, checked = _check_and_drop_stale(
+        kept, checked, archive = _check_and_drop_stale(
             inbox, stats, section="inbox", dry_run=dry_run
         )
         data["inbox"] = kept
+        archive_entries.extend(archive)
         total_checked += checked
 
     prioritized = data.get("prioritized") or {}
@@ -982,16 +1172,21 @@ def prune_stale_notifications(
         entries = prioritized.get(quadrant)
         if not entries:
             continue
-        kept, checked = _check_and_drop_stale(
+        kept, checked, archive = _check_and_drop_stale(
             entries, stats, section=quadrant, dry_run=dry_run
         )
         prioritized[quadrant] = kept
+        archive_entries.extend(archive)
         total_checked += checked
 
+    if archive_entries:
+        data.setdefault("done", []).extend(archive_entries)
+
     logger.debug(
-        "pruner checked %d github-notification entries across inbox + quadrants, dropped %d",
+        "pruner checked %d github-notification entries across inbox + quadrants, dropped %d (archived %d)",
         total_checked,
         stats.pruned_stale,
+        len(archive_entries),
     )
 
 
@@ -1063,6 +1258,7 @@ def run(args: argparse.Namespace) -> TriageStats:
     seen_ids = existing_thread_ids(data)
     new_q1: list[dict[str, Any]] = []
     new_inbox: list[dict[str, Any]] = []
+    new_done: list[dict[str, Any]] = []
 
     for notif in notifications:
         thread_id = str(notif.get("id") or "")
@@ -1080,8 +1276,14 @@ def run(args: argparse.Namespace) -> TriageStats:
             classification.bucket,
             classification.reason,
         )
+        if classification.bucket == BUCKET_KEEP:
+            stats.skipped_read += 1
+            continue
         if classification.bucket == BUCKET_DROP:
             stats.dropped += 1
+            if classification.archive_to_done:
+                new_done.append(build_done_archive_entry(notif))
+                stats.archived_to_done += 1
             if not args.dry_run:
                 try:
                     mark_thread_done(thread_id)
@@ -1131,10 +1333,15 @@ def run(args: argparse.Namespace) -> TriageStats:
 
     # Append new entries to todo.yml.
     if (
-        new_q1 or new_inbox or stats.marked_done or stats.pruned_stale
+        new_q1
+        or new_inbox
+        or new_done
+        or stats.marked_done
+        or stats.pruned_stale
     ) and not args.dry_run:
         data["inbox"].extend(new_inbox)
         data["prioritized"]["q1_do_first"].extend(new_q1)
+        data["done"].extend(new_done)
         try:
             write_todo_atomic(args.todo_file, data)
         except OSError as exc:
@@ -1163,6 +1370,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"fetched={stats.fetched} added_q1={stats.added_q1} "
         f"added_inbox={stats.added_inbox} dropped={stats.dropped} "
+        f"archived_to_done={stats.archived_to_done} "
+        f"skipped_read={stats.skipped_read} "
         f"already_tracked={stats.already_tracked} "
         f"marked_done={stats.marked_done} "
         f"pruned_stale={stats.pruned_stale}"
