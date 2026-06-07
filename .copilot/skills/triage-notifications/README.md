@@ -1,9 +1,9 @@
 # triage-notifications
 
-Classify unread GitHub notifications, auto-drop noise, route actionable
-items into `~/repos/zkoppert-todo/todo.yml`, and mark notifications done
-on GitHub (removing them from the inbox) once the corresponding todo
-is done.
+Classify GitHub notifications, auto-drop noise, route actionable
+items into `~/repos/zkoppert-todo/todo.yml`, archive shipped work to
+the `done` section for biannual reflection, and mark notifications
+done on GitHub (removing them from the inbox) once handled.
 
 Designed to be safe to re-run: deduped by `notification.thread_id`, so a
 second run produces no duplicate todos and no spurious mark-dones.
@@ -14,6 +14,11 @@ I get a lot of GitHub notifications and miss the important ones. This
 tool runs every two hours on weekdays, surfaces the actionable items
 into my existing todo workflow, and silently clears the noise so the
 notification inbox stops being a wall of red.
+
+The fetch uses `?all=true` so the cron also sees notifications I've
+viewed on github.com (marked read) but never deleted. Without that,
+PRs I'd already clicked on would sit in the inbox forever even after
+they merged - the cron would never see them again to clean them up.
 
 ## How it classifies
 
@@ -31,7 +36,12 @@ Three early-exit drops fire before the reason-based classifier, in this order:
    `triage.py` to add new patterns - keep them anchored on the same
    `_TITLE_DROP_PREFIX` + phrase + `:` shape.
 2. **Closed-subject drop** - if the PR or issue is already closed/merged
-   when the notification first lands, drop instead of routing anywhere.
+   when the notification arrives, drop instead of routing anywhere. If
+   the subject is a PR I authored, also append an entry to todo.yml's
+   `done` section (source `github-notification-auto-archive`) so the
+   shipped work is captured for biannual reflection. Notifications I
+   was assigned to or @-mentioned on still drop without archiving -
+   those reflect someone else's work, not mine.
 3. **Self-authored Enable Dependabot drop** - `reason=author` PRs titled
    `Enable Dependabot` (case-insensitive, whitespace-trimmed) drop when
    no human besides me has commented or reviewed (bots like Copilot
@@ -40,6 +50,15 @@ Three early-exit drops fire before the reason-based classifier, in this order:
    keeps the notification so the response reaches the inbox. On any
    API/parse failure, the rule conservatively falls through to normal
    classification.
+
+After those drops, **already-read notifications that would otherwise
+route to `INBOX` or `Q1`** are short-circuited as `KEEP` - they're
+things I already viewed and chose to leave alone, so the cron doesn't
+re-add them to the inbox. DROP rules still fire on read notifications
+(so `ci_activity`, `comment`-on-closed, super-linter comments, and
+`subscribed`-on-closed get cleaned up regardless of read status). Only
+unread notifications - or read notifications that survive every drop
+rule - take the actionable path.
 
 Anything that survives those falls into the reason table:
 
@@ -121,7 +140,12 @@ touched, so manually added items are left alone. Errors other than 404
 (timeout, 5xx, parse failure) keep the entry to avoid dropping things
 during transient issues. When the pruner drops an entry, it also marks
 the underlying GitHub notification thread done (DELETE) so the next
-cron cycle doesn't re-fetch the unread thread and re-add it. Pruner
+cron cycle doesn't re-fetch the unread thread and re-add it. If the
+dropped entry was a self-authored PR (`notification.reason == "author"`
+on a PR URL), it is also copied into `done` with
+`source: github-notification-auto-archive` before being removed - so
+PRs first tracked while open and merged later still land in the
+biannual reflection archive instead of vanishing silently. Pruner
 stats land in the final summary line as `pruned_stale=N` plus a
 `pruned_breakdown:` line when anything was dropped.
 
