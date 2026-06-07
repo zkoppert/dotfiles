@@ -16,14 +16,18 @@
 # Per-command confirmation:
 #   - `gh pr ready`:  set ZACK_CONFIRMED_PR_READY=1 in the same invocation.
 #   - `gh pr create`: write a non-empty review summary to
-#       <repo>/.git/copilot-pr-review/<current-branch>.md
-#     AND set ZACK_CONFIRMED_PR_CREATE=1 in the same invocation. The marker
-#     file must be >=200 bytes so a bare `touch` does not satisfy it — actual
-#     review content has to land there before the PR can be opened. Both
-#     conditions are required when invoked inside a git checkout. If the
-#     wrapper cannot resolve the current repo or branch (e.g., `gh pr create`
-#     invoked outside a checkout or on detached HEAD), the env var alone is
-#     accepted as a fallback because no marker path can be derived.
+#       <git-dir>/copilot-pr-review/<current-branch>.md
+#     AND set ZACK_CONFIRMED_PR_CREATE=1 in the same invocation. `<git-dir>` is
+#     the per-checkout git directory as reported by `git rev-parse
+#     --absolute-git-dir`, so worktrees resolve to the per-worktree gitdir
+#     (e.g. `<main>/.git/worktrees/<name>/copilot-pr-review/`) rather than the
+#     gitlink file at `<worktree>/.git`. The marker file must be >=200 bytes
+#     so a bare `touch` does not satisfy it — actual review content has to
+#     land there before the PR can be opened. Both conditions are required
+#     when invoked inside a git checkout. If the wrapper cannot resolve the
+#     current repo or branch (e.g., `gh pr create` invoked outside a checkout
+#     or on detached HEAD), the env var alone is accepted as a fallback
+#     because no marker path can be derived.
 #
 # Known limitations (PATH-shim is a soft guard, not adversarial):
 #   - `gh api repos/.../pulls` and `gh api graphql` createPullRequest mutations
@@ -175,21 +179,26 @@ if [ "$is_pr_create" = "1" ]; then
   # fall back to the env var alone.
   repo_root=""
   branch=""
+  git_dir=""
   if git rev-parse --show-toplevel >/dev/null 2>&1; then
     repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
     branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    # --absolute-git-dir returns the per-worktree gitdir, so this works for
+    # both plain checkouts (`<repo>/.git`) and worktrees (where `<repo>/.git`
+    # is a gitlink file, not a directory).
+    git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null || true)"
   fi
 
   marker_ok=0
   marker_path=""
   in_repo=0
-  if [ -n "$repo_root" ] && [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
+  if [ -n "$repo_root" ] && [ -n "$branch" ] && [ "$branch" != "HEAD" ] && [ -n "$git_dir" ]; then
     in_repo=1
     # Encode `/` and `%` losslessly so distinct branches never collide on the
     # marker filename. `feat/foo` becomes `feat%2Ffoo.md`; a literal underscore
     # branch like `feat_foo` stays `feat_foo.md`.
     safe_branch="$(printf '%s' "$branch" | sed -e 's/%/%25/g' -e 's|/|%2F|g')"
-    marker_path="$repo_root/.git/copilot-pr-review/$safe_branch.md"
+    marker_path="$git_dir/copilot-pr-review/$safe_branch.md"
     if [ -f "$marker_path" ]; then
       size="$(wc -c < "$marker_path" 2>/dev/null | tr -d ' ' || echo 0)"
       if [ "${size:-0}" -ge 200 ]; then
