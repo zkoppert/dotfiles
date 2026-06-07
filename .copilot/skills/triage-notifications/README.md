@@ -17,17 +17,32 @@ notification inbox stops being a wall of red.
 
 ## How it classifies
 
-One early-exit drop fires before the reason-based classifier:
+Three early-exit drops fire before the reason-based classifier, in this order:
 
-- **Self-authored Enable Dependabot drop** - `reason=author` PRs titled
-  exactly `Enable Dependabot` drop when no human besides me has
-  commented or reviewed (bots like Copilot reviewer and super-linter are
-  ignored). These are pure housekeeping noise once the bots have signed
-  off. A real human reviewer joining keeps the notification so the
-  response reaches the inbox. On any API/parse failure, the rule
-  conservatively falls through to normal classification.
+1. **Title-pattern drop** - repetitive system-generated noise (regex match
+   on `subject.title`). Currently catches titles shaped like
+   `Intermittent test failure: ...`, `Flaky test: ...`, `test flake: ...`,
+   with an optional leading `[Bug]`-style tag. Patterns are anchored to
+   the start of the title and require the trigger phrase to be followed
+   by a colon, so legitimate titles that mention the phrase as a
+   substring (e.g. `Fix flaky test in dashboard`) are not swept up.
+   Overridden when `reason` is `mention` or `assign` so a direct human
+   ping always reaches the inbox. Edit `TITLE_DROP_PATTERNS` in
+   `triage.py` to add new patterns - keep them anchored on the same
+   `_TITLE_DROP_PREFIX` + phrase + `:` shape.
+2. **Closed-subject drop** - if the PR or issue is already closed/merged
+   when the notification first lands, drop instead of routing anywhere.
+3. **Self-authored Enable Dependabot drop** - `reason=author` PRs titled
+   `Enable Dependabot` (case-insensitive, whitespace-trimmed) drop when
+   no human besides me has commented or reviewed (bots like Copilot
+   reviewer and super-linter are ignored). These are pure housekeeping
+   noise once the bots have signed off. A real human reviewer joining
+   keeps the notification so the response reaches the inbox. On any
+   API/parse failure, the rule conservatively falls through to normal
+   classification.
 
-Anything that survives falls into the reason table:
+Anything that survives those falls into the reason table:
+
 
 | Reason            | Bucket                                           |
 | ----------------- | ------------------------------------------------ |

@@ -2280,3 +2280,188 @@ def test_fetch_pr_human_commenters_handles_multi_page_slurp(monkeypatch):
         _enable_dependabot_notif(), my_login="zkoppert"
     )
     assert result == {"alice", "bob"}
+
+
+
+
+def _flaky_notif(reason: str, title: str) -> dict:
+    """Helper: open Issue with a flaky/intermittent test title under the
+    given reason. Mirrors the github-ui pattern seen in production."""
+    return _notif(
+        reason,
+        subject={
+            "title": title,
+            "url": "https://api.github.com/repos/o/r/issues/42",
+            "latest_comment_url": None,
+            "type": "Issue",
+        },
+    )
+
+
+def test_classify_drops_intermittent_test_failure_team_mention():
+    """The github-ui pattern: `team_mention` on an open Issue titled
+    'Intermittent test failure: ...' must drop instead of landing in the
+    inbox-by-default bucket."""
+    notif = _flaky_notif(
+        "team_mention",
+        "Intermittent test failure: DashboardSidebarCollapsed#calls onSelectLink",
+    )
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "intermittent test failure" in c.reason.lower()
+
+
+def test_classify_drops_flaky_test_subscribed():
+    """`flaky test` variant on a `subscribed` notification also drops."""
+    notif = _flaky_notif("subscribed", "Flaky test: NuxDashboard#renders")
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_classify_drops_test_flake_team_mention():
+    """`test flake` variant also drops when shaped as the bot output."""
+    notif = _flaky_notif("team_mention", "test flake: foo#bar started failing")
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_classify_drops_title_match_is_case_insensitive():
+    """Title matching ignores case - all-caps still drops."""
+    notif = _flaky_notif("team_mention", "INTERMITTENT TEST FAILURE: thing")
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_classify_keeps_intermittent_test_failure_when_at_mentioned():
+    """Direct @mention overrides the title drop - if someone explicitly
+    pings Zack on a flaky-test issue, surface it instead of dropping."""
+    notif = _flaky_notif(
+        "mention",
+        "Intermittent test failure: needs your attention",
+    )
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_Q1
+
+
+def test_classify_keeps_intermittent_test_failure_when_assigned():
+    """Direct assignment overrides the title drop."""
+    notif = _flaky_notif(
+        "assign",
+        "Intermittent test failure: please look",
+    )
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_Q1
+
+
+def test_classify_title_drop_does_not_match_unrelated_titles():
+    """Regression guard: a title without any drop pattern still flows
+    through normal classification (here: team_mention falls through to
+    inbox-by-default)."""
+    notif = _flaky_notif(
+        "team_mention",
+        "Real production bug: dashboard crashes",
+    )
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket != triage.BUCKET_DROP
+
+
+def test_classify_title_drop_does_not_match_phrase_as_substring():
+    """Regression guard from review feedback: legitimate titles that
+    contain the trigger phrase as a substring must NOT drop. Each of
+    these is a real PR or bug we'd actually want to triage."""
+    not_noise = [
+        ("review_requested", "Fix flaky test in dashboard"),
+        ("team_mention", "flaky test suite is failing CI completely"),
+        ("team_mention", "Intermittent test failure modes - design doc"),
+        ("subscribed", "test flake reproduction script"),
+        ("team_mention", "investigation: why is the flaky test detector broken"),
+    ]
+    for reason, title in not_noise:
+        notif = _flaky_notif(reason, title)
+        c = triage.classify(
+            notif,
+            my_login="zkoppert",
+            q1_logins=set(),
+            state_fetcher=lambda _: "open",
+            comment_fetcher=lambda _: (None, None),
+            subject_author_fetcher=lambda _: "someone-else",
+        )
+        assert c.bucket != triage.BUCKET_DROP, (
+            f"{reason!r} title {title!r} should not drop, got {c}"
+        )
+
+
+def test_classify_title_drop_matches_bracketed_prefix():
+    """The github-ui bot prepends `[Bug]` to some intermittent-failure
+    titles - the pattern must still match those."""
+    notif = _flaky_notif(
+        "team_mention",
+        "[Bug] Intermittent test failure: useSectionData#fails sometimes",
+    )
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_title_drop_patterns_constant_seeded():
+    """Sanity check: the constant is non-empty and the three seed
+    patterns are present."""
+    sources = {p.pattern for p in triage.TITLE_DROP_PATTERNS}
+    assert any("intermittent test failure" in p for p in sources)
+    assert any("flaky test" in p for p in sources)
+    assert any("test flake" in p for p in sources)
