@@ -17,6 +17,24 @@ notification inbox stops being a wall of red.
 
 ## How it classifies
 
+Two early-exit drops fire before the reason-based classifier:
+
+1. **Title-pattern drop** - repetitive system-generated noise (regex match
+   on `subject.title`). Currently catches titles shaped like
+   `Intermittent test failure: ...`, `Flaky test: ...`, `test flake: ...`,
+   with an optional leading `[Bug]`-style tag. Patterns are anchored to
+   the start of the title and require the trigger phrase to be followed
+   by a colon, so legitimate titles that mention the phrase as a
+   substring (e.g. `Fix flaky test in dashboard`) are not swept up.
+   Overridden when `reason` is `mention` or `assign` so a direct human
+   ping always reaches the inbox. Edit `TITLE_DROP_PATTERNS` in
+   `triage.py` to add new patterns - keep them anchored on the same
+   `_TITLE_DROP_PREFIX` + phrase + `:` shape.
+2. **Closed-subject drop** - if the PR or issue is already closed/merged
+   when the notification first lands, drop instead of routing anywhere.
+
+Anything that survives those falls into the reason table:
+
 | Reason            | Bucket                                           |
 | ----------------- | ------------------------------------------------ |
 | `mention`         | Q1 (urgent + important)                          |
