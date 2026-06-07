@@ -395,7 +395,6 @@ def classify(
                     f"title matches drop pattern /{pattern.pattern}/",
                 )
 
-
     # Cheap early drop: if the subject is already closed/merged when the
     # notification first lands, there is nothing left to do. Only check
     # reasons that route to inbox/Q1, and only when the subject is the

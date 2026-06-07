@@ -2282,8 +2282,6 @@ def test_fetch_pr_human_commenters_handles_multi_page_slurp(monkeypatch):
     assert result == {"alice", "bob"}
 
 
-
-
 def _flaky_notif(reason: str, title: str) -> dict:
     """Helper: open Issue with a flaky/intermittent test title under the
     given reason. Mirrors the github-ui pattern seen in production."""

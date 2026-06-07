@@ -43,7 +43,6 @@ Three early-exit drops fire before the reason-based classifier, in this order:
 
 Anything that survives those falls into the reason table:
 
-
 | Reason            | Bucket                                           |
 | ----------------- | ------------------------------------------------ |
 | `mention`         | Q1 (urgent + important)                          |
