@@ -2981,3 +2981,232 @@ def test_prune_archive_visible_to_dedup_on_next_run():
         triage.prune_stale_notifications(data, stats)
     ids = triage.existing_thread_ids(data)
     assert "thr-88" in ids
+
+
+# --- Tests for SUBSCRIPTION_FILTERED_REPOS (NUX subscription filter) ---
+
+
+def _nux_notif(reason: str, *, subject_type: str = "PullRequest") -> dict:
+    """A notification on github/new-user-experience with the given reason."""
+    return {
+        "id": "nux-1",
+        "reason": reason,
+        "unread": True,
+        "repository": {"full_name": "github/new-user-experience"},
+        "subject": {
+            "title": "Some NUX notification",
+            "url": "https://api.github.com/repos/github/new-user-experience/pulls/1",
+            "latest_comment_url": None,
+            "type": subject_type,
+        },
+    }
+
+
+def test_classify_nux_subscribed_drops():
+    """Subscribed-thread noise on github/new-user-experience drops -
+    I only want directed pings from that repo."""
+    c = triage.classify(
+        _nux_notif("subscribed"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "subscription allowlist" in c.reason
+
+
+def test_classify_nux_comment_drops():
+    """Plain comment notifications on NUX repo drop - if I was
+    @-mentioned in the comment the reason would be `mention`."""
+    c = triage.classify(
+        _nux_notif("comment"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: ("andimiya", "lgtm"),
+        subject_author_fetcher=lambda _: "andimiya",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "subscription allowlist" in c.reason
+
+
+def test_classify_nux_ci_activity_drops():
+    """ci_activity on NUX drops via the subscription filter (it would
+    drop anyway via the always-drop ci_activity rule - both paths agree)."""
+    c = triage.classify(
+        _nux_notif("ci_activity"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_classify_nux_author_drops():
+    """My own PRs on NUX (reason=author) drop too - I don't want the
+    cron tracking PRs I authored unless someone pings me on them."""
+    c = triage.classify(
+        _nux_notif("author"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_classify_nux_mention_still_routes_normally():
+    """An @-mention on NUX is a directed ping - keep the normal
+    Q1 routing for it."""
+    c = triage.classify(
+        _nux_notif("mention"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "andimiya",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_Q1
+
+
+def test_classify_nux_assign_still_routes_normally():
+    """Assign on NUX is a directed ping - Q1."""
+    c = triage.classify(
+        _nux_notif("assign"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "andimiya",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_Q1
+
+
+def test_classify_nux_review_requested_still_routes_normally():
+    """review_requested on NUX is a directed ping - either Q1 (if PR
+    author is on the NUX teammate list) or INBOX."""
+    c = triage.classify(
+        _nux_notif("review_requested"),
+        my_login="zkoppert",
+        q1_logins={"andimiya"},
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "andimiya",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_Q1
+
+
+def test_classify_nux_team_mention_still_routes_normally():
+    """team_mention on NUX is a team-level directed ping - INBOX
+    (team_mention isn't in Q1_REASONS, so it gets the default INBOX
+    routing; the point is the subscription filter doesn't DROP it)."""
+    c = triage.classify(
+        _nux_notif("team_mention"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "andimiya",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_INBOX
+
+
+def test_classify_non_filtered_repo_subscribed_still_routes_to_inbox():
+    """Repos NOT in SUBSCRIPTION_FILTERED_REPOS keep the normal
+    subscribed→INBOX routing."""
+    notif = _nux_notif("subscribed")
+    notif["repository"]["full_name"] = "github/some-other-repo"
+    notif["subject"]["url"] = "https://api.github.com/repos/github/some-other-repo/pulls/1"
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_INBOX
+
+
+def test_classify_nux_filter_runs_after_closed_state_drop():
+    """A closed/merged PR on NUX still drops via the closed-state rule
+    (cheaper than the subscription filter), and self-authored ones
+    still archive to done."""
+    notif = _nux_notif("author")
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "merged",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "merged pullrequest" in c.reason
+    assert c.archive_to_done is True
+
+
+def test_classify_nux_filter_runs_before_keep_wrapper():
+    """A read subscribed notification on NUX should DROP (so the cron
+    actually clears it), not KEEP. The subscription filter must run
+    before the read-notification KEEP override."""
+    notif = _nux_notif("subscribed")
+    notif["unread"] = False
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_classify_nux_security_alert_still_routes_to_q1():
+    """security_alert on NUX must still reach Q1 - vulnerabilities
+    and secret scans are too important to silently drop."""
+    c = triage.classify(
+        _nux_notif("security_alert"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_Q1
+
+
+def test_classify_subscription_filter_is_case_insensitive():
+    """Repo full_name lookup is lowercased so future entries for
+    mixed-case repos (e.g. github/CodeQL) don't silently miss."""
+    notif = _nux_notif("subscribed")
+    notif["repository"]["full_name"] = "GitHub/New-User-Experience"
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "subscription allowlist" in c.reason

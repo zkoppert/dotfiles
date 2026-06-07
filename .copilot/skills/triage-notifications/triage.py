@@ -120,6 +120,23 @@ STATEFUL_REASONS: set[str] = {
     "author",
 }
 
+# Repos where I'm only interested in directed pings - everything else
+# (subscribed, manual, comment, ci_activity, author, etc.) is auto-
+# subscription noise that should drop and be marked done on GitHub.
+# Maps full_name (lowercase) -> set of allowed reasons. Anything
+# outside the set drops at classify time, before any reason-based
+# routing. `security_alert` is kept so Dependabot vulnerability /
+# secret-scanning alerts still reach Q1 on filtered repos.
+SUBSCRIPTION_FILTERED_REPOS: dict[str, set[str]] = {
+    "github/new-user-experience": {
+        "review_requested",
+        "assign",
+        "mention",
+        "team_mention",
+        "security_alert",
+    },
+}
+
 DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
 
 # Buckets the classifier can return.
@@ -499,6 +516,25 @@ def _classify_internal(
                 BUCKET_DROP,
                 "self-authored Enable Dependabot PR with no human commenters",
             )
+
+    # Repo-scoped subscription filter: for repos in
+    # SUBSCRIPTION_FILTERED_REPOS (e.g. github/new-user-experience), only
+    # directed pings (review_requested / assign / mention / team_mention /
+    # security_alert) are interesting; everything else (subscribed,
+    # manual, comment, ci_activity, author, ...) is auto-subscription
+    # noise that should drop and be marked done. Placed after the title/
+    # closed-state/Enable Dependabot drops so those still fire on
+    # filtered repos too, but before reason routing so we don't pay for
+    # state/author fetches on reasons we're about to discard.
+    # Lookup is case-insensitive (`full_name.lower()`) so future entries
+    # for mixed-case repos like `github/CodeQL` don't silently miss.
+    repo_full = (notif.get("repository") or {}).get("full_name") or ""
+    allowed_reasons = SUBSCRIPTION_FILTERED_REPOS.get(repo_full.lower())
+    if allowed_reasons is not None and reason not in allowed_reasons:
+        return Classification(
+            BUCKET_DROP,
+            f"{repo_full}: reason '{reason}' not in subscription allowlist",
+        )
 
     # Already-viewed notifications that would otherwise route to
     # inbox/Q1 are handled by the `classify` wrapper which post-processes

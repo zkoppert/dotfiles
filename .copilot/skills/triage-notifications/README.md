@@ -22,7 +22,7 @@ they merged - the cron would never see them again to clean them up.
 
 ## How it classifies
 
-Three early-exit drops fire before the reason-based classifier, in this order:
+Four early-exit drops fire before the reason-based classifier, in this order:
 
 1. **Title-pattern drop** - repetitive system-generated noise (regex match
    on `subject.title`). Currently catches titles shaped like
@@ -50,6 +50,18 @@ Three early-exit drops fire before the reason-based classifier, in this order:
    keeps the notification so the response reaches the inbox. On any
    API/parse failure, the rule conservatively falls through to normal
    classification.
+4. **Per-repo subscription filter** - for repos listed in
+   `SUBSCRIPTION_FILTERED_REPOS`, only directed-ping reasons stay
+   (`review_requested`, `assign`, `mention`, `team_mention`,
+   `security_alert`); every other reason (`subscribed`, `manual`,
+   `comment`, `ci_activity`, `author`, ...) drops. Used for repos
+   where I get auto-subscribed to PRs/issues just by interacting once
+   and only care about notifications aimed directly at me.
+   `security_alert` is kept so Dependabot vulnerabilities and
+   secret-scanning alerts still route to Q1. Repo lookup is
+   case-insensitive. Currently filters `github/new-user-experience`.
+   Edit `SUBSCRIPTION_FILTERED_REPOS` in `triage.py` to add more
+   repos.
 
 After those drops, **already-read notifications that would otherwise
 route to `INBOX` or `Q1`** are short-circuited as `KEEP` - they're
