@@ -17,6 +17,18 @@ notification inbox stops being a wall of red.
 
 ## How it classifies
 
+One early-exit drop fires before the reason-based classifier:
+
+- **Self-authored Enable Dependabot drop** - `reason=author` PRs titled
+  exactly `Enable Dependabot` drop when no human besides me has
+  commented or reviewed (bots like Copilot reviewer and super-linter are
+  ignored). These are pure housekeeping noise once the bots have signed
+  off. A real human reviewer joining keeps the notification so the
+  response reaches the inbox. On any API/parse failure, the rule
+  conservatively falls through to normal classification.
+
+Anything that survives falls into the reason table:
+
 | Reason            | Bucket                                           |
 | ----------------- | ------------------------------------------------ |
 | `mention`         | Q1 (urgent + important)                          |
