@@ -279,6 +279,81 @@ def is_super_linter(author: str | None, body: str | None) -> bool:
     return False
 
 
+def fetch_pr_human_commenters(
+    notif: dict[str, Any], *, my_login: str
+) -> set[str] | None:
+    """Return the set of human GitHub logins (other than `my_login`) who
+    have commented or reviewed the PR.
+
+    Walks three endpoints because GitHub splits PR conversation across
+    them: ``/issues/{n}/comments`` (top-level), ``/pulls/{n}/comments``
+    (inline review comments), and ``/pulls/{n}/reviews`` (review summary
+    submissions). For each commenter we keep only ``user.type == "User"``
+    entries - bots like Copilot Code Review (``Bot``) are excluded by
+    design so a self-authored PR with only bot reviewers can still drop.
+
+    Returns ``None`` on any API or parse failure so callers can be
+    conservative (keep the notification instead of dropping it under
+    uncertainty).
+    """
+    subject = notif.get("subject") or {}
+    url = subject.get("url") or ""
+    if "/pulls/" not in url:
+        return None
+    # url is `https://api.github.com/repos/{owner}/{repo}/pulls/{n}` -
+    # extract the repo + number for the three derived endpoints.
+    path = url.replace("https://api.github.com", "")
+    parts = path.strip("/").split("/")
+    if len(parts) < 5 or parts[0] != "repos" or parts[3] != "pulls":
+        return None
+    owner, repo, number = parts[1], parts[2], parts[4]
+    base = f"/repos/{owner}/{repo}"
+    endpoints = [
+        f"{base}/issues/{number}/comments",
+        f"{base}/pulls/{number}/comments",
+        f"{base}/pulls/{number}/reviews",
+    ]
+    commenters: set[str] = set()
+    my_login_lc = my_login.lower()
+    for endpoint in endpoints:
+        try:
+            out = run_gh(
+                ["api", "--paginate", "--slurp", endpoint], timeout=30
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            logger.warning(
+                "fetch_pr_human_commenters %s failed: %s", endpoint, exc
+            )
+            return None
+        # `--slurp` wraps each page response in an outer JSON array so we
+        # can json.loads the whole thing safely - body content containing
+        # `][` (markdown reference links, array indexing) cannot fragment
+        # the parse. Matches the pattern used by fetch_notifications.
+        try:
+            pages = json.loads(out) if out.strip() else []
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "fetch_pr_human_commenters parse failed for %s: %s",
+                endpoint,
+                exc,
+            )
+            return None
+        for page in pages or []:
+            if not isinstance(page, list):
+                continue
+            for entry in page:
+                if not isinstance(entry, dict):
+                    continue
+                user = entry.get("user") or {}
+                if (user.get("type") or "").lower() != "user":
+                    continue
+                login = user.get("login") or ""
+                if not login or login.lower() == my_login_lc:
+                    continue
+                commenters.add(login)
+    return commenters
+
+
 def mentions_me(body: str | None, my_login: str) -> bool:
     """Return True if `body` contains an @-mention of `my_login` or `me`."""
     if not body:
@@ -295,12 +370,13 @@ def classify(
     state_fetcher=fetch_thread_state,
     comment_fetcher=fetch_latest_comment,
     subject_author_fetcher=fetch_subject_author,
+    human_commenter_fetcher=fetch_pr_human_commenters,
 ) -> Classification:
     """Decide which bucket a notification belongs in.
 
-    `state_fetcher`, `comment_fetcher`, and `subject_author_fetcher` are
-    injectable so tests can avoid network calls. They default to the live
-    API helpers.
+    `state_fetcher`, `comment_fetcher`, `subject_author_fetcher`, and
+    `human_commenter_fetcher` are injectable so tests can avoid network
+    calls. They default to the live API helpers.
     """
     reason = (notif.get("reason") or "").lower()
     subject = notif.get("subject") or {}
@@ -331,6 +407,26 @@ def classify(
             return Classification(
                 BUCKET_DROP,
                 f"{reason} on {state} {subject_type}",
+            )
+
+    # Self-authored `Enable Dependabot` housekeeping PRs are pure noise
+    # once any bots (Copilot reviewer, super-linter) have weighed in -
+    # there's nothing to triage unless an actual human reviewer joins.
+    # Drop only when no human besides me has commented. On fetch failure
+    # (None), fall through and let the normal classifier handle it.
+    # Placed AFTER the closed-state drop so already-closed Enable
+    # Dependabot PRs drop on the cheap state check instead of paying
+    # for 3 commenter API calls first.
+    if (
+        reason == "author"
+        and subject_type == "pullrequest"
+        and title.strip().lower() == "enable dependabot"
+    ):
+        commenters = human_commenter_fetcher(notif, my_login=my_login)
+        if commenters is not None and not commenters:
+            return Classification(
+                BUCKET_DROP,
+                "self-authored Enable Dependabot PR with no human commenters",
             )
 
     if reason == "review_requested":

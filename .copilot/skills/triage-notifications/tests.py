@@ -1982,6 +1982,306 @@ def test_classify_skips_state_check_for_non_subject_types():
     assert c.bucket == triage.BUCKET_Q1
 
 
+def _enable_dependabot_notif() -> dict:
+    """Helper: self-authored Enable Dependabot PR notification."""
+    return _notif(
+        "author",
+        subject={
+            "title": "Enable Dependabot",
+            "url": "https://api.github.com/repos/o/r/pulls/30",
+            "latest_comment_url": None,
+            "type": "PullRequest",
+        },
+    )
+
+
+def test_classify_closed_enable_dependabot_drops_via_state_check_not_commenter_fetch():
+    """A closed self-authored Enable Dependabot PR must drop via the cheap
+    state check before paying for 3 commenter API calls. Regression guard
+    on the ordering of classify() branches."""
+    fetcher_calls = []
+
+    def fetcher(n, *, my_login):
+        fetcher_calls.append(n)
+        return set()
+
+    c = triage.classify(
+        _enable_dependabot_notif(),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "closed",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
+        human_commenter_fetcher=fetcher,
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "closed pullrequest" in c.reason
+    assert fetcher_calls == []  # cheap state check short-circuited
+
+
+def test_classify_drops_self_authored_enable_dependabot_with_no_human_commenters():
+    """My own Enable Dependabot PR with only bot reviewers (Copilot,
+    super-linter) is noise - drop it so the inbox stays clean."""
+    c = triage.classify(
+        _enable_dependabot_notif(),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "Enable Dependabot" in c.reason
+
+
+def test_classify_keeps_enable_dependabot_when_human_commented():
+    """If an actual teammate has commented, keep the notification so
+    the response reaches the inbox."""
+    c = triage.classify(
+        _enable_dependabot_notif(),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
+        human_commenter_fetcher=lambda _, my_login: {"andimiya"},
+    )
+    assert c.bucket != triage.BUCKET_DROP
+
+
+def test_classify_keeps_enable_dependabot_on_fetch_failure():
+    """On fetcher returning None (network blip, parse failure), fall
+    through to normal classification - never drop on uncertainty."""
+    c = triage.classify(
+        _enable_dependabot_notif(),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
+        human_commenter_fetcher=lambda _, my_login: None,
+    )
+    assert c.bucket != triage.BUCKET_DROP
+
+
+def test_classify_does_not_drop_unrelated_author_pr():
+    """`reason=author` on a PR with a different title is not affected
+    by the Enable Dependabot rule - falls through to normal classifier."""
+    notif = _notif(
+        "author",
+        subject={
+            "title": "Fix payment processing bug",
+            "url": "https://api.github.com/repos/o/r/pulls/30",
+            "latest_comment_url": None,
+            "type": "PullRequest",
+        },
+    )
+    fetcher_calls = []
+
+    def fetcher(n, *, my_login):
+        fetcher_calls.append(n)
+        return set()
+
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
+        human_commenter_fetcher=fetcher,
+    )
+    assert c.bucket != triage.BUCKET_DROP
+    assert fetcher_calls == []  # short-circuit before any API call
+
+
+def test_classify_enable_dependabot_only_fires_on_author_reason():
+    """Same title under a different reason (e.g. team_mention) doesn't
+    trigger the self-authored rule."""
+    notif = _notif(
+        "team_mention",
+        subject={
+            "title": "Enable Dependabot",
+            "url": "https://api.github.com/repos/o/r/pulls/30",
+            "latest_comment_url": None,
+            "type": "PullRequest",
+        },
+    )
+    fetcher_calls = []
+
+    def fetcher(n, *, my_login):
+        fetcher_calls.append(n)
+        return set()
+
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
+        human_commenter_fetcher=fetcher,
+    )
+    assert c.bucket != triage.BUCKET_DROP
+    assert fetcher_calls == []
+
+
+def test_classify_enable_dependabot_title_match_is_case_insensitive():
+    """Whitespace and case variations on the exact title still match."""
+    notif = _notif(
+        "author",
+        subject={
+            "title": "  enable dependabot  ",
+            "url": "https://api.github.com/repos/o/r/pulls/30",
+            "latest_comment_url": None,
+            "type": "PullRequest",
+        },
+    )
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+# --- fetch_pr_human_commenters helper tests ---
+
+
+def _commenter(login: str, user_type: str = "User") -> dict:
+    return {"user": {"login": login, "type": user_type}}
+
+
+def test_fetch_pr_human_commenters_excludes_bots_and_self(monkeypatch):
+    """Bots (Copilot reviewer, super-linter) and my own comments are
+    excluded - only other humans count."""
+    page_responses = {
+        "/repos/o/r/issues/30/comments": [
+            _commenter("zkoppert"),
+            _commenter("super-linter[bot]", "Bot"),
+        ],
+        "/repos/o/r/pulls/30/comments": [
+            _commenter("Copilot", "Bot"),
+        ],
+        "/repos/o/r/pulls/30/reviews": [
+            _commenter("copilot-pull-request-reviewer[bot]", "Bot"),
+        ],
+    }
+
+    def fake_run_gh(args, *, timeout=60):
+        # args = ["api", "--paginate", "--slurp", "/repos/..."]
+        endpoint = args[-1]
+        # --slurp wraps each page in an outer array; here we have 1 page
+        return json.dumps([page_responses[endpoint]])
+
+    monkeypatch.setattr(triage, "run_gh", fake_run_gh)
+    notif = _enable_dependabot_notif()
+    result = triage.fetch_pr_human_commenters(notif, my_login="zkoppert")
+    assert result == set()
+
+
+def test_fetch_pr_human_commenters_includes_other_humans(monkeypatch):
+    """Real human reviewers (User type, not me) are counted."""
+    page_responses = {
+        "/repos/o/r/issues/30/comments": [_commenter("andimiya")],
+        "/repos/o/r/pulls/30/comments": [_commenter("iansan5653")],
+        "/repos/o/r/pulls/30/reviews": [],
+    }
+
+    def fake_run_gh(args, *, timeout=60):
+        return json.dumps([page_responses[args[-1]]])
+
+    monkeypatch.setattr(triage, "run_gh", fake_run_gh)
+    result = triage.fetch_pr_human_commenters(
+        _enable_dependabot_notif(), my_login="zkoppert"
+    )
+    assert result == {"andimiya", "iansan5653"}
+
+
+def test_fetch_pr_human_commenters_returns_none_on_api_failure(monkeypatch):
+    """Any subprocess failure surfaces as None so the caller stays
+    conservative."""
+
+    def fake_run_gh(args, *, timeout=60):
+        raise triage.subprocess.CalledProcessError(1, ["gh"])
+
+    monkeypatch.setattr(triage, "run_gh", fake_run_gh)
+    result = triage.fetch_pr_human_commenters(
+        _enable_dependabot_notif(), my_login="zkoppert"
+    )
+    assert result is None
+
+
+def test_fetch_pr_human_commenters_returns_none_on_non_pr_url():
+    """Issue URLs (no `/pulls/` segment) return None - the helper is
+    PR-only."""
+    notif = _notif(
+        "author",
+        subject={
+            "title": "Enable Dependabot",
+            "url": "https://api.github.com/repos/o/r/issues/30",
+            "latest_comment_url": None,
+            "type": "Issue",
+        },
+    )
+    assert triage.fetch_pr_human_commenters(notif, my_login="zkoppert") is None
+
+
+def test_fetch_pr_human_commenters_handles_bracket_substring_in_body(monkeypatch):
+    """Regression: a comment body containing the literal substring ``][``
+    (markdown reference link, array indexing, table cell, etc.) MUST
+    NOT corrupt the parse. The earlier implementation used a custom
+    split-on-`][` parser that fragmented these payloads and silently
+    returned None, which made the rule no-op exactly when comments had
+    non-trivial content."""
+    page_responses = {
+        "/repos/o/r/issues/30/comments": [
+            {
+                "user": {"login": "alice", "type": "User"},
+                "body": "see [foo][bar] and arr[0][1]",
+            }
+        ],
+        "/repos/o/r/pulls/30/comments": [],
+        "/repos/o/r/pulls/30/reviews": [],
+    }
+
+    def fake_run_gh(args, *, timeout=60):
+        return json.dumps([page_responses[args[-1]]])
+
+    monkeypatch.setattr(triage, "run_gh", fake_run_gh)
+    result = triage.fetch_pr_human_commenters(
+        _enable_dependabot_notif(), my_login="zkoppert"
+    )
+    assert result == {"alice"}
+
+
+def test_fetch_pr_human_commenters_handles_multi_page_slurp(monkeypatch):
+    """--slurp returns [[page1],[page2],...] - the parser must flatten
+    across pages."""
+    page_responses = {
+        "/repos/o/r/issues/30/comments": [
+            [_commenter("alice")],
+            [_commenter("bob")],
+        ],
+        "/repos/o/r/pulls/30/comments": [[]],
+        "/repos/o/r/pulls/30/reviews": [[]],
+    }
+
+    def fake_run_gh(args, *, timeout=60):
+        return json.dumps(page_responses[args[-1]])
+
+    monkeypatch.setattr(triage, "run_gh", fake_run_gh)
+    result = triage.fetch_pr_human_commenters(
+        _enable_dependabot_notif(), my_login="zkoppert"
+    )
+    assert result == {"alice", "bob"}
+
+
 def _flaky_notif(reason: str, title: str) -> dict:
     """Helper: open Issue with a flaky/intermittent test title under the
     given reason. Mirrors the github-ui pattern seen in production."""

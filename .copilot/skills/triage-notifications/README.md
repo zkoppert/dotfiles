@@ -17,7 +17,7 @@ notification inbox stops being a wall of red.
 
 ## How it classifies
 
-Two early-exit drops fire before the reason-based classifier:
+Three early-exit drops fire before the reason-based classifier, in this order:
 
 1. **Title-pattern drop** - repetitive system-generated noise (regex match
    on `subject.title`). Currently catches titles shaped like
@@ -32,6 +32,14 @@ Two early-exit drops fire before the reason-based classifier:
    `_TITLE_DROP_PREFIX` + phrase + `:` shape.
 2. **Closed-subject drop** - if the PR or issue is already closed/merged
    when the notification first lands, drop instead of routing anywhere.
+3. **Self-authored Enable Dependabot drop** - `reason=author` PRs titled
+   `Enable Dependabot` (case-insensitive, whitespace-trimmed) drop when
+   no human besides me has commented or reviewed (bots like Copilot
+   reviewer and super-linter are ignored). These are pure housekeeping
+   noise once the bots have signed off. A real human reviewer joining
+   keeps the notification so the response reaches the inbox. On any
+   API/parse failure, the rule conservatively falls through to normal
+   classification.
 
 Anything that survives those falls into the reason table:
 
