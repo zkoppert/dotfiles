@@ -77,6 +77,37 @@ Q1_REASONS: set[str] = {
 # Subject states that are candidates for the drop bucket.
 CLOSED_STATES: set[str] = {"closed", "merged"}
 
+# Title patterns that auto-drop regardless of subject state. Useful for
+# repetitive system-generated noise (intermittent test failures, flaky
+# test reports) that lands as `team_mention` on open issues and would
+# otherwise fall through to the inbox-by-default bucket.
+#
+# Patterns are deliberately anchored to the START of the title and
+# require the phrase to be followed by a colon. This matches the
+# system-generated shape (e.g. `Intermittent test failure: <test>` and
+# `[Bug] Intermittent test failure: <test>`) without catching legitimate
+# titles that mention the phrase as a substring (e.g. `Fix flaky test in
+# dashboard` or `flaky test suite is failing CI completely`, which are
+# real PRs / bugs we do NOT want to drop).
+#
+# Reasons in TITLE_DROP_PROTECTED_REASONS override this drop so an
+# explicit ping still reaches the inbox. Add patterns as new noise
+# shapes show up; keep them anchored on `^\s*(\[[^\]]+\]\s*)?` +
+# specific phrase + `\s*:` so legitimate titles aren't swept up.
+_TITLE_DROP_PREFIX = r"^\s*(\[[^\]]+\]\s*)?"
+TITLE_DROP_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        _TITLE_DROP_PREFIX + r"intermittent test failure\s*:", re.IGNORECASE
+    ),
+    re.compile(_TITLE_DROP_PREFIX + r"flaky test\s*:", re.IGNORECASE),
+    re.compile(_TITLE_DROP_PREFIX + r"test flake\s*:", re.IGNORECASE),
+]
+
+# Reasons where a direct human action overrides title-pattern drops.
+# If someone explicitly @-mentions or assigns Zack on a flaky-test
+# issue, surface it instead of silently dropping.
+TITLE_DROP_PROTECTED_REASONS: set[str] = {"mention", "assign"}
+
 # Reasons that get a subject-state check at classify time. If the PR / issue
 # is already closed/merged when the notification first arrives, drop it
 # instead of routing to a quadrant or inbox - there is nothing left to do.
@@ -274,6 +305,19 @@ def classify(
     reason = (notif.get("reason") or "").lower()
     subject = notif.get("subject") or {}
     subject_type = (subject.get("type") or "").lower()
+    title = subject.get("title") or ""
+
+    # Title-pattern drop: repetitive system-generated noise (intermittent
+    # test failures, flaky test reports) lands as `team_mention` on open
+    # issues and would otherwise fall through to the inbox. Mention/assign
+    # reasons skip this so a direct human ping always reaches the inbox.
+    if reason not in TITLE_DROP_PROTECTED_REASONS:
+        for pattern in TITLE_DROP_PATTERNS:
+            if pattern.search(title):
+                return Classification(
+                    BUCKET_DROP,
+                    f"title matches drop pattern /{pattern.pattern}/",
+                )
 
     # Cheap early drop: if the subject is already closed/merged when the
     # notification first lands, there is nothing left to do. Only check
