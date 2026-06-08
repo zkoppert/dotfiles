@@ -2484,11 +2484,14 @@ def _read_notif(reason: str, *, subject_type: str = "PullRequest", title: str = 
     }
 
 
-def test_classify_read_open_notification_returns_keep():
-    """Already-viewed open notifications must KEEP - don't re-route to inbox
-    once the user has clicked on them."""
-    c = triage.classify(
-        _read_notif("manual"),
+def test_classify_read_open_notification_routes_like_unread():
+    """Read notifications classify identically to unread - the
+    `already_tracked` short-circuit in run() prevents dupes on
+    successive cron ticks."""
+    read = _read_notif("manual")
+    unread = _read_notif("manual")
+    unread["unread"] = True
+    kwargs = dict(
         my_login="zkoppert",
         q1_logins=set(),
         state_fetcher=lambda _: "open",
@@ -2496,30 +2499,15 @@ def test_classify_read_open_notification_returns_keep():
         subject_author_fetcher=lambda _: "someone-else",
         human_commenter_fetcher=lambda _, my_login: set(),
     )
-    assert c.bucket == triage.BUCKET_KEEP
-    assert "already-read" in c.reason
-
-
-def test_classify_unread_notification_does_not_return_keep():
-    """The read-skip guard must NOT short-circuit unread notifications -
-    those go through the full reason-based classifier."""
-    notif = _read_notif("manual")
-    notif["unread"] = True
-    c = triage.classify(
-        notif,
-        my_login="zkoppert",
-        q1_logins=set(),
-        state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
-        subject_author_fetcher=lambda _: "someone-else",
-        human_commenter_fetcher=lambda _, my_login: set(),
-    )
-    assert c.bucket != triage.BUCKET_KEEP
+    c_read = triage.classify(read, **kwargs)
+    c_unread = triage.classify(unread, **kwargs)
+    assert c_read.bucket == c_unread.bucket
+    assert c_read.reason == c_unread.reason
 
 
 def test_classify_read_closed_pr_still_drops_via_state_check():
-    """Read notifications on closed/merged subjects must still drop -
-    KEEP only applies when no drop rule fired."""
+    """Read notifications on closed/merged subjects still drop - DROP
+    rules always fire regardless of read state."""
     c = triage.classify(
         _read_notif("author"),
         my_login="zkoppert",
@@ -2666,9 +2654,10 @@ def test_run_archives_to_done_and_marks_notification_done(todo_file):
     assert len(archived) == 1
 
 
-def test_run_skipped_read_does_not_add_to_inbox_or_delete(todo_file):
-    """A read+open notification must not be re-added to inbox AND must
-    not be marked done on GitHub - it just falls out of the loop."""
+def test_run_read_open_notification_added_to_inbox(todo_file):
+    """A read+open notification with no drop rule routes to inbox so it
+    stays visible in todo.yml until the user clears it. The notification
+    is NOT marked done on GitHub - that only happens on DROP."""
     notif = _read_notif("manual")
     notif["id"] = "777"
 
@@ -2696,8 +2685,7 @@ def test_run_skipped_read_does_not_add_to_inbox_or_delete(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
 
-    assert stats.skipped_read == 1
-    assert stats.added_inbox == 0
+    assert stats.added_inbox == 1
     assert stats.added_q1 == 0
     assert delete_calls == []
 
@@ -2718,11 +2706,11 @@ def test_fetch_notifications_uses_all_true_query():
     assert any("/notifications?all=true" in arg for c in captured for arg in c)
 
 
-# --- Tests for review-feedback fixes: KEEP wrapper, archive dedup, prune-archive ---
+# --- Tests for read-notification handling, archive dedup, prune-archive ---
 
 
 def test_classify_read_ci_activity_still_drops():
-    """ci_activity is always-drop noise - read status must not flip it to KEEP."""
+    """ci_activity is always-drop noise - read status must not change that."""
     notif = _read_notif("ci_activity")
     c = triage.classify(
         notif,
@@ -2734,8 +2722,7 @@ def test_classify_read_ci_activity_still_drops():
         human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP, (
-        "read ci_activity must drop so the notification gets cleared, "
-        "not lingered as KEEP"
+        "read ci_activity must drop so the notification gets cleared"
     )
 
 
@@ -2787,9 +2774,10 @@ def test_classify_read_super_linter_comment_still_drops():
     assert "super-linter" in c.reason
 
 
-def test_classify_read_inbox_routing_swaps_to_keep():
-    """Read notification that would otherwise route to INBOX must swap
-    to KEEP. (manual subscription on open subject routes to INBOX.)"""
+def test_classify_read_inbox_routing_now_returns_inbox():
+    """Read notification that routes to INBOX is no longer demoted to
+    KEEP - the inbox add is what we want, and the `already_tracked`
+    short-circuit keeps it from re-adding next tick."""
     notif = _read_notif("manual")
     c = triage.classify(
         notif,
@@ -2800,14 +2788,12 @@ def test_classify_read_inbox_routing_swaps_to_keep():
         subject_author_fetcher=lambda _: "andi",
         human_commenter_fetcher=lambda _, my_login: set(),
     )
-    assert c.bucket == triage.BUCKET_KEEP
-    assert "already-read" in c.reason
-    assert "INBOX" in c.reason  # mentions what it would have been
+    assert c.bucket == triage.BUCKET_INBOX
 
 
-def test_classify_read_q1_mention_swaps_to_keep():
-    """Read notification that would route to Q1 also swaps to KEEP -
-    user already saw the mention and chose not to act on it."""
+def test_classify_read_q1_mention_now_returns_q1():
+    """Read mention notification routes to Q1 same as unread - the
+    read-skip override is gone."""
     notif = _read_notif("mention")
     c = triage.classify(
         notif,
@@ -2818,8 +2804,7 @@ def test_classify_read_q1_mention_swaps_to_keep():
         subject_author_fetcher=lambda _: "andi",
         human_commenter_fetcher=lambda _, my_login: set(),
     )
-    assert c.bucket == triage.BUCKET_KEEP
-    assert "Q1" in c.reason
+    assert c.bucket == triage.BUCKET_Q1
 
 
 def test_build_done_archive_entry_includes_notification_thread_id():
@@ -3161,10 +3146,10 @@ def test_classify_nux_filter_runs_after_closed_state_drop():
     assert c.archive_to_done is True
 
 
-def test_classify_nux_filter_runs_before_keep_wrapper():
-    """A read subscribed notification on NUX should DROP (so the cron
-    actually clears it), not KEEP. The subscription filter must run
-    before the read-notification KEEP override."""
+def test_classify_nux_subscribed_drops_regardless_of_read_state():
+    """A read subscribed notification on NUX must DROP (so the cron
+    clears it). Verifies the subscription filter applies to read items
+    too, not just unread."""
     notif = _nux_notif("subscribed")
     notif["unread"] = False
     c = triage.classify(

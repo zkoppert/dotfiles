@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Notification triage: classify GitHub notifications and route them to todo.yml.
 
-For each unread notification from `gh api /notifications`, this tool:
+For each notification from `gh api /notifications?all=true` (read or
+unread), this tool:
 
 1. Classifies it as one of:
    - DROP            (safe to mark-done without confirmation)
@@ -143,10 +144,6 @@ DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
 BUCKET_DROP = "DROP"
 BUCKET_Q1 = "QUADRANT_Q1"
 BUCKET_INBOX = "INBOX"
-# Read notification that didn't match any drop rule. Already-viewed open
-# subjects fall here so the cron leaves them where the user put them
-# (don't re-add to inbox, don't mark notification done).
-BUCKET_KEEP = "KEEP"
 
 logger = logging.getLogger("triage")
 
@@ -176,7 +173,6 @@ class TriageStats:
     pruned_stale: int = 0
     pruned_by_reason: dict[str, int] = field(default_factory=dict)
     archived_to_done: int = 0
-    skipped_read: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -414,16 +410,11 @@ def classify(
     `human_commenter_fetcher` are injectable so tests can avoid network
     calls. They default to the live API helpers.
 
-    Read-notification override: if `_classify_internal` would have routed
-    a read notification (``unread is False``) to INBOX or Q1, swap to
-    BUCKET_KEEP instead. DROP results pass through unchanged so the
-    cleanup paths (``ci_activity``, ``comment``/``subscribed`` on closed
-    subjects, super-linter comments) still mark and delete the
-    notification. This guarantees noise gets cleared regardless of
-    read-status, while user-already-viewed actionable items aren't
-    re-added to the inbox on every cron tick.
+    Read notifications classify identically to unread ones; the
+    `already_tracked` short-circuit prevents the same notification from
+    being added to the inbox on successive cron ticks.
     """
-    result = _classify_internal(
+    return _classify_internal(
         notif,
         my_login=my_login,
         q1_logins=q1_logins,
@@ -432,12 +423,6 @@ def classify(
         subject_author_fetcher=subject_author_fetcher,
         human_commenter_fetcher=human_commenter_fetcher,
     )
-    if result.bucket in {BUCKET_INBOX, BUCKET_Q1} and notif.get("unread") is False:
-        return Classification(
-            BUCKET_KEEP,
-            f"already-read; would have been {result.bucket} ({result.reason})",
-        )
-    return result
 
 
 def _classify_internal(
@@ -450,11 +435,9 @@ def _classify_internal(
     subject_author_fetcher=fetch_subject_author,
     human_commenter_fetcher=fetch_pr_human_commenters,
 ) -> Classification:
-    """Raw classification before the read-notification KEEP override.
-
-    Split out from `classify` so the KEEP override can be applied
-    uniformly to INBOX/Q1 results without short-circuiting the DROP
-    branches that follow in this function.
+    """Reason-based classification. Split from `classify` for testability
+    and because the public entry point may grow additional pre/post
+    processing later.
     """
     reason = (notif.get("reason") or "").lower()
     subject = notif.get("subject") or {}
@@ -1312,9 +1295,6 @@ def run(args: argparse.Namespace) -> TriageStats:
             classification.bucket,
             classification.reason,
         )
-        if classification.bucket == BUCKET_KEEP:
-            stats.skipped_read += 1
-            continue
         if classification.bucket == BUCKET_DROP:
             stats.dropped += 1
             if classification.archive_to_done:
@@ -1407,7 +1387,6 @@ def main(argv: list[str] | None = None) -> int:
         f"fetched={stats.fetched} added_q1={stats.added_q1} "
         f"added_inbox={stats.added_inbox} dropped={stats.dropped} "
         f"archived_to_done={stats.archived_to_done} "
-        f"skipped_read={stats.skipped_read} "
         f"already_tracked={stats.already_tracked} "
         f"marked_done={stats.marked_done} "
         f"pruned_stale={stats.pruned_stale}"

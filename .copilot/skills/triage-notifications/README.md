@@ -63,16 +63,15 @@ Four early-exit drops fire before the reason-based classifier, in this order:
    Edit `SUBSCRIPTION_FILTERED_REPOS` in `triage.py` to add more
    repos.
 
-After those drops, **already-read notifications that would otherwise
-route to `INBOX` or `Q1`** are short-circuited as `KEEP` - they're
-things I already viewed and chose to leave alone, so the cron doesn't
-re-add them to the inbox. DROP rules still fire on read notifications
-(so `ci_activity`, `comment`-on-closed, super-linter comments, and
-`subscribed`-on-closed get cleaned up regardless of read status). Only
-unread notifications - or read notifications that survive every drop
-rule - take the actionable path.
+Both read and unread notifications classify through the same reason
+table. The `already_tracked` short-circuit in `run()` prevents a
+notification already represented in `todo.yml` from being re-added on
+subsequent cron ticks. DROP rules clear notifications regardless of
+read state (so `ci_activity`, `comment`-on-closed, super-linter
+comments without an @mention, and `subscribed`-on-closed get marked
+done either way).
 
-Anything that survives those falls into the reason table:
+The reason table:
 
 | Reason            | Bucket                                           |
 | ----------------- | ------------------------------------------------ |
