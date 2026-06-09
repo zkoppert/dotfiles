@@ -11,6 +11,12 @@
 #      hard-rule violations are reported (em-dashes, "per" misuse,
 #      "This PR" as a sentence subject, subjectless action-verb bullets,
 #      etc.).
+#   3. `gh pr edit`   - if `--body` or `--body-file` is provided, the new
+#      body content is piped through the same `validate-style` lint skill
+#      and the edit is blocked if any hard-rule violations are reported.
+#      Edits that touch only title, labels, reviewers, base, milestone,
+#      etc. are not gated. This closes the loop where post-create body
+#      edits would otherwise bypass the `pr create` lint.
 #
 # Behavior:
 #   - In an interactive shell (TTY): prompt for confirmation before running.
@@ -116,6 +122,7 @@ op=""
 
 is_pr_ready=0
 is_pr_create=0
+is_pr_edit=0
 if [ "$subcmd" = "pr" ] && [ "$op" = "ready" ]; then
   is_pr_ready=1
   # `--undo` reverts a ready PR back to draft and does NOT notify reviewers,
@@ -128,23 +135,105 @@ if [ "$subcmd" = "pr" ] && [ "$op" = "ready" ]; then
   done
 elif [ "$subcmd" = "pr" ] && [ "$op" = "create" ]; then
   is_pr_create=1
+elif [ "$subcmd" = "pr" ] && [ "$op" = "edit" ]; then
+  is_pr_edit=1
 fi
 
 # Help flags after the op (e.g. `gh pr create --help`, `gh pr ready -h`) are
 # not seen by the parser above because it breaks at `op`. Scan the full
 # argument list and let help requests pass through unguarded so agents can
 # introspect flags without tripping the gate.
-if [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ]; then
+if [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ] || [ "$is_pr_edit" = "1" ]; then
   for a in "$@"; do
     case "$a" in
       --help|-h|help)
         is_pr_create=0
         is_pr_ready=0
+        is_pr_edit=0
         break
         ;;
     esac
   done
 fi
+
+# Extract a PR body from `--body` / `--body-file` flags (in any of the four
+# forms: `--body x`, `--body=x`, `--body-file p`, `--body-file=p`) and pipe
+# it through the validate-style lint skill. Blocks the calling subcommand
+# with a clear violation list if the lint reports any hard-rule failures.
+# Silently passes if no body flag is present (e.g., a `gh pr edit` that
+# only changes labels, or a `gh pr create` that opens the editor).
+#
+# Args:
+#   $1 - human-readable subcommand label for the error message, e.g.
+#        "gh pr create" or "gh pr edit".
+#   $@ - the original argv to scan (caller forwards "$@").
+lint_pr_body_or_die() {
+  local subcmd_label="$1"; shift
+  local body_content=""
+  local body_source=""
+  local body_skip_reason=""
+  local prev_arg=""
+  local arg path
+  for arg in "$@"; do
+    case "$prev_arg" in
+      --body)
+        body_content="$arg"
+        body_source="--body"
+        ;;
+      --body-file)
+        if [ "$arg" = "-" ]; then
+          body_skip_reason="--body-file - (stdin; cannot safely re-read)"
+        elif [ -f "$arg" ]; then
+          body_content="$(cat "$arg")"
+          body_source="--body-file $arg"
+        else
+          body_skip_reason="--body-file $arg (file not found)"
+        fi
+        ;;
+    esac
+    case "$arg" in
+      --body=*)
+        body_content="${arg#--body=}"
+        body_source="--body="
+        ;;
+      --body-file=*)
+        path="${arg#--body-file=}"
+        if [ "$path" = "-" ]; then
+          body_skip_reason="--body-file=- (stdin; cannot safely re-read)"
+        elif [ -f "$path" ]; then
+          body_content="$(cat "$path")"
+          body_source="--body-file=$path"
+        else
+          body_skip_reason="--body-file=$path (file not found)"
+        fi
+        ;;
+    esac
+    prev_arg="$arg"
+  done
+
+  local lint_path="$HOME/.copilot/skills/validate-style/lint.py"
+  if [ -n "$body_content" ] && [ -x "$(command -v python3)" ] && [ -f "$lint_path" ]; then
+    local lint_output=""
+    if ! lint_output="$(printf '%s' "$body_content" | python3 "$lint_path" - 2>&1)"; then
+      cat >&2 <<EOF
+gh-guard: \`$subcmd_label\` blocked by validate-style.
+
+The PR body (from $body_source) failed Zack's hard writing-style rules. Fix the
+violations below and retry. See ~/.copilot/skills/validate-style/SKILL.md for
+the full rule catalog, or run the linter directly to iterate:
+
+  python3 $lint_path - <<<"<draft body>"
+
+Violations:
+
+$lint_output
+EOF
+      exit 1
+    fi
+  elif [ -n "$body_skip_reason" ]; then
+    echo "gh-guard: skipping validate-style lint ($body_skip_reason)." >&2
+  fi
+}
 
 # --- gh pr ready ---------------------------------------------------------
 if [ "$is_pr_ready" = "1" ]; then
@@ -183,69 +272,7 @@ if [ "$is_pr_create" = "1" ]; then
   # "This PR" as a sentence subject, subjectless action-verb bullets, etc.)
   # before the PR exists on GitHub, where a body edit would be needed to fix
   # them. The lint runs for both TTY and non-TTY paths -- the rule is hard.
-  body_content=""
-  body_source=""
-  body_skip_reason=""
-  prev_arg=""
-  for arg in "$@"; do
-    case "$prev_arg" in
-      --body)
-        body_content="$arg"
-        body_source="--body"
-        ;;
-      --body-file)
-        if [ "$arg" = "-" ]; then
-          body_skip_reason="--body-file - (stdin; cannot safely re-read)"
-        elif [ -f "$arg" ]; then
-          body_content="$(cat "$arg")"
-          body_source="--body-file $arg"
-        else
-          body_skip_reason="--body-file $arg (file not found)"
-        fi
-        ;;
-    esac
-    case "$arg" in
-      --body=*)
-        body_content="${arg#--body=}"
-        body_source="--body="
-        ;;
-      --body-file=*)
-        path="${arg#--body-file=}"
-        if [ "$path" = "-" ]; then
-          body_skip_reason="--body-file=- (stdin; cannot safely re-read)"
-        elif [ -f "$path" ]; then
-          body_content="$(cat "$path")"
-          body_source="--body-file=$path"
-        else
-          body_skip_reason="--body-file=$path (file not found)"
-        fi
-        ;;
-    esac
-    prev_arg="$arg"
-  done
-
-  lint_path="$HOME/.copilot/skills/validate-style/lint.py"
-  if [ -n "$body_content" ] && [ -x "$(command -v python3)" ] && [ -f "$lint_path" ]; then
-    lint_output=""
-    if ! lint_output="$(printf '%s' "$body_content" | python3 "$lint_path" - 2>&1)"; then
-      cat >&2 <<EOF
-gh-guard: \`gh pr create\` blocked by validate-style.
-
-The PR body (from $body_source) failed Zack's hard writing-style rules. Fix the
-violations below and retry. See ~/.copilot/skills/validate-style/SKILL.md for
-the full rule catalog, or run the linter directly to iterate:
-
-  python3 $lint_path - <<<"<draft body>"
-
-Violations:
-
-$lint_output
-EOF
-      exit 1
-    fi
-  elif [ -n "$body_skip_reason" ]; then
-    echo "gh-guard: skipping validate-style lint ($body_skip_reason)." >&2
-  fi
+  lint_pr_body_or_die "gh pr create" "$@"
 
   # Try to resolve the current repo and branch so we can check the per-branch
   # review marker. If either lookup fails, the marker check is skipped and we
@@ -350,6 +377,22 @@ EOF
       exit 1
     fi
   fi
+fi
+
+# --- gh pr edit ----------------------------------------------------------
+if [ "$is_pr_edit" = "1" ]; then
+  # `gh pr edit` can mutate any of: title, body, labels, reviewers, base,
+  # milestone, projects, assignees. We only care about body changes here --
+  # the lint runs against the new body content and blocks if it would
+  # introduce style violations. Edits that touch only non-body fields fall
+  # through silently because `lint_pr_body_or_die` short-circuits when no
+  # body flag is present.
+  #
+  # This closes the loop where post-create body edits would otherwise bypass
+  # the `pr create` lint -- PR #19 of zkoppert/zkoppert.github.io was edited
+  # four times after creation, and each edit re-introduced first-person rule
+  # violations that the original create-time lint never had a chance to see.
+  lint_pr_body_or_die "gh pr edit" "$@"
 fi
 
 exec "$REAL_GH" "$@"
