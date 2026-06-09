@@ -2,8 +2,8 @@
 # gh wrapper that guards specific gh subcommands against accidental or
 # unconfirmed use:
 #
-#   1. `gh pr ready`  — marks a draft PR ready and notifies reviewers.
-#   2. `gh pr create` — opens a PR; Zack's rule is "always run multi-model
+#   1. `gh pr ready`  - marks a draft PR ready and notifies reviewers.
+#   2. `gh pr create` - opens a PR; Zack's rule is "always run multi-model
 #      code review before opening a PR." Without enforcement the rule is
 #      easy to skip, so this wrapper blocks PR creation until a review
 #      marker exists. Additionally, the PR body is piped through the
@@ -26,7 +26,7 @@
 #     --absolute-git-dir`, so worktrees resolve to the per-worktree gitdir
 #     (e.g. `<main>/.git/worktrees/<name>/copilot-pr-review/`) rather than the
 #     gitlink file at `<worktree>/.git`. The marker file must be >=200 bytes
-#     so a bare `touch` does not satisfy it — actual review content has to
+#     so a bare `touch` does not satisfy it - actual review content has to
 #     land there before the PR can be opened. Both conditions are required
 #     when invoked inside a git checkout. If the wrapper cannot resolve the
 #     current repo or branch (e.g., `gh pr create` invoked outside a checkout
