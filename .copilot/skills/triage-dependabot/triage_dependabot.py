@@ -729,10 +729,46 @@ def decide(
 
 
 def do_merge(repo: str, number: int, *, dry_run: bool) -> None:
-    """Enable auto-merge for a PR (squash + delete branch)."""
+    """Enable auto-merge for a PR (squash + delete branch).
+
+    When the target repository doesn't have auto-merge enabled at the repo
+    level, ``gh pr merge --auto`` fails with stderr containing
+    ``Auto merge is not allowed for this repository``. In that case, fall
+    back to approving the PR (to satisfy required-review branch
+    protection) and then performing a synchronous merge.
+
+    Any other merge failure is re-raised unchanged so the run loop can
+    surface it in stats.errors.
+    """
     if dry_run:
         logger.info("dry-run: would auto-merge %s#%d", repo, number)
         return
+    try:
+        run_gh(
+            [
+                "pr",
+                "merge",
+                str(number),
+                "--repo",
+                repo,
+                "--auto",
+                "--squash",
+                "--delete-branch",
+            ],
+            timeout=60,
+        )
+        return
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr or ""
+        if not _is_auto_merge_disabled_error(stderr):
+            raise
+        logger.info(
+            "auto-merge unavailable for %s#%d; falling back to approve + merge",
+            repo,
+            number,
+        )
+
+    do_approve(repo, number, dry_run=False)
     run_gh(
         [
             "pr",
@@ -740,11 +776,39 @@ def do_merge(repo: str, number: int, *, dry_run: bool) -> None:
             str(number),
             "--repo",
             repo,
-            "--auto",
             "--squash",
             "--delete-branch",
         ],
         timeout=60,
+    )
+
+
+_AUTO_MERGE_DISABLED_MARKERS = (
+    "Auto merge is not allowed for this repository",
+    "enablePullRequestAutoMerge",
+)
+
+
+def _is_auto_merge_disabled_error(stderr: str) -> bool:
+    """True when gh's stderr indicates the repo lacks auto-merge."""
+    return any(marker in stderr for marker in _AUTO_MERGE_DISABLED_MARKERS)
+
+
+def do_approve(repo: str, number: int, *, dry_run: bool) -> None:
+    """Approve a PR via ``gh pr review --approve``."""
+    if dry_run:
+        logger.info("dry-run: would approve %s#%d", repo, number)
+        return
+    run_gh(
+        [
+            "pr",
+            "review",
+            str(number),
+            "--repo",
+            repo,
+            "--approve",
+        ],
+        timeout=30,
     )
 
 

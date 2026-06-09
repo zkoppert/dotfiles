@@ -824,6 +824,60 @@ def test_do_merge_invokes_gh() -> None:
     assert "--delete-branch" in args
 
 
+def test_do_merge_falls_back_when_auto_merge_disabled() -> None:
+    import subprocess
+
+    err = subprocess.CalledProcessError(
+        returncode=1,
+        cmd=["gh", "pr", "merge"],
+        output="",
+        stderr="GraphQL: Auto merge is not allowed for this repository (enablePullRequestAutoMerge)",
+    )
+    with mock.patch.object(td, "run_gh") as mocked:
+        mocked.side_effect = [err, None, None]
+        td.do_merge("o/r", 7, dry_run=False)
+    assert mocked.call_count == 3
+    auto_call = mocked.call_args_list[0][0][0]
+    approve_call = mocked.call_args_list[1][0][0]
+    plain_merge_call = mocked.call_args_list[2][0][0]
+    assert "--auto" in auto_call
+    assert "review" in approve_call and "--approve" in approve_call
+    assert "merge" in plain_merge_call and "--auto" not in plain_merge_call
+    assert "--squash" in plain_merge_call and "--delete-branch" in plain_merge_call
+
+
+def test_do_merge_propagates_other_errors() -> None:
+    import subprocess
+
+    err = subprocess.CalledProcessError(
+        returncode=1,
+        cmd=["gh", "pr", "merge"],
+        output="",
+        stderr="GraphQL: Pull request is not mergeable (mergeable)",
+    )
+    with mock.patch.object(td, "run_gh") as mocked:
+        mocked.side_effect = err
+        with pytest.raises(subprocess.CalledProcessError):
+            td.do_merge("o/r", 9, dry_run=False)
+    mocked.assert_called_once()
+
+
+def test_do_approve_dry_run() -> None:
+    with mock.patch.object(td, "run_gh") as mocked:
+        td.do_approve("o/r", 1, dry_run=True)
+    mocked.assert_not_called()
+
+
+def test_do_approve_invokes_gh() -> None:
+    with mock.patch.object(td, "run_gh") as mocked:
+        td.do_approve("o/r", 1, dry_run=False)
+    mocked.assert_called_once()
+    args = mocked.call_args[0][0]
+    assert args[:2] == ["pr", "review"]
+    assert "--approve" in args
+    assert "--repo" in args
+
+
 def test_do_rebase_comment_dry_run() -> None:
     with mock.patch.object(td, "run_gh") as mocked:
         td.do_rebase_comment("o/r", 1, dry_run=True)
