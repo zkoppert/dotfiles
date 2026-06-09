@@ -56,6 +56,33 @@ AGENTIC_PASSIVE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# "This PR adds...", "This change introduces...", etc. Matches when the phrase
+# appears at line start or after sentence-ending punctuation, which is where it
+# is almost always the subject of a sentence (the violation pattern). Mid-sentence
+# uses like "after merging this PR" are rare in PR bodies and are not matched.
+THIS_PR_SUBJECT_PATTERN = re.compile(
+    r"(?:^|(?<=[.!?])\s+)"
+    r"This\s+(?:PR|change|commit|MR|pull\s+request|patch|diff|changeset|revision)\b",
+    re.IGNORECASE,
+)
+
+# Bullets in PR bodies that lead with a bare past-tense action verb ("Added X",
+# "Removed Y", "Inspected Z") instead of first person ("I added X"). Restricted
+# to bullet lines because subjectless-verb detection in prose has too many false
+# positives ("Updated tests confirm the fix"). The verb list is curated to the
+# action verbs Zack actually uses in PR descriptions.
+SUBJECTLESS_ACTION_BULLET_PATTERN = re.compile(
+    r"^\s*(?:[-*+]|\d+\.)\s+"
+    r"(Added|Removed|Updated|Changed|Fixed|Created|Deleted|Modified|Refactored|"
+    r"Renamed|Moved|Implemented|Introduced|Replaced|Wrote|Edited|Applied|Ran|"
+    r"Built|Inspected|Verified|Tested|Configured|Installed|Pushed|Committed|"
+    r"Rebased|Merged|Reorganized|Cleaned|Simplified|Migrated|Optimized|"
+    r"Documented|Wired|Hooked|Integrated|Bumped|Pinned|Upgraded|Reverted|"
+    r"Restored|Improved|Reduced|Enabled|Disabled|Drafted|Generated|Switched|"
+    r"Swapped|Extracted|Inlined|Cached|Reworked|Reordered|Tagged|Squashed|"
+    r"Rendered|Pulled|Pinged|Posted|Sent|Triggered|Closed|Opened)\b",
+)
+
 
 FENCE_OPEN_PATTERN = re.compile(r"^(\s{0,3})(`{3,}|~{3,})")
 INLINE_CODE_PATTERN = re.compile(r"`[^`\n]+`")
@@ -147,6 +174,20 @@ RULES = [
         "Agentic passive voice (model name as subject of verbs like made/wrote/generated) "
         "is forbidden - the human owns the output. Rephrase with the human as subject "
         "(for example: 'I made an error in the writeup').",
+    ),
+    (
+        "no-this-pr-subject",
+        THIS_PR_SUBJECT_PATTERN,
+        "'This PR' / 'This change' / 'This commit' as the subject of a sentence "
+        "is forbidden in PR descriptions and review replies - write in first person "
+        "('I added retry logic', not 'This PR adds retry logic').",
+    ),
+    (
+        "no-subjectless-action-bullet",
+        SUBJECTLESS_ACTION_BULLET_PATTERN,
+        "Bullets that lead with a bare past-tense action verb ('Added X', 'Removed Y') "
+        "are forbidden in PR descriptions - rewrite in first person ('I added X', "
+        "'I removed Y') so the human is the explicit actor.",
     ),
 ]
 

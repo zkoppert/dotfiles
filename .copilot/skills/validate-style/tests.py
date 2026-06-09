@@ -196,6 +196,120 @@ class TestAgenticPassive(unittest.TestCase):
         self.assertNotIn("no-agentic-passive", rules_in(violations))
 
 
+class TestThisPrSubject(unittest.TestCase):
+    def test_this_pr_at_line_start_flagged(self):
+        violations = find_violations("This PR adds retry logic to the handler.")
+        self.assertIn("no-this-pr-subject", rules_in(violations))
+
+    def test_this_change_at_line_start_flagged(self):
+        violations = find_violations("This change introduces a new flag.")
+        self.assertIn("no-this-pr-subject", rules_in(violations))
+
+    def test_this_commit_at_line_start_flagged(self):
+        violations = find_violations("This commit fixes the off-by-one.")
+        self.assertIn("no-this-pr-subject", rules_in(violations))
+
+    def test_this_pull_request_flagged(self):
+        violations = find_violations("This pull request closes #42.")
+        self.assertIn("no-this-pr-subject", rules_in(violations))
+
+    def test_this_mr_flagged(self):
+        violations = find_violations("This MR introduces the helper.")
+        self.assertIn("no-this-pr-subject", rules_in(violations))
+
+    def test_this_pr_after_period_flagged(self):
+        # Sentence-initial mid-paragraph is also a violation.
+        violations = find_violations("Closes #1. This PR also updates the docs.")
+        self.assertIn("no-this-pr-subject", rules_in(violations))
+
+    def test_this_pr_case_insensitive(self):
+        violations = find_violations("this pr adds X.")
+        self.assertIn("no-this-pr-subject", rules_in(violations))
+
+    def test_mid_sentence_this_pr_not_flagged(self):
+        # "merging this PR" is the object of a verb, not the subject.
+        violations = find_violations("After merging this PR, run the deploy script.")
+        self.assertNotIn("no-this-pr-subject", rules_in(violations))
+
+    def test_first_person_pr_phrasing_not_flagged(self):
+        violations = find_violations("I opened this PR to fix the bug.")
+        self.assertNotIn("no-this-pr-subject", rules_in(violations))
+
+    def test_inside_inline_code_not_flagged(self):
+        # PR templates and docs sometimes show the bad pattern as an example.
+        violations = find_violations("Avoid `This PR adds X` - use first person.")
+        self.assertNotIn("no-this-pr-subject", rules_in(violations))
+
+
+class TestSubjectlessActionBullet(unittest.TestCase):
+    def test_added_bullet_flagged(self):
+        violations = find_violations("- Added one new post under _posts/.")
+        self.assertIn("no-subjectless-action-bullet", rules_in(violations))
+
+    def test_inspected_bullet_flagged(self):
+        violations = find_violations("- Inspected the rendered HTML.")
+        self.assertIn("no-subjectless-action-bullet", rules_in(violations))
+
+    def test_ran_bullet_flagged(self):
+        violations = find_violations("- Ran `validate-style` on the draft.")
+        self.assertIn("no-subjectless-action-bullet", rules_in(violations))
+
+    def test_asterisk_bullet_flagged(self):
+        violations = find_violations("* Removed the deprecated flag.")
+        self.assertIn("no-subjectless-action-bullet", rules_in(violations))
+
+    def test_numbered_bullet_flagged(self):
+        violations = find_violations("1. Updated the frontmatter image block.")
+        self.assertIn("no-subjectless-action-bullet", rules_in(violations))
+
+    def test_indented_bullet_flagged(self):
+        violations = find_violations("  - Renamed the helper to make the intent clearer.")
+        self.assertIn("no-subjectless-action-bullet", rules_in(violations))
+
+    def test_first_person_bullet_not_flagged(self):
+        violations = find_violations("- I added one new post under _posts/.")
+        self.assertNotIn("no-subjectless-action-bullet", rules_in(violations))
+
+    def test_we_bullet_not_flagged(self):
+        violations = find_violations("- We added retry logic to the handler.")
+        self.assertNotIn("no-subjectless-action-bullet", rules_in(violations))
+
+    def test_imperative_bullet_not_flagged(self):
+        # Setup steps and TODO items legitimately use bare imperatives ("Add X").
+        violations = find_violations("- Add the API key to your `.env` file.")
+        self.assertNotIn("no-subjectless-action-bullet", rules_in(violations))
+
+    def test_run_imperative_bullet_not_flagged(self):
+        violations = find_violations("- Run `make test` before pushing.")
+        self.assertNotIn("no-subjectless-action-bullet", rules_in(violations))
+
+    def test_prose_paragraph_starting_with_verb_not_flagged(self):
+        # By design we only flag bullets - prose has too many false positives
+        # ("Updated tests confirm the fix").
+        violations = find_violations("Updated tests confirm the fix landed.")
+        self.assertNotIn("no-subjectless-action-bullet", rules_in(violations))
+
+    def test_non_action_word_bullet_not_flagged(self):
+        violations = find_violations("- Notes on the rollout below.")
+        self.assertNotIn("no-subjectless-action-bullet", rules_in(violations))
+
+    def test_lowercase_verb_bullet_not_flagged(self):
+        # Lowercase ("added X") is usually a continuation of a previous bullet
+        # or wrapped line - not a fresh action report. Skip to avoid noise.
+        violations = find_violations("- added one new post")
+        self.assertNotIn("no-subjectless-action-bullet", rules_in(violations))
+
+    def test_inside_fenced_block_not_flagged(self):
+        text = (
+            "Example of a bad bullet:\n"
+            "```\n"
+            "- Added retry logic\n"
+            "```\n"
+        )
+        violations = find_violations(text)
+        self.assertNotIn("no-subjectless-action-bullet", rules_in(violations))
+
+
 class TestLineAndColumn(unittest.TestCase):
     def test_line_number_reported_correctly(self):
         text = "Line one is clean.\nLine two has a \u2014 dash here.\nLine three is fine."
