@@ -925,8 +925,12 @@ def test_mark_thread_done_uses_delete() -> None:
 
 def test_fetch_notifications_parses_paginated_pages() -> None:
     pages = [[{"id": "1"}], [{"id": "2"}]]
-    with mock.patch.object(td, "run_gh", return_value=json.dumps(pages)):
+    with mock.patch.object(td, "run_gh", return_value=json.dumps(pages)) as mock_run:
         assert td.fetch_notifications() == [{"id": "1"}, {"id": "2"}]
+    args = mock_run.call_args[0][0]
+    assert "/notifications?all=true" in args, (
+        f"expected ?all=true so read-but-not-done threads stay visible; got {args!r}"
+    )
 
 
 def test_fetch_notifications_empty_when_no_output() -> None:

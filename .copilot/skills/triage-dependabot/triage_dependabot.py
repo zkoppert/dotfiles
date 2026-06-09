@@ -179,8 +179,15 @@ def run_gh(args: list[str], *, timeout: int = 60) -> str:
 
 
 def fetch_notifications() -> list[dict[str, Any]]:
-    """Return all unread notifications for the authenticated user."""
-    raw = run_gh(["api", "/notifications", "--paginate", "--slurp"]).strip()
+    """Return notifications for the authenticated user.
+
+    Uses ``?all=true`` so the cron also picks up read-but-not-done
+    threads. Notifications can be marked read by the GitHub UI, mobile
+    apps, or Slack integrations without the user actually acting on the
+    underlying PR. The cron's cooldown and ``already_tracked`` logic
+    still dedupes work across ticks.
+    """
+    raw = run_gh(["api", "/notifications?all=true", "--paginate", "--slurp"]).strip()
     if not raw:
         return []
     try:
