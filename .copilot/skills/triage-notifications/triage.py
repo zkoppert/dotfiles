@@ -755,10 +755,17 @@ def load_todo(path: Path) -> dict[str, Any]:
         raise FileNotFoundError(f"todo file not found: {path}")
     with path.open("r", encoding="utf-8") as fh:
         data = _RT_YAML.load(fh) or {}
-    data.setdefault("inbox", [])
-    data.setdefault("prioritized", {})
-    data["prioritized"].setdefault("q1_do_first", [])
-    data.setdefault("done", [])
+    # Coerce None to empty container: YAML "inbox:" with no value loads as
+    # None, and setdefault() leaves None in place. Without this, downstream
+    # .extend() calls crash with AttributeError.
+    if data.get("inbox") is None:
+        data["inbox"] = []
+    if data.get("prioritized") is None:
+        data["prioritized"] = {}
+    if data["prioritized"].get("q1_do_first") is None:
+        data["prioritized"]["q1_do_first"] = []
+    if data.get("done") is None:
+        data["done"] = []
     return data
 
 
