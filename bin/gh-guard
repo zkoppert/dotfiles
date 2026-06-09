@@ -6,7 +6,11 @@
 #   2. `gh pr create` — opens a PR; Zack's rule is "always run multi-model
 #      code review before opening a PR." Without enforcement the rule is
 #      easy to skip, so this wrapper blocks PR creation until a review
-#      marker exists.
+#      marker exists. Additionally, the PR body is piped through the
+#      `validate-style` lint skill and the create is blocked if any
+#      hard-rule violations are reported (em-dashes, "per" misuse,
+#      "This PR" as a sentence subject, subjectless action-verb bullets,
+#      etc.).
 #
 # Behavior:
 #   - In an interactive shell (TTY): prompt for confirmation before running.
@@ -174,6 +178,75 @@ fi
 
 # --- gh pr create --------------------------------------------------------
 if [ "$is_pr_create" = "1" ]; then
+  # Lint the PR body via the validate-style skill before doing anything else.
+  # This catches violations of Zack's hard rules (em-dashes, "per" misuse,
+  # "This PR" as a sentence subject, subjectless action-verb bullets, etc.)
+  # before the PR exists on GitHub, where a body edit would be needed to fix
+  # them. The lint runs for both TTY and non-TTY paths -- the rule is hard.
+  body_content=""
+  body_source=""
+  body_skip_reason=""
+  prev_arg=""
+  for arg in "$@"; do
+    case "$prev_arg" in
+      --body)
+        body_content="$arg"
+        body_source="--body"
+        ;;
+      --body-file)
+        if [ "$arg" = "-" ]; then
+          body_skip_reason="--body-file - (stdin; cannot safely re-read)"
+        elif [ -f "$arg" ]; then
+          body_content="$(cat "$arg")"
+          body_source="--body-file $arg"
+        else
+          body_skip_reason="--body-file $arg (file not found)"
+        fi
+        ;;
+    esac
+    case "$arg" in
+      --body=*)
+        body_content="${arg#--body=}"
+        body_source="--body="
+        ;;
+      --body-file=*)
+        path="${arg#--body-file=}"
+        if [ "$path" = "-" ]; then
+          body_skip_reason="--body-file=- (stdin; cannot safely re-read)"
+        elif [ -f "$path" ]; then
+          body_content="$(cat "$path")"
+          body_source="--body-file=$path"
+        else
+          body_skip_reason="--body-file=$path (file not found)"
+        fi
+        ;;
+    esac
+    prev_arg="$arg"
+  done
+
+  lint_path="$HOME/.copilot/skills/validate-style/lint.py"
+  if [ -n "$body_content" ] && [ -x "$(command -v python3)" ] && [ -f "$lint_path" ]; then
+    lint_output=""
+    if ! lint_output="$(printf '%s' "$body_content" | python3 "$lint_path" - 2>&1)"; then
+      cat >&2 <<EOF
+gh-guard: \`gh pr create\` blocked by validate-style.
+
+The PR body (from $body_source) failed Zack's hard writing-style rules. Fix the
+violations below and retry. See ~/.copilot/skills/validate-style/SKILL.md for
+the full rule catalog, or run the linter directly to iterate:
+
+  python3 $lint_path - <<<"<draft body>"
+
+Violations:
+
+$lint_output
+EOF
+      exit 1
+    fi
+  elif [ -n "$body_skip_reason" ]; then
+    echo "gh-guard: skipping validate-style lint ($body_skip_reason)." >&2
+  fi
+
   # Try to resolve the current repo and branch so we can check the per-branch
   # review marker. If either lookup fails, the marker check is skipped and we
   # fall back to the env var alone.
