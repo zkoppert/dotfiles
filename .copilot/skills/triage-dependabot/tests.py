@@ -2185,3 +2185,87 @@ def test_run_closed_excluded_dep_mark_done_failure_does_not_abort_run(
     assert any(
         "mark-done failed for closed excluded-dep" in e for e in stats.errors
     )
+
+
+# ---------------------------------------------------------------------------
+# SKIPPED_REPO_PATTERNS - filter Dependabot PRs in super-linter repo itself
+# ---------------------------------------------------------------------------
+
+
+def test_skipped_repo_match_super_linter() -> None:
+    assert td.skipped_repo_match("super-linter/super-linter") == "super-linter/super-linter"
+
+
+def test_skipped_repo_match_case_insensitive() -> None:
+    assert td.skipped_repo_match("Super-Linter/Super-Linter") is not None
+
+
+def test_skipped_repo_match_negative() -> None:
+    assert td.skipped_repo_match("github-community-projects/stale-repos") is None
+    assert td.skipped_repo_match("") is None
+    # Partial / superstring matches must not fire - pattern is anchored.
+    assert td.skipped_repo_match("foo/super-linter") is None
+    assert td.skipped_repo_match("super-linter/super-linter-fork") is None
+
+
+def _run_skipped_super_linter_repo_with_reason(
+    tmp_path: Path, reason: str
+) -> tuple[td.TriageStats, mock.MagicMock]:
+    """Run() against a Dependabot PR *inside* super-linter/super-linter with a
+    title that does NOT mention super-linter (so only the repo filter can
+    catch it). Returns stats + mark_thread_done mock."""
+    notif = {
+        "id": f"thread-super-linter-repo-{reason}",
+        "reason": reason,
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/super-linter/super-linter/pulls/9999",
+        },
+    }
+    pr = _base_pr(
+        number=9999,
+        url="https://github.com/super-linter/super-linter/pull/9999",
+        title="chore(deps): bump actions/checkout from 4 to 5",
+    )
+    args = _make_args(tmp_path)
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "do_merge"
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock:
+        stats = td.run(args)
+    return stats, mark_mock
+
+
+def test_run_skips_super_linter_repo_pr_with_subscribed_clears_notification(
+    tmp_path: Path,
+) -> None:
+    """Passive subscription noise inside super-linter repo: clear the
+    notification so the inbox stops accumulating. Matches the @-mention-only
+    behavior of the notification-triage SUBSCRIPTION_FILTERED_REPOS entry."""
+    stats, mark_mock = _run_skipped_super_linter_repo_with_reason(
+        tmp_path, "subscribed"
+    )
+    assert stats.skipped_dependency == 1
+    assert stats.dependabot == 0
+    mark_mock.assert_called_once_with(
+        "thread-super-linter-repo-subscribed", dry_run=False
+    )
+
+
+def test_run_skips_super_linter_repo_pr_with_mention_keeps_notification(
+    tmp_path: Path,
+) -> None:
+    """@-mentions in the super-linter repo are actionable: skip the auto
+    action but leave the notification so the user can respond."""
+    stats, mark_mock = _run_skipped_super_linter_repo_with_reason(
+        tmp_path, "mention"
+    )
+    assert stats.skipped_dependency == 1
+    mark_mock.assert_not_called()

@@ -110,6 +110,19 @@ SKIPPED_DEPENDENCY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"super-linter/super-linter", re.IGNORECASE),
 )
 
+# Repositories the triage skill must never auto-merge / rebase / label
+# Dependabot PRs in. Treated identically to SKIPPED_DEPENDENCY_PATTERNS:
+# the action is skipped and (for passive subscription reasons in
+# EXCLUDED_DEP_AUTO_CLEAR_REASONS) the notification is cleared so the
+# inbox stays quiet. @mention / team_mention / author reasons still leave
+# the notification alone so the user can act directly. This is for repos
+# where Zack is a passive contributor (subscribed but not maintaining),
+# distinct from SKIPPED_DEPENDENCY_PATTERNS which targets PRs *bumping*
+# those tools as a dependency elsewhere.
+SKIPPED_REPO_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^super-linter/super-linter$", re.IGNORECASE),
+)
+
 # Notification reasons that count as "passive subscription" - if a PR is
 # excluded from action AND we got notified for one of these reasons, mark
 # the thread done so it stops cluttering the inbox. Any other reason
@@ -302,6 +315,22 @@ def skipped_dependency_match(pr: dict[str, Any]) -> str | None:
         match = pattern.search(title) or pattern.search(body)
         if match:
             return match.group(0)
+    return None
+
+
+def skipped_repo_match(repo: str) -> str | None:
+    """Return the matched repo if it is on the skipped-repo list.
+
+    Repos on this list (e.g. ``super-linter/super-linter``) are ones Zack
+    subscribes to but doesn't actively maintain. Dependabot PRs there get
+    auto-skipped + notification-cleared so they stop landing in the inbox
+    or Q1, mirroring the @mention-only rule in the notification triage.
+    """
+    if not repo:
+        return None
+    for pattern in SKIPPED_REPO_PATTERNS:
+        if pattern.search(repo):
+            return repo
     return None
 
 
@@ -1222,7 +1251,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             continue
         if not is_dependabot_pr(pr):
             continue
-        skipped_dep = skipped_dependency_match(pr)
+        skipped_dep = skipped_dependency_match(pr) or skipped_repo_match(repo)
         if skipped_dep:
             pr_state = (pr.get("state") or "").lower()
             thread_id = str(notif.get("id") or "")

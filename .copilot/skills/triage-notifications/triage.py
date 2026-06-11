@@ -136,6 +136,16 @@ SUBSCRIPTION_FILTERED_REPOS: dict[str, set[str]] = {
         "team_mention",
         "security_alert",
     },
+    # super-linter is a community repo Zack subscribes to but isn't an
+    # active maintainer on. Drop subscription noise (dependabot bumps,
+    # comments on others' PRs, ci_activity) unless he's directly pinged.
+    "super-linter/super-linter": {
+        "mention",
+        "team_mention",
+        "assign",
+        "review_requested",
+        "security_alert",
+    },
 }
 
 DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"

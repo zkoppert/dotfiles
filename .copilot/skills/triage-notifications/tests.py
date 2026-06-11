@@ -3195,3 +3195,54 @@ def test_classify_subscription_filter_is_case_insensitive():
     )
     assert c.bucket == triage.BUCKET_DROP
     assert "subscription allowlist" in c.reason
+
+
+# --- Tests for super-linter/super-linter subscription filter ---
+
+
+def _superlinter_notif(reason: str) -> dict:
+    """Notification on super-linter/super-linter with the given reason."""
+    return {
+        "id": "sl-1",
+        "reason": reason,
+        "unread": True,
+        "repository": {"full_name": "super-linter/super-linter"},
+        "subject": {
+            "title": "chore(deps): bump foo",
+            "url": "https://api.github.com/repos/super-linter/super-linter/pulls/9999",
+            "latest_comment_url": None,
+            "type": "PullRequest",
+        },
+    }
+
+
+def test_classify_super_linter_repo_subscribed_drops():
+    """Dependabot bumps and other subscribed-thread activity in the
+    super-linter repo drop - I'm a passive subscriber, not a
+    maintainer there."""
+    c = triage.classify(
+        _superlinter_notif("subscribed"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "dependabot[bot]",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "subscription allowlist" in c.reason
+
+
+def test_classify_super_linter_repo_mention_routes_to_q1():
+    """@-mentions in the super-linter repo still reach Q1 - if someone
+    pings me directly, that's the signal worth surfacing."""
+    c = triage.classify(
+        _superlinter_notif("mention"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: ("maintainer", "@zkoppert thoughts?"),
+        subject_author_fetcher=lambda _: "maintainer",
+        human_commenter_fetcher=lambda _, my_login: set(),
+    )
+    assert c.bucket == triage.BUCKET_Q1
