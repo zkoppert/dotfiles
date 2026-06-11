@@ -152,7 +152,7 @@ DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
 
 # Buckets the classifier can return.
 BUCKET_DROP = "DROP"
-BUCKET_Q1 = "QUADRANT_Q1"
+BUCKET_Q2 = "QUADRANT_Q2"
 BUCKET_INBOX = "INBOX"
 
 logger = logging.getLogger("triage")
@@ -176,7 +176,7 @@ class TriageStats:
 
     fetched: int = 0
     dropped: int = 0
-    added_q1: int = 0
+    added_q2: int = 0
     added_inbox: int = 0
     already_tracked: int = 0
     marked_done: int = 0
@@ -536,7 +536,7 @@ def _classify_internal(
     # comment-on-closed still get cleaned up regardless of read status.
 
     if reason == "review_requested":
-        # Auto-Q1 only when the PR author is on the narrow allowlist.
+        # Auto-Q2 only when the PR author is on the narrow allowlist.
         # GitHub doesn't put the requester in the notification payload, and
         # the latest comment author is unrelated to who clicked "request
         # review". Use the PR author as a pragmatic proxy: the dominant
@@ -546,12 +546,12 @@ def _classify_internal(
         author = subject_author_fetcher(notif)
         if author and author in q1_logins:
             return Classification(
-                BUCKET_Q1,
+                BUCKET_Q2,
                 f"review_requested on PR by teammate @{author}",
             )
         return Classification(
             BUCKET_INBOX,
-            "review_requested - PR author not on Q1 allowlist (or unknown)",
+            "review_requested - PR author not on Q2 allowlist (or unknown)",
         )
 
     if reason in Q1_REASONS:
@@ -564,7 +564,7 @@ def _classify_internal(
                         BUCKET_INBOX,
                         f"{reason} on PR I authored - status update only",
                     )
-        return Classification(BUCKET_Q1, f"{reason} → Q1")
+        return Classification(BUCKET_Q2, f"{reason} → Q2")
 
     if reason == "manual":
         # Subscribed deliberately. Surface as actionable but let user
@@ -577,7 +577,7 @@ def _classify_internal(
             return Classification(BUCKET_DROP, f"comment on {state} {subject_type}")
         author, body = comment_fetcher(notif)
         if mentions_me(body, my_login):
-            return Classification(BUCKET_Q1, f"@mention in comment by @{author}")
+            return Classification(BUCKET_Q2, f"@mention in comment by @{author}")
         if is_super_linter(author, body):
             return Classification(BUCKET_DROP, "super-linter comment without @mention")
         return Classification(BUCKET_INBOX, "comment thread (not closed)")
@@ -654,12 +654,12 @@ def build_todo_entry(
         },
     }
 
-    if classification.bucket == BUCKET_Q1:
+    if classification.bucket == BUCKET_Q2:
         entry.update(
             {
                 "urgency": "high",
                 "importance": "high",
-                "quadrant": "q1_do_first",
+                "quadrant": "q2_schedule",
                 "status": "pending",
             }
         )
@@ -774,6 +774,8 @@ def load_todo(path: Path) -> dict[str, Any]:
         data["prioritized"] = {}
     if data["prioritized"].get("q1_do_first") is None:
         data["prioritized"]["q1_do_first"] = []
+    if data["prioritized"].get("q2_schedule") is None:
+        data["prioritized"]["q2_schedule"] = []
     if data.get("done") is None:
         data["done"] = []
     return data
@@ -1292,7 +1294,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         return stats
 
     seen_ids = existing_thread_ids(data)
-    new_q1: list[dict[str, Any]] = []
+    new_q2: list[dict[str, Any]] = []
     new_inbox: list[dict[str, Any]] = []
     new_done: list[dict[str, Any]] = []
 
@@ -1329,9 +1331,9 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
             continue
         entry = build_todo_entry(notif, classification)
-        if classification.bucket == BUCKET_Q1:
-            new_q1.append(entry)
-            stats.added_q1 += 1
+        if classification.bucket == BUCKET_Q2:
+            new_q2.append(entry)
+            stats.added_q2 += 1
         else:
             new_inbox.append(entry)
             stats.added_inbox += 1
@@ -1366,14 +1368,14 @@ def run(args: argparse.Namespace) -> TriageStats:
 
     # Append new entries to todo.yml.
     if (
-        new_q1
+        new_q2
         or new_inbox
         or new_done
         or stats.marked_done
         or stats.pruned_stale
     ) and not args.dry_run:
         data["inbox"].extend(new_inbox)
-        data["prioritized"]["q1_do_first"].extend(new_q1)
+        data["prioritized"]["q2_schedule"].extend(new_q2)
         data["done"].extend(new_done)
         try:
             write_todo_atomic(args.todo_file, data)
@@ -1381,11 +1383,11 @@ def run(args: argparse.Namespace) -> TriageStats:
             stats.errors.append(f"failed to write todo file: {exc}")
             return stats
 
-    new_actionable = stats.added_q1 + stats.added_inbox
+    new_actionable = stats.added_q2 + stats.added_inbox
     if new_actionable and not args.no_notify:
         title = "Notification triage"
         message = (
-            f"{stats.added_q1} new Q1, {stats.added_inbox} to inbox "
+            f"{stats.added_q2} new Q2, {stats.added_inbox} to inbox "
             f"({stats.dropped} dropped)"
         )
         macos_notify(title, message)
@@ -1401,7 +1403,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     stats = run(args)
     print(
-        f"fetched={stats.fetched} added_q1={stats.added_q1} "
+        f"fetched={stats.fetched} added_q2={stats.added_q2} "
         f"added_inbox={stats.added_inbox} dropped={stats.dropped} "
         f"archived_to_done={stats.archived_to_done} "
         f"already_tracked={stats.already_tracked} "

@@ -52,7 +52,7 @@ def test_classify_mention_goes_to_q1():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_assign_goes_to_q1():
@@ -64,7 +64,7 @@ def test_classify_assign_goes_to_q1():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_security_alert_goes_to_q1():
@@ -75,7 +75,7 @@ def test_classify_security_alert_goes_to_q1():
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_assign_on_my_own_pr_goes_to_inbox():
@@ -119,7 +119,7 @@ def test_classify_security_alert_on_my_own_pr_still_goes_to_q1():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_self_assign_on_non_pr_still_goes_to_q1():
@@ -145,7 +145,7 @@ def test_classify_self_assign_on_non_pr_still_goes_to_q1():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=fetcher,
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
     assert fetcher_called == [], "fetcher should be skipped for non-PR subjects"
 
 
@@ -169,7 +169,7 @@ def test_review_requested_from_teammate_goes_to_q1():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "iansan5653",
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
     assert "iansan5653" in c.reason
 
 
@@ -244,7 +244,7 @@ def test_comment_with_mention_goes_to_q1():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: ("teammate", "hey @zkoppert can you look?"),
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_super_linter_without_mention_drops():
@@ -273,7 +273,7 @@ def test_super_linter_with_mention_still_goes_to_q1():
             "Super-linter found issues, @zkoppert please review",
         ),
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_ci_activity_drops():
@@ -386,11 +386,11 @@ def test_make_todo_id_handles_no_number():
 # ----------------------------------------------------------------------
 
 
-def test_build_todo_entry_q1_has_quadrant_fields():
+def test_build_todo_entry_q2_has_quadrant_fields():
     notif = _notif("mention")
-    c = triage.Classification(triage.BUCKET_Q1, "@mention")
+    c = triage.Classification(triage.BUCKET_Q2, "@mention")
     entry = triage.build_todo_entry(notif, c)
-    assert entry["quadrant"] == "q1_do_first"
+    assert entry["quadrant"] == "q2_schedule"
     assert entry["urgency"] == "high"
     assert entry["importance"] == "high"
     assert entry["status"] == "pending"
@@ -630,10 +630,10 @@ def test_run_dedupes_already_tracked(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
     assert stats.already_tracked == 1
-    assert stats.added_q1 == 0
+    assert stats.added_q2 == 0
 
 
-def test_run_adds_q1_for_mention(todo_file):
+def test_run_adds_q2_for_mention(todo_file):
     responses = {
         "/user": json.dumps({"login": "zkoppert"}),
         "/notifications?all=true": json.dumps([_notif("mention")]),
@@ -641,11 +641,11 @@ def test_run_adds_q1_for_mention(todo_file):
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
-    assert stats.added_q1 == 1
+    assert stats.added_q2 == 1
     data = yaml.safe_load(todo_file.read_text())
-    q1 = data["prioritized"]["q1_do_first"]
-    assert len(q1) == 1
-    assert q1[0]["quadrant"] == "q1_do_first"
+    q2 = data["prioritized"]["q2_schedule"]
+    assert len(q2) == 1
+    assert q2[0]["quadrant"] == "q2_schedule"
 
 
 def test_run_drops_ci_activity_and_marks_done(todo_file):
@@ -689,7 +689,7 @@ def test_run_dry_run_does_not_write(todo_file):
             ["--todo-file", str(todo_file), "--dry-run", "--no-notify"]
         )
         stats = triage.run(args)
-    assert stats.added_q1 == 1
+    assert stats.added_q2 == 1
     assert todo_file.read_text() == before
 
 
@@ -1451,7 +1451,7 @@ def test_run_prune_marks_thread_done_so_it_does_not_reappear(todo_file):
         stats_second = triage.run(args)
 
     assert stats_second.added_inbox == 0
-    assert stats_second.added_q1 == 0
+    assert stats_second.added_q2 == 0
     data = yaml.safe_load(todo_file.read_text())
     assert data["inbox"] == []
 
@@ -1925,7 +1925,7 @@ def test_classify_keeps_mention_on_open_subject():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_keeps_review_requested_on_open_pr():
@@ -1953,7 +1953,7 @@ def test_classify_keeps_assign_when_state_unknown():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_skips_state_check_for_non_subject_types():
@@ -1979,7 +1979,7 @@ def test_classify_skips_state_check_for_non_subject_types():
         subject_author_fetcher=lambda _: "someone-else",
     )
     fetcher.assert_not_called()
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def _enable_dependabot_notif() -> dict:
@@ -2373,7 +2373,7 @@ def test_classify_keeps_intermittent_test_failure_when_at_mentioned():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_keeps_intermittent_test_failure_when_assigned():
@@ -2390,7 +2390,7 @@ def test_classify_keeps_intermittent_test_failure_when_assigned():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_title_drop_does_not_match_unrelated_titles():
@@ -2686,7 +2686,7 @@ def test_run_read_open_notification_added_to_inbox(todo_file):
         stats = triage.run(args)
 
     assert stats.added_inbox == 1
-    assert stats.added_q1 == 0
+    assert stats.added_q2 == 0
     assert delete_calls == []
 
 
@@ -2804,7 +2804,7 @@ def test_classify_read_q1_mention_now_returns_q1():
         subject_author_fetcher=lambda _: "andi",
         human_commenter_fetcher=lambda _, my_login: set(),
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_build_done_archive_entry_includes_notification_thread_id():
@@ -3061,7 +3061,7 @@ def test_classify_nux_mention_still_routes_normally():
         subject_author_fetcher=lambda _: "andimiya",
         human_commenter_fetcher=lambda _, my_login: set(),
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_nux_assign_still_routes_normally():
@@ -3075,7 +3075,7 @@ def test_classify_nux_assign_still_routes_normally():
         subject_author_fetcher=lambda _: "andimiya",
         human_commenter_fetcher=lambda _, my_login: set(),
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_nux_review_requested_still_routes_normally():
@@ -3090,7 +3090,7 @@ def test_classify_nux_review_requested_still_routes_normally():
         subject_author_fetcher=lambda _: "andimiya",
         human_commenter_fetcher=lambda _, my_login: set(),
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_nux_team_mention_still_routes_normally():
@@ -3176,7 +3176,7 @@ def test_classify_nux_security_alert_still_routes_to_q1():
         subject_author_fetcher=lambda _: "someone-else",
         human_commenter_fetcher=lambda _, my_login: set(),
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_subscription_filter_is_case_insensitive():
@@ -3245,4 +3245,4 @@ def test_classify_super_linter_repo_mention_routes_to_q1():
         subject_author_fetcher=lambda _: "maintainer",
         human_commenter_fetcher=lambda _, my_login: set(),
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
