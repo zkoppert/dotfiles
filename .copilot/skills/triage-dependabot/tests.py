@@ -2846,3 +2846,201 @@ def test_load_and_write_todo_roundtrips_ruby_method_and_backticks(
     assert flags2[0]["id"] == flags[0]["id"]
     assert flags2[0]["title"] == flags[0]["title"]
     assert flags2[0]["description"] == flags[0]["description"]
+
+
+# ---------------------------------------------------------------------------
+# Bug 5 / FR: prerelease (alpha/beta/rc/dev/preview) bumps -> @dependabot close
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        # Real github-community-projects/stale-repos#520 title.
+        "chore(deps): bump python from 3.14.5-slim to 3.15.0b2-slim in the dependencies group",
+        # PEP 440 short forms glued to the patch digit.
+        "Bump foo from 1.0.0 to 2.0.0a1",
+        "Bump foo from 1.0.0 to 2.0.0b3",
+        "Bump foo from 1.0.0 to 2.0.0rc1",
+        # Semver / npm word forms with `-` or `.` separators.
+        "Bump foo from 1.0.0 to 2.0.0-alpha",
+        "Bump foo from 1.0.0 to 2.0.0-beta.1",
+        "Bump foo from 1.0.0 to 2.0.0-rc1",
+        "Bump foo from 1.0.0 to 2.0.0-preview",
+        "Bump foo from 1.0.0 to 2.0.0-pre",
+        # PEP 440 dev release.
+        "Bump foo from 1.0.0 to 2.0.0.dev1",
+    ],
+)
+def test_is_prerelease_target_positive(title: str) -> None:
+    assert td.is_prerelease_target({"title": title, "body": ""})
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        # Stable docker tags with build variants must not match.
+        "chore(deps): bump python from 3.14.5-slim to 3.15.0-slim",
+        "Bump nginx from 1.20.0-alpine to 1.21.0-alpine",
+        "Bump base from 1.0-bookworm to 1.1-bookworm",
+        # PEP 440 post-release: a bug-fix tag, fine to auto-merge.
+        "Bump foo from 1.0.0 to 1.0.0.post1",
+        # Plain semver bumps.
+        "Bump foo from 1.0.0 to 2.0.0",
+        "Bump foo from 1.2.3 to 1.2.4",
+        # Words that contain prerelease substrings must not match (e.g.
+        # `alpine` ≠ `alpha`, `predictor` ≠ `pre`).
+        "Bump foo from 1.0.0 to 1.0.0-alpine",
+    ],
+)
+def test_is_prerelease_target_negative(title: str) -> None:
+    assert not td.is_prerelease_target({"title": title, "body": ""})
+
+
+def test_is_prerelease_target_detects_in_body_for_grouped_pr() -> None:
+    """Grouped PR titles often hide the version - body must be scanned too."""
+    pr = {
+        "title": "Bump the dependencies group with 1 update",
+        "body": "Updates python from 3.14.5-slim to 3.15.0b2-slim",
+    }
+    assert td.is_prerelease_target(pr)
+
+
+def test_decide_routes_prerelease_to_close(tmp_path: Path) -> None:
+    pr = _base_pr(
+        number=520,
+        title="chore(deps): bump python from 3.14.5-slim to 3.15.0b2-slim",
+        url="https://github.com/github-community-projects/stale-repos/pull/520",
+    )
+    decision = _decide(pr)
+    assert decision.outcome == td.OUTCOME_CLOSE_PRERELEASE
+    assert "prerelease" in decision.reason
+
+
+def test_decide_prerelease_check_is_after_humans_engaged(tmp_path: Path) -> None:
+    """Human review activity wins over the prerelease close: maybe the human
+    is actively evaluating whether to take the beta. Don't yank the PR
+    out from under them."""
+    pr = _base_pr(
+        title="Bump foo from 1.0.0 to 2.0.0-beta.1",
+        comments=[{"author": {"login": "iansan5653"}, "body": "looks interesting"}],
+    )
+    decision = _decide(pr)
+    assert decision.outcome == td.OUTCOME_FLAG
+    assert decision.reason == "human review activity present"
+
+
+def test_decide_prerelease_check_runs_before_rebase(tmp_path: Path) -> None:
+    """A prerelease PR that's behind shouldn't get a rebase comment - we're
+    just going to close it. Saves a wasted rebase round-trip."""
+    pr = _base_pr(
+        title="Bump foo from 1.0.0 to 2.0.0-beta.1",
+        mergeStateStatus="behind",
+    )
+    decision = _decide(pr)
+    assert decision.outcome == td.OUTCOME_CLOSE_PRERELEASE
+
+
+def test_do_dependabot_close_dry_run_no_subprocess() -> None:
+    with mock.patch.object(td, "run_gh") as mocked:
+        td.do_dependabot_close("o/r", 1, dry_run=True)
+    mocked.assert_not_called()
+
+
+def test_do_dependabot_close_posts_correct_comment() -> None:
+    with mock.patch.object(td, "run_gh") as mocked:
+        td.do_dependabot_close("github-community-projects/stale-repos", 520, dry_run=False)
+    mocked.assert_called_once()
+    args = mocked.call_args[0][0]
+    assert args[:2] == ["pr", "comment"]
+    assert "520" in args
+    assert "--repo" in args
+    assert "github-community-projects/stale-repos" in args
+    assert "--body" in args
+    body_idx = args.index("--body")
+    assert args[body_idx + 1] == "@dependabot close"
+
+
+def test_run_closes_prerelease_and_marks_notification_done(tmp_path: Path) -> None:
+    """End-to-end: a Dependabot PR targeting a beta version posts
+    '@dependabot close', marks the notification done, and applies the
+    cooldown so the next run skips it."""
+    notif = {
+        "id": "thread-prerelease",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/github-community-projects/stale-repos/pulls/520",
+        },
+    }
+    pr = _base_pr(
+        number=520,
+        title="chore(deps): bump python from 3.14.5-slim to 3.15.0b2-slim in the dependencies group",
+        url="https://github.com/github-community-projects/stale-repos/pull/520",
+    )
+    args = _make_args(tmp_path)
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "do_dependabot_close"
+    ) as close_mock, mock.patch.object(
+        td, "do_merge"
+    ) as merge_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_done_mock:
+        stats = td.run(args)
+
+    assert stats.closed_prerelease == 1
+    assert stats.merged == 0
+    assert stats.flagged == 0
+    assert stats.errors == []
+    close_mock.assert_called_once_with(
+        "github-community-projects/stale-repos", 520, dry_run=False
+    )
+    merge_mock.assert_not_called()
+    mark_done_mock.assert_called_once_with("thread-prerelease", dry_run=False)
+    state = td.load_state(args.state_file)
+    assert (
+        "https://github.com/github-community-projects/stale-repos/pull/520" in state
+    )
+
+
+def test_run_closes_prerelease_dry_run_does_not_post(tmp_path: Path) -> None:
+    """Dry-run prerelease close: count the action, don't actually post the
+    comment, don't mark the thread done, don't write state."""
+    notif = {
+        "id": "thread-prerelease-dry",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/9",
+        },
+    }
+    pr = _base_pr(number=9, title="Bump foo from 1.0.0 to 2.0.0-beta.1")
+    args = _make_args(tmp_path, dry_run=True)
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "run_gh"
+    ) as run_gh_mock:
+        stats = td.run(args)
+
+    assert stats.closed_prerelease == 1
+    # No mutating gh call should fire in dry-run (the only run_gh calls that
+    # could happen here come from is_archived_repo / coverage, both of which
+    # are autouse-stubbed or unused in this path).
+    for call in run_gh_mock.call_args_list:
+        cmd = call[0][0]
+        assert "comment" not in cmd, f"unexpected comment call: {cmd}"
+        assert not (cmd[0] == "api" and "-X" in cmd and "DELETE" in cmd), (
+            f"unexpected DELETE call: {cmd}"
+        )
+    assert not args.state_file.exists()

@@ -70,6 +70,7 @@ DEPENDABOT_LOGINS: set[str] = {
 OUTCOME_MERGE = "merge"
 OUTCOME_REBASE = "rebase"
 OUTCOME_LABEL_AND_MERGE = "label-and-merge"
+OUTCOME_CLOSE_PRERELEASE = "close-prerelease"
 OUTCOME_FLAG = "flag-for-review"
 OUTCOME_SKIP = "skip"  # pending CI, closed PR, cooldown - no action this run.
 
@@ -145,6 +146,19 @@ _VERSION_BUMP_RE = re.compile(
     re.IGNORECASE,
 )
 
+#
+# We deliberately match the marker anywhere in the version token after
+# "to", not just at the immediate end of the digits, so grouped PR bodies
+# listing multiple `to` versions per line still detect correctly.
+_PRERELEASE_TARGET_RE = re.compile(
+    r"\bto\s+v?\d+(?:\.\d+)*"
+    r"(?:"
+    r"[ab]\d+|rc\d+"
+    r"|[.-](?:alpha|beta|rc|preview|pre|dev)"
+    r")",
+    re.IGNORECASE,
+)
+
 logger = logging.getLogger("triage-dependabot")
 
 
@@ -161,6 +175,7 @@ class TriageStats:
     skipped: int = 0
     skipped_dependency: int = 0
     skipped_archived: int = 0
+    closed_prerelease: int = 0
     cooldown: int = 0
     already_tracked: int = 0
     stale_removed: int = 0
@@ -424,10 +439,33 @@ def parse_bump_from_body(body: str) -> str:
     return highest or BUMP_UNKNOWN
 
 
+
 _GROUPED_TITLE_RE = re.compile(
     r"\bbump\s+the\s+[\w.\-/]+\s+group\b",
     re.IGNORECASE,
 )
+
+
+def is_prerelease_target(pr: dict[str, Any]) -> bool:
+    """Return True if any ``to <version>`` expression targets a prerelease.
+
+    Catches bumps like ``from 3.14.5-slim to 3.15.0b2-slim`` (PEP 440 beta),
+    ``to 2.0.0-rc1`` (semver release candidate), ``to 1.0.0.dev1`` (PEP 440
+    dev), ``to 1.0.0-alpha`` (semver alpha). Build-variant suffixes such as
+    ``-slim`` / ``-alpine`` and PEP 440 post-releases (``.post1``) are not
+    treated as prereleases.
+
+    Scans both the title and body so single-package PRs and grouped PRs
+    are both detected. Conservative: any prerelease target anywhere in
+    the PR text routes the PR to ``@dependabot close`` rather than
+    auto-merging an unstable release.
+    """
+    title = pr.get("title") or ""
+    body = pr.get("body") or ""
+    return bool(
+        _PRERELEASE_TARGET_RE.search(title)
+        or _PRERELEASE_TARGET_RE.search(body)
+    )
 
 
 def detect_bump(pr: dict[str, Any]) -> str:
@@ -818,6 +856,12 @@ def decide(
     if humans_engaged(pr, my_login):
         return Decision(OUTCOME_FLAG, "human review activity present")
 
+    if is_prerelease_target(pr):
+        return Decision(
+            OUTCOME_CLOSE_PRERELEASE,
+            "target version is a prerelease (alpha/beta/rc/dev)",
+        )
+
     merge_state = (pr.get("mergeStateStatus") or "").lower()
     if merge_state in {"behind", "dirty"}:
         if needs_rebase_comment(pr, my_login):
@@ -1124,6 +1168,32 @@ def do_add_label(repo: str, number: int, label: str, *, dry_run: bool) -> None:
             repo,
             "--add-label",
             label,
+        ],
+        timeout=30,
+    )
+
+
+def do_dependabot_close(repo: str, number: int, *, dry_run: bool) -> None:
+    """Post the ``@dependabot close`` comment to close a prerelease bump PR.
+
+    Dependabot treats this comment as a directive to close the PR (and the
+    backing branch) so the noise stops. If the upstream releases another
+    prerelease later Dependabot may open a new PR; the next run of this
+    tool will close that one too. For a permanent skip, add an
+    ``ignore`` rule for prereleases in the repo's ``.github/dependabot.yml``.
+    """
+    if dry_run:
+        logger.info("dry-run: would post '@dependabot close' on %s#%d", repo, number)
+        return
+    run_gh(
+        [
+            "pr",
+            "comment",
+            str(number),
+            "--repo",
+            repo,
+            "--body",
+            "@dependabot close",
         ],
         timeout=30,
     )
@@ -1670,6 +1740,14 @@ def run(args: argparse.Namespace) -> TriageStats:
                 do_rebase_comment(repo, number, dry_run=args.dry_run)
                 stats.rebased += 1
                 state[pr_url] = now
+            elif decision.outcome == OUTCOME_CLOSE_PRERELEASE:
+                do_dependabot_close(repo, number, dry_run=args.dry_run)
+                mark_thread_done(thread_id, dry_run=args.dry_run)
+                stats.closed_prerelease += 1
+                state[pr_url] = now
+                stats.stale_removed += _cleanup_stale_entries(
+                    data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
+                )
             elif decision.outcome == OUTCOME_FLAG:
                 if thread_id and thread_id in seen_thread_ids:
                     stats.already_tracked += 1
@@ -1737,11 +1815,15 @@ def run(args: argparse.Namespace) -> TriageStats:
         save_state(args.state_file, state)
 
     if not args.no_notify and (
-        stats.merged or stats.labeled_and_merged or stats.flagged
+        stats.merged
+        or stats.labeled_and_merged
+        or stats.flagged
+        or stats.closed_prerelease
     ):
         message = (
             f"merged={stats.merged} labeled={stats.labeled_and_merged} "
             f"rebased={stats.rebased} flagged={stats.flagged} "
+            f"closed_prerelease={stats.closed_prerelease} "
             f"stale_removed={stats.stale_removed}"
         )
         macos_notify("Dependabot triage", message)
@@ -1760,6 +1842,7 @@ def main(argv: list[str] | None = None) -> int:
         f"fetched={stats.fetched} dependabot={stats.dependabot} "
         f"merged={stats.merged} labeled={stats.labeled_and_merged} "
         f"rebased={stats.rebased} flagged={stats.flagged} "
+        f"closed_prerelease={stats.closed_prerelease} "
         f"skipped={stats.skipped} skipped_dependency={stats.skipped_dependency} "
         f"skipped_archived={stats.skipped_archived} "
         f"cooldown={stats.cooldown} already_tracked={stats.already_tracked} "

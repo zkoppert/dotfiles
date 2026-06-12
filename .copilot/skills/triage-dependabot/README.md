@@ -28,6 +28,7 @@ by `dependabot[bot]` or `dependabot-preview[bot]`:
 | Title or body references an excluded dependency AND notification reason is `mention`, `team_mention`, `author`, or `manual` | skip, leave notification in inbox for direct response |
 | Draft PR | flag-for-review |
 | Any non-bot human (other than me) reviewed or commented | flag-for-review |
+| Target version is a prerelease (alpha / beta / rc / dev / preview) | close-prerelease (comment `@dependabot close`) |
 | `mergeStateStatus` is `behind` or `dirty` | rebase (suppressed if my last rebase comment is newer than the latest dependabot push) |
 | Bump is major / minor / unknown AND repo coverage threshold below 90 | flag-for-review |
 | CI status pending | skip this run; next hour retries |
@@ -38,6 +39,23 @@ by `dependabot[bot]` or `dependabot-preview[bot]`:
 The script never auto-merges when uncertainty exists - sub-agent
 timeouts, unknown bump kinds, and missing coverage signals all route to
 `flag-for-review`.
+
+### Prerelease detection
+
+Catches PRs like
+[github-community-projects/stale-repos#520](https://github.com/github-community-projects/stale-repos/pull/520)
+(`bump python from 3.14.5-slim to 3.15.0b2-slim`) that target an
+unstable release. Recognized prerelease forms:
+
+- PEP 440 short forms glued to the patch digit: `1.0.0a1`, `1.0.0b2`, `1.0.0rc1`, `3.15.0b2`
+- Word forms with `-` or `.` separator: `1.0.0-alpha`, `1.0.0-beta.1`, `1.0.0-rc1`, `1.0.0.dev1`, `1.0.0-preview`
+
+Docker build variants (`-slim`, `-alpine`, `-bookworm`) and PEP 440
+post-releases (`1.0.0.post1`) are NOT treated as prereleases. The action
+is `@dependabot close`; Dependabot may open a new PR if the upstream
+releases another prerelease, and the next run closes that one too. For
+a permanent skip, add an `ignore` rule in the repo's
+`.github/dependabot.yml`.
 
 ### Excluded dependencies
 
@@ -67,6 +85,9 @@ conservative default.
   notification stays open so the next push triggers another evaluation.
 - **Label-and-merge**: `gh pr edit --add-label release` (only if the
   repo defines a `release` label) followed by auto-merge.
+- **Close-prerelease**: `gh pr comment --body "@dependabot close"` for
+  PRs whose target version is an alpha / beta / rc / dev / preview;
+  notification is marked done and the cooldown is applied.
 - **Flag-for-review**: a Q1 entry in
   `~/repos/zkoppert-todo/todo.yml` under
   `prioritized.q1_do_first`, with `source: dependabot-triage`,

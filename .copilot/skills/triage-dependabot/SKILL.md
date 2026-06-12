@@ -1,6 +1,6 @@
 ---
 name: triage-dependabot
-description: Triggers when the user says "triage dependabot", "review my dependabot PRs", "what dependency updates are waiting", "merge safe dependabot bumps", or any similar request to process Dependabot PRs surfaced via GitHub notifications. Runs the dotfiles tool which filters notifications to Dependabot-authored PRs, evaluates each PR against a four-outcome decision tree (auto-merge, request rebase, label-and-merge for security releases, or flag for human review in ~/repos/zkoppert-todo/todo.yml), and skips PRs that another human is already engaged on or whose CI is still pending. Safe to re-run; per-PR cooldown prevents double-acting within an hour.
+description: Triggers when the user says "triage dependabot", "review my dependabot PRs", "what dependency updates are waiting", "merge safe dependabot bumps", or any similar request to process Dependabot PRs surfaced via GitHub notifications. Runs the dotfiles tool which filters notifications to Dependabot-authored PRs, evaluates each PR against a five-outcome decision tree (auto-merge, request rebase, label-and-merge for security releases, close-prerelease for alpha/beta/rc/dev target versions, or flag for human review in ~/repos/zkoppert-todo/todo.yml), and skips PRs that another human is already engaged on or whose CI is still pending. Safe to re-run; per-PR cooldown prevents double-acting within an hour.
 ---
 
 # Triage Dependabot PRs
@@ -24,13 +24,17 @@ upgrades or seeing a backlog of dependabot notifications.
 2. Filters to notifications whose subject is a PullRequest authored by
    `dependabot[bot]` (or `dependabot-preview[bot]`).
 3. For each PR, fetches metadata (`gh pr view --json`) and decides one
-   of four outcomes:
+   of five outcomes:
    - `merge` - enable `gh pr merge --auto --squash --delete-branch`.
    - `rebase` - comment `@dependabot rebase` (suppressed when a prior
      rebase request is newer than the most recent dependabot push).
    - `label-and-merge` - add the `release` label (if the repo defines
      one) and enable auto-merge, for changes the Copilot sub-agent or
      fallback regex classifies as security-related.
+   - `close-prerelease` - comment `@dependabot close` when the target
+     version is a prerelease (alpha / beta / rc / dev / preview).
+     Catches PRs like `bump python from 3.14.5-slim to 3.15.0b2-slim`
+     that should never auto-merge.
    - `flag-for-review` - write a Q1 entry to
      `~/repos/zkoppert-todo/todo.yml` for human attention.
 4. Marks the notification done on GitHub when an action runs.
@@ -90,7 +94,7 @@ python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py 
 - Do not modify `todo.yml` directly. The script handles atomic writes.
 - Do not commit changes to `zkoppert-todo` automatically. The user
   reviews and commits manually (matches existing workflow).
-- Do not relax the four-outcome decision tree without explicit approval.
+- Do not relax the five-outcome decision tree without explicit approval.
   Routing to `flag-for-review` is the safe default whenever any
   uncertainty exists (sub-agent failure, unknown bump kind, missing
   coverage signal).
