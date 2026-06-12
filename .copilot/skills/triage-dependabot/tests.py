@@ -2721,3 +2721,128 @@ def test_run_branch_protection_failure_flags_and_sets_long_cooldown(
         23 * 3600
     )
     assert td.in_cooldown(state, pr_url, now=now_plus_23h)
+
+
+# ---------------------------------------------------------------------------
+# Stale-removal guard (bug 4)
+# ---------------------------------------------------------------------------
+
+
+def test_remove_stale_entries_never_removes_items_without_notification(
+    tmp_path: Path, caplog: Any
+) -> None:
+    """Regression: hand-curated Q1 entries (no ``notification`` field) must
+    survive a stale-removal pass even when another item in the same bucket
+    is matched and removed.
+    """
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: hand-curated-no-notification\n"
+        "      title: 'IssueQuery#maybe_expand_author_for_agents fix'\n"
+        "      status: pending\n"
+        "    - id: dependabot-foo-pr-9\n"
+        "      title: Review dependabot PR\n"
+        "      notification:\n"
+        "        thread_id: thread-resolved\n"
+        "        url: https://github.com/o/r/pull/9\n"
+        "        reason: subscribed\n"
+        "    - id: hand-curated-null-notif\n"
+        "      title: notification field present but null\n"
+        "      notification: null\n"
+        "    - id: hand-curated-empty-notif\n"
+        "      title: notification field present but empty\n"
+        "      notification: {}\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+    data = td.load_todo(todo_file)
+
+    with caplog.at_level("INFO", logger="triage-dependabot"):
+        removed = td.remove_stale_entries(
+            data,
+            thread_id="thread-resolved",
+            pr_url="https://github.com/o/r/pull/9",
+        )
+
+    assert removed == 1
+
+    ids_left = [item["id"] for item in data["prioritized"]["q1_do_first"]]
+    assert ids_left == [
+        "hand-curated-no-notification",
+        "hand-curated-null-notif",
+        "hand-curated-empty-notif",
+    ]
+
+    # Diagnostic logging captured the removal with the matched key + item id.
+    matching_records = [
+        rec.getMessage() for rec in caplog.records if "stale-removal" in rec.getMessage()
+    ]
+    assert any("dependabot-foo-pr-9" in msg for msg in matching_records)
+    assert any("thread_id=thread-resolved" in msg for msg in matching_records)
+
+
+def test_remove_stale_entries_no_op_when_both_keys_missing() -> None:
+    """An empty resolver argument list must never remove anything."""
+    data = {
+        "inbox": [
+            {
+                "id": "anything",
+                "notification": {
+                    "thread_id": "t1",
+                    "url": "https://github.com/o/r/pull/1",
+                },
+            },
+        ],
+        "prioritized": {"q1_do_first": []},
+        "done": [],
+    }
+    assert td.remove_stale_entries(data) == 0
+    assert td.remove_stale_entries(data, thread_id=None, pr_url=None) == 0
+    assert td.remove_stale_entries(data, thread_id="", pr_url="") == 0
+    assert data["inbox"][0]["id"] == "anything"
+
+
+def test_load_and_write_todo_roundtrips_ruby_method_and_backticks(
+    tmp_path: Path,
+) -> None:
+    """ruamel round-trip must preserve ``IssueQuery#maybe_expand_*`` text.
+
+    The hand-curated Q1 item lost in the 2026-06-11 triage session
+    contained a single-quoted title with ``IssueQuery#maybe_expand_*``
+    and a description with backticks. Verify load_todo + write_todo_atomic
+    preserves the content exactly so any future loss is not a YAML
+    round-trip bug.
+    """
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: core-ux-2746-author-me-copilot-coauthored-prs\n"
+        "      title: 'core-ux#2746: bare `author:@me` drops Copilot-coauthored PRs'\n"
+        "      description: 'IssueQuery#maybe_expand_author_for_agents was gated"
+        " by `pull_request_scoped_search?`'\n"
+        "      status: pending\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+
+    data = td.load_todo(todo_file)
+    flags = data["prioritized"]["q1_do_first"]
+    assert len(flags) == 1
+    assert flags[0]["id"] == "core-ux-2746-author-me-copilot-coauthored-prs"
+    assert "#maybe_expand_author_for_agents" in flags[0]["description"]
+    assert "pull_request_scoped_search?" in flags[0]["description"]
+    assert "`author:@me`" in flags[0]["title"]
+
+    out_path = tmp_path / "todo-out.yml"
+    td.write_todo_atomic(out_path, data)
+    reloaded = td.load_todo(out_path)
+    flags2 = reloaded["prioritized"]["q1_do_first"]
+    assert len(flags2) == 1
+    assert flags2[0]["id"] == flags[0]["id"]
+    assert flags2[0]["title"] == flags[0]["title"]
+    assert flags2[0]["description"] == flags[0]["description"]

@@ -1211,27 +1211,41 @@ def remove_stale_entries(
     done), and fall back to ``notification.url`` so we catch the case where
     an earlier notification thread tracked the same PR under a different id.
 
+    Defense-in-depth guarantees enforced here, since hand-curated Q1
+    entries without a ``notification`` field have been reported lost in
+    past cron runs:
+
+    * Returns 0 immediately when both ``thread_id`` and ``pr_url`` are
+      empty. The caller must explicitly opt in to removal by supplying at
+      least one notification key.
+    * The match check returns False for any item without a dict-typed
+      ``notification`` field. Entries with ``notification: null``, missing
+      the key entirely, or with a non-mapping value are kept.
+    * Every removal is logged at INFO with the matched key plus the item's
+      ``id`` and ``title`` so future stomps are diagnosable from the log
+      alone (no need to re-construct the input ``todo.yml``).
+
     Mutates ``data`` in place and returns the number of entries removed
     across all buckets.
     """
     if not thread_id and not pr_url:
         return 0
 
-    def matches(item: Any) -> bool:
+    def matches(item: Any) -> tuple[bool, str]:
         if not isinstance(item, dict):
-            return False
+            return False, ""
         notif = item.get("notification")
         if not isinstance(notif, dict):
-            return False
+            return False, ""
         if thread_id and str(notif.get("thread_id") or "") == thread_id:
-            return True
+            return True, f"thread_id={thread_id}"
         if pr_url and notif.get("url") == pr_url:
-            return True
-        return False
+            return True, f"url={pr_url}"
+        return False, ""
 
     removed = 0
 
-    def prune(items: Any) -> None:
+    def prune(bucket: str, items: Any) -> None:
         """Remove matching entries from a sequence in place.
 
         Using slice assignment preserves the original sequence type
@@ -1243,7 +1257,17 @@ def remove_stale_entries(
             return
         kept: list[Any] = []
         for item in items:
-            if matches(item):
+            hit, why = matches(item)
+            if hit:
+                item_id = item.get("id") if isinstance(item, dict) else None
+                item_title = item.get("title") if isinstance(item, dict) else None
+                logger.info(
+                    "stale-removal: bucket=%s match=%s id=%s title=%r",
+                    bucket,
+                    why,
+                    item_id,
+                    item_title,
+                )
                 removed += 1
                 continue
             kept.append(item)
@@ -1251,11 +1275,11 @@ def remove_stale_entries(
 
     for key in ("inbox", "done", "in_progress", "blocked", "in_review"):
         if key in data:
-            prune(data[key])
+            prune(key, data[key])
     prioritized = data.get("prioritized")
     if isinstance(prioritized, dict):
-        for _quadrant_key, items in list(prioritized.items()):
-            prune(items)
+        for quadrant_key, items in list(prioritized.items()):
+            prune(f"prioritized.{quadrant_key}", items)
     return removed
 
 
