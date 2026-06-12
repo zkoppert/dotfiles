@@ -1112,7 +1112,17 @@ def has_existing_approval(
         author = (review.get("author") or {}).get("login") or ""
         if author != my_login:
             continue
-        commit_id = review.get("commit_id") or review.get("commitId")
+        # `gh pr view --json reviews,latestReviews` returns the commit as a
+        # nested object: ``{"commit": {"oid": "<sha>"}}``. Older or alternate
+        # gh versions have been observed using flat ``commit_id``/``commitId``
+        # fields, so fall back to those for resilience.
+        commit_obj = review.get("commit")
+        if isinstance(commit_obj, dict):
+            commit_id = commit_obj.get("oid") or commit_obj.get("sha")
+        else:
+            commit_id = commit_obj if isinstance(commit_obj, str) else None
+        if not commit_id:
+            commit_id = review.get("commit_id") or review.get("commitId")
         if commit_id and commit_id == current_head:
             return True
     return False

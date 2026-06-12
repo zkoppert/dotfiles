@@ -2531,13 +2531,16 @@ def test_is_branch_protection_error_negative() -> None:
 
 
 def test_has_existing_approval_true_when_login_matches_head() -> None:
+    # Production-shape payload: ``gh pr view --json reviews,latestReviews``
+    # returns ``commit`` as a nested ``{"oid": "<sha>"}`` object rather than
+    # a flat ``commit_id`` field. Regression for PR #37 review feedback.
     payload = {
         "headRefOid": "abc123",
         "reviews": [
             {
                 "state": "APPROVED",
                 "author": {"login": "zkoppert"},
-                "commit_id": "abc123",
+                "commit": {"oid": "abc123"},
             }
         ],
         "latestReviews": [],
@@ -2553,7 +2556,7 @@ def test_has_existing_approval_false_when_head_changed() -> None:
             {
                 "state": "APPROVED",
                 "author": {"login": "zkoppert"},
-                "commit_id": "oldsha",
+                "commit": {"oid": "oldsha"},
             }
         ],
         "latestReviews": [],
@@ -2569,13 +2572,49 @@ def test_has_existing_approval_false_when_other_user_approved() -> None:
             {
                 "state": "APPROVED",
                 "author": {"login": "other"},
-                "commit_id": "abc123",
+                "commit": {"oid": "abc123"},
             }
         ],
         "latestReviews": [],
     }
     with mock.patch.object(td, "run_gh", return_value=json.dumps(payload)):
         assert td.has_existing_approval("o/r", 1, "zkoppert", "abc123") is False
+
+
+def test_has_existing_approval_accepts_flat_commit_id_fallback() -> None:
+    # Some older or alternate gh versions may emit a flat ``commit_id`` field
+    # instead of the nested ``commit.oid`` object. Keep the fallback covered
+    # so we don't regress resilience while fixing the primary shape.
+    payload = {
+        "headRefOid": "abc123",
+        "reviews": [
+            {
+                "state": "APPROVED",
+                "author": {"login": "zkoppert"},
+                "commit_id": "abc123",
+            }
+        ],
+        "latestReviews": [],
+    }
+    with mock.patch.object(td, "run_gh", return_value=json.dumps(payload)):
+        assert td.has_existing_approval("o/r", 1, "zkoppert", "abc123") is True
+
+
+def test_has_existing_approval_uses_latest_reviews_with_nested_commit() -> None:
+    # ``latestReviews`` uses the same nested ``commit.oid`` shape as ``reviews``.
+    payload = {
+        "headRefOid": "abc123",
+        "reviews": [],
+        "latestReviews": [
+            {
+                "state": "APPROVED",
+                "author": {"login": "zkoppert"},
+                "commit": {"oid": "abc123"},
+            }
+        ],
+    }
+    with mock.patch.object(td, "run_gh", return_value=json.dumps(payload)):
+        assert td.has_existing_approval("o/r", 1, "zkoppert", "abc123") is True
 
 
 def test_has_existing_approval_false_on_gh_error() -> None:
