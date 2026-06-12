@@ -414,14 +414,35 @@ def detect_bump(pr: dict[str, Any]) -> str:
 _COVERAGE_RE = re.compile(r"--cov-fail-under[=\s]+(\d+)")
 _PYPROJECT_COV_RE = re.compile(r"fail_under\s*=\s*(\d+)", re.IGNORECASE)
 
+# SimpleCov (Ruby) declares thresholds in test/test_helper.rb or
+# spec/spec_helper.rb in either bare form (``SimpleCov.minimum_coverage 100``)
+# or inside a ``SimpleCov.start do ... end`` block (``minimum_coverage line:
+# 100, branch: 100``). The prefix is therefore optional but only counted when
+# the surrounding file already references SimpleCov (avoiding false matches
+# on unrelated Ruby code that happens to define a ``minimum_coverage`` DSL).
+_SIMPLECOV_RE = re.compile(
+    r"(?:SimpleCov\.)?minimum_coverage\b[^,\n]*?(?:line:\s*)?(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_SIMPLECOV_KV_RE = re.compile(
+    r"(line|branch):\s*(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_SIMPLECOV_GUARD_RE = re.compile(r"\bsimplecov\b", re.IGNORECASE)
+
 
 def detect_repo_coverage(repo: str) -> int | None:
-    """Return the configured Python coverage threshold, or None if unknown.
+    """Return the configured coverage threshold, or None if unknown.
 
     Inspects the default branch of ``owner/repo`` via ``gh api`` for
-    pyproject.toml / setup.cfg / Makefile / tox.ini / .coveragerc. Returns
-    the highest ``--cov-fail-under=N`` (or ``fail_under = N``) value found,
-    or None when no signal exists. Callers treat None as "below
+    Python (pyproject.toml / setup.cfg / Makefile / tox.ini / .coveragerc)
+    and Ruby SimpleCov (test/test_helper.rb / spec/spec_helper.rb /
+    .simplecov / Rakefile) coverage configuration. Returns the highest
+    Python threshold found, or for SimpleCov the lowest of ``line:`` and
+    ``branch:`` if both are present (the lowest gate that would actually
+    fail a build). When both Python and Ruby signals are present, returns
+    the higher of the two so the conservative "merge only when well
+    tested" semantics still apply. Callers treat None as "below
     SAFE_COVERAGE_THRESHOLD" so unknown coverage flags for review.
     """
     candidates = [
@@ -430,6 +451,10 @@ def detect_repo_coverage(repo: str) -> int | None:
         "Makefile",
         "tox.ini",
         ".coveragerc",
+        "test/test_helper.rb",
+        "spec/spec_helper.rb",
+        ".simplecov",
+        "Rakefile",
     ]
     highest: int | None = None
     for path in candidates:
@@ -459,7 +484,42 @@ def detect_repo_coverage(repo: str) -> int | None:
             value = int(match.group(1))
             if highest is None or value > highest:
                 highest = value
+        for value in _extract_simplecov_values(raw):
+            if highest is None or value > highest:
+                highest = value
     return highest
+
+
+def _extract_simplecov_values(raw: str) -> list[int]:
+    """Return one int per ``minimum_coverage`` call in a SimpleCov context.
+
+    Only returns values when the file references SimpleCov somewhere
+    (so unrelated Ruby files that define a ``minimum_coverage`` DSL do
+    not poison the threshold).
+
+    For multi-key forms (``line: X, branch: Y``) returns the lowest of the
+    two keys because either gate failing would fail the build; for the
+    single-number form returns that number. Floats are floored to int to
+    match the integer semantics the rest of the threshold pipeline uses.
+    """
+    if not _SIMPLECOV_GUARD_RE.search(raw):
+        return []
+    values: list[int] = []
+    for match in _SIMPLECOV_RE.finditer(raw):
+        # The full ``minimum_coverage ...`` argument list is everything
+        # between the call and the next newline. Re-scan that slice for
+        # ``line:`` / ``branch:`` pairs so we can take the lowest gate.
+        start = match.start()
+        end = raw.find("\n", start)
+        if end == -1:
+            end = len(raw)
+        segment = raw[start:end]
+        kv_values = [float(kv.group(2)) for kv in _SIMPLECOV_KV_RE.finditer(segment)]
+        if kv_values:
+            values.append(int(min(kv_values)))
+        else:
+            values.append(int(float(match.group(1))))
+    return values
 
 
 # ---------------------------------------------------------------------------

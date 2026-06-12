@@ -213,6 +213,120 @@ def test_detect_repo_coverage_returns_none_when_no_signal() -> None:
         assert td.detect_repo_coverage("z/r") is None
 
 
+def test_detect_repo_coverage_extracts_simplecov_line_and_branch() -> None:
+    # github/markup has ``SimpleCov.minimum_coverage line: 100, branch: 100``
+    # in test/test_helper.rb. Lowest of the two gates is the one that fails
+    # the build first, so we report the lowest (which is 100 here).
+    files = {
+        "test/test_helper.rb": (
+            "require 'simplecov'\n"
+            "SimpleCov.minimum_coverage line: 100, branch: 100\n"
+        ),
+    }
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        for name, body in files.items():
+            if name in args[1]:
+                return body
+        raise FileNotFoundError(args[1])
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
+        assert td.detect_repo_coverage("github/markup") == 100
+
+
+def test_detect_repo_coverage_extracts_simplecov_single_number() -> None:
+    files = {
+        "spec/spec_helper.rb": (
+            "SimpleCov.start\nSimpleCov.minimum_coverage 90\n"
+        ),
+    }
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        for name, body in files.items():
+            if name in args[1]:
+                return body
+        raise FileNotFoundError(args[1])
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
+        assert td.detect_repo_coverage("z/r") == 90
+
+
+def test_detect_repo_coverage_extracts_simplecov_float() -> None:
+    files = {
+        ".simplecov": "SimpleCov.minimum_coverage 80.5\n",
+    }
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        for name, body in files.items():
+            if name in args[1]:
+                return body
+        raise FileNotFoundError(args[1])
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
+        # Float value is floored to int (matches the integer threshold
+        # semantics used elsewhere in the pipeline).
+        assert td.detect_repo_coverage("z/r") == 80
+
+
+def test_detect_repo_coverage_simplecov_lowest_when_line_below_branch() -> None:
+    files = {
+        "test/test_helper.rb": "SimpleCov.minimum_coverage line: 80, branch: 95\n",
+    }
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        for name, body in files.items():
+            if name in args[1]:
+                return body
+        raise FileNotFoundError(args[1])
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
+        assert td.detect_repo_coverage("z/r") == 80
+
+
+def test_detect_repo_coverage_simplecov_block_form() -> None:
+    """github/markup uses bare ``minimum_coverage`` inside ``SimpleCov.start``.
+
+    The prefix is optional, but only counted because SimpleCov appears in
+    the file (guards against false positives on unrelated Ruby DSL).
+    """
+    files = {
+        "test/test_helper.rb": (
+            'require "simplecov"\n'
+            "SimpleCov.start do\n"
+            "  enable_coverage :branch\n"
+            '  add_filter "/test/"\n'
+            '  command_name "MarkupTests"\n'
+            "  minimum_coverage line: 100, branch: 100\n"
+            "end\n"
+        ),
+    }
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        for name, body in files.items():
+            if name in args[1]:
+                return body
+        raise FileNotFoundError(args[1])
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
+        assert td.detect_repo_coverage("github/markup") == 100
+
+
+def test_detect_repo_coverage_simplecov_ignored_without_simplecov_marker() -> None:
+    """Unrelated files with a ``minimum_coverage`` DSL must not match."""
+    files = {
+        "Rakefile": "task :coverage do\n  minimum_coverage 50\nend\n",
+    }
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        for name, body in files.items():
+            if name in args[1]:
+                return body
+        raise FileNotFoundError(args[1])
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
+        assert td.detect_repo_coverage("z/r") is None
+
+
 # ---------------------------------------------------------------------------
 # Human-activity / CI / rebase
 # ---------------------------------------------------------------------------
