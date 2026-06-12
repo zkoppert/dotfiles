@@ -88,6 +88,13 @@ SAFE_COVERAGE_THRESHOLD = 90
 # duplicate merges while gh updates the notification stream.
 ACTION_COOLDOWN_SECONDS = 3600
 
+# When a PR is blocked by branch protection (e.g. CODEOWNERS review
+# required) we flag for human review once and back off for a full day so
+# the cron does not re-approve + re-attempt the same PR every hour. The
+# observed pathology was 52 redundant approve events on a single PR
+# before this longer cooldown existed.
+BRANCH_PROTECTION_COOLDOWN_SECONDS = 24 * 3600
+
 # Sub-agent timeouts (seconds).
 SUBAGENT_CHANGELOG_TIMEOUT = 90
 SUBAGENT_CI_DEBUG_TIMEOUT = 300
@@ -223,7 +230,7 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any] | None:
     """Fetch the PR with the fields needed for the decision tree."""
     fields = (
         "number,title,body,author,state,mergeable,mergeStateStatus,isDraft,"
-        "url,labels,headRefName,baseRefName,reviews,comments,commits,"
+        "url,labels,headRefName,headRefOid,baseRefName,reviews,comments,commits,"
         "statusCheckRollup,autoMergeRequest"
     )
     try:
@@ -859,14 +866,31 @@ def decide(
 # ---------------------------------------------------------------------------
 
 
-def do_merge(repo: str, number: int, *, dry_run: bool) -> None:
+def do_merge(
+    repo: str,
+    number: int,
+    *,
+    dry_run: bool,
+    my_login: str | None = None,
+    head_sha: str | None = None,
+) -> None:
     """Enable auto-merge for a PR (squash + delete branch).
 
     When the target repository doesn't have auto-merge enabled at the repo
     level, ``gh pr merge --auto`` fails with stderr containing
     ``Auto merge is not allowed for this repository``. In that case, fall
     back to approving the PR (to satisfy required-review branch
-    protection) and then performing a synchronous merge.
+    protection) and then performing a synchronous merge. The approve step
+    is idempotent: if ``my_login`` already has an ``APPROVED`` review on
+    ``head_sha``, the approval call is skipped to avoid the 52-retries-
+    per-hour loop seen on PRs whose merge ultimately fails branch
+    protection.
+
+    Branch-protection failures (required reviewer not satisfied, required
+    status check missing, etc.) raise ``BranchProtectionBlocked`` so the
+    run loop can convert the failure into a flag-for-review with a
+    24-hour cooldown instead of churning through approval + merge every
+    hour.
 
     Any other merge failure is re-raised unchanged so the run loop can
     surface it in stats.errors.
@@ -891,6 +915,12 @@ def do_merge(repo: str, number: int, *, dry_run: bool) -> None:
         return
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr or ""
+        if _is_branch_protection_error(stderr):
+            raise BranchProtectionBlocked(
+                repo=repo,
+                number=number,
+                marker=_match_branch_protection_marker(stderr) or stderr.strip()[:120],
+            ) from exc
         if not _is_auto_merge_disabled_error(stderr):
             raise
         logger.info(
@@ -899,19 +929,38 @@ def do_merge(repo: str, number: int, *, dry_run: bool) -> None:
             number,
         )
 
-    do_approve(repo, number, dry_run=False)
-    run_gh(
-        [
-            "pr",
-            "merge",
-            str(number),
-            "--repo",
+    if my_login and head_sha and has_existing_approval(repo, number, my_login, head_sha):
+        logger.info(
+            "%s#%d already approved by %s at %s, skipping approve",
             repo,
-            "--squash",
-            "--delete-branch",
-        ],
-        timeout=60,
-    )
+            number,
+            my_login,
+            head_sha,
+        )
+    else:
+        do_approve(repo, number, dry_run=False)
+    try:
+        run_gh(
+            [
+                "pr",
+                "merge",
+                str(number),
+                "--repo",
+                repo,
+                "--squash",
+                "--delete-branch",
+            ],
+            timeout=60,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr or ""
+        if _is_branch_protection_error(stderr):
+            raise BranchProtectionBlocked(
+                repo=repo,
+                number=number,
+                marker=_match_branch_protection_marker(stderr) or stderr.strip()[:120],
+            ) from exc
+        raise
 
 
 _AUTO_MERGE_DISABLED_MARKERS = (
@@ -920,9 +969,109 @@ _AUTO_MERGE_DISABLED_MARKERS = (
 )
 
 
+# Branch-protection failures - gh's stderr when a merge is permanently
+# blocked by repo policy. Matched case-insensitively so future GitHub
+# wording tweaks (capitalisation, punctuation) still catch. When any of
+# these fire, the run loop converts the failure into a flag-for-review
+# with a 24h cooldown instead of churning approve+merge every hour.
+_BRANCH_PROTECTION_MARKERS = (
+    "the base branch policy prohibits the merge",
+    "required status check",
+    "changes requested",
+    "review is required by reviewers with write access",
+    "at least 1 approving review is required",
+)
+
+
+class BranchProtectionBlocked(Exception):
+    """Raised when ``gh pr merge`` is rejected by branch protection."""
+
+    def __init__(self, *, repo: str, number: int, marker: str) -> None:
+        super().__init__(f"{repo}#{number} blocked by branch protection: {marker}")
+        self.repo = repo
+        self.number = number
+        self.marker = marker
+
+
 def _is_auto_merge_disabled_error(stderr: str) -> bool:
     """True when gh's stderr indicates the repo lacks auto-merge."""
     return any(marker in stderr for marker in _AUTO_MERGE_DISABLED_MARKERS)
+
+
+def _match_branch_protection_marker(stderr: str) -> str | None:
+    """Return the first branch-protection marker found in stderr (or None)."""
+    lowered = stderr.lower()
+    for marker in _BRANCH_PROTECTION_MARKERS:
+        if marker in lowered:
+            return marker
+    return None
+
+
+def _is_branch_protection_error(stderr: str) -> bool:
+    """True when gh's stderr indicates a branch-protection rejection."""
+    return _match_branch_protection_marker(stderr) is not None
+
+
+def has_existing_approval(
+    repo: str, number: int, my_login: str, head_sha: str
+) -> bool:
+    """True when ``my_login`` already approved this PR at the current head.
+
+    Re-approving an already-approved PR is the GitHub equivalent of a
+    no-op review (you can't "double approve"), but ``gh pr review --approve``
+    still posts a review event each time. That clutters the PR timeline
+    and burns API budget. Worse, if the post-approve merge keeps failing
+    for branch-protection reasons, the cron approves the same SHA every
+    hour - 52 events on a single PR was the observed pathology.
+
+    Returns False on any lookup error so the caller falls through to the
+    normal approve path; a redundant approve is better than a missed one.
+    """
+    try:
+        raw = run_gh(
+            [
+                "pr",
+                "view",
+                str(number),
+                "--repo",
+                repo,
+                "--json",
+                "headRefOid,reviews,latestReviews",
+            ],
+            timeout=20,
+        )
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ) as exc:
+        logger.debug(
+            "has_existing_approval lookup failed for %s#%d: %s", repo, number, exc
+        )
+        return False
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.debug(
+            "has_existing_approval json parse failed for %s#%d: %s", repo, number, exc
+        )
+        return False
+    current_head = payload.get("headRefOid") or head_sha
+    reviews = list(payload.get("reviews") or []) + list(
+        payload.get("latestReviews") or []
+    )
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        if (review.get("state") or "").upper() != "APPROVED":
+            continue
+        author = (review.get("author") or {}).get("login") or ""
+        if author != my_login:
+            continue
+        commit_id = review.get("commit_id") or review.get("commitId")
+        if commit_id and commit_id == current_head:
+            return True
+    return False
 
 
 def do_approve(repo: str, number: int, *, dry_run: bool) -> None:
@@ -1463,7 +1612,13 @@ def run(args: argparse.Namespace) -> TriageStats:
 
         try:
             if decision.outcome == OUTCOME_MERGE:
-                do_merge(repo, number, dry_run=args.dry_run)
+                do_merge(
+                    repo,
+                    number,
+                    dry_run=args.dry_run,
+                    my_login=my_login,
+                    head_sha=pr.get("headRefOid"),
+                )
                 mark_thread_done(thread_id, dry_run=args.dry_run)
                 stats.merged += 1
                 state[pr_url] = now
@@ -1474,7 +1629,13 @@ def run(args: argparse.Namespace) -> TriageStats:
                 labels = fetch_repo_labels(repo)
                 if "release" in labels:
                     do_add_label(repo, number, "release", dry_run=args.dry_run)
-                do_merge(repo, number, dry_run=args.dry_run)
+                do_merge(
+                    repo,
+                    number,
+                    dry_run=args.dry_run,
+                    my_login=my_login,
+                    head_sha=pr.get("headRefOid"),
+                )
                 mark_thread_done(thread_id, dry_run=args.dry_run)
                 stats.labeled_and_merged += 1
                 state[pr_url] = now
@@ -1499,6 +1660,43 @@ def run(args: argparse.Namespace) -> TriageStats:
                         data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
                     )
                 stats.skipped += 1
+        except BranchProtectionBlocked as exc:
+            logger.warning(
+                "%s#%d -> branch protection blocks merge (%s); flagging for review",
+                repo,
+                number,
+                exc.marker,
+            )
+            bp_decision = Decision(
+                OUTCOME_FLAG,
+                f"blocked by branch protection: {exc.marker}",
+                bump=decision.bump,
+                is_security=decision.is_security,
+            )
+            if thread_id and thread_id in seen_thread_ids:
+                stats.already_tracked += 1
+            else:
+                new_flags.append(build_flag_entry(pr, repo, notif, bp_decision))
+                stats.flagged += 1
+            # Extend the cooldown to ~24h so the cron stops re-approving
+            # and re-trying the same blocked PR every hour. The standard
+            # in_cooldown() check uses (now - last) < ACTION_COOLDOWN_SECONDS
+            # so storing a future timestamp keeps the entry "in cooldown"
+            # for the offset interval.
+            if pr_url:
+                state[pr_url] = now + (
+                    BRANCH_PROTECTION_COOLDOWN_SECONDS - ACTION_COOLDOWN_SECONDS
+                )
+            if thread_id:
+                try:
+                    mark_thread_done(thread_id, dry_run=args.dry_run)
+                except (
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                ) as mark_exc:
+                    stats.errors.append(
+                        f"mark-done failed for branch-protected {pr_url}: {mark_exc}"
+                    )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             stats.errors.append(f"action {decision.outcome} failed for {pr_url}: {exc}")
 

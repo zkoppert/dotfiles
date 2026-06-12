@@ -1258,7 +1258,9 @@ def test_run_end_to_end_merges_and_flags(tmp_path: Path) -> None:
     assert stats.dependabot == 2
     assert stats.merged == 1
     assert stats.flagged == 1
-    do_merge_mock.assert_called_once_with("o/r1", 1, dry_run=False)
+    do_merge_mock.assert_called_once_with(
+        "o/r1", 1, dry_run=False, my_login="zkoppert", head_sha=None
+    )
     mark_done_mock.assert_called_once_with("thread-merge", dry_run=False)
 
     reloaded = td.load_todo(args.todo_file)
@@ -2497,3 +2499,225 @@ def test_run_skips_archived_repo_and_clears_notification(tmp_path: Path) -> None
 
     state = td.load_state(args.state_file)
     assert "https://github.com/zkoppert/advanced-security-enforcer/pull/73" in state
+
+
+# ---------------------------------------------------------------------------
+# Branch-protection / idempotent approval (bug 3)
+# ---------------------------------------------------------------------------
+
+
+def test_is_branch_protection_error_matches_known_markers() -> None:
+    assert td._is_branch_protection_error(
+        "the base branch policy prohibits the merge"
+    )
+    # Case-insensitive.
+    assert td._is_branch_protection_error(
+        "The Base Branch Policy Prohibits The Merge"
+    )
+    assert td._is_branch_protection_error(
+        "GraphQL: At least 1 approving review is required by reviewers"
+    )
+    assert td._is_branch_protection_error("Required status check missing")
+    assert td._is_branch_protection_error("Changes requested by reviewer")
+    assert td._is_branch_protection_error(
+        "Review is required by reviewers with write access"
+    )
+
+
+def test_is_branch_protection_error_negative() -> None:
+    assert not td._is_branch_protection_error("Auto merge is not allowed")
+    assert not td._is_branch_protection_error("merge conflict")
+    assert not td._is_branch_protection_error("")
+
+
+def test_has_existing_approval_true_when_login_matches_head() -> None:
+    payload = {
+        "headRefOid": "abc123",
+        "reviews": [
+            {
+                "state": "APPROVED",
+                "author": {"login": "zkoppert"},
+                "commit_id": "abc123",
+            }
+        ],
+        "latestReviews": [],
+    }
+    with mock.patch.object(td, "run_gh", return_value=json.dumps(payload)):
+        assert td.has_existing_approval("o/r", 1, "zkoppert", "abc123") is True
+
+
+def test_has_existing_approval_false_when_head_changed() -> None:
+    payload = {
+        "headRefOid": "newsha",
+        "reviews": [
+            {
+                "state": "APPROVED",
+                "author": {"login": "zkoppert"},
+                "commit_id": "oldsha",
+            }
+        ],
+        "latestReviews": [],
+    }
+    with mock.patch.object(td, "run_gh", return_value=json.dumps(payload)):
+        assert td.has_existing_approval("o/r", 1, "zkoppert", "newsha") is False
+
+
+def test_has_existing_approval_false_when_other_user_approved() -> None:
+    payload = {
+        "headRefOid": "abc123",
+        "reviews": [
+            {
+                "state": "APPROVED",
+                "author": {"login": "other"},
+                "commit_id": "abc123",
+            }
+        ],
+        "latestReviews": [],
+    }
+    with mock.patch.object(td, "run_gh", return_value=json.dumps(payload)):
+        assert td.has_existing_approval("o/r", 1, "zkoppert", "abc123") is False
+
+
+def test_has_existing_approval_false_on_gh_error() -> None:
+    with mock.patch.object(
+        td, "run_gh", side_effect=td.subprocess.CalledProcessError(1, "gh")
+    ):
+        assert td.has_existing_approval("o/r", 1, "zkoppert", "abc123") is False
+
+
+def test_do_merge_skips_approve_when_already_approved(tmp_path: Path) -> None:
+    """If my login already approved this head SHA, do not re-approve."""
+    auto_merge_err = td.subprocess.CalledProcessError(1, "gh")
+    auto_merge_err.stderr = "Auto merge is not allowed for this repository"
+
+    call_log: list[list[str]] = []
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        call_log.append(list(args))
+        if "--auto" in args:
+            raise auto_merge_err
+        return ""
+
+    with mock.patch.object(
+        td, "has_existing_approval", return_value=True
+    ) as approval_check, mock.patch.object(
+        td, "do_approve"
+    ) as approve_mock, mock.patch.object(
+        td, "run_gh", side_effect=fake_run_gh
+    ):
+        td.do_merge(
+            "o/r", 1, dry_run=False, my_login="zkoppert", head_sha="abc123"
+        )
+
+    approval_check.assert_called_once_with("o/r", 1, "zkoppert", "abc123")
+    approve_mock.assert_not_called()
+    # First call was --auto attempt; second was the sync merge.
+    assert any("--auto" in a for a in call_log)
+    assert any(
+        "--auto" not in a and "merge" in a and "--squash" in a for a in call_log
+    )
+
+
+def test_do_merge_raises_branch_protection_blocked_on_sync_merge_failure(
+    tmp_path: Path,
+) -> None:
+    auto_merge_err = td.subprocess.CalledProcessError(1, "gh")
+    auto_merge_err.stderr = "Auto merge is not allowed for this repository"
+
+    bp_err = td.subprocess.CalledProcessError(1, "gh")
+    bp_err.stderr = "the base branch policy prohibits the merge"
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        if "--auto" in args:
+            raise auto_merge_err
+        raise bp_err
+
+    with mock.patch.object(
+        td, "has_existing_approval", return_value=True
+    ), mock.patch.object(
+        td, "do_approve"
+    ), mock.patch.object(
+        td, "run_gh", side_effect=fake_run_gh
+    ):
+        with pytest.raises(td.BranchProtectionBlocked) as exc_info:
+            td.do_merge(
+                "jmeridth/gh-health-files",
+                59,
+                dry_run=False,
+                my_login="zkoppert",
+                head_sha="abc",
+            )
+
+    assert "the base branch policy prohibits the merge" in exc_info.value.marker
+
+
+def test_run_branch_protection_failure_flags_and_sets_long_cooldown(
+    tmp_path: Path,
+) -> None:
+    """Regression test for the 52-retry approve loop on gh-health-files#59."""
+    notif = {
+        "id": "thread-bp",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/jmeridth/gh-health-files/pulls/59",
+        },
+    }
+    pr = _base_pr(
+        number=59,
+        url="https://github.com/jmeridth/gh-health-files/pull/59",
+    )
+    pr["headRefOid"] = "abc123"
+
+    args = _make_args(tmp_path)
+
+    bp_err = td.BranchProtectionBlocked(
+        repo="jmeridth/gh-health-files",
+        number=59,
+        marker="the base branch policy prohibits the merge",
+    )
+
+    approve_mock = mock.MagicMock()
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=95
+    ), mock.patch.object(
+        td, "do_merge", side_effect=bp_err
+    ), mock.patch.object(
+        td, "do_approve", approve_mock
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_done_mock:
+        stats = td.run(args)
+
+    # Flagged for review (not retried, no errors).
+    assert stats.merged == 0
+    assert stats.flagged == 1
+    assert stats.errors == []
+    # No additional approve happened in the run loop; do_merge raised
+    # before its internal approve fallback could re-fire.
+    approve_mock.assert_not_called()
+    # Notification cleared so it does not re-enter next hour.
+    mark_done_mock.assert_called_once_with("thread-bp", dry_run=False)
+
+    # Q1 entry has the branch-protection reason in its description.
+    reloaded = td.load_todo(args.todo_file)
+    flags = reloaded["prioritized"]["q1_do_first"]
+    assert len(flags) == 1
+    assert "branch protection" in flags[0]["description"]
+
+    # Long cooldown set: a follow-up run within the next 24h must skip.
+    state = td.load_state(args.state_file)
+    pr_url = "https://github.com/jmeridth/gh-health-files/pull/59"
+    assert pr_url in state
+    # Within the 24h window in_cooldown should still return True.
+    now_plus_23h = datetime.datetime.now(datetime.timezone.utc).timestamp() + (
+        23 * 3600
+    )
+    assert td.in_cooldown(state, pr_url, now=now_plus_23h)
