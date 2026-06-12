@@ -115,6 +115,7 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 - Prefer ecosystem tools (`pip install`, `npm init`, etc.) over manual configuration
 - Run `make lint` and `make test` before committing in repos that have a Makefile
 - Write unit tests for new functionality
+- **Test file naming - one per source module, no catch-alls**: When a repo follows a per-module test convention (e.g., `test_<module>.py` for each `<module>.py`), put new tests for a module in that module's existing test file (creating it if missing). Never create catch-all aggregator files like `test_coverage_additions.py`, `test_extra.py`, `test_misc.py`, or `test_new_stuff.py` - they hide what is being tested and break the source-to-test mapping a maintainer relies on. If a test exercises multiple modules, file it under the module whose behavior is most central to the assertion. Before adding a new `test_*.py` file, confirm there is no existing per-module test file that would be a better home.
 - Document changes to environment variables in the `README.md` file
 - **Linting philosophy**: When linting errors arise, **always fix the code to pass the linter** - do not suppress, ignore, or disable lint rules. Only disable a rule as a last resort if fixing the code is truly impossible or would make it significantly worse, and explain why in a comment. This applies to all linters (flake8, pylint, mypy, markdownlint, eslint, etc.).
 - **Cross-reference existing patterns**: When adding new code to a file that already has similar blocks (e.g., a new job in a workflow, a new route in a router, a new test in a suite), explicitly compare the new code against the existing code for naming conventions, formatting, and runtime behavior before committing. Don't pattern-match on the name you're defining - check how existing code actually references the same concept.
@@ -301,7 +302,7 @@ The following conventions apply to my suite of GitHub Actions in the `github-com
 ### Project Structure
 - **Flat module layout** - all Python source files live at the repo root (no `src/` directory)
 - Common module split: `{main}.py`, `auth.py`, `env.py`, `markdown_writer.py` (or `markdown.py`)
-- Test files: `test_*.py` at root, one per module
+- Test files: `test_*.py` at root, one per source module - never catch-all aggregator files like `test_coverage_additions.py`
 - Linter configs live in `.github/linters/` (not repo root)
 - Action definition: `action.yml` (Docker-based action)
 
