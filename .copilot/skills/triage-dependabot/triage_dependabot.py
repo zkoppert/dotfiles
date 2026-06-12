@@ -153,6 +153,7 @@ class TriageStats:
     flagged: int = 0
     skipped: int = 0
     skipped_dependency: int = 0
+    skipped_archived: int = 0
     cooldown: int = 0
     already_tracked: int = 0
     stale_removed: int = 0
@@ -246,6 +247,35 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any] | None:
     except json.JSONDecodeError as exc:
         logger.warning("fetch_pr: could not parse PR for %s#%d: %s", repo, number, exc)
         return None
+
+
+def is_archived_repo(repo: str, cache: dict[str, bool]) -> bool:
+    """Return True if ``owner/repo`` is archived on GitHub.
+
+    Archived repositories can never accept merges, so any Dependabot PR
+    against them is unactionable - we clear the notification and skip
+    rather than flag for review or attempt to merge. Results are cached
+    in ``cache`` per run so repeat lookups for the same repo cost
+    nothing.
+
+    Failures (network error, missing repo, parse error) return False so
+    a transient ``gh`` outage does not silently swallow notifications;
+    the PR will be processed normally and may flag for review.
+    """
+    if repo in cache:
+        return cache[repo]
+    try:
+        out = run_gh(
+            ["api", f"/repos/{repo}", "--jq", ".archived"],
+            timeout=15,
+        ).strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        logger.warning("is_archived_repo failed for %s: %s", repo, exc)
+        cache[repo] = False
+        return False
+    archived = out.lower() == "true"
+    cache[repo] = archived
+    return archived
 
 
 def fetch_repo_labels(repo: str) -> set[str]:
@@ -413,16 +443,26 @@ def detect_bump(pr: dict[str, Any]) -> str:
 
 _COVERAGE_RE = re.compile(r"--cov-fail-under[=\s]+(\d+)")
 _PYPROJECT_COV_RE = re.compile(r"fail_under\s*=\s*(\d+)", re.IGNORECASE)
+# Ruby SimpleCov: `minimum_coverage line: N, branch: N` (or just `minimum_coverage N`).
+# Matches the `line:` form first so we read the line-coverage number, then a
+# bare leading integer for the simpler `minimum_coverage 95` style.
+_SIMPLECOV_LINE_RE = re.compile(
+    r"minimum_coverage[^\n]*?line:\s*(\d+)", re.IGNORECASE
+)
+_SIMPLECOV_BARE_RE = re.compile(
+    r"minimum_coverage\s+(\d+)\b", re.IGNORECASE
+)
 
 
 def detect_repo_coverage(repo: str) -> int | None:
-    """Return the configured Python coverage threshold, or None if unknown.
+    """Return the configured test-coverage threshold, or None if unknown.
 
     Inspects the default branch of ``owner/repo`` via ``gh api`` for
-    pyproject.toml / setup.cfg / Makefile / tox.ini / .coveragerc. Returns
-    the highest ``--cov-fail-under=N`` (or ``fail_under = N``) value found,
-    or None when no signal exists. Callers treat None as "below
-    SAFE_COVERAGE_THRESHOLD" so unknown coverage flags for review.
+    Python (pyproject.toml / setup.cfg / Makefile / tox.ini / .coveragerc)
+    and Ruby SimpleCov (test/test_helper.rb / spec/spec_helper.rb)
+    configuration. Returns the highest threshold value found across any
+    matched regex, or None when no signal exists. Callers treat None as
+    "below SAFE_COVERAGE_THRESHOLD" so unknown coverage flags for review.
     """
     candidates = [
         "pyproject.toml",
@@ -430,7 +470,15 @@ def detect_repo_coverage(repo: str) -> int | None:
         "Makefile",
         "tox.ini",
         ".coveragerc",
+        "test/test_helper.rb",
+        "spec/spec_helper.rb",
     ]
+    patterns = (
+        _COVERAGE_RE,
+        _PYPROJECT_COV_RE,
+        _SIMPLECOV_LINE_RE,
+        _SIMPLECOV_BARE_RE,
+    )
     highest: int | None = None
     for path in candidates:
         try:
@@ -451,14 +499,11 @@ def detect_repo_coverage(repo: str) -> int | None:
             continue
         if not raw:
             continue
-        for match in _COVERAGE_RE.finditer(raw):
-            value = int(match.group(1))
-            if highest is None or value > highest:
-                highest = value
-        for match in _PYPROJECT_COV_RE.finditer(raw):
-            value = int(match.group(1))
-            if highest is None or value > highest:
-                highest = value
+        for pattern in patterns:
+            for match in pattern.finditer(raw):
+                value = int(match.group(1))
+                if highest is None or value > highest:
+                    highest = value
     return highest
 
 
@@ -764,7 +809,13 @@ def decide(
 # ---------------------------------------------------------------------------
 
 
-def do_merge(repo: str, number: int, *, dry_run: bool) -> None:
+def do_merge(
+    repo: str,
+    number: int,
+    *,
+    dry_run: bool,
+    my_login: str | None = None,
+) -> None:
     """Enable auto-merge for a PR (squash + delete branch).
 
     When the target repository doesn't have auto-merge enabled at the repo
@@ -772,6 +823,16 @@ def do_merge(repo: str, number: int, *, dry_run: bool) -> None:
     ``Auto merge is not allowed for this repository``. In that case, fall
     back to approving the PR (to satisfy required-review branch
     protection) and then performing a synchronous merge.
+
+    The approve step is skipped when ``my_login`` is provided and the
+    authenticated user already has an APPROVED review on the PR. This
+    prevents an infinite re-approval loop on PRs where a downstream
+    branch-protection rule blocks the merge after the first approval.
+
+    Raises ``MergeBlockedByBranchProtectionError`` when the post-approve
+    synchronous merge fails with a base-branch-policy error - callers
+    convert this to flag-for-review and apply the cooldown so the same
+    PR is not re-attempted every hour.
 
     Any other merge failure is re-raised unchanged so the run loop can
     surface it in stats.errors.
@@ -804,19 +865,33 @@ def do_merge(repo: str, number: int, *, dry_run: bool) -> None:
             number,
         )
 
-    do_approve(repo, number, dry_run=False)
-    run_gh(
-        [
-            "pr",
-            "merge",
-            str(number),
-            "--repo",
+    if my_login and my_latest_review_state(repo, number, my_login) == "APPROVED":
+        logger.info(
+            "%s#%d already approved by %s; skipping re-approve",
             repo,
-            "--squash",
-            "--delete-branch",
-        ],
-        timeout=60,
-    )
+            number,
+            my_login,
+        )
+    else:
+        do_approve(repo, number, dry_run=False)
+    try:
+        run_gh(
+            [
+                "pr",
+                "merge",
+                str(number),
+                "--repo",
+                repo,
+                "--squash",
+                "--delete-branch",
+            ],
+            timeout=60,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr or ""
+        if _is_branch_protection_error(stderr):
+            raise MergeBlockedByBranchProtectionError(stderr.strip()) from exc
+        raise
 
 
 _AUTO_MERGE_DISABLED_MARKERS = (
@@ -824,10 +899,72 @@ _AUTO_MERGE_DISABLED_MARKERS = (
     "enablePullRequestAutoMerge",
 )
 
+# Markers in `gh pr merge` stderr indicating the synchronous merge was
+# rejected by branch protection (e.g. required status checks, code-owner
+# approval, signed commits). Re-approving will never unblock these, so the
+# run loop converts them to flag-for-review and applies the cooldown.
+_BRANCH_PROTECTION_MARKERS = (
+    "base branch policy prohibits the merge",
+)
+
+
+class MergeBlockedByBranchProtectionError(Exception):
+    """Raised when a post-approve sync merge is rejected by branch protection."""
+
 
 def _is_auto_merge_disabled_error(stderr: str) -> bool:
     """True when gh's stderr indicates the repo lacks auto-merge."""
     return any(marker in stderr for marker in _AUTO_MERGE_DISABLED_MARKERS)
+
+
+def _is_branch_protection_error(stderr: str) -> bool:
+    """True when gh's stderr indicates branch protection blocked the merge."""
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _BRANCH_PROTECTION_MARKERS)
+
+
+def my_latest_review_state(repo: str, number: int, my_login: str) -> str | None:
+    """Return the state of the authenticated user's latest review on a PR.
+
+    Returns the upper-case review state (``APPROVED``, ``CHANGES_REQUESTED``,
+    ``COMMENTED``, ``DISMISSED``) when a review by ``my_login`` exists in
+    ``latestReviews``; otherwise None. Network or parse failures also
+    return None so callers fall back to the safe path (re-approve).
+    """
+    try:
+        out = run_gh(
+            [
+                "pr",
+                "view",
+                str(number),
+                "--repo",
+                repo,
+                "--json",
+                "latestReviews",
+            ],
+            timeout=20,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        logger.warning(
+            "my_latest_review_state failed for %s#%d: %s", repo, number, exc
+        )
+        return None
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "my_latest_review_state: could not parse PR %s#%d: %s",
+            repo,
+            number,
+            exc,
+        )
+        return None
+    for review in payload.get("latestReviews") or []:
+        login = (review.get("author") or {}).get("login") or ""
+        if login == my_login:
+            state = (review.get("state") or "").upper()
+            return state or None
+    return None
 
 
 def do_approve(repo: str, number: int, *, dry_run: bool) -> None:
@@ -1228,6 +1365,7 @@ def run(args: argparse.Namespace) -> TriageStats:
     use_copilot = not args.no_copilot_subagent
     allowed = set(args.allowed_repo)
     coverage_cache: dict[str, int | None] = {}
+    archived_cache: dict[str, bool] = {}
 
     def coverage_lookup(repo: str) -> int | None:
         if repo not in coverage_cache:
@@ -1245,6 +1383,33 @@ def run(args: argparse.Namespace) -> TriageStats:
         if in_cooldown(state, candidate_url, now=now):
             stats.cooldown += 1
             logger.info("cooldown active for %s, skipping (pre-fetch)", candidate_url)
+            continue
+        if is_archived_repo(repo, archived_cache):
+            thread_id = str(notif.get("id") or "")
+            logger.info(
+                "%s#%d -> repo archived, clearing notification (PRs cannot merge)",
+                repo,
+                number,
+            )
+            stats.skipped_archived += 1
+            if thread_id:
+                try:
+                    mark_thread_done(thread_id, dry_run=args.dry_run)
+                    stats.stale_removed += _cleanup_stale_entries(
+                        data,
+                        thread_id=thread_id,
+                        pr_url=candidate_url,
+                        dry_run=args.dry_run,
+                    )
+                except (
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                ) as exc:
+                    stats.errors.append(
+                        f"mark-done failed for archived repo "
+                        f"{candidate_url}: {exc}"
+                    )
+            state[candidate_url] = now
             continue
         pr = fetch_pr(repo, number)
         if pr is None:
@@ -1344,7 +1509,9 @@ def run(args: argparse.Namespace) -> TriageStats:
 
         try:
             if decision.outcome == OUTCOME_MERGE:
-                do_merge(repo, number, dry_run=args.dry_run)
+                do_merge(
+                    repo, number, dry_run=args.dry_run, my_login=my_login
+                )
                 mark_thread_done(thread_id, dry_run=args.dry_run)
                 stats.merged += 1
                 state[pr_url] = now
@@ -1355,7 +1522,9 @@ def run(args: argparse.Namespace) -> TriageStats:
                 labels = fetch_repo_labels(repo)
                 if "release" in labels:
                     do_add_label(repo, number, "release", dry_run=args.dry_run)
-                do_merge(repo, number, dry_run=args.dry_run)
+                do_merge(
+                    repo, number, dry_run=args.dry_run, my_login=my_login
+                )
                 mark_thread_done(thread_id, dry_run=args.dry_run)
                 stats.labeled_and_merged += 1
                 state[pr_url] = now
@@ -1380,6 +1549,26 @@ def run(args: argparse.Namespace) -> TriageStats:
                         data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
                     )
                 stats.skipped += 1
+        except MergeBlockedByBranchProtectionError as exc:
+            logger.info(
+                "%s#%d -> merge blocked by branch protection (%s); flagging for review",
+                repo,
+                number,
+                exc,
+            )
+            blocked = Decision(
+                OUTCOME_FLAG,
+                "auto-merge blocked by branch protection",
+                bump=decision.bump,
+                is_security=decision.is_security,
+            )
+            if thread_id and thread_id in seen_thread_ids:
+                stats.already_tracked += 1
+            else:
+                new_flags.append(build_flag_entry(pr, repo, notif, blocked))
+                stats.flagged += 1
+            if pr_url:
+                state[pr_url] = now
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             stats.errors.append(f"action {decision.outcome} failed for {pr_url}: {exc}")
 
@@ -1420,6 +1609,7 @@ def main(argv: list[str] | None = None) -> int:
         f"merged={stats.merged} labeled={stats.labeled_and_merged} "
         f"rebased={stats.rebased} flagged={stats.flagged} "
         f"skipped={stats.skipped} skipped_dependency={stats.skipped_dependency} "
+        f"skipped_archived={stats.skipped_archived} "
         f"cooldown={stats.cooldown} already_tracked={stats.already_tracked} "
         f"stale_removed={stats.stale_removed}"
     )
