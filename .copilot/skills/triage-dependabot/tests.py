@@ -18,6 +18,32 @@ import pytest
 
 import triage_dependabot as td
 
+
+@pytest.fixture(autouse=True)
+def _stub_archive_lookup(request: Any) -> Any:
+    """Default ``is_archived_repo`` to False for every test.
+
+    Bug 2 added a per-loop archive check that talks to ``gh api``. Without
+    this fixture every end-to-end test would hit the network (slowing the
+    suite and flaking offline) and the archived-repo regression test
+    would have to fight a cached True value from a prior run. Tests that
+    exercise ``is_archived_repo`` directly opt out by marking themselves
+    with ``@pytest.mark.no_archive_stub`` so the real function runs.
+    """
+    td._ARCHIVED_REPO_CACHE.clear()
+    if request.node.get_closest_marker("no_archive_stub"):
+        yield None
+        td._ARCHIVED_REPO_CACHE.clear()
+        return
+    patcher = mock.patch.object(td, "is_archived_repo", return_value=False)
+    patcher.start()
+    try:
+        yield patcher
+    finally:
+        patcher.stop()
+        td._ARCHIVED_REPO_CACHE.clear()
+
+
 # ---------------------------------------------------------------------------
 # parse_pr_subject / is_dependabot_pr
 # ---------------------------------------------------------------------------
@@ -2383,3 +2409,91 @@ def test_run_skips_super_linter_repo_pr_with_mention_keeps_notification(
     )
     assert stats.skipped_dependency == 1
     mark_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Archived repo handling (bug 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.no_archive_stub
+def test_is_archived_repo_returns_true_when_gh_returns_true() -> None:
+    td._ARCHIVED_REPO_CACHE.clear()
+    with mock.patch.object(td, "run_gh", return_value="true\n"):
+        assert td.is_archived_repo("zkoppert/advanced-security-enforcer") is True
+
+
+@pytest.mark.no_archive_stub
+def test_is_archived_repo_returns_false_when_gh_returns_false() -> None:
+    td._ARCHIVED_REPO_CACHE.clear()
+    with mock.patch.object(td, "run_gh", return_value="false\n"):
+        assert td.is_archived_repo("github/markup") is False
+
+
+@pytest.mark.no_archive_stub
+def test_is_archived_repo_caches_per_process() -> None:
+    td._ARCHIVED_REPO_CACHE.clear()
+    with mock.patch.object(td, "run_gh", return_value="true\n") as gh_mock:
+        td.is_archived_repo("o/r")
+        td.is_archived_repo("o/r")
+        td.is_archived_repo("o/r")
+    assert gh_mock.call_count == 1
+
+
+@pytest.mark.no_archive_stub
+def test_is_archived_repo_falls_back_to_false_on_api_error() -> None:
+    td._ARCHIVED_REPO_CACHE.clear()
+    with mock.patch.object(
+        td, "run_gh", side_effect=td.subprocess.CalledProcessError(1, "gh")
+    ):
+        assert td.is_archived_repo("o/r") is False
+
+
+def test_run_skips_archived_repo_and_clears_notification(tmp_path: Path) -> None:
+    """Archived repos can never accept merges - skip + clear, never flag."""
+    notif = {
+        "id": "thread-archived",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": (
+                "https://api.github.com/repos/zkoppert/"
+                "advanced-security-enforcer/pulls/73"
+            ),
+        },
+    }
+    pr = _base_pr(
+        number=73,
+        url="https://github.com/zkoppert/advanced-security-enforcer/pull/73",
+        title="Bump foo from 1.0.0 to 1.1.0",
+    )
+
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "is_archived_repo", return_value=True
+    ) as archive_mock, mock.patch.object(
+        td, "do_merge"
+    ) as merge_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_done_mock:
+        stats = td.run(args)
+
+    archive_mock.assert_called_with("zkoppert/advanced-security-enforcer")
+    merge_mock.assert_not_called()
+    mark_done_mock.assert_called_once_with("thread-archived", dry_run=False)
+    assert stats.skipped_archived == 1
+    assert stats.flagged == 0
+    assert stats.dependabot == 0  # archived skip happens before dependabot count
+
+    reloaded = td.load_todo(args.todo_file)
+    assert reloaded["prioritized"]["q1_do_first"] == []
+
+    state = td.load_state(args.state_file)
+    assert "https://github.com/zkoppert/advanced-security-enforcer/pull/73" in state

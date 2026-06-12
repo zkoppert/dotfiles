@@ -153,6 +153,7 @@ class TriageStats:
     flagged: int = 0
     skipped: int = 0
     skipped_dependency: int = 0
+    skipped_archived: int = 0
     cooldown: int = 0
     already_tracked: int = 0
     stale_removed: int = 0
@@ -332,6 +333,40 @@ def skipped_repo_match(repo: str) -> str | None:
         if pattern.search(repo):
             return repo
     return None
+
+
+_ARCHIVED_REPO_CACHE: dict[str, bool] = {}
+
+
+def is_archived_repo(repo: str) -> bool:
+    """Return True when ``owner/repo`` is archived on GitHub.
+
+    Archived repos cannot accept commits, so any Dependabot PR opened
+    against them is permanently unmergeable. Without this check the cron
+    would re-flag the same archived-repo PRs to Q1 every hour forever.
+
+    Results are cached for the lifetime of the process because archive
+    status does not change within a single run. API failures (network
+    issues, transient 5xx, malformed JSON) fall back to ``False`` so a
+    flaky GitHub doesn't suppress real Dependabot work.
+    """
+    if not repo:
+        return False
+    if repo in _ARCHIVED_REPO_CACHE:
+        return _ARCHIVED_REPO_CACHE[repo]
+    try:
+        raw = run_gh(["api", f"/repos/{repo}", "--jq", ".archived"], timeout=15)
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ) as exc:
+        logger.debug("is_archived_repo lookup failed for %s: %s", repo, exc)
+        _ARCHIVED_REPO_CACHE[repo] = False
+        return False
+    archived = (raw or "").strip().lower() == "true"
+    _ARCHIVED_REPO_CACHE[repo] = archived
+    return archived
 
 
 # ---------------------------------------------------------------------------
@@ -1311,6 +1346,30 @@ def run(args: argparse.Namespace) -> TriageStats:
             continue
         if not is_dependabot_pr(pr):
             continue
+        if is_archived_repo(repo):
+            thread_id = str(notif.get("id") or "")
+            pr_url = pr.get("url") or ""
+            logger.info("%s#%d -> skipping archived repo %s", repo, number, repo)
+            stats.skipped_archived += 1
+            if thread_id:
+                try:
+                    mark_thread_done(thread_id, dry_run=args.dry_run)
+                    stats.stale_removed += _cleanup_stale_entries(
+                        data,
+                        thread_id=thread_id,
+                        pr_url=pr_url,
+                        dry_run=args.dry_run,
+                    )
+                except (
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                ) as exc:
+                    stats.errors.append(
+                        f"mark-done failed for archived repo {pr_url}: {exc}"
+                    )
+            if pr_url:
+                state[pr_url] = now
+            continue
         skipped_dep = skipped_dependency_match(pr) or skipped_repo_match(repo)
         if skipped_dep:
             pr_state = (pr.get("state") or "").lower()
@@ -1480,6 +1539,7 @@ def main(argv: list[str] | None = None) -> int:
         f"merged={stats.merged} labeled={stats.labeled_and_merged} "
         f"rebased={stats.rebased} flagged={stats.flagged} "
         f"skipped={stats.skipped} skipped_dependency={stats.skipped_dependency} "
+        f"skipped_archived={stats.skipped_archived} "
         f"cooldown={stats.cooldown} already_tracked={stats.already_tracked} "
         f"stale_removed={stats.stale_removed}"
     )
