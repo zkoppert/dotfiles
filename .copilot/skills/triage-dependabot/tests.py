@@ -20,23 +20,29 @@ import triage_dependabot as td
 
 
 @pytest.fixture(autouse=True)
-def _stub_is_archived_repo(request: pytest.FixtureRequest) -> Any:
+def _stub_archive_lookup(request: Any) -> Any:
     """Default ``is_archived_repo`` to False for every test.
 
-    Bug 2's archived-repo short-circuit calls ``gh api /repos/{repo}``
-    on every notification, which would either hit the network or
-    pollute the e2e tests that mock specific gh endpoints. Tests that
-    exercise the archived path re-patch ``is_archived_repo`` inside the
-    test body, which transparently overrides this autouse stub.
-
-    Tests that target ``is_archived_repo`` itself (their name contains
-    ``is_archived_repo``) opt out so they can exercise the real helper.
+    Bug 2 added a per-loop archive check that talks to ``gh api``. Without
+    this fixture every end-to-end test would hit the network (slowing the
+    suite and flaking offline) and the archived-repo regression test
+    would have to fight a cached True value from a prior run. Tests that
+    exercise ``is_archived_repo`` directly opt out by marking themselves
+    with ``@pytest.mark.no_archive_stub`` so the real function runs.
     """
-    if "is_archived_repo" in request.node.name:
-        yield
+    td._ARCHIVED_REPO_CACHE.clear()
+    if request.node.get_closest_marker("no_archive_stub"):
+        yield None
+        td._ARCHIVED_REPO_CACHE.clear()
         return
-    with mock.patch.object(td, "is_archived_repo", return_value=False):
-        yield
+    patcher = mock.patch.object(td, "is_archived_repo", return_value=False)
+    patcher.start()
+    try:
+        yield patcher
+    finally:
+        patcher.stop()
+        td._ARCHIVED_REPO_CACHE.clear()
+
 
 # ---------------------------------------------------------------------------
 # parse_pr_subject / is_dependabot_pr
@@ -230,6 +236,120 @@ def test_detect_repo_coverage_returns_none_when_no_signal() -> None:
     with mock.patch.object(
         td, "run_gh", side_effect=td.subprocess.CalledProcessError(1, "gh")
     ):
+        assert td.detect_repo_coverage("z/r") is None
+
+
+def test_detect_repo_coverage_extracts_simplecov_line_and_branch() -> None:
+    # github/markup has ``SimpleCov.minimum_coverage line: 100, branch: 100``
+    # in test/test_helper.rb. Lowest of the two gates is the one that fails
+    # the build first, so we report the lowest (which is 100 here).
+    files = {
+        "test/test_helper.rb": (
+            "require 'simplecov'\n"
+            "SimpleCov.minimum_coverage line: 100, branch: 100\n"
+        ),
+    }
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        for name, body in files.items():
+            if name in args[1]:
+                return body
+        raise FileNotFoundError(args[1])
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
+        assert td.detect_repo_coverage("github/markup") == 100
+
+
+def test_detect_repo_coverage_extracts_simplecov_single_number() -> None:
+    files = {
+        "spec/spec_helper.rb": (
+            "SimpleCov.start\nSimpleCov.minimum_coverage 90\n"
+        ),
+    }
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        for name, body in files.items():
+            if name in args[1]:
+                return body
+        raise FileNotFoundError(args[1])
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
+        assert td.detect_repo_coverage("z/r") == 90
+
+
+def test_detect_repo_coverage_extracts_simplecov_float() -> None:
+    files = {
+        ".simplecov": "SimpleCov.minimum_coverage 80.5\n",
+    }
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        for name, body in files.items():
+            if name in args[1]:
+                return body
+        raise FileNotFoundError(args[1])
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
+        # Float value is floored to int (matches the integer threshold
+        # semantics used elsewhere in the pipeline).
+        assert td.detect_repo_coverage("z/r") == 80
+
+
+def test_detect_repo_coverage_simplecov_lowest_when_line_below_branch() -> None:
+    files = {
+        "test/test_helper.rb": "SimpleCov.minimum_coverage line: 80, branch: 95\n",
+    }
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        for name, body in files.items():
+            if name in args[1]:
+                return body
+        raise FileNotFoundError(args[1])
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
+        assert td.detect_repo_coverage("z/r") == 80
+
+
+def test_detect_repo_coverage_simplecov_block_form() -> None:
+    """github/markup uses bare ``minimum_coverage`` inside ``SimpleCov.start``.
+
+    The prefix is optional, but only counted because SimpleCov appears in
+    the file (guards against false positives on unrelated Ruby DSL).
+    """
+    files = {
+        "test/test_helper.rb": (
+            'require "simplecov"\n'
+            "SimpleCov.start do\n"
+            "  enable_coverage :branch\n"
+            '  add_filter "/test/"\n'
+            '  command_name "MarkupTests"\n'
+            "  minimum_coverage line: 100, branch: 100\n"
+            "end\n"
+        ),
+    }
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        for name, body in files.items():
+            if name in args[1]:
+                return body
+        raise FileNotFoundError(args[1])
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
+        assert td.detect_repo_coverage("github/markup") == 100
+
+
+def test_detect_repo_coverage_simplecov_ignored_without_simplecov_marker() -> None:
+    """Unrelated files with a ``minimum_coverage`` DSL must not match."""
+    files = {
+        "Rakefile": "task :coverage do\n  minimum_coverage 50\nend\n",
+    }
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        for name, body in files.items():
+            if name in args[1]:
+                return body
+        raise FileNotFoundError(args[1])
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
         assert td.detect_repo_coverage("z/r") is None
 
 
@@ -1139,7 +1259,7 @@ def test_run_end_to_end_merges_and_flags(tmp_path: Path) -> None:
     assert stats.merged == 1
     assert stats.flagged == 1
     do_merge_mock.assert_called_once_with(
-        "o/r1", 1, dry_run=False, my_login="zkoppert"
+        "o/r1", 1, dry_run=False, my_login="zkoppert", head_sha=None
     )
     mark_done_mock.assert_called_once_with("thread-merge", dry_run=False)
 
@@ -2294,336 +2414,288 @@ def test_run_skips_super_linter_repo_pr_with_mention_keeps_notification(
 
 
 # ---------------------------------------------------------------------------
-# Bug 1: SimpleCov coverage detection (Ruby)
+# Archived repo handling (bug 2)
 # ---------------------------------------------------------------------------
 
 
-def test_detect_repo_coverage_extracts_simplecov_line() -> None:
-    """Ruby SimpleCov: `minimum_coverage line: N, branch: N` style.
-
-    Mirrors github/markup's spec/spec_helper.rb (line 100, branch 100). Before
-    the fix, the function only matched Python regexes and returned None for
-    Ruby repos, bouncing every patch bump to Q1.
-    """
-    files = {
-        "spec/spec_helper.rb": (
-            "SimpleCov.start do\n"
-            "  enable_coverage :branch\n"
-            "  minimum_coverage line: 100, branch: 100\n"
-            "end\n"
-        ),
-    }
-
-    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
-        for name, body in files.items():
-            if name in args[1]:
-                return body
-        raise FileNotFoundError(args[1])
-
-    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
-        assert td.detect_repo_coverage("github/markup") == 100
+@pytest.mark.no_archive_stub
+def test_is_archived_repo_returns_true_when_gh_returns_true() -> None:
+    td._ARCHIVED_REPO_CACHE.clear()
+    with mock.patch.object(td, "run_gh", return_value="true\n"):
+        assert td.is_archived_repo("zkoppert/advanced-security-enforcer") is True
 
 
-def test_detect_repo_coverage_extracts_simplecov_bare_form() -> None:
-    """Ruby SimpleCov: `minimum_coverage 95` (no `line:` key)."""
-    files = {
-        "test/test_helper.rb": "SimpleCov.minimum_coverage 95\n",
-    }
-
-    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
-        for name, body in files.items():
-            if name in args[1]:
-                return body
-        raise FileNotFoundError(args[1])
-
-    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
-        assert td.detect_repo_coverage("o/r") == 95
-
-
-def test_detect_repo_coverage_picks_highest_across_python_and_ruby() -> None:
-    """Mixed-language repo: take the highest threshold across all matched
-    regexes from any of the candidate files."""
-    files = {
-        "pyproject.toml": "[tool.coverage.report]\nfail_under = 60",
-        "spec/spec_helper.rb": "minimum_coverage line: 100, branch: 100",
-        "test/test_helper.rb": "minimum_coverage 75",
-    }
-
-    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
-        for name, body in files.items():
-            if name in args[1]:
-                return body
-        raise FileNotFoundError(args[1])
-
-    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
-        assert td.detect_repo_coverage("mixed/repo") == 100
-
-
-# ---------------------------------------------------------------------------
-# Bug 2: Archived-repo short-circuit
-# ---------------------------------------------------------------------------
-
-
-def test_is_archived_repo_true_when_gh_returns_true() -> None:
-    cache: dict[str, bool] = {}
-    with mock.patch.object(td, "run_gh", return_value="true\n") as mocked:
-        assert td.is_archived_repo("zkoppert/advanced-security-enforcer", cache) is True
-    assert cache["zkoppert/advanced-security-enforcer"] is True
-    mocked.assert_called_once()
-
-
-def test_is_archived_repo_false_when_gh_returns_false() -> None:
-    cache: dict[str, bool] = {}
+@pytest.mark.no_archive_stub
+def test_is_archived_repo_returns_false_when_gh_returns_false() -> None:
+    td._ARCHIVED_REPO_CACHE.clear()
     with mock.patch.object(td, "run_gh", return_value="false\n"):
-        assert td.is_archived_repo("o/r", cache) is False
-    assert cache["o/r"] is False
+        assert td.is_archived_repo("github/markup") is False
 
 
-def test_is_archived_repo_uses_cache_on_repeat_lookup() -> None:
-    cache: dict[str, bool] = {}
-    with mock.patch.object(td, "run_gh", return_value="true\n") as mocked:
-        td.is_archived_repo("o/r", cache)
-        td.is_archived_repo("o/r", cache)
-        td.is_archived_repo("o/r", cache)
-    mocked.assert_called_once()
+@pytest.mark.no_archive_stub
+def test_is_archived_repo_caches_per_process() -> None:
+    td._ARCHIVED_REPO_CACHE.clear()
+    with mock.patch.object(td, "run_gh", return_value="true\n") as gh_mock:
+        td.is_archived_repo("o/r")
+        td.is_archived_repo("o/r")
+        td.is_archived_repo("o/r")
+    assert gh_mock.call_count == 1
 
 
-def test_is_archived_repo_returns_false_on_gh_failure() -> None:
-    """Network / 404 / parse error must not silently swallow notifications.
-    Return False so the PR is processed normally and may flag for review."""
-    import subprocess as _sp
-
-    cache: dict[str, bool] = {}
-    err = _sp.CalledProcessError(returncode=1, cmd=["gh"], stderr="boom")
-    with mock.patch.object(td, "run_gh", side_effect=err):
-        assert td.is_archived_repo("o/r", cache) is False
-    assert cache["o/r"] is False
+@pytest.mark.no_archive_stub
+def test_is_archived_repo_falls_back_to_false_on_api_error() -> None:
+    td._ARCHIVED_REPO_CACHE.clear()
+    with mock.patch.object(
+        td, "run_gh", side_effect=td.subprocess.CalledProcessError(1, "gh")
+    ):
+        assert td.is_archived_repo("o/r") is False
 
 
-def test_run_skips_archived_repo_clears_notification_and_cooldown(
-    tmp_path: Path,
-) -> None:
-    """Archived repos: clear the notification, apply cooldown, do not fetch
-    the PR or write to the todo file. Mirrors EXCLUDED_DEP_AUTO_CLEAR_REASONS.
-    """
+def test_run_skips_archived_repo_and_clears_notification(tmp_path: Path) -> None:
+    """Archived repos can never accept merges - skip + clear, never flag."""
     notif = {
         "id": "thread-archived",
         "reason": "subscribed",
         "subject": {
             "type": "PullRequest",
-            "url": "https://api.github.com/repos/zkoppert/advanced-security-enforcer/pulls/42",
+            "url": (
+                "https://api.github.com/repos/zkoppert/"
+                "advanced-security-enforcer/pulls/73"
+            ),
         },
     }
+    pr = _base_pr(
+        number=73,
+        url="https://github.com/zkoppert/advanced-security-enforcer/pull/73",
+        title="Bump foo from 1.0.0 to 1.1.0",
+    )
+
     args = _make_args(tmp_path)
+
     with mock.patch.object(
         td, "get_my_login", return_value="zkoppert"
     ), mock.patch.object(
         td, "fetch_notifications", return_value=[notif]
     ), mock.patch.object(
-        td, "is_archived_repo", return_value=True
+        td, "fetch_pr", return_value=pr
     ), mock.patch.object(
-        td, "fetch_pr"
-    ) as fetch_pr_mock, mock.patch.object(
+        td, "is_archived_repo", return_value=True
+    ) as archive_mock, mock.patch.object(
         td, "do_merge"
-    ) as do_merge_mock, mock.patch.object(
+    ) as merge_mock, mock.patch.object(
         td, "mark_thread_done"
     ) as mark_done_mock:
         stats = td.run(args)
 
-    assert stats.skipped_archived == 1
-    assert stats.dependabot == 0
-    assert stats.flagged == 0
-    fetch_pr_mock.assert_not_called()
-    do_merge_mock.assert_not_called()
+    archive_mock.assert_called_with("zkoppert/advanced-security-enforcer")
+    merge_mock.assert_not_called()
     mark_done_mock.assert_called_once_with("thread-archived", dry_run=False)
-    state = td.load_state(args.state_file)
-    assert (
-        "https://github.com/zkoppert/advanced-security-enforcer/pull/42" in state
-    )
-
-
-def test_run_skips_archived_repo_dry_run_does_not_mutate(tmp_path: Path) -> None:
-    """Dry-run archived flow: count the skip, do not mark the thread, do not
-    write the state file."""
-    notif = {
-        "id": "thread-archived-dry",
-        "reason": "subscribed",
-        "subject": {
-            "type": "PullRequest",
-            "url": "https://api.github.com/repos/o/archived/pulls/1",
-        },
-    }
-    args = _make_args(tmp_path, dry_run=True)
-    with mock.patch.object(
-        td, "get_my_login", return_value="zkoppert"
-    ), mock.patch.object(
-        td, "fetch_notifications", return_value=[notif]
-    ), mock.patch.object(
-        td, "is_archived_repo", return_value=True
-    ), mock.patch.object(
-        td, "mark_thread_done"
-    ) as mark_done_mock:
-        stats = td.run(args)
-
     assert stats.skipped_archived == 1
-    mark_done_mock.assert_called_once_with("thread-archived-dry", dry_run=True)
-    assert not args.state_file.exists()
+    assert stats.flagged == 0
+    assert stats.dependabot == 0  # archived skip happens before dependabot count
+
+    reloaded = td.load_todo(args.todo_file)
+    assert reloaded["prioritized"]["q1_do_first"] == []
+
+    state = td.load_state(args.state_file)
+    assert "https://github.com/zkoppert/advanced-security-enforcer/pull/73" in state
 
 
 # ---------------------------------------------------------------------------
-# Bug 3a: skip do_approve when already approved by current user
+# Branch-protection / idempotent approval (bug 3)
 # ---------------------------------------------------------------------------
 
 
-def test_my_latest_review_state_returns_approved_for_my_login() -> None:
-    payload = {
-        "latestReviews": [
-            {"author": {"login": "someone-else"}, "state": "COMMENTED"},
-            {"author": {"login": "zkoppert"}, "state": "APPROVED"},
-        ]
-    }
-    with mock.patch.object(td, "run_gh", return_value=json.dumps(payload)):
-        assert td.my_latest_review_state("o/r", 1, "zkoppert") == "APPROVED"
-
-
-def test_my_latest_review_state_returns_none_when_no_review_by_me() -> None:
-    payload = {"latestReviews": [{"author": {"login": "someone-else"}, "state": "APPROVED"}]}
-    with mock.patch.object(td, "run_gh", return_value=json.dumps(payload)):
-        assert td.my_latest_review_state("o/r", 1, "zkoppert") is None
-
-
-def test_my_latest_review_state_returns_none_on_gh_failure() -> None:
-    import subprocess as _sp
-
-    err = _sp.CalledProcessError(returncode=1, cmd=["gh"], stderr="boom")
-    with mock.patch.object(td, "run_gh", side_effect=err):
-        assert td.my_latest_review_state("o/r", 1, "zkoppert") is None
-
-
-def test_do_merge_fallback_skips_approve_when_already_approved() -> None:
-    """Bug 3a: when the authenticated user already has an APPROVED review,
-    do not re-approve - just retry the synchronous merge. Prevents the
-    'approve PR 52 times' loop on jmeridth/gh-health-files#59 style cases."""
-    import subprocess as _sp
-
-    auto_err = _sp.CalledProcessError(
-        returncode=1,
-        cmd=["gh", "pr", "merge"],
-        output="",
-        stderr="GraphQL: Auto merge is not allowed for this repository (enablePullRequestAutoMerge)",
-    )
-    with mock.patch.object(td, "run_gh") as mocked, mock.patch.object(
-        td, "my_latest_review_state", return_value="APPROVED"
-    ) as latest_mock:
-        # First call (auto-merge) fails with auto-merge-disabled. Second call
-        # (the post-approve synchronous merge) succeeds. There should be NO
-        # call to `gh pr review --approve` between them.
-        mocked.side_effect = [auto_err, None]
-        td.do_merge("o/r", 59, dry_run=False, my_login="zkoppert")
-
-    latest_mock.assert_called_once_with("o/r", 59, "zkoppert")
-    assert mocked.call_count == 2
-    for call in mocked.call_args_list:
-        cmd = call[0][0]
-        assert not (
-            "review" in cmd and "--approve" in cmd
-        ), f"unexpected approve in {cmd}"
-
-
-def test_do_merge_fallback_approves_when_not_yet_approved() -> None:
-    """Bug 3a regression guard: when my_latest_review_state returns None
-    (no prior review), the original approve + merge fallback still runs."""
-    import subprocess as _sp
-
-    auto_err = _sp.CalledProcessError(
-        returncode=1,
-        cmd=["gh", "pr", "merge"],
-        output="",
-        stderr="GraphQL: Auto merge is not allowed for this repository (enablePullRequestAutoMerge)",
-    )
-    with mock.patch.object(td, "run_gh") as mocked, mock.patch.object(
-        td, "my_latest_review_state", return_value=None
-    ):
-        mocked.side_effect = [auto_err, None, None]
-        td.do_merge("o/r", 7, dry_run=False, my_login="zkoppert")
-
-    assert mocked.call_count == 3
-    approve_call = mocked.call_args_list[1][0][0]
-    assert "review" in approve_call and "--approve" in approve_call
-
-
-def test_do_merge_fallback_approves_when_my_login_is_none() -> None:
-    """Backward compat: callers that omit my_login (e.g. older tests)
-    keep the original approve + merge path."""
-    import subprocess as _sp
-
-    auto_err = _sp.CalledProcessError(
-        returncode=1,
-        cmd=["gh", "pr", "merge"],
-        output="",
-        stderr="GraphQL: Auto merge is not allowed for this repository (enablePullRequestAutoMerge)",
-    )
-    with mock.patch.object(td, "run_gh") as mocked, mock.patch.object(
-        td, "my_latest_review_state"
-    ) as latest_mock:
-        mocked.side_effect = [auto_err, None, None]
-        td.do_merge("o/r", 7, dry_run=False)
-    latest_mock.assert_not_called()
-    assert mocked.call_count == 3
-
-
-# ---------------------------------------------------------------------------
-# Bug 3b: branch-protection error -> flag-for-review + cooldown
-# ---------------------------------------------------------------------------
-
-
-def test_is_branch_protection_error_matches_known_marker() -> None:
-    assert td._is_branch_protection_error(
-        "GraphQL: Pull request Pull request is not mergeable: the base branch policy prohibits the merge."
-    )
+def test_is_branch_protection_error_matches_known_markers() -> None:
     assert td._is_branch_protection_error(
         "the base branch policy prohibits the merge"
+    )
+    # Case-insensitive.
+    assert td._is_branch_protection_error(
+        "The Base Branch Policy Prohibits The Merge"
+    )
+    assert td._is_branch_protection_error(
+        "GraphQL: At least 1 approving review is required by reviewers"
+    )
+    assert td._is_branch_protection_error("Required status check missing")
+    assert td._is_branch_protection_error("Changes requested by reviewer")
+    assert td._is_branch_protection_error(
+        "Review is required by reviewers with write access"
     )
 
 
 def test_is_branch_protection_error_negative() -> None:
-    assert not td._is_branch_protection_error("Some other failure")
+    assert not td._is_branch_protection_error("Auto merge is not allowed")
+    assert not td._is_branch_protection_error("merge conflict")
     assert not td._is_branch_protection_error("")
 
 
-def test_do_merge_raises_branch_protection_error_when_sync_merge_blocked() -> None:
-    """Bug 3b: post-approve sync merge fails with a base-branch-policy error.
-    do_merge converts it to MergeBlockedByBranchProtectionError so the run
-    loop can flag-for-review and apply the cooldown."""
-    import subprocess as _sp
+def test_has_existing_approval_true_when_login_matches_head() -> None:
+    # Production-shape payload: ``gh pr view --json reviews,latestReviews``
+    # returns ``commit`` as a nested ``{"oid": "<sha>"}`` object rather than
+    # a flat ``commit_id`` field. Regression for PR #37 review feedback.
+    payload = {
+        "headRefOid": "abc123",
+        "reviews": [
+            {
+                "state": "APPROVED",
+                "author": {"login": "zkoppert"},
+                "commit": {"oid": "abc123"},
+            }
+        ],
+        "latestReviews": [],
+    }
+    with mock.patch.object(td, "run_gh", return_value=json.dumps(payload)):
+        assert td.has_existing_approval("o/r", 1, "zkoppert", "abc123") is True
 
-    auto_err = _sp.CalledProcessError(
-        returncode=1,
-        cmd=["gh", "pr", "merge"],
-        output="",
-        stderr="GraphQL: Auto merge is not allowed for this repository (enablePullRequestAutoMerge)",
-    )
-    protection_err = _sp.CalledProcessError(
-        returncode=1,
-        cmd=["gh", "pr", "merge"],
-        output="",
-        stderr="failed to merge pull request: the base branch policy prohibits the merge",
-    )
-    with mock.patch.object(td, "run_gh") as mocked, mock.patch.object(
-        td, "my_latest_review_state", return_value="APPROVED"
+
+def test_has_existing_approval_false_when_head_changed() -> None:
+    payload = {
+        "headRefOid": "newsha",
+        "reviews": [
+            {
+                "state": "APPROVED",
+                "author": {"login": "zkoppert"},
+                "commit": {"oid": "oldsha"},
+            }
+        ],
+        "latestReviews": [],
+    }
+    with mock.patch.object(td, "run_gh", return_value=json.dumps(payload)):
+        assert td.has_existing_approval("o/r", 1, "zkoppert", "newsha") is False
+
+
+def test_has_existing_approval_false_when_other_user_approved() -> None:
+    payload = {
+        "headRefOid": "abc123",
+        "reviews": [
+            {
+                "state": "APPROVED",
+                "author": {"login": "other"},
+                "commit": {"oid": "abc123"},
+            }
+        ],
+        "latestReviews": [],
+    }
+    with mock.patch.object(td, "run_gh", return_value=json.dumps(payload)):
+        assert td.has_existing_approval("o/r", 1, "zkoppert", "abc123") is False
+
+
+def test_has_existing_approval_accepts_flat_commit_id_fallback() -> None:
+    # Some older or alternate gh versions may emit a flat ``commit_id`` field
+    # instead of the nested ``commit.oid`` object. Keep the fallback covered
+    # so we don't regress resilience while fixing the primary shape.
+    payload = {
+        "headRefOid": "abc123",
+        "reviews": [
+            {
+                "state": "APPROVED",
+                "author": {"login": "zkoppert"},
+                "commit_id": "abc123",
+            }
+        ],
+        "latestReviews": [],
+    }
+    with mock.patch.object(td, "run_gh", return_value=json.dumps(payload)):
+        assert td.has_existing_approval("o/r", 1, "zkoppert", "abc123") is True
+
+
+def test_has_existing_approval_uses_latest_reviews_with_nested_commit() -> None:
+    # ``latestReviews`` uses the same nested ``commit.oid`` shape as ``reviews``.
+    payload = {
+        "headRefOid": "abc123",
+        "reviews": [],
+        "latestReviews": [
+            {
+                "state": "APPROVED",
+                "author": {"login": "zkoppert"},
+                "commit": {"oid": "abc123"},
+            }
+        ],
+    }
+    with mock.patch.object(td, "run_gh", return_value=json.dumps(payload)):
+        assert td.has_existing_approval("o/r", 1, "zkoppert", "abc123") is True
+
+
+def test_has_existing_approval_false_on_gh_error() -> None:
+    with mock.patch.object(
+        td, "run_gh", side_effect=td.subprocess.CalledProcessError(1, "gh")
     ):
-        mocked.side_effect = [auto_err, protection_err]
-        with pytest.raises(td.MergeBlockedByBranchProtectionError):
-            td.do_merge("jmeridth/gh-health-files", 59, dry_run=False, my_login="zkoppert")
+        assert td.has_existing_approval("o/r", 1, "zkoppert", "abc123") is False
 
 
-def test_run_flags_and_cooldowns_on_branch_protection_block(tmp_path: Path) -> None:
-    """End-to-end Bug 3 regression: a PR whose merge is blocked by branch
-    protection must (a) get flagged into q1_do_first exactly once, and (b)
-    receive a cooldown entry so the next run skips it - even though the
-    underlying merge attempt raised."""
+def test_do_merge_skips_approve_when_already_approved(tmp_path: Path) -> None:
+    """If my login already approved this head SHA, do not re-approve."""
+    auto_merge_err = td.subprocess.CalledProcessError(1, "gh")
+    auto_merge_err.stderr = "Auto merge is not allowed for this repository"
+
+    call_log: list[list[str]] = []
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        call_log.append(list(args))
+        if "--auto" in args:
+            raise auto_merge_err
+        return ""
+
+    with mock.patch.object(
+        td, "has_existing_approval", return_value=True
+    ) as approval_check, mock.patch.object(
+        td, "do_approve"
+    ) as approve_mock, mock.patch.object(
+        td, "run_gh", side_effect=fake_run_gh
+    ):
+        td.do_merge(
+            "o/r", 1, dry_run=False, my_login="zkoppert", head_sha="abc123"
+        )
+
+    approval_check.assert_called_once_with("o/r", 1, "zkoppert", "abc123")
+    approve_mock.assert_not_called()
+    # First call was --auto attempt; second was the sync merge.
+    assert any("--auto" in a for a in call_log)
+    assert any(
+        "--auto" not in a and "merge" in a and "--squash" in a for a in call_log
+    )
+
+
+def test_do_merge_raises_branch_protection_blocked_on_sync_merge_failure(
+    tmp_path: Path,
+) -> None:
+    auto_merge_err = td.subprocess.CalledProcessError(1, "gh")
+    auto_merge_err.stderr = "Auto merge is not allowed for this repository"
+
+    bp_err = td.subprocess.CalledProcessError(1, "gh")
+    bp_err.stderr = "the base branch policy prohibits the merge"
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        if "--auto" in args:
+            raise auto_merge_err
+        raise bp_err
+
+    with mock.patch.object(
+        td, "has_existing_approval", return_value=True
+    ), mock.patch.object(
+        td, "do_approve"
+    ), mock.patch.object(
+        td, "run_gh", side_effect=fake_run_gh
+    ):
+        with pytest.raises(td.BranchProtectionBlocked) as exc_info:
+            td.do_merge(
+                "jmeridth/gh-health-files",
+                59,
+                dry_run=False,
+                my_login="zkoppert",
+                head_sha="abc",
+            )
+
+    assert "the base branch policy prohibits the merge" in exc_info.value.marker
+
+
+def test_run_branch_protection_failure_flags_and_sets_long_cooldown(
+    tmp_path: Path,
+) -> None:
+    """Regression test for the 52-retry approve loop on gh-health-files#59."""
     notif = {
-        "id": "thread-blocked",
+        "id": "thread-bp",
         "reason": "subscribed",
         "subject": {
             "type": "PullRequest",
@@ -2633,15 +2705,19 @@ def test_run_flags_and_cooldowns_on_branch_protection_block(tmp_path: Path) -> N
     pr = _base_pr(
         number=59,
         url="https://github.com/jmeridth/gh-health-files/pull/59",
-        title="Bump foo from 1.0.0 to 1.0.1",
     )
-
-    def do_merge_blocked(*_args: Any, **_kwargs: Any) -> None:
-        raise td.MergeBlockedByBranchProtectionError(
-            "the base branch policy prohibits the merge"
-        )
+    pr["headRefOid"] = "abc123"
 
     args = _make_args(tmp_path)
+
+    bp_err = td.BranchProtectionBlocked(
+        repo="jmeridth/gh-health-files",
+        number=59,
+        marker="the base branch policy prohibits the merge",
+    )
+
+    approve_mock = mock.MagicMock()
+
     with mock.patch.object(
         td, "get_my_login", return_value="zkoppert"
     ), mock.patch.object(
@@ -2649,83 +2725,166 @@ def test_run_flags_and_cooldowns_on_branch_protection_block(tmp_path: Path) -> N
     ), mock.patch.object(
         td, "fetch_pr", return_value=pr
     ), mock.patch.object(
-        td, "detect_repo_coverage", return_value=100
+        td, "detect_repo_coverage", return_value=95
     ), mock.patch.object(
-        td, "do_merge", side_effect=do_merge_blocked
+        td, "do_merge", side_effect=bp_err
+    ), mock.patch.object(
+        td, "do_approve", approve_mock
     ), mock.patch.object(
         td, "mark_thread_done"
     ) as mark_done_mock:
         stats = td.run(args)
 
-    assert stats.flagged == 1, "must flag the blocked PR for review"
+    # Flagged for review (not retried, no errors).
     assert stats.merged == 0
-    assert not stats.errors, f"branch-protection block must not record an error: {stats.errors}"
-    mark_done_mock.assert_not_called()
+    assert stats.flagged == 1
+    assert stats.errors == []
+    # No additional approve happened in the run loop; do_merge raised
+    # before its internal approve fallback could re-fire.
+    approve_mock.assert_not_called()
+    # Notification cleared so it does not re-enter next hour.
+    mark_done_mock.assert_called_once_with("thread-bp", dry_run=False)
 
-    # The flag entry exists in q1_do_first with the right reason.
+    # Q1 entry has the branch-protection reason in its description.
     reloaded = td.load_todo(args.todo_file)
     flags = reloaded["prioritized"]["q1_do_first"]
     assert len(flags) == 1
-    assert flags[0]["description"].endswith(
-        "auto-merge blocked by branch protection."
-    )
+    assert "branch protection" in flags[0]["description"]
 
-    # The cooldown was applied so the next run skips this PR.
+    # Long cooldown set: a follow-up run within the next 24h must skip.
     state = td.load_state(args.state_file)
-    assert "https://github.com/jmeridth/gh-health-files/pull/59" in state
+    pr_url = "https://github.com/jmeridth/gh-health-files/pull/59"
+    assert pr_url in state
+    # Within the 24h window in_cooldown should still return True.
+    now_plus_23h = datetime.datetime.now(datetime.timezone.utc).timestamp() + (
+        23 * 3600
+    )
+    assert td.in_cooldown(state, pr_url, now=now_plus_23h)
 
 
-def test_run_branch_protection_block_does_not_duplicate_flag(tmp_path: Path) -> None:
-    """When the PR is already tracked in q1_do_first under the same thread
-    id, a branch-protection block must increment already_tracked rather
-    than re-adding the entry."""
-    notif = {
-        "id": "thread-blocked-dup",
-        "reason": "subscribed",
-        "subject": {
-            "type": "PullRequest",
-            "url": "https://api.github.com/repos/o/r/pulls/1",
-        },
+# ---------------------------------------------------------------------------
+# Stale-removal guard (bug 4)
+# ---------------------------------------------------------------------------
+
+
+def test_remove_stale_entries_never_removes_items_without_notification(
+    tmp_path: Path, caplog: Any
+) -> None:
+    """Regression: hand-curated Q1 entries (no ``notification`` field) must
+    survive a stale-removal pass even when another item in the same bucket
+    is matched and removed.
+    """
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: hand-curated-no-notification\n"
+        "      title: 'IssueQuery#maybe_expand_author_for_agents fix'\n"
+        "      status: pending\n"
+        "    - id: dependabot-foo-pr-9\n"
+        "      title: Review dependabot PR\n"
+        "      notification:\n"
+        "        thread_id: thread-resolved\n"
+        "        url: https://github.com/o/r/pull/9\n"
+        "        reason: subscribed\n"
+        "    - id: hand-curated-null-notif\n"
+        "      title: notification field present but null\n"
+        "      notification: null\n"
+        "    - id: hand-curated-empty-notif\n"
+        "      title: notification field present but empty\n"
+        "      notification: {}\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+    data = td.load_todo(todo_file)
+
+    with caplog.at_level("INFO", logger="triage-dependabot"):
+        removed = td.remove_stale_entries(
+            data,
+            thread_id="thread-resolved",
+            pr_url="https://github.com/o/r/pull/9",
+        )
+
+    assert removed == 1
+
+    ids_left = [item["id"] for item in data["prioritized"]["q1_do_first"]]
+    assert ids_left == [
+        "hand-curated-no-notification",
+        "hand-curated-null-notif",
+        "hand-curated-empty-notif",
+    ]
+
+    # Diagnostic logging captured the removal with the matched key + item id.
+    matching_records = [
+        rec.getMessage() for rec in caplog.records if "stale-removal" in rec.getMessage()
+    ]
+    assert any("dependabot-foo-pr-9" in msg for msg in matching_records)
+    assert any("thread_id=thread-resolved" in msg for msg in matching_records)
+
+
+def test_remove_stale_entries_no_op_when_both_keys_missing() -> None:
+    """An empty resolver argument list must never remove anything."""
+    data = {
+        "inbox": [
+            {
+                "id": "anything",
+                "notification": {
+                    "thread_id": "t1",
+                    "url": "https://github.com/o/r/pull/1",
+                },
+            },
+        ],
+        "prioritized": {"q1_do_first": []},
+        "done": [],
     }
-    pr = _base_pr(url="https://github.com/o/r/pull/1")
-    args = _make_args(tmp_path)
-    # Seed the todo file with an existing flag entry whose notification.thread_id
-    # matches the incoming notification so the dedupe path fires.
-    args.todo_file.write_text(
-        (
-            "inbox: []\n"
-            "prioritized:\n"
-            "  q1_do_first:\n"
-            "    - id: pre-existing\n"
-            "      title: prior\n"
-            "      notification:\n"
-            "        thread_id: 'thread-blocked-dup'\n"
-            "done: []\n"
-        ),
+    assert td.remove_stale_entries(data) == 0
+    assert td.remove_stale_entries(data, thread_id=None, pr_url=None) == 0
+    assert td.remove_stale_entries(data, thread_id="", pr_url="") == 0
+    assert data["inbox"][0]["id"] == "anything"
+
+
+def test_load_and_write_todo_roundtrips_ruby_method_and_backticks(
+    tmp_path: Path,
+) -> None:
+    """ruamel round-trip must preserve ``IssueQuery#maybe_expand_*`` text.
+
+    The hand-curated Q1 item lost in the 2026-06-11 triage session
+    contained a single-quoted title with ``IssueQuery#maybe_expand_*``
+    and a description with backticks. Verify load_todo + write_todo_atomic
+    preserves the content exactly so any future loss is not a YAML
+    round-trip bug.
+    """
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: core-ux-2746-author-me-copilot-coauthored-prs\n"
+        "      title: 'core-ux#2746: bare `author:@me` drops Copilot-coauthored PRs'\n"
+        "      description: 'IssueQuery#maybe_expand_author_for_agents was gated"
+        " by `pull_request_scoped_search?`'\n"
+        "      status: pending\n"
+        "done: []\n",
         encoding="utf-8",
     )
 
-    def do_merge_blocked(*_args: Any, **_kwargs: Any) -> None:
-        raise td.MergeBlockedByBranchProtectionError("policy")
+    data = td.load_todo(todo_file)
+    flags = data["prioritized"]["q1_do_first"]
+    assert len(flags) == 1
+    assert flags[0]["id"] == "core-ux-2746-author-me-copilot-coauthored-prs"
+    assert "#maybe_expand_author_for_agents" in flags[0]["description"]
+    assert "pull_request_scoped_search?" in flags[0]["description"]
+    assert "`author:@me`" in flags[0]["title"]
 
-    with mock.patch.object(
-        td, "get_my_login", return_value="zkoppert"
-    ), mock.patch.object(
-        td, "fetch_notifications", return_value=[notif]
-    ), mock.patch.object(
-        td, "fetch_pr", return_value=pr
-    ), mock.patch.object(
-        td, "detect_repo_coverage", return_value=100
-    ), mock.patch.object(
-        td, "do_merge", side_effect=do_merge_blocked
-    ):
-        stats = td.run(args)
-
-    assert stats.already_tracked == 1
-    assert stats.flagged == 0
-    # Cooldown still applies.
-    state = td.load_state(args.state_file)
-    assert "https://github.com/o/r/pull/1" in state
+    out_path = tmp_path / "todo-out.yml"
+    td.write_todo_atomic(out_path, data)
+    reloaded = td.load_todo(out_path)
+    flags2 = reloaded["prioritized"]["q1_do_first"]
+    assert len(flags2) == 1
+    assert flags2[0]["id"] == flags[0]["id"]
+    assert flags2[0]["title"] == flags[0]["title"]
+    assert flags2[0]["description"] == flags[0]["description"]
 
 
 # ---------------------------------------------------------------------------
