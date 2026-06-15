@@ -28,7 +28,7 @@ by `dependabot[bot]` or `dependabot-preview[bot]`:
 | Title or body references an excluded dependency AND notification reason is `mention`, `team_mention`, `author`, or `manual` | skip, leave notification in inbox for direct response |
 | Draft PR | flag-for-review |
 | Any non-bot human (other than me) reviewed or commented | flag-for-review |
-| Target version is a prerelease (alpha / beta / rc / dev / preview) | close-prerelease (comment `@dependabot close`) |
+| Target version is a prerelease (alpha / beta / rc / dev / preview) | close-prerelease (comment `@dependabot close` and force-close via `gh pr close`) |
 | `mergeStateStatus` is `behind` or `dirty` | rebase (suppressed if my last rebase comment is newer than the latest dependabot push) |
 | Bump is major / minor / unknown AND repo coverage threshold below 90 | flag-for-review |
 | CI status pending | skip this run; next hour retries |
@@ -52,10 +52,19 @@ unstable release. Recognized prerelease forms:
 
 Docker build variants (`-slim`, `-alpine`, `-bookworm`) and PEP 440
 post-releases (`1.0.0.post1`) are NOT treated as prereleases. The action
-is `@dependabot close`; Dependabot may open a new PR if the upstream
-releases another prerelease, and the next run closes that one too. For
-a permanent skip, add an `ignore` rule in the repo's
-`.github/dependabot.yml`.
+posts `@dependabot close` (so Dependabot's tracking records the
+directive) and then immediately calls `gh pr close --delete-branch` to
+force the PR shut via the API. The direct close exists because
+Dependabot has historically ignored the comment for hours (see
+`github-community-projects/contributors#496`, where the hourly cron
+posted the directive 12+ times before the PR actually closed). Only a
+narrow "already closed / not found" race on the close call is
+swallowed; any other failure (auth, rate limit, timeout, branch
+deletion) propagates so the outer run loop records it and the next
+cron tick retries instead of silently treating the PR as handled.
+Dependabot may open a new PR if the upstream releases another
+prerelease, and the next run closes that one too. For a permanent
+skip, add an `ignore` rule in the repo's `.github/dependabot.yml`.
 
 ### Excluded dependencies
 
@@ -85,8 +94,10 @@ conservative default.
   notification stays open so the next push triggers another evaluation.
 - **Label-and-merge**: `gh pr edit --add-label release` (only if the
   repo defines a `release` label) followed by auto-merge.
-- **Close-prerelease**: `gh pr comment --body "@dependabot close"` for
-  PRs whose target version is an alpha / beta / rc / dev / preview;
+- **Close-prerelease**: `gh pr comment --body "@dependabot close"`
+  followed by `gh pr close --delete-branch` (force-close via the API,
+  so we do not depend on Dependabot acting on the comment) for PRs
+  whose target version is an alpha / beta / rc / dev / preview;
   notification is marked done and the cooldown is applied.
 - **Flag-for-review**: a Q1 entry in
   `~/repos/zkoppert-todo/todo.yml` under

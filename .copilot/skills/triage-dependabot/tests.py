@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -2989,15 +2990,84 @@ def test_do_dependabot_close_dry_run_no_subprocess() -> None:
 def test_do_dependabot_close_posts_correct_comment() -> None:
     with mock.patch.object(td, "run_gh") as mocked:
         td.do_dependabot_close("github-community-projects/stale-repos", 520, dry_run=False)
-    mocked.assert_called_once()
-    args = mocked.call_args[0][0]
-    assert args[:2] == ["pr", "comment"]
-    assert "520" in args
-    assert "--repo" in args
-    assert "github-community-projects/stale-repos" in args
-    assert "--body" in args
-    body_idx = args.index("--body")
-    assert args[body_idx + 1] == "@dependabot close"
+    assert mocked.call_count == 2
+    comment_call, close_call = mocked.call_args_list
+    comment_args = comment_call[0][0]
+    assert comment_args[:2] == ["pr", "comment"]
+    assert "520" in comment_args
+    assert "--repo" in comment_args
+    assert "github-community-projects/stale-repos" in comment_args
+    assert "--body" in comment_args
+    body_idx = comment_args.index("--body")
+    assert comment_args[body_idx + 1] == "@dependabot close"
+    close_args = close_call[0][0]
+    assert close_args[:2] == ["pr", "close"]
+    assert "520" in close_args
+    assert "--repo" in close_args
+    assert "github-community-projects/stale-repos" in close_args
+    assert "--delete-branch" in close_args
+
+
+def test_do_dependabot_close_swallows_already_closed_error() -> None:
+    """If ``gh pr close`` fails with an 'already closed' stderr (a benign
+    race where Dependabot or a parallel run closed the PR between the
+    comment and the close), the comment has still landed and the tool
+    must not crash."""
+
+    def _run_gh_side_effect(args: list[str], *, timeout: int = 60) -> str:
+        if args[:2] == ["pr", "close"]:
+            raise subprocess.CalledProcessError(
+                1,
+                ["gh", *args],
+                stderr="pull request is closed",
+            )
+        return ""
+
+    with mock.patch.object(td, "run_gh", side_effect=_run_gh_side_effect) as mocked:
+        td.do_dependabot_close(
+            "github-community-projects/contributors", 496, dry_run=False
+        )
+    assert mocked.call_count == 2
+
+
+def test_do_dependabot_close_propagates_real_close_failure() -> None:
+    """If ``gh pr close`` fails for a real reason (auth, rate limit,
+    branch deletion, network), the error MUST propagate so the outer
+    run loop records it and skips the cooldown / mark-done that would
+    otherwise hide the still-open PR. Without this, the fix would
+    silently re-introduce the spam pathology it is trying to escape."""
+
+    def _run_gh_side_effect(args: list[str], *, timeout: int = 60) -> str:
+        if args[:2] == ["pr", "close"]:
+            raise subprocess.CalledProcessError(
+                1,
+                ["gh", *args],
+                stderr="HTTP 403: API rate limit exceeded for installation",
+            )
+        return ""
+
+    with mock.patch.object(td, "run_gh", side_effect=_run_gh_side_effect):
+        with pytest.raises(subprocess.CalledProcessError):
+            td.do_dependabot_close(
+                "github-community-projects/contributors", 496, dry_run=False
+            )
+
+
+def test_do_dependabot_close_propagates_timeout() -> None:
+    """A timeout on the close call leaves the PR in unknown state -
+    propagate so the outer loop retries on the next cron tick instead
+    of silently marking the notification done."""
+
+    def _run_gh_side_effect(args: list[str], *, timeout: int = 60) -> str:
+        if args[:2] == ["pr", "close"]:
+            raise subprocess.TimeoutExpired(cmd=["gh", *args], timeout=timeout)
+        return ""
+
+    with mock.patch.object(td, "run_gh", side_effect=_run_gh_side_effect):
+        with pytest.raises(subprocess.TimeoutExpired):
+            td.do_dependabot_close(
+                "github-community-projects/contributors", 496, dry_run=False
+            )
 
 
 def test_run_closes_prerelease_and_marks_notification_done(tmp_path: Path) -> None:

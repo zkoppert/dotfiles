@@ -31,10 +31,12 @@ upgrades or seeing a backlog of dependabot notifications.
    - `label-and-merge` - add the `release` label (if the repo defines
      one) and enable auto-merge, for changes the Copilot sub-agent or
      fallback regex classifies as security-related.
-   - `close-prerelease` - comment `@dependabot close` when the target
+   - `close-prerelease` - comment `@dependabot close` and then
+     force-close via `gh pr close --delete-branch` when the target
      version is a prerelease (alpha / beta / rc / dev / preview).
      Catches PRs like `bump python from 3.14.5-slim to 3.15.0b2-slim`
-     that should never auto-merge.
+     that should never auto-merge. The direct close exists because
+     Dependabot has historically ignored the comment for hours.
    - `flag-for-review` - write a Q1 entry to
      `~/repos/zkoppert-todo/todo.yml` for human attention.
 4. Marks the notification done on GitHub when an action runs.

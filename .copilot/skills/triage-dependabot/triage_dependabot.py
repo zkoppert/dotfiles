@@ -1183,17 +1183,60 @@ def do_add_label(repo: str, number: int, label: str, *, dry_run: bool) -> None:
     )
 
 
-def do_dependabot_close(repo: str, number: int, *, dry_run: bool) -> None:
-    """Post the ``@dependabot close`` comment to close a prerelease bump PR.
+def _is_already_closed_stderr(stderr: str) -> bool:
+    """Detect gh's "already closed / not found" stderr signatures.
 
-    Dependabot treats this comment as a directive to close the PR (and the
-    backing branch) so the noise stops. If the upstream releases another
-    prerelease later Dependabot may open a new PR; the next run of this
-    tool will close that one too. For a permanent skip, add an
-    ``ignore`` rule for prereleases in the repo's ``.github/dependabot.yml``.
+    Used to distinguish a benign race (the PR was closed between the
+    comment and the close call, e.g. by a parallel run or by Dependabot
+    itself acting on the comment) from a real failure (auth expiry,
+    rate limit, transient 5xx, branch-deletion failure) that must
+    propagate so the outer run loop records it and the next cron tick
+    retries instead of silently treating it as success.
+    """
+    lowered = stderr.lower()
+    return (
+        "already closed" in lowered
+        or "pull request is closed" in lowered
+        or "could not resolve to a pullrequest" in lowered
+        or "not found" in lowered
+    )
+
+
+def do_dependabot_close(repo: str, number: int, *, dry_run: bool) -> None:
+    """Close a prerelease bump PR via both a directive comment and a direct close.
+
+    Two-step closure:
+
+    1. Post ``@dependabot close`` so Dependabot's own tracking sees the
+       directive (helps it record that the PR was intentionally closed
+       and avoid immediately re-opening for the same prerelease).
+    2. Call ``gh pr close --delete-branch`` to force-close the PR
+       directly via the API. Dependabot has historically ignored the
+       ``@dependabot close`` comment for hours (see
+       github-community-projects/contributors#496 where the cron posted
+       the directive 12+ times before the PR actually closed), so the
+       direct close guarantees the PR shuts on the first cron tick and
+       stops the comment spam.
+
+    Only the narrow "already closed / not found" race is swallowed (e.g.
+    a parallel run, or Dependabot acting on the comment between the two
+    calls). Every other ``gh pr close`` failure - auth, rate limit,
+    timeout, transient API error, branch-deletion failure - propagates
+    so the outer run loop records it in ``stats.errors`` and skips the
+    ``mark_thread_done`` + cooldown that would otherwise hide the open
+    PR until the next cron tick.
+
+    If the upstream releases another prerelease later Dependabot may
+    open a new PR; the next run of this tool will close that one too.
+    For a permanent skip, add an ``ignore`` rule for prereleases in the
+    repo's ``.github/dependabot.yml``.
     """
     if dry_run:
-        logger.info("dry-run: would post '@dependabot close' on %s#%d", repo, number)
+        logger.info(
+            "dry-run: would post '@dependabot close' and force-close %s#%d",
+            repo,
+            number,
+        )
         return
     run_gh(
         [
@@ -1207,6 +1250,28 @@ def do_dependabot_close(repo: str, number: int, *, dry_run: bool) -> None:
         ],
         timeout=30,
     )
+    try:
+        run_gh(
+            [
+                "pr",
+                "close",
+                str(number),
+                "--repo",
+                repo,
+                "--delete-branch",
+            ],
+            timeout=30,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "") if hasattr(exc, "stderr") else ""
+        if _is_already_closed_stderr(stderr):
+            logger.info(
+                "do_dependabot_close: %s#%d already closed; nothing to do",
+                repo,
+                number,
+            )
+            return
+        raise
 
 
 def mark_thread_done(thread_id: str, *, dry_run: bool) -> None:
