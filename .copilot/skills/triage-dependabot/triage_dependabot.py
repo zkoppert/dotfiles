@@ -457,7 +457,7 @@ def is_prerelease_target(pr: dict[str, Any]) -> bool:
 
     Scans both the title and body so single-package PRs and grouped PRs
     are both detected. Conservative: any prerelease target anywhere in
-    the PR text routes the PR to ``@dependabot close`` rather than
+    the PR text routes the PR to the close-prerelease branch rather than
     auto-merging an unstable release.
     """
     title = pr.get("title") or ""
@@ -1203,28 +1203,23 @@ def _is_already_closed_stderr(stderr: str) -> bool:
 
 
 def do_dependabot_close(repo: str, number: int, *, dry_run: bool) -> None:
-    """Close a prerelease bump PR via both a directive comment and a direct close.
+    """Force-close a prerelease bump PR via the GitHub API.
 
-    Two-step closure:
+    Calls ``gh pr close --delete-branch`` to shut the PR directly. We
+    used to also post ``@dependabot close`` first, but Dependabot
+    historically ignored that comment for hours (see
+    github-community-projects/contributors#496 where the cron posted
+    the directive 12+ times before the PR actually closed) and once the
+    direct close lands the comment is pure noise on the PR timeline, so
+    the comment was dropped.
 
-    1. Post ``@dependabot close`` so Dependabot's own tracking sees the
-       directive (helps it record that the PR was intentionally closed
-       and avoid immediately re-opening for the same prerelease).
-    2. Call ``gh pr close --delete-branch`` to force-close the PR
-       directly via the API. Dependabot has historically ignored the
-       ``@dependabot close`` comment for hours (see
-       github-community-projects/contributors#496 where the cron posted
-       the directive 12+ times before the PR actually closed), so the
-       direct close guarantees the PR shuts on the first cron tick and
-       stops the comment spam.
-
-    Only the narrow "already closed / not found" race is swallowed (e.g.
-    a parallel run, or Dependabot acting on the comment between the two
-    calls). Every other ``gh pr close`` failure - auth, rate limit,
-    timeout, transient API error, branch-deletion failure - propagates
-    so the outer run loop records it in ``stats.errors`` and skips the
-    ``mark_thread_done`` + cooldown that would otherwise hide the open
-    PR until the next cron tick.
+    Only the narrow "already closed / not found" race is swallowed
+    (e.g. a parallel run, or Dependabot closing the PR itself between
+    cron ticks). Every other ``gh pr close`` failure - auth, rate
+    limit, timeout, transient API error, branch-deletion failure -
+    propagates so the outer run loop records it in ``stats.errors`` and
+    skips the ``mark_thread_done`` + cooldown that would otherwise hide
+    the open PR until the next cron tick.
 
     If the upstream releases another prerelease later Dependabot may
     open a new PR; the next run of this tool will close that one too.
@@ -1232,24 +1227,8 @@ def do_dependabot_close(repo: str, number: int, *, dry_run: bool) -> None:
     repo's ``.github/dependabot.yml``.
     """
     if dry_run:
-        logger.info(
-            "dry-run: would post '@dependabot close' and force-close %s#%d",
-            repo,
-            number,
-        )
+        logger.info("dry-run: would force-close %s#%d", repo, number)
         return
-    run_gh(
-        [
-            "pr",
-            "comment",
-            str(number),
-            "--repo",
-            repo,
-            "--body",
-            "@dependabot close",
-        ],
-        timeout=30,
-    )
     try:
         run_gh(
             [

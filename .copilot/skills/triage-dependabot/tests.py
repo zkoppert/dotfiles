@@ -2889,7 +2889,7 @@ def test_load_and_write_todo_roundtrips_ruby_method_and_backticks(
 
 
 # ---------------------------------------------------------------------------
-# Bug 5 / FR: prerelease (alpha/beta/rc/dev/preview) bumps -> @dependabot close
+# Bug 5 / FR: prerelease (alpha/beta/rc/dev/preview) bumps -> force-close via gh pr close
 # ---------------------------------------------------------------------------
 
 
@@ -2987,20 +2987,11 @@ def test_do_dependabot_close_dry_run_no_subprocess() -> None:
     mocked.assert_not_called()
 
 
-def test_do_dependabot_close_posts_correct_comment() -> None:
+def test_do_dependabot_close_force_closes_via_api() -> None:
     with mock.patch.object(td, "run_gh") as mocked:
         td.do_dependabot_close("github-community-projects/stale-repos", 520, dry_run=False)
-    assert mocked.call_count == 2
-    comment_call, close_call = mocked.call_args_list
-    comment_args = comment_call[0][0]
-    assert comment_args[:2] == ["pr", "comment"]
-    assert "520" in comment_args
-    assert "--repo" in comment_args
-    assert "github-community-projects/stale-repos" in comment_args
-    assert "--body" in comment_args
-    body_idx = comment_args.index("--body")
-    assert comment_args[body_idx + 1] == "@dependabot close"
-    close_args = close_call[0][0]
+    assert mocked.call_count == 1
+    close_args = mocked.call_args_list[0][0][0]
     assert close_args[:2] == ["pr", "close"]
     assert "520" in close_args
     assert "--repo" in close_args
@@ -3008,11 +2999,25 @@ def test_do_dependabot_close_posts_correct_comment() -> None:
     assert "--delete-branch" in close_args
 
 
+def test_do_dependabot_close_does_not_post_dependabot_close_comment() -> None:
+    """Regression guard for the comment-spam pathology. Posting
+    ``@dependabot close`` is pure noise on the PR timeline now that
+    ``gh pr close --delete-branch`` closes the PR directly, so the
+    comment must never be sent."""
+    with mock.patch.object(td, "run_gh") as mocked:
+        td.do_dependabot_close("github-community-projects/stale-repos", 520, dry_run=False)
+    for call in mocked.call_args_list:
+        args = call[0][0]
+        assert args[:2] != ["pr", "comment"], (
+            "do_dependabot_close must not post any PR comment; got "
+            f"{args!r}"
+        )
+
+
 def test_do_dependabot_close_swallows_already_closed_error() -> None:
     """If ``gh pr close`` fails with an 'already closed' stderr (a benign
-    race where Dependabot or a parallel run closed the PR between the
-    comment and the close), the comment has still landed and the tool
-    must not crash."""
+    race where Dependabot or a parallel run closed the PR before we
+    got there), the tool must not crash."""
 
     def _run_gh_side_effect(args: list[str], *, timeout: int = 60) -> str:
         if args[:2] == ["pr", "close"]:
@@ -3027,7 +3032,7 @@ def test_do_dependabot_close_swallows_already_closed_error() -> None:
         td.do_dependabot_close(
             "github-community-projects/contributors", 496, dry_run=False
         )
-    assert mocked.call_count == 2
+    assert mocked.call_count == 1
 
 
 def test_do_dependabot_close_propagates_real_close_failure() -> None:
@@ -3071,9 +3076,10 @@ def test_do_dependabot_close_propagates_timeout() -> None:
 
 
 def test_run_closes_prerelease_and_marks_notification_done(tmp_path: Path) -> None:
-    """End-to-end: a Dependabot PR targeting a beta version posts
-    '@dependabot close', marks the notification done, and applies the
-    cooldown so the next run skips it."""
+    """End-to-end: a Dependabot PR targeting a beta version is
+    force-closed via ``gh pr close --delete-branch``, the notification
+    is marked done, and the cooldown is applied so the next run skips
+    it."""
     notif = {
         "id": "thread-prerelease",
         "reason": "subscribed",
@@ -3219,8 +3225,9 @@ def test_run_close_prerelease_cooldown_set_when_mark_done_fails(
     Without this guard a notifications-API hiccup right after the
     direct close would leave the cooldown unset, and the next cron
     tick (within 1 hour) could re-encounter the still-listed
-    notification, re-post the @dependabot close comment, and reproduce
-    the contributors#496 spam pattern."""
+    notification and re-run the close path against an already-closed
+    PR (reproducing the contributors#496 churn pattern from a
+    different angle)."""
     notif = {
         "id": "thread-prerelease-flaky-mark",
         "reason": "subscribed",
