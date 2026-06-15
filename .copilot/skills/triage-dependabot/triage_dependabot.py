@@ -1284,6 +1284,42 @@ def mark_thread_done(thread_id: str, *, dry_run: bool) -> None:
     )
 
 
+def _safe_mark_thread_done(
+    thread_id: str,
+    *,
+    dry_run: bool,
+    stats: TriageStats,
+    context: str,
+) -> bool:
+    """Best-effort wrapper around ``mark_thread_done`` for post-action cleanup.
+
+    Used after a successful action (merge / label-and-merge /
+    close-prerelease / terminal-skip) where the action has already
+    landed and the per-PR cooldown has already been written. A flaky
+    notifications API call (``CalledProcessError`` /
+    ``TimeoutExpired``) must NOT unwind any of that - otherwise the
+    outer ``except`` would skip the cooldown set, and the next cron
+    tick would re-attempt the already-completed action (re-merge,
+    re-close, re-comment) producing the exact spam pathology this
+    module is built to avoid.
+
+    Failures are recorded in ``stats.errors`` and logged. ``thread_id``
+    of empty / falsy is a no-op (matches the existing convention at
+    the call sites that guard with ``if thread_id``).
+
+    Returns True on success or no-op, False if the call raised.
+    """
+    if not thread_id:
+        return True
+    try:
+        mark_thread_done(thread_id, dry_run=dry_run)
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        stats.errors.append(f"mark-done failed for {context}: {exc}")
+        logger.warning("mark_thread_done failed for %s: %s", context, exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # todo.yml integration
 # ---------------------------------------------------------------------------
@@ -1669,24 +1705,21 @@ def run(args: argparse.Namespace) -> TriageStats:
             pr_url = pr.get("url") or ""
             logger.info("%s#%d -> skipping archived repo %s", repo, number, repo)
             stats.skipped_archived += 1
+            if pr_url:
+                state[pr_url] = now
             if thread_id:
-                try:
-                    mark_thread_done(thread_id, dry_run=args.dry_run)
+                if _safe_mark_thread_done(
+                    thread_id,
+                    dry_run=args.dry_run,
+                    stats=stats,
+                    context=f"archived repo {pr_url}",
+                ):
                     stats.stale_removed += _cleanup_stale_entries(
                         data,
                         thread_id=thread_id,
                         pr_url=pr_url,
                         dry_run=args.dry_run,
                     )
-                except (
-                    subprocess.CalledProcessError,
-                    subprocess.TimeoutExpired,
-                ) as exc:
-                    stats.errors.append(
-                        f"mark-done failed for archived repo {pr_url}: {exc}"
-                    )
-            if pr_url:
-                state[pr_url] = now
             continue
         skipped_dep = skipped_dependency_match(pr) or skipped_repo_match(repo)
         if skipped_dep:
@@ -1788,9 +1821,14 @@ def run(args: argparse.Namespace) -> TriageStats:
                     my_login=my_login,
                     head_sha=pr.get("headRefOid"),
                 )
-                mark_thread_done(thread_id, dry_run=args.dry_run)
                 stats.merged += 1
                 state[pr_url] = now
+                _safe_mark_thread_done(
+                    thread_id,
+                    dry_run=args.dry_run,
+                    stats=stats,
+                    context=f"merged {pr_url}",
+                )
                 stats.stale_removed += _cleanup_stale_entries(
                     data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
                 )
@@ -1805,9 +1843,14 @@ def run(args: argparse.Namespace) -> TriageStats:
                     my_login=my_login,
                     head_sha=pr.get("headRefOid"),
                 )
-                mark_thread_done(thread_id, dry_run=args.dry_run)
                 stats.labeled_and_merged += 1
                 state[pr_url] = now
+                _safe_mark_thread_done(
+                    thread_id,
+                    dry_run=args.dry_run,
+                    stats=stats,
+                    context=f"labeled-and-merged {pr_url}",
+                )
                 stats.stale_removed += _cleanup_stale_entries(
                     data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
                 )
@@ -1817,9 +1860,14 @@ def run(args: argparse.Namespace) -> TriageStats:
                 state[pr_url] = now
             elif decision.outcome == OUTCOME_CLOSE_PRERELEASE:
                 do_dependabot_close(repo, number, dry_run=args.dry_run)
-                mark_thread_done(thread_id, dry_run=args.dry_run)
                 stats.closed_prerelease += 1
                 state[pr_url] = now
+                _safe_mark_thread_done(
+                    thread_id,
+                    dry_run=args.dry_run,
+                    stats=stats,
+                    context=f"closed-prerelease {pr_url}",
+                )
                 stats.stale_removed += _cleanup_stale_entries(
                     data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
                 )
@@ -1832,7 +1880,14 @@ def run(args: argparse.Namespace) -> TriageStats:
                     state[pr_url] = now
             else:
                 if decision.terminal and thread_id:
-                    mark_thread_done(thread_id, dry_run=args.dry_run)
+                    if pr_url:
+                        state[pr_url] = now
+                    _safe_mark_thread_done(
+                        thread_id,
+                        dry_run=args.dry_run,
+                        stats=stats,
+                        context=f"terminal-skip {pr_url}",
+                    )
                     stats.stale_removed += _cleanup_stale_entries(
                         data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
                     )
@@ -1865,15 +1920,12 @@ def run(args: argparse.Namespace) -> TriageStats:
                     BRANCH_PROTECTION_COOLDOWN_SECONDS - ACTION_COOLDOWN_SECONDS
                 )
             if thread_id:
-                try:
-                    mark_thread_done(thread_id, dry_run=args.dry_run)
-                except (
-                    subprocess.CalledProcessError,
-                    subprocess.TimeoutExpired,
-                ) as mark_exc:
-                    stats.errors.append(
-                        f"mark-done failed for branch-protected {pr_url}: {mark_exc}"
-                    )
+                _safe_mark_thread_done(
+                    thread_id,
+                    dry_run=args.dry_run,
+                    stats=stats,
+                    context=f"branch-protected {pr_url}",
+                )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             stats.errors.append(f"action {decision.outcome} failed for {pr_url}: {exc}")
 

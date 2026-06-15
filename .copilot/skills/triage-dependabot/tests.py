@@ -3118,6 +3118,213 @@ def test_run_closes_prerelease_and_marks_notification_done(tmp_path: Path) -> No
     )
 
 
+def test_run_merge_cooldown_set_when_mark_done_fails(tmp_path: Path) -> None:
+    """If mark_thread_done throws after a successful merge, the cooldown
+    state MUST still be written so the next cron tick does not try to
+    re-merge the already-merged PR. The mark-done failure is recorded
+    in stats.errors and processing continues.
+
+    Regression guard for a latent bug at the run-loop call site where
+    a notifications-API hiccup mid-tick would jump to the outer except
+    and leave state[pr_url] unset, causing the next tick to re-run
+    do_merge against a closed PR."""
+    notif = {
+        "id": "thread-merge-flaky-mark",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/1",
+        },
+    }
+    pr = _base_pr(number=1, url="https://github.com/o/r1/pull/1")
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=95
+    ), mock.patch.object(
+        td, "do_merge"
+    ), mock.patch.object(
+        td,
+        "mark_thread_done",
+        side_effect=subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 500"),
+    ):
+        stats = td.run(args)
+
+    assert stats.merged == 1
+    assert any("mark-done failed for merged" in e for e in stats.errors)
+    state = td.load_state(args.state_file)
+    assert "https://github.com/o/r1/pull/1" in state
+
+
+def test_run_label_and_merge_cooldown_set_when_mark_done_fails(
+    tmp_path: Path,
+) -> None:
+    """Same cooldown-preservation invariant for the label-and-merge path."""
+    notif = {
+        "id": "thread-lm-flaky-mark",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/7",
+        },
+    }
+    pr = _base_pr(
+        number=7,
+        url="https://github.com/o/r1/pull/7",
+        title="chore(deps): bump cryptography from 41.0.0 to 41.0.7 (CVE-2024-1234)",
+        body="Fixes CVE-2024-1234, a security advisory.",
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=95
+    ), mock.patch.object(
+        td, "fetch_repo_labels", return_value={"release"}
+    ), mock.patch.object(
+        td, "is_security_change", return_value=True
+    ), mock.patch.object(
+        td, "do_add_label"
+    ), mock.patch.object(
+        td, "do_merge"
+    ), mock.patch.object(
+        td,
+        "mark_thread_done",
+        side_effect=subprocess.TimeoutExpired(cmd=["gh"], timeout=20),
+    ):
+        stats = td.run(args)
+
+    assert stats.labeled_and_merged == 1
+    assert any("mark-done failed for labeled-and-merged" in e for e in stats.errors)
+    state = td.load_state(args.state_file)
+    assert "https://github.com/o/r1/pull/7" in state
+
+
+def test_run_close_prerelease_cooldown_set_when_mark_done_fails(
+    tmp_path: Path,
+) -> None:
+    """Same cooldown-preservation invariant for the close-prerelease path.
+
+    Without this guard a notifications-API hiccup right after the
+    direct close would leave the cooldown unset, and the next cron
+    tick (within 1 hour) could re-encounter the still-listed
+    notification, re-post the @dependabot close comment, and reproduce
+    the contributors#496 spam pattern."""
+    notif = {
+        "id": "thread-prerelease-flaky-mark",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/520",
+        },
+    }
+    pr = _base_pr(
+        number=520,
+        url="https://github.com/o/r1/pull/520",
+        title="chore(deps): bump python from 3.14.5-slim to 3.15.0b2-slim",
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "do_dependabot_close"
+    ), mock.patch.object(
+        td,
+        "mark_thread_done",
+        side_effect=subprocess.CalledProcessError(
+            1, ["gh"], stderr="HTTP 403: API rate limit exceeded"
+        ),
+    ):
+        stats = td.run(args)
+
+    assert stats.closed_prerelease == 1
+    assert any("mark-done failed for closed-prerelease" in e for e in stats.errors)
+    state = td.load_state(args.state_file)
+    assert "https://github.com/o/r1/pull/520" in state
+
+
+def test_safe_mark_thread_done_no_thread_is_noop() -> None:
+    """Empty thread_id is the documented no-op (matches the prior
+    ``if thread_id:`` guard at the call sites)."""
+    stats = td.TriageStats()
+    with mock.patch.object(td, "mark_thread_done") as mocked:
+        result = td._safe_mark_thread_done(
+            "", dry_run=False, stats=stats, context="ctx"
+        )
+    assert result is True
+    mocked.assert_not_called()
+    assert stats.errors == []
+
+
+def test_safe_mark_thread_done_records_failure() -> None:
+    """A flaky mark-done returns False and appends to stats.errors so
+    callers can branch on it if they need to."""
+    stats = td.TriageStats()
+    with mock.patch.object(
+        td,
+        "mark_thread_done",
+        side_effect=subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 500"),
+    ):
+        result = td._safe_mark_thread_done(
+            "thread-x", dry_run=False, stats=stats, context="merged https://x/y"
+        )
+    assert result is False
+    assert len(stats.errors) == 1
+    assert "mark-done failed for merged https://x/y" in stats.errors[0]
+
+
+def test_run_terminal_skip_cooldown_set_when_mark_done_fails(
+    tmp_path: Path,
+) -> None:
+    """Same cooldown-preservation invariant for the terminal-skip path
+    (closed/merged PRs). Without this guard, a flaky mark-done on a
+    closed PR would leave the cooldown unset, and the next cron tick
+    would re-fetch the same closed PR and retry mark-done forever."""
+    notif = {
+        "id": "thread-closed-flaky-mark",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/9",
+        },
+    }
+    pr = _base_pr(number=9, url="https://github.com/o/r/pull/9", state="closed")
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td,
+        "mark_thread_done",
+        side_effect=subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 500"),
+    ):
+        stats = td.run(args)
+
+    assert stats.skipped == 1
+    assert any("mark-done failed for terminal-skip" in e for e in stats.errors)
+    state = td.load_state(args.state_file)
+    assert "https://github.com/o/r/pull/9" in state
+
+
 def test_run_closes_prerelease_dry_run_does_not_post(tmp_path: Path) -> None:
     """Dry-run prerelease close: count the action, don't actually post the
     comment, don't mark the thread done, don't write state."""
