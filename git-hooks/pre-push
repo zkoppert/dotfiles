@@ -1,0 +1,99 @@
+#!/bin/bash
+# Global pre-push hook: scan commit messages for private/internal repo
+# references when pushing to a public repository.
+#
+# Install by setting: git config --global core.hooksPath ~/repos/dotfiles/git-hooks
+#
+# How it works:
+#   1. Determines the remote repo (owner/repo) from the push URL.
+#   2. Checks the repo's visibility via `gh api`.
+#   3. If public, extracts all commit messages being pushed and runs them
+#      through validate-style with --check-visibility.
+#   4. Blocks the push if any private repo references are found.
+#
+# Skipping:
+#   Set SKIP_PREPUSH_VISIBILITY=1 to bypass this hook (e.g., for known-safe pushes).
+
+set -euo pipefail
+
+if [ "${SKIP_PREPUSH_VISIBILITY:-}" = "1" ]; then
+  exit 0
+fi
+
+LINT_PATH="$HOME/.copilot/skills/validate-style/lint.py"
+
+# Bail early if dependencies aren't available
+if ! command -v gh >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1 || [ ! -f "$LINT_PATH" ]; then
+  exit 0
+fi
+
+# $1 = remote name, $2 = remote URL
+remote_url="${2:-}"
+if [ -z "$remote_url" ]; then
+  exit 0
+fi
+
+# Extract owner/repo from the remote URL
+# Handles: git@github.com:owner/repo.git, https://github.com/owner/repo.git
+owner_repo=""
+if [[ "$remote_url" =~ github\.com[:/]([^/]+/[^/]+?)(\.git)?$ ]]; then
+  owner_repo="${BASH_REMATCH[1]}"
+fi
+
+if [ -z "$owner_repo" ]; then
+  exit 0
+fi
+
+# Check visibility - only gate pushes to public repos
+repo_vis="$(gh api "repos/$owner_repo" --jq .visibility 2>/dev/null || true)"
+if [ "$repo_vis" != "public" ]; then
+  exit 0
+fi
+
+# Read stdin for the ref updates being pushed
+# Format: <local ref> <local sha> <remote ref> <remote sha>
+violations_found=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # Skip delete pushes
+  if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
+    continue
+  fi
+
+  # Determine the range of commits being pushed
+  if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+    # New branch - check all commits not on any other remote branch
+    range="$local_sha --not --remotes=origin"
+  else
+    range="$remote_sha..$local_sha"
+  fi
+
+  # Extract commit messages
+  commit_messages="$(git log --format="%H %s%n%b" $range 2>/dev/null || true)"
+  if [ -z "$commit_messages" ]; then
+    continue
+  fi
+
+  # Run through validate-style with visibility checking
+  lint_output=""
+  if ! lint_output="$(printf '%s' "$commit_messages" | python3 "$LINT_PATH" --check-visibility - 2>&1)"; then
+    if [ "$violations_found" = "0" ]; then
+      echo "" >&2
+      echo "pre-push: BLOCKED - commit messages reference private/internal repos" >&2
+      echo "          in a push to public repo '$owner_repo'." >&2
+      echo "" >&2
+    fi
+    echo "$lint_output" >&2
+    echo "" >&2
+    echo "Fix: amend the commit message(s) to remove or anonymize private repo references." >&2
+    echo "     Use 'an internal repo' or 'a private service' instead of the repo name." >&2
+    echo "Skip: SKIP_PREPUSH_VISIBILITY=1 git push (use sparingly)" >&2
+    echo "" >&2
+    violations_found=1
+  fi
+done
+
+if [ "$violations_found" = "1" ]; then
+  exit 1
+fi
+
+exit 0

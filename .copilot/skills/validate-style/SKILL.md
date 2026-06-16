@@ -26,6 +26,7 @@ At a high level, the rules cover:
 - **no-agentic-passive** - using a model name as the subject of verbs like made, wrote, generated
 - **no-this-pr-subject** - using "This PR / This change / This commit" as a sentence subject instead of first person
 - **no-subjectless-action-bullet** - bullets that lead with a bare past-tense action verb ("Added X") instead of first person ("I added X")
+- **no-private-repo-ref** (requires `--check-visibility`) - referencing a private or internal GitHub repo in text destined for a public surface. Checks visibility via the `gh` CLI at lint time.
 
 When the linter flags a violation, it prints the exact rule name, file, line, and column. Use that to look up the full message and suggested fix in `lint.py`.
 

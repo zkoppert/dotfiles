@@ -213,8 +213,36 @@ lint_pr_body_or_die() {
 
   local lint_path="$HOME/.copilot/skills/validate-style/lint.py"
   if [ -n "$body_content" ] && [ -x "$(command -v python3)" ] && [ -f "$lint_path" ]; then
+    # Determine if the target repo is public. If so, enable --check-visibility
+    # to block references to private/internal repos in the PR body.
+    local visibility_flag=""
+    local target_repo=""
+    # Try -R/--repo flag first
+    local prev=""
+    for arg in "$@"; do
+      case "$prev" in
+        -R|--repo) target_repo="$arg" ;;
+      esac
+      case "$arg" in
+        --repo=*) target_repo="${arg#--repo=}" ;;
+        -R=*) target_repo="${arg#-R=}" ;;
+      esac
+      prev="$arg"
+    done
+    # Fall back to current repo from git remote
+    if [ -z "$target_repo" ] && git rev-parse --show-toplevel >/dev/null 2>&1; then
+      target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
+    fi
+    if [ -n "$target_repo" ]; then
+      local repo_vis=""
+      repo_vis="$("$REAL_GH" api "repos/$target_repo" --jq .visibility 2>/dev/null || true)"
+      if [ "$repo_vis" = "public" ]; then
+        visibility_flag="--check-visibility"
+      fi
+    fi
+
     local lint_output=""
-    if ! lint_output="$(printf '%s' "$body_content" | python3 "$lint_path" - 2>&1)"; then
+    if ! lint_output="$(printf '%s' "$body_content" | python3 "$lint_path" $visibility_flag - 2>&1)"; then
       cat >&2 <<EOF
 gh-guard: \`$subcmd_label\` blocked by validate-style.
 
@@ -222,7 +250,7 @@ The PR body (from $body_source) failed Zack's hard writing-style rules. Fix the
 violations below and retry. See ~/.copilot/skills/validate-style/SKILL.md for
 the full rule catalog, or run the linter directly to iterate:
 
-  python3 $lint_path - <<<"<draft body>"
+  python3 $lint_path $visibility_flag - <<<"<draft body>"
 
 Violations:
 

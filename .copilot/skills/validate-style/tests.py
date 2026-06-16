@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -480,6 +481,89 @@ class TestCodeRegionMasking(unittest.TestCase):
         violations = find_violations(prefix + "\n")
         self.assertEqual(len(violations), 1)
         self.assertEqual(violations[0].column, prefix.index("\u2014") + 1)
+
+
+class TestPrivateRepoRef(unittest.TestCase):
+    """Tests for the no-private-repo-ref rule (--check-visibility)."""
+
+    def _find_with_mock_visibility(self, text, visibility_map):
+        """Run _find_private_repo_refs with a mocked visibility checker."""
+        with unittest.mock.patch(
+            "lint._check_repo_visibility",
+            side_effect=lambda repo: visibility_map.get(repo),
+        ):
+            from lint import _find_private_repo_refs, mask_code_regions
+            return _find_private_repo_refs(mask_code_regions(text))
+
+    def test_github_url_private_repo_flagged(self):
+        text = "See https://github.com/acme/secret-repo/pull/123 for details."
+        violations = self._find_with_mock_visibility(text, {"acme/secret-repo": "private"})
+        self.assertEqual(len(violations), 1)
+        self.assertEqual(violations[0].rule, "no-private-repo-ref")
+        self.assertIn("acme/secret-repo", violations[0].text)
+
+    def test_github_url_public_repo_not_flagged(self):
+        text = "See https://github.com/actions/checkout for the action."
+        violations = self._find_with_mock_visibility(text, {"actions/checkout": "public"})
+        self.assertEqual(len(violations), 0)
+
+    def test_shorthand_private_repo_flagged(self):
+        text = "Fixed in acme/internal-service#42."
+        violations = self._find_with_mock_visibility(text, {"acme/internal-service": "private"})
+        self.assertEqual(len(violations), 1)
+        self.assertIn("acme/internal-service#42", violations[0].text)
+
+    def test_shorthand_public_repo_not_flagged(self):
+        text = "Related to actions/checkout#99."
+        violations = self._find_with_mock_visibility(text, {"actions/checkout": "public"})
+        self.assertEqual(len(violations), 0)
+
+    def test_internal_visibility_flagged(self):
+        text = "Documented in https://github.com/corp/wiki-repo/issues/5."
+        violations = self._find_with_mock_visibility(text, {"corp/wiki-repo": "internal"})
+        self.assertEqual(len(violations), 1)
+        self.assertIn("internal", violations[0].message)
+
+    def test_bare_word_slash_word_not_matched(self):
+        """Bare prose like 'input/output' should not trigger API calls."""
+        text = "The input/output ratio was fine. Also client/server architecture."
+        with unittest.mock.patch("lint._check_repo_visibility") as mock_check:
+            from lint import _find_private_repo_refs, mask_code_regions
+            _find_private_repo_refs(mask_code_regions(text))
+            mock_check.assert_not_called()
+
+    def test_exclusion_skips_file_paths(self):
+        """Paths like src/main, bin/utils should be excluded."""
+        text = "Check https://github.com/src/main for the source."
+        with unittest.mock.patch("lint._check_repo_visibility") as mock_check:
+            from lint import _find_private_repo_refs, mask_code_regions
+            _find_private_repo_refs(mask_code_regions(text))
+            mock_check.assert_not_called()
+
+    def test_deduplication(self):
+        """Same repo referenced twice should only check visibility once."""
+        text = "See acme/repo#1 and acme/repo#2."
+        with unittest.mock.patch(
+            "lint._check_repo_visibility", return_value="private"
+        ) as mock_check:
+            from lint import _find_private_repo_refs, mask_code_regions
+            violations = _find_private_repo_refs(mask_code_regions(text))
+            mock_check.assert_called_once_with("acme/repo")
+            self.assertEqual(len(violations), 1)
+
+    def test_code_block_refs_not_checked(self):
+        """Repo refs inside code blocks should be masked and not checked."""
+        text = "```\ngithub/secret#123\n```"
+        with unittest.mock.patch("lint._check_repo_visibility") as mock_check:
+            from lint import _find_private_repo_refs, mask_code_regions
+            _find_private_repo_refs(mask_code_regions(text))
+            mock_check.assert_not_called()
+
+    def test_api_failure_does_not_flag(self):
+        """If the API returns None (error/timeout), do not flag."""
+        text = "See https://github.com/unknown/repo/pull/1."
+        violations = self._find_with_mock_visibility(text, {"unknown/repo": None})
+        self.assertEqual(len(violations), 0)
 
 
 if __name__ == "__main__":
