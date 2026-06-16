@@ -96,6 +96,7 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 - **Check for unintended behavioral changes** - compare new code against the existing patterns in the same file or module
 - **Check docstring/comment accuracy** - verify that docstrings, comments, and commit messages accurately describe what the code actually does. Flag cases where stated behavior differs from implemented behavior.
 - **Idiomatic language check (self-review only)** - when conducting a self-review, do a pass for language idiom violations that would signal unfamiliarity to a reviewer. Examples: `filter` vs `select` in Ruby, `list()` vs list comprehension in Python, `.forEach` vs `.map` in JS when the return value matters. This is not about style nitpicking - it's about using the language the way its community expects. Only flag during self-review, not when reviewing others' PRs.
+- **React composition check** - when reviewing React code, flag components that build a large derived data shape and then walk it with conditionals. The canonical smell: a `.map()` containing a multi-branch `if`/`switch` with type casts handling 3 or more variants inline. Suggest extraction into per-variant components - this improves testability (each component is independently unit-testable) and readability (the container reads like a table of contents). When the extracted components also co-locate their data subscriptions via hooks, siblings avoid unnecessary re-renders.
 
 ### Tone and voice
 - All review feedback must match the tone and voice described in the **Writing Style** section of these instructions
@@ -120,6 +121,29 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 - Document changes to environment variables in the `README.md` file
 - **Linting philosophy**: When linting errors arise, **always fix the code to pass the linter** - do not suppress, ignore, or disable lint rules. Only disable a rule as a last resort if fixing the code is truly impossible or would make it significantly worse, and explain why in a comment. This applies to all linters (flake8, pylint, mypy, markdownlint, eslint, etc.).
 - **Cross-reference existing patterns**: When adding new code to a file that already has similar blocks (e.g., a new job in a workflow, a new route in a router, a new test in a suite), explicitly compare the new code against the existing code for naming conventions, formatting, and runtime behavior before committing. Don't pattern-match on the name you're defining - check how existing code actually references the same concept.
+
+### React & TypeScript Component Patterns
+
+When writing or reviewing React components, follow these composition principles. AI agents tend to produce monolithic components with big conditionals - one render function that switches on data type, full of `if`/`else` chains and type casts. That pattern works but creates comprehension debt: adding one row type means reading the whole feature.
+
+- **One component per concern, in its own file.** If a component renders different things based on a type discriminator (e.g., event type, action type, row variant), extract each case into a standalone component. Each should be small enough to read in one scroll.
+- **Prefer components that fetch their own data from hooks** in variant-driven UIs (lists of heterogeneous items, sidebars with mixed row types). Each component reads what it needs from tanstack-query or a shared hook rather than receiving rich objects via prop drilling. This keeps components self-contained and avoids unnecessary re-renders of siblings when one subscription updates. Pure presentational components that receive already-loaded data are still fine for leaf UI.
+- **Pass only primitives as props** (IDs, counts, enum values) when the child will fetch its own rich data. Props are for identity and configuration. If the parent already has the data and the child is purely presentational, passing the object directly is acceptable.
+- **Return null when there's nothing to show.** If a component's data means it shouldn't render, let it decide that internally (`if (!hasData) return null`). Don't push visibility logic into the parent.
+- **Container components read like a table of contents.** The parent composes children in a list - it should be obvious what the feature does by scanning the container without reading child implementations:
+  ```tsx
+  function SidebarActivity() {
+    return (
+      <>
+        <CommitsRow />
+        <ApprovedRow />
+        <ReviewCommentsRow />
+        <LabelsRow />
+      </>
+    )
+  }
+  ```
+- **When to flag in reviews**: see the "React composition check" bullet in the Code Review Workflow above. This is a composability and testability concern, not a style nitpick.
 
 ## Platform & System Design
 - **Design for safe contribution** - When creating new modules or features, always ask: "Could a PM or junior contributor add to this safely without understanding the whole system?" If no, the abstraction is wrong. Prefer designs where the blast radius of a bad change is small by default.
