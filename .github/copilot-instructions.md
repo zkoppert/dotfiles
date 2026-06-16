@@ -95,6 +95,7 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 - **Check whether the author has addressed existing review feedback** - read through all review threads and comments before reporting. Note unresolved threads.
 - **Check for unintended behavioral changes** - compare new code against the existing patterns in the same file or module
 - **Check docstring/comment accuracy** - verify that docstrings, comments, and commit messages accurately describe what the code actually does. Flag cases where stated behavior differs from implemented behavior.
+- **Idiomatic language check (self-review only)** - when conducting a self-review, do a pass for language idiom violations that would signal unfamiliarity to a reviewer. Examples: `filter` vs `select` in Ruby, `list()` vs list comprehension in Python, `.forEach` vs `.map` in JS when the return value matters. This is not about style nitpicking - it's about using the language the way its community expects. Only flag during self-review, not when reviewing others' PRs.
 
 ### Tone and voice
 - All review feedback must match the tone and voice described in the **Writing Style** section of these instructions
@@ -111,7 +112,7 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 - **Python** is the preferred scripting language for automation, data processing, and tooling
 - Use `argparse` for CLI argument parsing in Python scripts
 - Include proper error handling and logging - don't silently swallow errors
-- Only add comments where code needs clarification; don't over-comment obvious logic
+- **Comments explain why, not what** - only comment non-obvious design decisions (e.g., why one method was chosen over another, a constraint that isn't visible in the code). If the method name or variable name already communicates the intent, delete the comment. First drafts tend to over-comment; strip redundant comments before committing.
 - Prefer ecosystem tools (`pip install`, `npm init`, etc.) over manual configuration
 - Run `make lint` and `make test` before committing in repos that have a Makefile
 - Write unit tests for new functionality
@@ -137,6 +138,8 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 - Always disable pagers: `git --no-pager`, `gh --no-pager`, or pipe to `cat`
 - **Gists**: I use gists frequently for drafts, sharing, and iteration. **Always create gists as private/secret by default** unless I explicitly ask for a public gist. When editing gists programmatically, use `gh api` to fetch raw file content instead of `gh gist view --raw` (which prepends the description and causes duplication on re-upload)
 - **Verify edits to external content**: After modifying any external content (gists, PR descriptions, issue bodies, discussion posts, wiki pages), always fetch the result back and verify the edit applied correctly - check that the content wasn't truncated, corrupted, or partially applied. Do not assume a successful API response means the content is correct. Read it back and confirm.
+- **No hard-wrapped prose in GitHub-bound markdown**: Never hard-wrap paragraphs at 80 characters in files destined for `gh pr edit --body-file`, `gh issue create --body-file`, or `gh gist create`. GitHub renders each literal newline as a visible line break. Use single-line paragraphs; let the renderer wrap. Lists, tables, code blocks, and headers are fine on their own lines.
+- **Trace the code path before writing rationale**: Before describing *why* a design works in PR descriptions, review comments, or issue replies, trace the actual runtime path in source code. Don't infer behavior from method names or documentation alone - read the implementation. Wrong rationale (even on correct code) erodes reviewer trust and creates confusion when the code is revisited later.
 
 ## GitHub Actions Best Practices
 When creating or modifying GitHub Actions workflows:
