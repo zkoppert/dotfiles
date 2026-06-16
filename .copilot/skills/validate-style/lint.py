@@ -215,10 +215,18 @@ def find_violations(text: str, check_visibility: bool = False) -> list[Violation
     return violations
 
 
-# Matches owner/repo patterns: github.com/owner/repo, owner/repo#123, owner/repo/pull/123
-_REPO_REF_PATTERN = re.compile(
-    r"(?:https?://)?(?:github\.com/)?([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"
+# Matches repo references with at least one anchoring signal:
+# - github.com/owner/repo (URL prefix)
+# - owner/repo#123 (issue/PR number suffix)
+# - owner/repo/pull/123 or owner/repo/issues/456 (path suffix)
+# Bare word/word without any anchor is NOT matched to avoid false positives
+# on prose like "input/output", "client/server".
+_REPO_REF_URL_PATTERN = re.compile(
+    r"(?:https?://)?github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"
     r"(?:#\d+|/(?:pull|issues|actions|blob|tree|commit)/\S*)?"
+)
+_REPO_REF_SHORTHAND_PATTERN = re.compile(
+    r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)"
 )
 
 # Exclude obvious false positives (file paths, known non-repo patterns)
@@ -251,13 +259,36 @@ def _find_private_repo_refs(masked_text: str) -> list[Violation]:
     seen_repos: set[str] = set()
 
     for lineno, line in enumerate(masked_text.splitlines(), start=1):
-        for match in _REPO_REF_PATTERN.finditer(line):
+        # Check URL-style references (github.com/owner/repo...)
+        for match in _REPO_REF_URL_PATTERN.finditer(line):
             owner_repo = match.group(1).rstrip(".,;:!?)")
-            # Strip trailing path components if present (e.g., owner/repo/pull → owner/repo)
             parts = owner_repo.split("/")
             if len(parts) > 2:
                 owner_repo = "/".join(parts[:2])
-            if _REPO_REF_EXCLUDE.match(owner_repo.split("/", 1)[1] if "/" in owner_repo else ""):
+            if _REPO_REF_EXCLUDE.match(owner_repo):
+                continue
+            if owner_repo in seen_repos:
+                continue
+            seen_repos.add(owner_repo)
+
+            visibility = _check_repo_visibility(owner_repo)
+            if visibility in ("private", "internal"):
+                violations.append(
+                    Violation(
+                        rule="no-private-repo-ref",
+                        line=lineno,
+                        column=match.start() + 1,
+                        text=match.group(0),
+                        message=f"Reference to {visibility} repo '{owner_repo}' in text destined for "
+                        f"a public context. Anonymize it (e.g., 'an internal service repo') or "
+                        f"remove the reference entirely.",
+                    )
+                )
+
+        # Check shorthand references (owner/repo#123)
+        for match in _REPO_REF_SHORTHAND_PATTERN.finditer(line):
+            owner_repo = match.group(1)
+            if _REPO_REF_EXCLUDE.match(owner_repo):
                 continue
             if owner_repo in seen_repos:
                 continue

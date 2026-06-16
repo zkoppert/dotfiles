@@ -17,6 +17,10 @@ def fetch_body(args: argparse.Namespace) -> str:
             return f.read()
 
     gh = "gh"
+    if args.pr or args.issue:
+        if not args.repo:
+            print("Error: --repo is required when using --pr or --issue", file=sys.stderr)
+            sys.exit(2)
     if args.pr:
         cmd = [gh, "pr", "view", str(args.pr), "--repo", args.repo, "--json", "body", "--jq", ".body"]
     elif args.issue:
