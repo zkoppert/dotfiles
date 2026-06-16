@@ -840,15 +840,35 @@ def decide(
     repo: str,
     coverage_lookup: Any,
     use_copilot: bool,
+    notif_reason: str = "",
 ) -> Decision:
     """Apply the decision tree to a Dependabot PR.
 
     ``coverage_lookup`` is a callable ``repo -> int | None`` so tests can
     inject a deterministic value without touching the network.
+
+    ``notif_reason`` is the GitHub notification reason (e.g.
+    ``review_requested``, ``mention``). When the repo or dependency is on
+    the skip list and the reason is passive, the PR is skipped before any
+    bump-severity or CI evaluation runs.
     """
     state = (pr.get("state") or "").lower()
     if state in {"closed", "merged"}:
         return Decision(OUTCOME_SKIP, "pr already closed", terminal=True)
+
+    # Repo-level and dependency-level skip list: takes priority over all
+    # other decision logic (bump severity, CI, coverage, etc.). Only
+    # @mention / team_mention / author reasons are actionable; everything
+    # else is passive noise that should be dropped.
+    _skip_match = skipped_repo_match(repo) or skipped_dependency_match(pr)
+    if _skip_match:
+        _reason_lower = (notif_reason or "").lower()
+        if _reason_lower not in {"mention", "team_mention", "author"}:
+            return Decision(
+                OUTCOME_SKIP,
+                f"excluded repo/dependency {_skip_match}",
+                terminal=True,
+            )
 
     if pr.get("isDraft"):
         return Decision(OUTCOME_FLAG, "pr is a draft")
@@ -1776,12 +1796,14 @@ def run(args: argparse.Namespace) -> TriageStats:
             logger.info("cooldown active for %s, skipping", pr_url)
             continue
 
+        reason = (notif.get("reason") or "").lower()
         decision = decide(
             pr,
             my_login=my_login,
             repo=repo,
             coverage_lookup=coverage_lookup,
             use_copilot=use_copilot,
+            notif_reason=reason,
         )
         logger.info(
             "%s#%d -> %s (%s)",
