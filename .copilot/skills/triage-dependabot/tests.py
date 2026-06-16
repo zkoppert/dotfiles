@@ -2415,6 +2415,71 @@ def test_run_skips_super_linter_repo_pr_with_mention_keeps_notification(
 
 
 # ---------------------------------------------------------------------------
+# decide() defense-in-depth: repo/dep skip takes priority over bump severity
+# ---------------------------------------------------------------------------
+
+
+def test_decide_skips_super_linter_repo_major_bump_with_passive_reason() -> None:
+    """A major bump PR in super-linter/super-linter with a passive notification
+    reason must be skipped inside decide() - not flagged for review. This is the
+    defense-in-depth fix for the filter priority bug where bump severity ran
+    before the repo-level skip."""
+    pr = _base_pr(
+        title="Bump actions/checkout from 4 to 5",
+        statusCheckRollup=[{"conclusion": "SUCCESS"}],
+    )
+    decision = td.decide(
+        pr,
+        my_login="zkoppert",
+        repo="super-linter/super-linter",
+        coverage_lookup=lambda _r: None,
+        use_copilot=False,
+        notif_reason="review_requested",
+    )
+    assert decision.outcome == td.OUTCOME_SKIP
+    assert "excluded repo/dependency" in decision.reason
+
+
+def test_decide_does_not_skip_super_linter_repo_when_mentioned() -> None:
+    """If the notification reason is a direct @mention, the repo-level skip
+    should NOT suppress the decision - the user needs to act."""
+    pr = _base_pr(
+        title="Bump actions/checkout from 4 to 5",
+        statusCheckRollup=[{"conclusion": "SUCCESS"}],
+    )
+    decision = td.decide(
+        pr,
+        my_login="zkoppert",
+        repo="super-linter/super-linter",
+        coverage_lookup=lambda _r: 95,
+        use_copilot=False,
+        notif_reason="mention",
+    )
+    # Should proceed through normal logic (not skipped)
+    assert decision.outcome != td.OUTCOME_SKIP
+
+
+def test_decide_skips_super_linter_dependency_major_bump() -> None:
+    """A PR bumping super-linter/super-linter as a dependency (title match)
+    with a passive reason must be skipped inside decide() even though the
+    bump is major."""
+    pr = _base_pr(
+        title="Bump super-linter/super-linter from 7.0.0 to 8.0.0",
+        statusCheckRollup=[{"conclusion": "SUCCESS"}],
+    )
+    decision = td.decide(
+        pr,
+        my_login="zkoppert",
+        repo="o/r",
+        coverage_lookup=lambda _r: None,
+        use_copilot=False,
+        notif_reason="review_requested",
+    )
+    assert decision.outcome == td.OUTCOME_SKIP
+    assert "excluded repo/dependency" in decision.reason
+
+
+# ---------------------------------------------------------------------------
 # Archived repo handling (bug 2)
 # ---------------------------------------------------------------------------
 
