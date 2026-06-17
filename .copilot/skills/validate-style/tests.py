@@ -631,6 +631,62 @@ class TestPrivateRepoRef(unittest.TestCase):
         violations = self._find_with_mock_visibility(text, {"unknown/repo": None})
         self.assertEqual(len(violations), 0)
 
+    def test_find_violations_end_to_end_with_visibility(self):
+        """find_violations(check_visibility=True) wires through to the repo check."""
+        text = "See https://github.com/acme/secret-repo for details."
+        with unittest.mock.patch("lint._check_repo_visibility", return_value="private"):
+            violations = find_violations(text, check_visibility=True)
+        self.assertIn("no-private-repo-ref", rules_in(violations))
+
+    def test_find_violations_defaults_to_no_visibility_check(self):
+        """The default call must not invoke the visibility check or flag repos."""
+        text = "See https://github.com/acme/secret-repo for details."
+        with unittest.mock.patch("lint._check_repo_visibility") as mock_check:
+            violations = find_violations(text)
+            mock_check.assert_not_called()
+        self.assertNotIn("no-private-repo-ref", rules_in(violations))
+
+    def test_cli_check_visibility_flag_flags_private_repo(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("See https://github.com/acme/secret-repo here.\n")
+            path = f.name
+        try:
+            with unittest.mock.patch("lint._check_repo_visibility", return_value="private"):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    code = main(["--check-visibility", path])
+            self.assertEqual(code, 1)
+            self.assertIn("no-private-repo-ref", buf.getvalue())
+        finally:
+            os.unlink(path)
+
+    def test_cli_without_flag_does_not_check_visibility(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("See https://github.com/acme/secret-repo here.\n")
+            path = f.name
+        try:
+            with unittest.mock.patch("lint._check_repo_visibility") as mock_check:
+                with redirect_stdout(io.StringIO()):
+                    code = main([path])
+                mock_check.assert_not_called()
+            self.assertEqual(code, 0)
+        finally:
+            os.unlink(path)
+
+    def test_mixed_case_github_domain_flagged(self):
+        """Mixed-case domains (GitHub.com) must still be detected."""
+        text = "See GitHub.com/acme/secret-repo for details."
+        violations = self._find_with_mock_visibility(text, {"acme/secret-repo": "private"})
+        self.assertEqual(len(violations), 1)
+
+    def test_github_substring_in_hostname_not_matched(self):
+        """github.com inside a longer host must not trigger a lookup."""
+        text = "Visit notgithub.com/acme/repo, mygithub.com/foo/bar, and my-github.com/x/y."
+        with unittest.mock.patch("lint._check_repo_visibility") as mock_check:
+            from lint import _find_private_repo_refs, mask_code_regions
+            _find_private_repo_refs(mask_code_regions(text))
+            mock_check.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

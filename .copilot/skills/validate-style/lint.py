@@ -238,9 +238,14 @@ def find_violations(text: str, check_visibility: bool = False) -> list[Violation
 # - owner/repo/pull/123 or owner/repo/issues/456 (path suffix)
 # Bare word/word without any anchor is NOT matched to avoid false positives
 # on prose like "input/output", "client/server".
+# Case-insensitive so mixed-case domains (GitHub.com) are caught, and the
+# leading (?<![A-Za-z0-9.-]) boundary stops "github.com" from matching inside a
+# longer host (notgithub.com, mygithub.com, my-github.com) and triggering
+# spurious lookups.
 _REPO_REF_URL_PATTERN = re.compile(
-    r"(?:https?://)?github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"
-    r"(?:#\d+|/(?:pull|issues|actions|blob|tree|commit)/\S*)?"
+    r"(?<![A-Za-z0-9.-])(?:https?://)?github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"
+    r"(?:#\d+|/(?:pull|issues|actions|blob|tree|commit)/\S*)?",
+    re.IGNORECASE,
 )
 _REPO_REF_SHORTHAND_PATTERN = re.compile(
     r"\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)"
