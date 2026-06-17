@@ -20,4 +20,4 @@
 
 ## Rollout
 
-<!-- Feature flag, monitoring/alert to watch, rollback plan. For dotfiles-style repos this can be "N/A - local change only". -->
+<!-- Feature flag, monitoring/alert to watch, rollback plan. For dotfiles-style repos this can be "N/A, local change only". -->

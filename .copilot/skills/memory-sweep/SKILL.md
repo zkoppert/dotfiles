@@ -3,7 +3,7 @@ name: memory-sweep
 description: This skill should be used when the user asks to "audit my memories", "sweep memories", "find memory-only rules", "what memories should be promoted to instructions", "review my Copilot memories", or any similar request to identify rules that live only in stored Copilot memories but are not yet documented in their personal copilot-instructions.md. It dumps the current memories from the agent's prompt context to a tempfile and runs a Python classifier that scores each memory against the instructions file for keyword and phrase overlap. Output is a list of memories classified as PROMOTE (memory-only, candidate for promotion), AMBIGUOUS (partial overlap, worth eyeballing), or PRESENT (already covered).
 ---
 
-# Memory Sweep - find memory-only rules that should be in copilot-instructions.md
+# Memory Sweep: find memory-only rules that should be in copilot-instructions.md
 
 ## When to use this skill
 
@@ -54,7 +54,7 @@ chmod 700 "$SWEEP_DIR"
 
 Then use your file-write tool to create
 `"$SWEEP_DIR/memories.md"` containing **only** the memory entries
-from the `<memories>` block - one entry per memory, in this exact
+from the `<memories>` block, one entry per memory, in this exact
 markdown format:
 
 ```markdown

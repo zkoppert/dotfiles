@@ -9,7 +9,7 @@ risky ones rot.
 ## What problem this solves
 
 Dependabot generates a notification per PR per push. Most of them are
-patch bumps with green CI that I rubber-stamp - that work belongs in
+patch bumps with green CI that I rubber-stamp; that work belongs in
 automation. A minority are major version jumps, security advisories with
 behavior changes, or builds where my coverage is too low to trust the
 green CI. Those still need eyes, but they get buried in the rubber-stamp
@@ -36,7 +36,7 @@ by `dependabot[bot]` or `dependabot-preview[bot]`:
 | Security release (Copilot sub-agent or regex on title/body) AND repo defines a `release` label | label-and-merge |
 | Otherwise | merge |
 
-The script never auto-merges when uncertainty exists - sub-agent
+The script never auto-merges when uncertainty exists; sub-agent
 timeouts, unknown bump kinds, and missing coverage signals all route to
 `flag-for-review`.
 
