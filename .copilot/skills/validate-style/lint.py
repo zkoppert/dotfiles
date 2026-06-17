@@ -39,13 +39,14 @@ class Violation:
 
 EM_DASH_PATTERN = re.compile(r"\u2014")
 
-# A hyphen-minus or en-dash used as sentence punctuation: flanked by whitespace
-# on both sides (e.g., "master drift - they came in"). Word-joining hyphens like
-# "runner-up" have no surrounding spaces and are not matched. The leading
-# (?<=\S) lookbehind requires a non-space character immediately before, which
-# excludes Markdown/YAML list bullets ("- item", "  - item") whose dash is the
-# first non-whitespace character on the line.
-SPACED_DASH_PATTERN = re.compile(r"(?<=\S)[ \t][-\u2013][ \t](?=\S)")
+# A hyphen-minus or en-dash used as sentence punctuation between two words:
+# a single space-flanked dash with a letter on each side, e.g.
+# "master drift - they came in". Requiring a letter on both sides keeps the
+# rule to prose punctuation and avoids flagging word-joining hyphens
+# ("runner-up", no spaces), list bullets ("- item", "  - item", "> - item"),
+# thematic breaks ("- - -"), numbered steps and issue refs ("Step 1 - x",
+# "Fix #5 - x"), numeric ranges ("3 - 1"), and label lists ("**Term** - desc").
+SPACED_DASH_PATTERN = re.compile(r"(?<=[A-Za-z])[ \t][-\u2013][ \t](?=[A-Za-z])")
 
 PER_DETERMINER_PATTERN = re.compile(
     r"\bper\s+(the|a|my|our|your|his|her|their|this|that|last|prior|previous|recent|latest|earlier|above|below|usual)\b",

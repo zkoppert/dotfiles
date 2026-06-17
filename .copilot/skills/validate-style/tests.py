@@ -87,6 +87,34 @@ class TestSpacedDash(unittest.TestCase):
         violations = find_violations("Run `foo - bar` to see output.")
         self.assertNotIn("no-spaced-dash", rules_in(violations))
 
+    def test_blockquote_bullet_not_flagged(self):
+        violations = find_violations("> - a quoted bullet item")
+        self.assertNotIn("no-spaced-dash", rules_in(violations))
+
+    def test_spaced_thematic_break_not_flagged(self):
+        violations = find_violations("- - -")
+        self.assertNotIn("no-spaced-dash", rules_in(violations))
+
+    def test_issue_ref_list_not_flagged(self):
+        violations = find_violations("Fix #5 - add the new feature")
+        self.assertNotIn("no-spaced-dash", rules_in(violations))
+
+    def test_numbered_step_not_flagged(self):
+        violations = find_violations("Step 1 - install the dependencies")
+        self.assertNotIn("no-spaced-dash", rules_in(violations))
+
+    def test_numeric_range_not_flagged(self):
+        violations = find_violations("The score was 3 - 1 at half time.")
+        self.assertNotIn("no-spaced-dash", rules_in(violations))
+
+    def test_bold_label_list_not_flagged(self):
+        violations = find_violations("**Term** - the description goes here")
+        self.assertNotIn("no-spaced-dash", rules_in(violations))
+
+    def test_prose_inside_list_item_flagged(self):
+        violations = find_violations("1. First - then second")
+        self.assertIn("no-spaced-dash", rules_in(violations))
+
     def test_en_dash_is_not_flagged(self):
         violations = find_violations("Page 5\u20137 covers it.")
         self.assertNotIn("no-em-dash", rules_in(violations))
