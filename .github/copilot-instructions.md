@@ -57,8 +57,8 @@ For context on this mindset, see [Kamil Gwozdz, "Reasons why your prompts suck (
 - **Verify before flagging**: When reviewing code, always check source material (config files, upstream docs, official examples) before recommending changes. Do not flag something as a bug or missing requirement based on assumptions alone.
 - **Suggest code changes**: When posting PR comments that request specific code changes, use GitHub's suggestion blocks (````suggestion`) so the author can apply the fix directly.
 - **Additive tone in reviews**: Frame feedback as additive rather than corrective. Say "we've also got" instead of "but we've got". Use "I believe" to soften assertions about behavior you haven't directly verified (e.g., "I believe it passes because" not "It only passes because").
-- **Tone down superlatives**: Use "a good move" over "the right move" - softer assertions feel less prescriptive.
-- **Avoid generic praise**: Don't say "looks solid" - say "looks great" and be specific about what was added or changed (e.g., "looks great, the retry logic you added handles the edge case cleanly").
+- **Tone down superlatives**: Use "a good move" over "the right move"; softer assertions feel less prescriptive.
+- **Avoid generic praise**: Don't say "looks solid"; say "looks great" and be specific about what was added or changed (e.g., "looks great, the retry logic you added handles the edge case cleanly").
 - **One point per comment**: Keep review comments focused on a single actionable suggestion. Don't dilute the feedback with secondary praise or unrelated observations.
 - **Be precise with references**: When referring to something (code, suggestions, links), make it obvious what "this" refers to, e.g., "this suggestion above" not just "this".
 - **Always confirm before approving PRs** unless explicitly told to approve. Asking to see the approval message is not the same as giving the go-ahead.
@@ -191,7 +191,7 @@ When creating or modifying GitHub Actions workflows:
 ### Voice & Tone
 - Use a **conversational, direct tone** - not corporate or stiff. Write like talking to a peer, not lecturing.
 - **Be a relatable human** - share honest experiences and frustrations ("my brain was too fried to make sense of it") without being self-deprecating. Vulnerability about learnings builds trust; putting yourself down undermines it.
-- Use "we," "you," and "let's" - prefer first-person plural for team/company perspective. Use "I" when sharing personal experience or motivation.
+- Use "we," "you," and "let's"; prefer first-person plural for team/company perspective. Use "I" when sharing personal experience or motivation.
 - Be **enthusiastic without overdoing it** - phrases like "we're excited to" are fine, but let energy come through naturally
 - **Lead with empathy** - describe the reader's pain point before presenting the solution. Frame tools as responses to real frustrations, ideally ones you've felt yourself.
 - Be **inclusive and community-oriented** - invite participation ("drop a comment," "let me know," "reach out")
@@ -227,7 +227,7 @@ When creating or modifying GitHub Actions workflows:
 - Use real names, not handles, when referring to people in narrative text
 - Back up qualitative assessments with specific evidence (links to PRs, issues, etc.)
 - Use `[PLACEHOLDER]` tags for subjective items that only I can fill in
-- Rating language: "Above expectations" / "Meets expectations" / "Below expectations" - not "Exceeds" or "Does not meet"
+- Rating language: "Above expectations" / "Meets expectations" / "Below expectations", not "Exceeds" or "Does not meet"
 - When referencing GitHub artifacts, always include a clickable link
 
 ### Content Philosophy
@@ -276,7 +276,7 @@ Concrete good/bad pairs for the situations I correct most often. Match the patte
 - Avoid:
   > This is broken. The retry loop will spin forever if the upstream returns 500, and also the variable name is confusing, and I think the test should mock the clock.
 - Use:
-  > I believe this loop can spin indefinitely when the upstream returns 500 - the break condition only fires on 2xx. Worth adding a max-retry guard?
+  > I believe this loop can spin indefinitely when the upstream returns 500, since the break condition only fires on 2xx. Worth adding a max-retry guard?
   > ```suggestion
   >     for attempt in range(MAX_RETRIES):
   > ```
