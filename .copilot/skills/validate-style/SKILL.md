@@ -3,7 +3,7 @@ name: validate-style
 description: This skill should be used BEFORE posting any text to GitHub (PR descriptions, issues, comments, discussions, gists), Slack, email, or any other external-facing surface, to catch hard-rule writing-style violations. Also triggered when the user asks to "lint this text", "check this for style violations", "validate this draft", or "run the writing style linter".
 ---
 
-# Validate Style - enforce Zack's writing-style hard rules
+# Validate Style: enforce Zack's writing-style hard rules
 
 Use this skill **before** finalizing any text that will be posted externally on Zack's behalf. The linter catches the rules that are easiest to forget under pressure and the ones Zack has explicitly flagged as hard rules in his Copilot instructions.
 
@@ -19,7 +19,7 @@ grep -A1 '"no-' ~/.copilot/skills/validate-style/lint.py | head -40
 At a high level, the rules cover:
 
 - **no-em-dash** - the em-dash character
-- **no-spaced-dash** - a hyphen or en-dash used as sentence punctuation (spaced, e.g., "drift - they came in") instead of joining words ("runner-up")
+- **no-spaced-dash** - a hyphen or en-dash used as sentence punctuation (spaced, e.g., `drift - they came in`) instead of joining words ("runner-up")
 - **no-per-as-according-to** - using the word "per" to mean "according to"
 - **no-prayer-hands** - the folded-hands emoji for thanks or please
 - **no-click-here** - non-descriptive Markdown link text
@@ -78,7 +78,7 @@ python3 ~/.copilot/skills/validate-style/lint.py --json path/to/draft.md
 
 ## How to handle violations
 
-1. **Fix every violation before posting.** Hard rules are hard rules - do not ship text with violations.
+1. **Fix every violation before posting.** Hard rules are hard rules; do not ship text with violations.
 2. **If the linter has a false positive**, rephrase rather than disable the rule. The rules are intentionally narrow to keep false positives low; if you trip one, the wording probably is unclear.
 3. **Re-run the linter** after fixing to confirm the text is clean.
 

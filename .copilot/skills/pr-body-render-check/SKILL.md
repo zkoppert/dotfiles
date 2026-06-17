@@ -1,4 +1,4 @@
-# pr-body-render-check - verify PR/issue body rendering after edit
+# pr-body-render-check: verify PR/issue body rendering after edit
 
 Use this skill **after** updating a PR description, issue body, or gist via `gh pr edit --body-file`, `gh issue edit --body-file`, or `gh gist edit`.
 

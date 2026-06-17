@@ -18,7 +18,7 @@ notification inbox stops being a wall of red.
 The fetch uses `?all=true` so the cron also sees notifications I've
 viewed on github.com (marked read) but never deleted. Without that,
 PRs I'd already clicked on would sit in the inbox forever even after
-they merged - the cron would never see them again to clean them up.
+they merged; the cron would never see them again to clean them up.
 
 ## How it classifies
 
@@ -33,7 +33,7 @@ Four early-exit drops fire before the reason-based classifier, in this order:
    substring (e.g. `Fix flaky test in dashboard`) are not swept up.
    Overridden when `reason` is `mention` or `assign` so a direct human
    ping always reaches the inbox. Edit `TITLE_DROP_PATTERNS` in
-   `triage.py` to add new patterns - keep them anchored on the same
+   `triage.py` to add new patterns; keep them anchored on the same
    `_TITLE_DROP_PREFIX` + phrase + `:` shape.
 2. **Closed-subject drop** - if the PR or issue is already closed/merged
    when the notification arrives, drop instead of routing anywhere. If
@@ -83,7 +83,7 @@ The reason table:
 | `comment`         | DROP if thread closed/merged or super-linter without @mention; Q1 if @mention; INBOX otherwise |
 | `ci_activity`     | DROP (always)                                    |
 | `subscribed`      | DROP if closed/merged; else INBOX                |
-| anything else     | INBOX (safe default - never auto-drop the unknown) |
+| anything else     | INBOX (safe default; never auto-drop the unknown) |
 
 The NUX teammate allowlist is hardcoded in `triage.py` as
 `NUX_TEAM_LOGINS_Q1`. Edit there to add or remove people.
@@ -154,7 +154,7 @@ the underlying GitHub notification thread done (DELETE) so the next
 cron cycle doesn't re-fetch the unread thread and re-add it. If the
 dropped entry was a self-authored PR (`notification.reason == "author"`
 on a PR URL), it is also copied into `done` with
-`source: github-notification-auto-archive` before being removed - so
+`source: github-notification-auto-archive` before being removed, so
 PRs first tracked while open and merged later still land in the
 biannual reflection archive instead of vanishing silently. Pruner
 stats land in the final summary line as `pruned_stale=N` plus a

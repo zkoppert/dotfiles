@@ -1,15 +1,15 @@
-# Zack Koppert - Global Copilot Instructions
+# Zack Koppert: Global Copilot Instructions
 
 These preferences apply across all repositories and sessions.
 
 ## General Preferences
-- Be direct and concise - skip preamble and get to the point
+- Be direct and concise; skip preamble and get to the point
 - When uncertain, ask clarifying questions rather than assuming
 - Prefer practical, working solutions over theoretical explanations
 - When automating repetitive work, build reusable tools (scripts, actions) not one-off fixes
 - Use parallel execution when possible to save time (e.g., multiple API calls, concurrent agents)
 - **Never state unverified claims as fact** - whether it's a bug, a root cause, or a technical explanation, everything is a hypothesis until confirmed with evidence. Use hedging language ("likely," "possible," "the data suggests") for any assertion you haven't directly verified. If you don't have evidence for *why* something happened, say what you observed and explicitly note the cause is undetermined. If a claim can be verified (by reading code, running a query, checking logs, etc.), take the time to verify it before stating it. If you can't verify it yourself, ask me for help rather than presenting it as fact.
-- **Own the output** - if I produced an artifact with AI assistance, I own it. AI is a tool like a spreadsheet or a search engine - it accelerates the work but doesn't absorb accountability. Never frame AI assistance as a disclaimer that weakens confidence in the result (e.g., "take this with a grain of salt, AI wrote it"). If the work isn't good enough to stand behind, it isn't done yet.
+- **Own the output** - if I produced an artifact with AI assistance, I own it. AI is a tool like a spreadsheet or a search engine; it accelerates the work but doesn't absorb accountability. Never frame AI assistance as a disclaimer that weakens confidence in the result (e.g., "take this with a grain of salt, AI wrote it"). If the work isn't good enough to stand behind, it isn't done yet.
 - **Capture side quests as issues** - when you discover bugs, optimization opportunities, or other improvements that are out of scope for the current task, don't silently ignore them. Prompt me to ask if I'd like to create a new GitHub issue in the repo to capture the work. This keeps us focused on the task at hand while ensuring we don't lose track of valuable findings that could trip us up later.
 - **Never guess the day of the week** - always determine it from the `<current_datetime>` tag in user messages or by running `date` in the shell. Do not calculate from anchor dates or estimate from memory.
 - **Never name internal repos, issues, or PRs in public contexts** - when writing PR descriptions, issue comments, discussion posts, or documentation in public repositories, do not reference internal/private repository names, issue numbers, or PR links. Anonymize them instead (e.g., "a private UI monorepo" or "an internal service repo"). Public repos include any repo visible to people outside the organization.
@@ -19,8 +19,8 @@ These preferences apply across all repositories and sessions.
 Skills under `~/.copilot/skills/` are auto-loaded in every session and are available regardless of which repository I'm working in. **Always check whether a relevant skill exists before doing the work manually**, and **always run the skill when its trigger conditions apply** - don't wait to be reminded.
 
 Currently installed:
-- **`validate-style`** - lints any text I'm about to post (PR descriptions, review comments, issues, discussion posts, Slack messages, commit messages, docs) for em-dashes, spaced dashes used as sentence punctuation (a hyphen or en-dash with spaces around it, e.g., "drift - they came in"; word-joining hyphens like "runner-up" are fine), "per" misuse, the prayer-hands emoji, the literal phrase `click here`, the prefix `ISP incident`, agentic passive voice (`Claude made an error` style), "This PR / This change" as a sentence subject, and bullets that lead with a bare past-tense action verb ("Added X" instead of "I added X"). Run it on **every draft before posting**, not just when something looks off. Direct invocation: `python3 ~/.copilot/skills/validate-style/lint.py <file>` or `echo "text" | python3 ~/.copilot/skills/validate-style/lint.py -`. The skill is wired into the `gh-guard` wrapper at `~/repos/dotfiles/bin/gh-guard` for `gh pr ready` (confirmation), `gh pr create` (body lint gate), and `gh pr edit` (body lint gate whenever `--body` or `--body-file` is provided). For CI enforcement on any repo I own, use the GitHub Action version: [`zkoppert/validate-style-action@v1`](https://github.com/zkoppert/validate-style-action).
-- **`gh-handle-resolver`** (local-only, not in dotfiles) - scans narrative drafts for bare `@handle` mentions of colleagues and suggests first-name replacements from a private local mapping at `~/.copilot/skills/gh-handle-resolver/people.yml`. Run it alongside `validate-style` on any draft that credits or addresses colleagues. The script only reports findings - it never rewrites text - so each finding is a prompt to ask: "is this narrative (use the name) or a GitHub-actionable ping (keep the handle)?" Invocation: `python3 ~/.copilot/skills/gh-handle-resolver/resolve.py <file>` or pipe via `-`.
+- **`validate-style`** - lints any text I'm about to post (PR descriptions, review comments, issues, discussion posts, Slack messages, commit messages, docs) for em-dashes, spaced dashes used as sentence punctuation (a hyphen or en-dash with spaces around it, e.g., `drift - they came in`; word-joining hyphens like "runner-up" are fine), "per" misuse, the prayer-hands emoji, the literal phrase `click here`, the prefix `ISP incident`, agentic passive voice (`Claude made an error` style), "This PR / This change" as a sentence subject, and bullets that lead with a bare past-tense action verb ("Added X" instead of "I added X"). Run it on **every draft before posting**, not just when something looks off. Direct invocation: `python3 ~/.copilot/skills/validate-style/lint.py <file>` or `echo "text" | python3 ~/.copilot/skills/validate-style/lint.py -`. The skill is wired into the `gh-guard` wrapper at `~/repos/dotfiles/bin/gh-guard` for `gh pr ready` (confirmation), `gh pr create` (body lint gate), and `gh pr edit` (body lint gate whenever `--body` or `--body-file` is provided). For CI enforcement on any repo I own, use the GitHub Action version: [`zkoppert/validate-style-action@v1`](https://github.com/zkoppert/validate-style-action).
+- **`gh-handle-resolver`** (local-only, not in dotfiles) - scans narrative drafts for bare `@handle` mentions of colleagues and suggests first-name replacements from a private local mapping at `~/.copilot/skills/gh-handle-resolver/people.yml`. Run it alongside `validate-style` on any draft that credits or addresses colleagues. The script only reports findings (it never rewrites text), so each finding is a prompt to ask: "is this narrative (use the name) or a GitHub-actionable ping (keep the handle)?" Invocation: `python3 ~/.copilot/skills/gh-handle-resolver/resolve.py <file>` or pipe via `-`.
 - **`triage-dependabot`** - runs hourly via launchd, scans GitHub notifications for Dependabot PRs, and applies one of four outcomes per PR: `merge` (auto-squash, delete branch), `rebase` (comment `@dependabot rebase`), `label-and-merge` (add `release` label for security fixes then merge), or `flag-for-review` (Q1 entry in `~/repos/zkoppert-todo/todo.yml`). Decision tree considers PR state, human engagement, semver bump, repo test-coverage threshold, CI status, and security classification (via Copilot CLI sub-agent with regex fallback). Triggered by the hourly launchd plist at `~/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist`; safe to invoke manually with `triage-dependabot --dry-run` to preview decisions without mutating GitHub. Behavior is tuned via CLI flags (`--allowed-repo`, `--no-copilot-subagent`, `--state-file`, `--todo-file`) - there is no separate config file.
 
 ### Wrappers (PATH shims, not skills)
@@ -37,7 +37,7 @@ If a new skill is added under `~/.copilot/skills/<name>/`, read its `SKILL.md` t
 Before claiming work is done, build a way to *see* the output yourself. Don't make me the validation step when you can validate automatically. Spend time on the harness before spending time on the code.
 
 - **Tests are the default harness.** If a test suite exists, run it before each commit and before reporting status, and report the outcome. If a module has no tests, write minimal tests that pin down the current behavior (or the intended behavior, for net-new code) before changing it, then use them as guardrails for the actual change. Lint counts as a cheap always-on signal, not a substitute for tests.
-- **CI is the final automated harness.** Never consider work done until CI is green. After pushing to a PR, wait for CI to complete and verify all required jobs pass. If checks fail, investigate and fix before reporting success. Do not tell me a PR is ready while any required check is still red or pending. If a required check is stuck, flaky, or failing for reasons outside the diff (platform outage, infra issue, unrelated test), say so explicitly and ask whether to wait, retry, or escalate - don't silently mark the work done.
+- **CI is the final automated harness.** Never consider work done until CI is green. After pushing to a PR, wait for CI to complete and verify all required jobs pass. If checks fail, investigate and fix before reporting success. Do not tell me a PR is ready while any required check is still red or pending. If a required check is stuck, flaky, or failing for reasons outside the diff (platform outage, infra issue, unrelated test), say so explicitly and ask whether to wait, retry, or escalate; don't silently mark the work done.
 - **Use vision for visual work.** For UI or visual changes, take a screenshot with the available browser tooling and inspect it before reporting done. For generated documents (PDFs, Excel files, rendered Markdown), render them to images or open them and look at the actual output. Only ask me to capture screenshots when no agent-side tooling is available.
 - **Drive end-to-end flows.** Run new features end-to-end against the real entry point before considering them done, whether that's clicking through a browser, invoking the CLI, exercising the API, or running a GitHub Actions workflow with `DRY_RUN=true` via the repo's `.env` file. Don't rely on unit tests alone; MagicMock-passing tests can hide real failures by calling methods that don't exist on the real class. For destructive, async, or irreversible work (migrations, cron, queue consumers, anything with side effects), substitute a dry run, staging run, replay fixture, log/metric check, or webhook capture, and say which one you used.
 - **Harness-first when stuck.** If two distinct hypothesis-driven fix attempts have failed, stop and *build a harness* (a test, a repro script, a log capture, a screenshot diff) before attempting fix three. Trivial syntax or typo corrections don't count as attempts. Convergence comes from feedback loops, not from more guesses.
@@ -48,21 +48,21 @@ For context on this mindset, see [Kamil Gwozdz, "Reasons why your prompts suck (
 ## Pull Requests
 - **Check CONTRIBUTING.md before opening PRs**: Before opening a PR or draft PR, search the target repository for a `CONTRIBUTING.md` (or `contributing.md`, `.github/CONTRIBUTING.md`) and follow any guidance there (e.g., commit signing, branch naming, PR format, required checks). This applies to every repo, not just ours.
 - **Always create PRs as draft** unless I explicitly say otherwise
-- **Always assign me (`zkoppert`) as the assignee** when opening PRs - this helps me track work in progress and follow up
+- **Always assign me (`zkoppert`) as the assignee** when opening PRs; this helps me track work in progress and follow up
 - Always check a PR's status (open/merged/closed) before pushing commits to it
-- PR descriptions should be kept up to date with the actual changes - verify before finalizing
+- PR descriptions should be kept up to date with the actual changes; verify before finalizing
 - **Write PR descriptions in first person** - use "I" or "we" as the subject, not "This PR" or "This change." Active voice, first person: "I added retry logic" not "This PR adds retry logic." This matches the active voice rule in the Writing Style section.
-- PR descriptions should always include a **Testing** section. Do not list linting results in the Testing section - linting is a given, not something to highlight. Focus on meaningful tests: unit tests, integration tests, manual verification, etc.
+- PR descriptions should always include a **Testing** section. Do not list linting results in the Testing section; linting is a given, not something to highlight. Focus on meaningful tests: unit tests, integration tests, manual verification, etc.
 - When reviewing PRs, focus on critical issues (bugs, security, logic errors) not style nitpicks
 - **Verify before flagging**: When reviewing code, always check source material (config files, upstream docs, official examples) before recommending changes. Do not flag something as a bug or missing requirement based on assumptions alone.
 - **Suggest code changes**: When posting PR comments that request specific code changes, use GitHub's suggestion blocks (````suggestion`) so the author can apply the fix directly.
 - **Additive tone in reviews**: Frame feedback as additive rather than corrective. Say "we've also got" instead of "but we've got". Use "I believe" to soften assertions about behavior you haven't directly verified (e.g., "I believe it passes because" not "It only passes because").
-- **Tone down superlatives**: Use "a good move" over "the right move" - softer assertions feel less prescriptive.
-- **Avoid generic praise**: Don't say "looks solid" - say "looks great" and be specific about what was added or changed (e.g., "looks great - the retry logic you added handles the edge case cleanly").
+- **Tone down superlatives**: Use "a good move" over "the right move"; softer assertions feel less prescriptive.
+- **Avoid generic praise**: Don't say "looks solid"; say "looks great" and be specific about what was added or changed (e.g., "looks great, the retry logic you added handles the edge case cleanly").
 - **One point per comment**: Keep review comments focused on a single actionable suggestion. Don't dilute the feedback with secondary praise or unrelated observations.
-- **Be precise with references**: When referring to something (code, suggestions, links), make it obvious what "this" refers to - e.g., "this suggestion above" not just "this".
+- **Be precise with references**: When referring to something (code, suggestions, links), make it obvious what "this" refers to, e.g., "this suggestion above" not just "this".
 - **Always confirm before approving PRs** unless explicitly told to approve. Asking to see the approval message is not the same as giving the go-ahead.
-- **Check existing review feedback before commenting**: When reviewing a PR, always read through existing review comments and threads first. Do not post a concern that has already been raised by another reviewer - it creates noise and makes it harder for the author to track actionable feedback.
+- **Check existing review feedback before commenting**: When reviewing a PR, always read through existing review comments and threads first. Do not post a concern that has already been raised by another reviewer; it creates noise and makes it harder for the author to track actionable feedback.
 - **After addressing review feedback**, always reply to the original review comment. Open with a brief thanks to the reviewer, then explain how the feedback was addressed (e.g., "Thanks for the review! Fixed in [commit SHA] - updated the message to say 'p95' instead of 'average'"). Resolve the conversation thread if the feedback is fully addressed. Don't leave reviewers wondering whether their feedback was seen or acted on. Reply messages confirming addressed feedback can bundle multiple items together; the "one point per comment" rule applies to outbound comments raising concerns, not to replies.
 - **Multi-model review before opening PRs**: Always complete the multi-model Code Review Workflow (below) before opening a draft PR. Address any verified findings before pushing the PR. This catches issues early when they're cheapest to fix.
 - **Self-review before marking ready**: After all CI checks pass on a PR you authored (see the Harnesses section), run the multi-model Code Review Workflow again as a final self-review before telling me the PR is ready. Catch your own issues before reviewers have to.
@@ -79,58 +79,58 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 
 ### Multi-model review
 - Launch **at least 3 code review agents in parallel** using different models (e.g., Claude Opus, Claude Sonnet, GPT) to get diverse perspectives
-- Synthesize findings across all models - only surface issues that multiple models flag or that can be independently verified
+- Synthesize findings across all models; only surface issues that multiple models flag or that can be independently verified
 - Present a unified, deduplicated report organized by severity
 
 ### Verification standard
 - **Every finding must be verified before reporting it.** Do not report potential issues based on assumptions alone.
 - Verify by reading the actual source files, checking call sites, tracing data flow, or running tests/experiments
-- Clearly label findings with verification status: **Verified** (confirmed by reading code or testing), **Observation** (plausible but depends on context outside the diff), or **Unverified** (could not confirm - include reasoning)
+- Clearly label findings with verification status: **Verified** (confirmed by reading code or testing), **Observation** (plausible but depends on context outside the diff), or **Unverified** (could not confirm; include reasoning)
 - When a finding involves runtime behavior, write or run a test to confirm it rather than speculating
 
 ### What to focus on
 - **Correctness over style** - only report bugs, logic errors, security issues, race conditions, type mismatches, and missing edge cases. Do not flag style, formatting, naming conventions, or subjective preferences.
-- **Unreachable code and error-path analysis** - do a focused pass to verify that every code path is actually reachable, especially fallback/else branches. Check that commands which can exit non-zero (e.g., `grep` with no matches, failed pipes under `set -eo pipefail`, empty globs) don't silently abort before reaching intended fallback logic. Trace each branch - not just the happy path - to confirm it can actually execute.
+- **Unreachable code and error-path analysis** - do a focused pass to verify that every code path is actually reachable, especially fallback/else branches. Check that commands which can exit non-zero (e.g., `grep` with no matches, failed pipes under `set -eo pipefail`, empty globs) don't silently abort before reaching intended fallback logic. Trace each branch, not just the happy path, to confirm it can actually execute.
 - **Security-focused review** - do a dedicated pass specifically for security concerns. In particular, check for: script injection via unsanitized interpolation (e.g., `${{ }}` in GitHub Actions expanding attacker-controlled input before bash runs), command injection through variable expansion, secrets leaked into logs, and unsafe handling of user-controlled or PR-controlled data. Flag any path where external input flows into command execution without proper sanitization.
 - **Check whether the author has addressed existing review feedback** - read through all review threads and comments before reporting. Note unresolved threads.
 - **Check for unintended behavioral changes** - compare new code against the existing patterns in the same file or module
 - **Check docstring/comment accuracy** - verify that docstrings, comments, and commit messages accurately describe what the code actually does. Flag cases where stated behavior differs from implemented behavior.
-- **Idiomatic language check (self-review only)** - when conducting a self-review, do a pass for language idiom violations that would signal unfamiliarity to a reviewer. Examples: `filter` vs `select` in Ruby, `list()` vs list comprehension in Python, `.forEach` vs `.map` in JS when the return value matters. This is not about style nitpicking - it's about using the language the way its community expects. Only flag during self-review, not when reviewing others' PRs.
-- **React composition check** - when reviewing React code, flag components that build a large derived data shape and then walk it with conditionals. The canonical smell: a `.map()` containing a multi-branch `if`/`switch` with type casts handling 3 or more variants inline. Suggest extraction into per-variant components - this improves testability (each component is independently unit-testable) and readability (the container reads like a table of contents). When the extracted components also co-locate their data subscriptions via hooks, siblings avoid unnecessary re-renders.
+- **Idiomatic language check (self-review only)** - when conducting a self-review, do a pass for language idiom violations that would signal unfamiliarity to a reviewer. Examples: `filter` vs `select` in Ruby, `list()` vs list comprehension in Python, `.forEach` vs `.map` in JS when the return value matters. This is not about style nitpicking; it's about using the language the way its community expects. Only flag during self-review, not when reviewing others' PRs.
+- **React composition check** - when reviewing React code, flag components that build a large derived data shape and then walk it with conditionals. The canonical smell: a `.map()` containing a multi-branch `if`/`switch` with type casts handling 3 or more variants inline. Suggest extraction into per-variant components; this improves testability (each component is independently unit-testable) and readability (the container reads like a table of contents). When the extracted components also co-locate their data subscriptions via hooks, siblings avoid unnecessary re-renders.
 
 ### Tone and voice
 - All review feedback must match the tone and voice described in the **Writing Style** section of these instructions
-- Use additive, curious framing - not corrective or prescriptive
+- Use additive, curious framing, not corrective or prescriptive
 - For **first-time contributors**, lead with what was done well, be warm and specific about how to fix issues, and provide step-by-step guidance rather than terse criticism
 - For established contributors or teammates, be concise and direct
 
 ### Drafting comments
 - If findings warrant PR comments, draft them in my voice and **show me the draft before posting**
 - When specific code changes are needed, use GitHub suggestion blocks
-- One actionable point per comment - do not bundle multiple concerns
+- One actionable point per comment; do not bundle multiple concerns
 
 ## Code Style & Languages
 - **Python** is the preferred scripting language for automation, data processing, and tooling
 - Use `argparse` for CLI argument parsing in Python scripts
-- Include proper error handling and logging - don't silently swallow errors
+- Include proper error handling and logging; don't silently swallow errors
 - **Comments explain why, not what** - only comment non-obvious design decisions (e.g., why one method was chosen over another, a constraint that isn't visible in the code). If the method name or variable name already communicates the intent, delete the comment. First drafts tend to over-comment; strip redundant comments before committing.
 - Prefer ecosystem tools (`pip install`, `npm init`, etc.) over manual configuration
 - Run `make lint` and `make test` before committing in repos that have a Makefile
 - Write unit tests for new functionality
-- **Test file naming - one per source module, no catch-alls**: When a repo follows a per-module test convention (e.g., `test_<module>.py` for each `<module>.py`), put new tests for a module in that module's existing test file (creating it if missing). Never create catch-all aggregator files like `test_coverage_additions.py`, `test_extra.py`, `test_misc.py`, or `test_new_stuff.py` - they hide what is being tested and break the source-to-test mapping a maintainer relies on. If a test exercises multiple modules, file it under the module whose behavior is most central to the assertion. Before adding a new `test_*.py` file, confirm there is no existing per-module test file that would be a better home.
+- **Test file naming, one per source module, no catch-alls**: When a repo follows a per-module test convention (e.g., `test_<module>.py` for each `<module>.py`), put new tests for a module in that module's existing test file (creating it if missing). Never create catch-all aggregator files like `test_coverage_additions.py`, `test_extra.py`, `test_misc.py`, or `test_new_stuff.py` - they hide what is being tested and break the source-to-test mapping a maintainer relies on. If a test exercises multiple modules, file it under the module whose behavior is most central to the assertion. Before adding a new `test_*.py` file, confirm there is no existing per-module test file that would be a better home.
 - Document changes to environment variables in the `README.md` file
 - **Linting philosophy**: When linting errors arise, **always fix the code to pass the linter** - do not suppress, ignore, or disable lint rules. Only disable a rule as a last resort if fixing the code is truly impossible or would make it significantly worse, and explain why in a comment. This applies to all linters (flake8, pylint, mypy, markdownlint, eslint, etc.).
-- **Cross-reference existing patterns**: When adding new code to a file that already has similar blocks (e.g., a new job in a workflow, a new route in a router, a new test in a suite), explicitly compare the new code against the existing code for naming conventions, formatting, and runtime behavior before committing. Don't pattern-match on the name you're defining - check how existing code actually references the same concept.
+- **Cross-reference existing patterns**: When adding new code to a file that already has similar blocks (e.g., a new job in a workflow, a new route in a router, a new test in a suite), explicitly compare the new code against the existing code for naming conventions, formatting, and runtime behavior before committing. Don't pattern-match on the name you're defining; check how existing code actually references the same concept.
 
 ### React & TypeScript Component Patterns
 
-When writing or reviewing React components, follow these composition principles. AI agents tend to produce monolithic components with big conditionals - one render function that switches on data type, full of `if`/`else` chains and type casts. That pattern works but creates comprehension debt: adding one row type means reading the whole feature.
+When writing or reviewing React components, follow these composition principles. AI agents tend to produce monolithic components with big conditionals, one render function that switches on data type, full of `if`/`else` chains and type casts. That pattern works but creates comprehension debt: adding one row type means reading the whole feature.
 
 - **One component per concern, in its own file.** If a component renders different things based on a type discriminator (e.g., event type, action type, row variant), extract each case into a standalone component. Each should be small enough to read in one scroll.
 - **Prefer components that fetch their own data from hooks** in variant-driven UIs (lists of heterogeneous items, sidebars with mixed row types). Each component reads what it needs from tanstack-query or a shared hook rather than receiving rich objects via prop drilling. This keeps components self-contained and avoids unnecessary re-renders of siblings when one subscription updates. Pure presentational components that receive already-loaded data are still fine for leaf UI.
 - **Pass only primitives as props** (IDs, counts, enum values) when the child will fetch its own rich data. Props are for identity and configuration. If the parent already has the data and the child is purely presentational, passing the object directly is acceptable.
 - **Return null when there's nothing to show.** If a component's data means it shouldn't render, let it decide that internally (`if (!hasData) return null`). Don't push visibility logic into the parent.
-- **Container components read like a table of contents.** The parent composes children in a list - it should be obvious what the feature does by scanning the container without reading child implementations:
+- **Container components read like a table of contents.** The parent composes children in a list; it should be obvious what the feature does by scanning the container without reading child implementations:
   ```tsx
   function SidebarActivity() {
     return (
@@ -149,8 +149,8 @@ When writing or reviewing React components, follow these composition principles.
 - **Design for safe contribution** - When creating new modules or features, always ask: "Could a PM or junior contributor add to this safely without understanding the whole system?" If no, the abstraction is wrong. Prefer designs where the blast radius of a bad change is small by default.
 - **Explicit domain boundaries** - When adding new functionality, identify and document which module owns which concern. Don't let unrelated capabilities leak across module boundaries (e.g., notification logic shouldn't touch payment logic). Flag boundary violations in reviews.
 - **Design for 10x** - When adding API calls, pagination, or data processing, always ask: what happens if the input is 10x larger than today? Add rate limiting and backoff by default, not as an afterthought.
-- **Semantic observability** - When adding error handling, include enough context to diagnose *who* is affected and *what change* caused it - not just the raw error. Log the feature, the actor, and the deployment version. Raw stack traces are the equivalent of useless dashboards.
-- **Self-healing and automatic rollback** - When designing CI/CD workflows or deployment pipelines, always include an automatic rollback path. Feature flags should be the default mechanism for shipping new behavior - so a bad change can be disabled without a redeploy.
+- **Semantic observability** - When adding error handling, include enough context to diagnose *who* is affected and *what change* caused it, not just the raw error. Log the feature, the actor, and the deployment version. Raw stack traces are the equivalent of useless dashboards.
+- **Self-healing and automatic rollback** - When designing CI/CD workflows or deployment pipelines, always include an automatic rollback path. Feature flags should be the default mechanism for shipping new behavior, so a bad change can be disabled without a redeploy.
 - **Guardrails over guidelines** - Where possible, encode pattern consistency as a lint rule or CI check rather than relying on human review to catch deviations. If a requirement matters, it should be a gate, not a suggestion.
 - **Assume imperfect changes** - Design systems so that a single bad commit, a hallucinated function call, or an incorrect configuration value can't cascade into a system-wide failure. Use input validation at boundaries, not just at the entry point. Treat every module boundary as a trust boundary.
 - **Conflict detection over conflict prevention** - Instead of relying on contributors to avoid conflicts (e.g., DB migrations, config changes), build detection into the pipeline. Conflicting migrations should be blocked automatically. Overlapping feature flags should raise a warning.
@@ -161,16 +161,16 @@ When writing or reviewing React components, follow these composition principles.
 - When searching across an org, use `gh search prs`, `gh search issues`, etc. with `--owner` filter
 - Always disable pagers: `git --no-pager`, `gh --no-pager`, or pipe to `cat`
 - **Gists**: I use gists frequently for drafts, sharing, and iteration. **Always create gists as private/secret by default** unless I explicitly ask for a public gist. When editing gists programmatically, use `gh api` to fetch raw file content instead of `gh gist view --raw` (which prepends the description and causes duplication on re-upload)
-- **Verify edits to external content**: After modifying any external content (gists, PR descriptions, issue bodies, discussion posts, wiki pages), always fetch the result back and verify the edit applied correctly - check that the content wasn't truncated, corrupted, or partially applied. Do not assume a successful API response means the content is correct. Read it back and confirm.
+- **Verify edits to external content**: After modifying any external content (gists, PR descriptions, issue bodies, discussion posts, wiki pages), always fetch the result back and verify the edit applied correctly; check that the content wasn't truncated, corrupted, or partially applied. Do not assume a successful API response means the content is correct. Read it back and confirm.
 - **No hard-wrapped prose in GitHub-bound markdown**: Never hard-wrap paragraphs at 80 characters in files destined for `gh pr edit --body-file`, `gh issue create --body-file`, or `gh gist create`. GitHub renders each literal newline as a visible line break. Use single-line paragraphs; let the renderer wrap. Lists, tables, code blocks, and headers are fine on their own lines.
-- **Trace the code path before writing rationale**: Before describing *why* a design works in PR descriptions, review comments, or issue replies, trace the actual runtime path in source code. Don't infer behavior from method names or documentation alone - read the implementation. Wrong rationale (even on correct code) erodes reviewer trust and creates confusion when the code is revisited later.
+- **Trace the code path before writing rationale**: Before describing *why* a design works in PR descriptions, review comments, or issue replies, trace the actual runtime path in source code. Don't infer behavior from method names or documentation alone; read the implementation. Wrong rationale (even on correct code) erodes reviewer trust and creates confusion when the code is revisited later.
 
 ## GitHub Actions Best Practices
 When creating or modifying GitHub Actions workflows:
 1. Always use the **latest release** of each action
 2. Pin actions to their **full commit SHA** (not tags) with a comment showing the **full version tag**: `uses: actions/checkout@<sha> # v6.0.2` (not just `# v6`)
 3. Validate workflow syntax before committing
-4. Use **dedicated tokens/secrets** for each workflow - do not reuse tokens across different workflows
+4. Use **dedicated tokens/secrets** for each workflow; do not reuse tokens across different workflows
 5. When filtering activity data for reports, exclude Dependabot PRs from summaries (they add noise)
 
 ## Git & Version Control
@@ -182,20 +182,20 @@ When creating or modifying GitHub Actions workflows:
 
 ## Excel & Report Generation
 - Use **openpyxl** for Excel file creation in Python
-- Excel can only support one hyperlink per cell - use a separate References sheet for multiple links
+- Excel can only support one hyperlink per cell; use a separate References sheet for multiple links
 - For display in cells, use clean text (e.g., `github#418801`) without raw URLs
-- Match existing format/templates when extending reports - don't invent new layouts without asking
+- Match existing format/templates when extending reports; don't invent new layouts without asking
 
 ## Writing Style (for reports, evaluations, documentation authored on my behalf)
 
 ### Voice & Tone
 - Use a **conversational, direct tone** - not corporate or stiff. Write like talking to a peer, not lecturing.
 - **Be a relatable human** - share honest experiences and frustrations ("my brain was too fried to make sense of it") without being self-deprecating. Vulnerability about learnings builds trust; putting yourself down undermines it.
-- Use "we," "you," and "let's" - prefer first-person plural for team/company perspective. Use "I" when sharing personal experience or motivation.
+- Use "we," "you," and "let's"; prefer first-person plural for team/company perspective. Use "I" when sharing personal experience or motivation.
 - Be **enthusiastic without overdoing it** - phrases like "we're excited to" are fine, but let energy come through naturally
 - **Lead with empathy** - describe the reader's pain point before presenting the solution. Frame tools as responses to real frustrations, ideally ones you've felt yourself.
 - Be **inclusive and community-oriented** - invite participation ("drop a comment," "let me know," "reach out")
-- **Warm closings** - end with something human ("Hopefully this makes FR 1% easier in the heat of an incident") not something corporate ("This is for you - let's make it as useful as possible")
+- **Warm closings** - end with something human ("Hopefully this makes FR 1% easier in the heat of an incident") not something corporate ("This is for you. Let's make it as useful as possible")
 
 ### Structure & Flow
 - **Lead with the ask (BLUF)** - for proposals, requests, and recommendations where I want a decision or action, put the ask in the first or second paragraph. State what I want to do, then explain why. Don't bury the recommendation under context, data, or background. This applies to Slack messages, issue comments, review replies, emails, and short decision docs.
@@ -213,21 +213,21 @@ When creating or modifying GitHub Actions workflows:
 - **Grounded claims** - cite specific data or sources when making assertions
 - **Bookend with CTAs** - end articles/posts with a clear call to action: check out the repo, open an issue, try it out. Never just fade out.
 - Use **bridge sentences** to connect sections - "To address this," "That is why," "Now that we have covered"
-- Vary greetings and openings - don't default to "Hey team" every time
+- Vary greetings and openings; don't default to "Hey team" every time
 
 ### Formatting Preferences
 - **H2 headers as questions or action phrases** - "How does it work?", "Understanding the report", "Jump in!"
-- **Bulleted lists** for features or use cases - keep items parallel in structure
-- **Bold for key terms** on first mention - e.g., "**time to first response**", "**innersource contribution percentage**"
+- **Bulleted lists** for features or use cases; keep items parallel in structure
+- **Bold for key terms** on first mention, e.g., "**time to first response**", "**innersource contribution percentage**"
 - **Inline links always** - use `[descriptive text](url)` not raw URLs. Link text should describe the destination ("the [dashboard](url)" not the literal `click [here](url)`). This applies to discussion posts, PR descriptions, Slack messages, and documentation.
-- **Inline code** for technical references - repo names, file names, environment variables in backticks
+- **Inline code** for technical references: repo names, file names, environment variables in backticks
 - Screenshots should include descriptive alt text and context about what the image shows
 
 ### Reports & Evaluations
 - Use real names, not handles, when referring to people in narrative text
 - Back up qualitative assessments with specific evidence (links to PRs, issues, etc.)
 - Use `[PLACEHOLDER]` tags for subjective items that only I can fill in
-- Rating language: "Above expectations" / "Meets expectations" / "Below expectations" - not "Exceeds" or "Does not meet"
+- Rating language: "Above expectations" / "Meets expectations" / "Below expectations", not "Exceeds" or "Does not meet"
 - When referencing GitHub artifacts, always include a clickable link
 
 ### Content Philosophy
@@ -239,9 +239,9 @@ When creating or modifying GitHub Actions workflows:
 
 ### Hard Rules
 - **Never use em dashes** (the long dash character). Rephrase using a comma, period, parentheses, or restructure the sentence. Do not substitute a spaced hyphen ( - ), which is also flagged (see the next rule).
-- **Never use a dash as sentence punctuation**: a hyphen or en-dash with spaces around it standing in for a comma, colon, or parenthetical pause (e.g., "our diff is dashboard only, so these are master drift - they came in"). Rephrase with a comma, period, parentheses, or sentence restructure. Word-joining hyphens with no surrounding spaces are fine ("runner-up", "well-known"). The `validate-style` linter blocks the spaced-dash pattern.
+- **Never use a dash as sentence punctuation**: a hyphen or en-dash with spaces around it standing in for a comma, colon, or parenthetical pause (e.g., `our diff is dashboard only, so these are master drift - they came in`). Rephrase with a comma, period, parentheses, or sentence restructure. Word-joining hyphens with no surrounding spaces are fine ("runner-up", "well-known"). The `validate-style` linter blocks the spaced-dash pattern.
 - **Use "consistency" instead of "idempotency"** and **"consistent" instead of "idempotent"** in all written content (PRs, reviews, discussion posts, documentation, comments, etc.). These terms are more accessible to broader audiences.
-- **Never use "per" to mean "according to" or "based on"** in any written content. Replace with "based on …". Examples: `per my last email`, `per the docs`, `per the PR description`, `per Andi's recommendation` are all not allowed - use "based on my last email", "based on the docs", etc. "Per" as a unit/rate (e.g., "3 errors per second", "one point per comment", "one test file per module") is fine.
+- **Never use "per" to mean "according to" or "based on"** in any written content. Replace with "based on …". Examples: `per my last email`, `per the docs`, `per the PR description`, `per Andi's recommendation` are all not allowed; use "based on my last email", "based on the docs", etc. "Per" as a unit/rate (e.g., "3 errors per second", "one point per comment", "one test file per module") is fine.
 - **Never use "This PR / This change / This commit" as a sentence subject** in PR descriptions, review replies, or commit messages. Write in first person instead: "I added retry logic", not "This PR adds retry logic". This is the same rule as the active-voice / first-person guidance in **Pull Requests** above, but called out here because I have repeatedly seen it slip through. The `validate-style` linter blocks this pattern.
 - **Never lead a bullet with a bare past-tense action verb** ("Added X", "Removed Y", "Inspected Z") in PR descriptions or status updates. Rewrite in first person ("I added X", "I removed Y"). The `validate-style` linter blocks this pattern in bullets specifically.
 - **Lint drafts before posting**: run the `validate-style` skill (see the **Copilot Skills** section above) on any text destined for GitHub or Slack.
@@ -269,14 +269,14 @@ Concrete good/bad pairs for the situations I correct most often. Match the patte
 - Avoid:
   > I addressed both points. Fixed the off-by-one in the loop bound and renamed the helper. Thanks for the review.
 - Use:
-  > Thanks for the review! I addressed both points - fixed the off-by-one in the loop bound in [SHA] and renamed the helper in [SHA].
+  > Thanks for the review! I addressed both points: fixed the off-by-one in the loop bound in [SHA] and renamed the helper in [SHA].
 - Why: opens with appreciation (see Pull Requests rule above), then specifies which commits address which feedback. Makes it easy for the reviewer to verify.
 
 **PR review comment (additive, one point per comment, hedge unverified claims):**
 - Avoid:
   > This is broken. The retry loop will spin forever if the upstream returns 500, and also the variable name is confusing, and I think the test should mock the clock.
 - Use:
-  > I believe this loop can spin indefinitely when the upstream returns 500 - the break condition only fires on 2xx. Worth adding a max-retry guard?
+  > I believe this loop can spin indefinitely when the upstream returns 500, since the break condition only fires on 2xx. Worth adding a max-retry guard?
   > ```suggestion
   >     for attempt in range(MAX_RETRIES):
   > ```
@@ -284,16 +284,16 @@ Concrete good/bad pairs for the situations I correct most often. Match the patte
 
 **Status update about your own work (own the output, no AI disclaimers):**
 - Avoid:
-  > Here's the draft - take it with a grain of salt since AI wrote most of it.
+  > Here's the draft, take it with a grain of salt since AI wrote most of it.
 - Use:
   > Here's the draft. I'd value a second pair of eyes on the rollback section.
 - Why: I own the artifact regardless of how it was produced. AI assistance is not a disclaimer that weakens confidence in the result.
 
 **Reporting an error you made (no agentic passive voice):**
 - Avoid:
-  > `<model>` made an error in the writeup - the latency number was off by 10x.
+  > `<model>` made an error in the writeup: the latency number was off by 10x.
 - Use:
-  > I made an error in the writeup - the latency number was off by 10x. Corrected in [link].
+  > I made an error in the writeup: the latency number was off by 10x. Corrected in [link].
 - Why: I am the actor. The model is the tool. Saying the model "made" or "wrote" something subtly transfers accountability away from the human.
 
 **Public-context references to internal work (no internal repo names in public):**
@@ -317,20 +317,20 @@ Concrete good/bad pairs for the situations I correct most often. Match the patte
 - Add a `.gitignore` for common artifacts (`__pycache__/`, `*.pyc`, `.DS_Store`)
 
 ## macOS Environment
-- I run macOS - use macOS-compatible commands (e.g., `open` not `xdg-open`, `pbcopy` for clipboard)
+- I run macOS; use macOS-compatible commands (e.g., `open` not `xdg-open`, `pbcopy` for clipboard)
 - For scheduled tasks, prefer **launchd** plist over crontab
 - My repos live in `~/repos/`
 
 ---
 
-## My Open Source GitHub Actions - Shared Patterns
+## My Open Source GitHub Actions: Shared Patterns
 
-The following conventions apply to my suite of GitHub Actions in the `github-community-projects` org: **contributors**, **evergreen**, **issue-metrics**, **stale-repos**, **cleanowners**, **measure-innersource**, **pr-conflict-detector**, and **ospo-reusable-workflows**. These repos share a consistent architecture - follow these patterns when working in any of them.
+The following conventions apply to my suite of GitHub Actions in the `github-community-projects` org: **contributors**, **evergreen**, **issue-metrics**, **stale-repos**, **cleanowners**, **measure-innersource**, **pr-conflict-detector**, and **ospo-reusable-workflows**. These repos share a consistent architecture; follow these patterns when working in any of them.
 
 ### Project Structure
 - **Flat module layout** - all Python source files live at the repo root (no `src/` directory)
 - Common module split: `{main}.py`, `auth.py`, `env.py`, `markdown_writer.py` (or `markdown.py`)
-- Test files: `test_*.py` at root, one per source module - never catch-all aggregator files like `test_coverage_additions.py`
+- Test files: `test_*.py` at root, one per source module, never catch-all aggregator files like `test_coverage_additions.py`
 - Linter configs live in `.github/linters/` (not repo root)
 - Action definition: `action.yml` (Docker-based action)
 

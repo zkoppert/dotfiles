@@ -16,4 +16,4 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: zkoppert/validate-style-action@8d332d850c4c9bb0a37b14974c061bd1579c69bf # v1.0.0
+      - uses: zkoppert/validate-style-action@85fd68136c85d72cce0a0a683da3ac03e74640ba # v1.2.0
