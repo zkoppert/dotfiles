@@ -39,6 +39,15 @@ class Violation:
 
 EM_DASH_PATTERN = re.compile(r"\u2014")
 
+# A hyphen-minus or en-dash used as sentence punctuation between two words:
+# a single space-flanked dash with a letter on each side, e.g.
+# "master drift - they came in". Requiring a letter on both sides keeps the
+# rule to prose punctuation and avoids flagging word-joining hyphens
+# ("runner-up", no spaces), list bullets ("- item", "  - item", "> - item"),
+# thematic breaks ("- - -"), numbered steps and issue refs ("Step 1 - x",
+# "Fix #5 - x"), numeric ranges ("3 - 1"), and label lists ("**Term** - desc").
+SPACED_DASH_PATTERN = re.compile(r"(?<=[A-Za-z])[ \t][-\u2013][ \t](?=[A-Za-z])")
+
 PER_DETERMINER_PATTERN = re.compile(
     r"\bper\s+(the|a|my|our|your|his|her|their|this|that|last|prior|previous|recent|latest|earlier|above|below|usual)\b",
     re.IGNORECASE,
@@ -139,7 +148,15 @@ RULES = [
     (
         "no-em-dash",
         EM_DASH_PATTERN,
-        "Em-dash (\u2014) is forbidden. Use a hyphen with spaces ( - ), comma, period, or rephrase.",
+        "Em-dash (\u2014) is forbidden. Rephrase using a comma, period, parentheses, "
+        "or restructure the sentence. Do not substitute a spaced hyphen, which is also flagged.",
+    ),
+    (
+        "no-spaced-dash",
+        SPACED_DASH_PATTERN,
+        "A spaced hyphen or en-dash used as sentence punctuation (e.g., 'master drift - they "
+        "came in') is forbidden. Rephrase using a comma, period, parentheses, or restructure "
+        "the sentence. Word-joining hyphens (e.g., 'runner-up') are fine.",
     ),
     (
         "no-per-as-according-to",
