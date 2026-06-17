@@ -39,6 +39,14 @@ class Violation:
 
 EM_DASH_PATTERN = re.compile(r"\u2014")
 
+# A hyphen-minus or en-dash used as sentence punctuation: flanked by whitespace
+# on both sides (e.g., "master drift - they came in"). Word-joining hyphens like
+# "runner-up" have no surrounding spaces and are not matched. The leading
+# (?<=\S) lookbehind requires a non-space character immediately before, which
+# excludes Markdown/YAML list bullets ("- item", "  - item") whose dash is the
+# first non-whitespace character on the line.
+SPACED_DASH_PATTERN = re.compile(r"(?<=\S)[ \t][-\u2013][ \t](?=\S)")
+
 PER_DETERMINER_PATTERN = re.compile(
     r"\bper\s+(the|a|my|our|your|his|her|their|this|that|last|prior|previous|recent|latest|earlier|above|below|usual)\b",
     re.IGNORECASE,
@@ -139,7 +147,15 @@ RULES = [
     (
         "no-em-dash",
         EM_DASH_PATTERN,
-        "Em-dash (\u2014) is forbidden. Use a hyphen with spaces ( - ), comma, period, or rephrase.",
+        "Em-dash (\u2014) is forbidden. Rephrase using a comma, period, parentheses, "
+        "or restructure the sentence. Do not substitute a spaced hyphen, which is also flagged.",
+    ),
+    (
+        "no-spaced-dash",
+        SPACED_DASH_PATTERN,
+        "A spaced hyphen or en-dash used as sentence punctuation (e.g., 'master drift - they "
+        "came in') is forbidden. Rephrase using a comma, period, parentheses, or restructure "
+        "the sentence. Word-joining hyphens (e.g., 'runner-up') are fine.",
     ),
     (
         "no-per-as-according-to",

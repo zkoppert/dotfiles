@@ -45,9 +45,47 @@ class TestEmDash(unittest.TestCase):
             len([v for v in violations if v.rule == "no-em-dash"]), 2
         )
 
-    def test_hyphen_is_not_flagged(self):
+    def test_intraword_hyphen_is_not_flagged(self):
+        violations = find_violations("The runner-up used a well-known trick.")
+        self.assertNotIn("no-em-dash", rules_in(violations))
+        self.assertNotIn("no-spaced-dash", rules_in(violations))
+
+
+class TestSpacedDash(unittest.TestCase):
+    def test_spaced_hyphen_punctuation_flagged(self):
+        violations = find_violations("Our diff is dashboard only, so these are master drift - they came in.")
+        self.assertIn("no-spaced-dash", rules_in(violations))
+
+    def test_spaced_hyphen_not_flagged_as_em_dash(self):
         violations = find_violations("Use a hyphen - like this - between words.")
         self.assertNotIn("no-em-dash", rules_in(violations))
+        self.assertEqual(
+            len([v for v in violations if v.rule == "no-spaced-dash"]), 2
+        )
+
+    def test_spaced_en_dash_punctuation_flagged(self):
+        violations = find_violations("We shipped it \u2013 then reverted.")
+        self.assertIn("no-spaced-dash", rules_in(violations))
+
+    def test_intraword_hyphen_not_flagged(self):
+        violations = find_violations("The runner-up is a well-known face.")
+        self.assertNotIn("no-spaced-dash", rules_in(violations))
+
+    def test_unspaced_en_dash_range_not_flagged(self):
+        violations = find_violations("Page 5\u20137 covers it.")
+        self.assertNotIn("no-spaced-dash", rules_in(violations))
+
+    def test_line_start_bullet_not_flagged(self):
+        violations = find_violations("- a clean bullet item")
+        self.assertNotIn("no-spaced-dash", rules_in(violations))
+
+    def test_indented_bullet_not_flagged(self):
+        violations = find_violations("  - an indented clean bullet item")
+        self.assertNotIn("no-spaced-dash", rules_in(violations))
+
+    def test_spaced_dash_inside_inline_code_ignored(self):
+        violations = find_violations("Run `foo - bar` to see output.")
+        self.assertNotIn("no-spaced-dash", rules_in(violations))
 
     def test_en_dash_is_not_flagged(self):
         violations = find_violations("Page 5\u20137 covers it.")

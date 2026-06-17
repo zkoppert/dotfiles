@@ -19,6 +19,7 @@ grep -A1 '"no-' ~/.copilot/skills/validate-style/lint.py | head -40
 At a high level, the rules cover:
 
 - **no-em-dash** - the em-dash character
+- **no-spaced-dash** - a hyphen or en-dash used as sentence punctuation (spaced, e.g., "drift - they came in") instead of joining words ("runner-up")
 - **no-per-as-according-to** - using the word "per" to mean "according to"
 - **no-prayer-hands** - the folded-hands emoji for thanks or please
 - **no-click-here** - non-descriptive Markdown link text
