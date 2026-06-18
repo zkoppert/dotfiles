@@ -1,0 +1,39 @@
+#!/bin/bash
+# Global pre-commit hook, scoped to the zkoppert-todo repo.
+#
+# core.hooksPath is global, so this runs in EVERY repo and must be a fast,
+# silent no-op everywhere except zkoppert-todo, where it gates commits on the
+# same todo.yml structure validator enforced in CI.
+#
+# Skip with SKIP_TODO_VALIDATE=1 (mirrors pre-push's SKIP_PREPUSH_VISIBILITY=1).
+
+set -euo pipefail
+
+if [ "${SKIP_TODO_VALIDATE:-}" = "1" ]; then
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$repo_root" ]; then
+  exit 0
+fi
+
+# Two-file signature identifies zkoppert-todo without a network call.
+if [ ! -f "$repo_root/scripts/validate_todo.py" ] || [ ! -f "$repo_root/todo.yml" ]; then
+  exit 0
+fi
+
+# Missing python3 must never block commits in unrelated repos.
+if ! command -v python3 >/dev/null 2>&1; then
+  exit 0
+fi
+
+if ! python3 "$repo_root/scripts/validate_todo.py" "$repo_root/todo.yml"; then
+  echo "" >&2
+  echo "Commit blocked: todo.yml failed structure validation. Every item must live in the inbox or a quadrant." >&2
+  echo "Skip: SKIP_TODO_VALIDATE=1 git commit (use sparingly)" >&2
+  echo "" >&2
+  exit 1
+fi
+
+exit 0
