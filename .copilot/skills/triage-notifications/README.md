@@ -11,9 +11,11 @@ second run produces no duplicate todos and no spurious mark-dones.
 ## What problem this solves
 
 I get a lot of GitHub notifications and miss the important ones. This
-tool runs every two hours on weekdays, surfaces the actionable items
-into my existing todo workflow, and silently clears the noise so the
-notification inbox stops being a wall of red.
+tool runs every two hours on weekdays and does an aggressive "bulk
+triage": it drops the passive subscription noise (and clears those
+GitHub notifications), keeps only the personal-action items in my
+existing todo workflow, and leaves Dependabot bumps for a separate
+handler. The notification inbox stops being a wall of red.
 
 The fetch uses `?all=true` so the cron also sees notifications I've
 viewed on github.com (marked read) but never deleted. Without that,
@@ -22,68 +24,76 @@ they merged; the cron would never see them again to clean them up.
 
 ## How it classifies
 
-Four early-exit drops fire before the reason-based classifier, in this order:
+The core policy is **KEEP_REASONS default-drop**: only directed,
+personal-action reasons survive. Everything else is passive subscription
+noise that drops and is marked done on GitHub.
 
-1. **Title-pattern drop** - repetitive system-generated noise (regex match
-   on `subject.title`). Currently catches titles shaped like
-   `Intermittent test failure: ...`, `Flaky test: ...`, `test flake: ...`,
-   with an optional leading `[Bug]`-style tag. Patterns are anchored to
-   the start of the title and require the trigger phrase to be followed
-   by a colon, so legitimate titles that mention the phrase as a
-   substring (e.g. `Fix flaky test in dashboard`) are not swept up.
-   Overridden when `reason` is `mention` or `assign` so a direct human
-   ping always reaches the inbox. Edit `TITLE_DROP_PATTERNS` in
-   `triage.py` to add new patterns; keep them anchored on the same
-   `_TITLE_DROP_PREFIX` + phrase + `:` shape.
-2. **Closed-subject drop** - if the PR or issue is already closed/merged
-   when the notification arrives, drop instead of routing anywhere. If
-   the subject is a PR I authored, also append an entry to todo.yml's
-   `done` section (source `github-notification-auto-archive`) so the
-   shipped work is captured for biannual reflection. Notifications I
-   was assigned to or @-mentioned on still drop without archiving -
-   those reflect someone else's work, not mine.
-3. **Self-authored Enable Dependabot drop** - `reason=author` PRs titled
-   `Enable Dependabot` (case-insensitive, whitespace-trimmed) drop when
-   no human besides me has commented or reviewed (bots like Copilot
-   reviewer and super-linter are ignored). These are pure housekeeping
-   noise once the bots have signed off. A real human reviewer joining
-   keeps the notification so the response reaches the inbox. On any
-   API/parse failure, the rule conservatively falls through to normal
-   classification.
-4. **Per-repo subscription filter** - for repos listed in
-   `SUBSCRIPTION_FILTERED_REPOS`, only directed-ping reasons stay
-   (`review_requested`, `assign`, `mention`, `team_mention`,
-   `security_alert`); every other reason (`subscribed`, `manual`,
-   `comment`, `ci_activity`, `author`, ...) drops. Used for repos
-   where I get auto-subscribed to PRs/issues just by interacting once
-   and only care about notifications aimed directly at me.
-   `security_alert` is kept so Dependabot vulnerabilities and
-   secret-scanning alerts still route to Q1. Repo lookup is
-   case-insensitive. Currently filters `github/new-user-experience`.
-   Edit `SUBSCRIPTION_FILTERED_REPOS` in `triage.py` to add more
-   repos.
+`KEEP_REASONS = {review_requested, assign, author, mention, security_alert}`
 
-Both read and unread notifications classify through the same reason
-table. The `already_tracked` short-circuit in `run()` prevents a
-notification already represented in `todo.yml` from being re-added on
-subsequent cron ticks. DROP rules clear notifications regardless of
-read state (so `ci_activity`, `comment`-on-closed, super-linter
-comments without an @mention, and `subscribed`-on-closed get marked
-done either way).
+A series of early-exit drops fire before reason routing, in this order:
 
-The reason table:
+1. **Title-pattern drop** - repetitive system-generated noise and routine
+   config PRs (regex match on `subject.title`). Catches flaky-test report
+   titles (`Intermittent test failure: ...`, `Flaky test: ...`, `test
+   flake: ...`) and `Enable Dependabot` config PRs. Overridden when
+   `reason` is `mention` or `assign` so a direct human ping always
+   reaches the inbox. Edit `TITLE_DROP_PATTERNS` in `triage.py` to add
+   patterns.
+2. **Dependabot version-bump drop** - PRs whose title looks like a
+   Dependabot bump (`build(deps): ...`, `chore(deps-dev): ...`, or
+   `Bump <pkg> from <x> to <y>`) drop from the inbox but are **never
+   marked done on GitHub** (`skip_mark_done`). A separate
+   `triage-dependabot` tool consumes those threads, so they must stay
+   unread. A direct `mention`/`assign` overrides this so a human ping on
+   a bump still reaches me.
+3. **Closed-subject drop** - if a KEEP-reason PR or issue is already
+   closed/merged when the notification arrives, drop instead of routing
+   anywhere. If the subject is a PR I authored, also append an entry to
+   todo.yml's `done` section (source `github-notification-auto-archive`)
+   so the shipped work is captured for biannual reflection.
+4. **Repo-level overrides** (`repo_override`) - per-repo policies, often
+   stricter than the global KEEP_REASONS. A safety carve-out runs first:
+   a direct `mention`, a direct `assign`, or a `security_alert` always
+   survives these gates (except on the fully tuned-out repos), because a
+   personal ping or a vulnerability alert is too important to silently
+   drop on a title or subscription miss.
+   - `github/.github`, `github/core-ux-elt` (`ALWAYS_DROP_REPOS`): fully
+     tuned out, dropping **every** notification, including direct pings and
+     security alerts.
+   - `github/curated-data`: drop everything except the carve-out (direct
+     pings and security alerts).
+   - `github/markup`: keep security-related titles (security / vuln /
+     CVE, routed to INBOX) and the carve-out reasons; drop the rest as
+     low priority.
+   - `github/pull-requests`: keep only titles about NUX's area of
+     responsibility (the `/pulls` dashboard and the inbox feature -
+     keywords `dashboard`, `inbox`, `/pulls`, `pulls dashboard`) plus the
+     carve-out reasons; drop anything else. The rest of that repo has its
+     own first-responder system.
+   - `*/super-linter` (any owner, matched by `^[^/]+/super-linter$`):
+     keep only the carve-out reasons. This covers both
+     `super-linter/super-linter` and the `github/super-linter` fork (an
+     exact-match list missed the fork, so its Dependabot PRs slipped
+     through).
+   - `github/new-user-experience`: keep `review_requested` plus the
+     carve-out reasons; drop my own PR noise (`author`) and team_mention.
 
-| Reason            | Bucket                                           |
-| ----------------- | ------------------------------------------------ |
-| `mention`         | Q1 (urgent + important)                          |
-| `assign`          | Q1                                               |
-| `security_alert`  | Q1                                               |
-| `review_requested`| Q1 if from NUX teammate, else INBOX              |
-| `manual`          | INBOX (deliberately subscribed)                  |
-| `comment`         | DROP if thread closed/merged or super-linter without @mention; Q1 if @mention; INBOX otherwise |
-| `ci_activity`     | DROP (always)                                    |
-| `subscribed`      | DROP if closed/merged; else INBOX                |
-| anything else     | INBOX (safe default; never auto-drop the unknown) |
+After the drops, surviving KEEP_REASONS notifications route by reason.
+Both read and unread notifications classify through the same table; the
+`already_tracked` short-circuit in `run()` prevents re-adding a tracked
+notification.
+
+The reason table (after the early-exit drops above):
+
+| Reason             | Bucket                                          |
+| ------------------ | ----------------------------------------------- |
+| `mention`          | Q1 (urgent + important)                         |
+| `assign`           | Q1                                              |
+| `security_alert`   | Q1                                              |
+| `review_requested` | Q1 if from NUX teammate, else INBOX             |
+| `author`           | INBOX (my own open PR/issue, status item)       |
+| `comment`          | Q1 if the body @-mentions me; else DROP         |
+| anything else      | DROP (passive subscription noise)               |
 
 The NUX teammate allowlist is hardcoded in `triage.py` as
 `NUX_TEAM_LOGINS_Q1`. Edit there to add or remove people.
@@ -212,9 +222,12 @@ python3 -m pytest tests.py -v
   `~/Library/Logs/notification-triage.log`.
 - **`todo.yml` missing**: script exits with code 1. Re-create the file
   (or check that `~/repos/zkoppert-todo` is still cloned).
-- **A new GitHub notification reason appears**: classifier defaults to
-  INBOX rather than DROP. Check the inbox bucket for unfamiliar items
-  and update `Q1_REASONS` / `CLOSED_STATES` in `triage.py` if needed.
+- **A new GitHub notification reason appears**: under the aggressive
+  policy the classifier **drops** any reason that isn't in
+  `KEEP_REASONS`. If a new directed-ping reason shows up that I care
+  about, add it to `KEEP_REASONS` (and route it in `_classify_internal`)
+  in `triage.py`. Run with `--dry-run --verbose` to see how unfamiliar
+  reasons are being classified before they're cleared.
 - **Pruner dropped something I wanted to keep**: the pruner only drops
   on a hard "stale" signal (closed PR, closed issue, locked discussion,
   answered Q&A discussion, or 404). If a subject reopens after being
