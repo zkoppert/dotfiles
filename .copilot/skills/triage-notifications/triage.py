@@ -56,6 +56,8 @@ _RT_YAML.preserve_quotes = True
 _RT_YAML.width = 4096
 _RT_YAML.indent(mapping=2, sequence=4, offset=2)
 
+logger = logging.getLogger("triage")
+
 # Allowlist of GitHub logins whose review_requested notifications auto-route
 # to Q1. Currently Zack's direct reports plus his manager - kept narrow on
 # purpose so cross-team requests still hit inbox for review.
@@ -171,6 +173,126 @@ DEPENDABOT_BUMP_PATTERNS: list[re.Pattern[str]] = [
     re.compile(_CC_PREFIX + r"bump\s+the\s+.+\sgroup\b", re.IGNORECASE),
 ]
 
+PRIVATE_TRIAGE_REPOS_PATH = Path.home() / ".copilot" / "private" / "triage-repos.yml"
+
+
+def load_private_triage_repos(
+    path: Path = PRIVATE_TRIAGE_REPOS_PATH,
+) -> dict[str, Any]:
+    """Load private repo filters from Zack's untracked local config."""
+    if not path.exists():
+        logger.warning(
+            "private triage repo config not found at %s; using public defaults",
+            path,
+        )
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        logger.warning(
+            "could not load private triage repo config at %s: %s; using public defaults",
+            path,
+            exc,
+        )
+        return {}
+    if not isinstance(data, dict):
+        logger.warning(
+            "private triage repo config at %s is not a mapping; using public defaults",
+            path,
+        )
+        return {}
+    return data
+
+
+def _repo_key(repo: Any) -> str | None:
+    if not isinstance(repo, str):
+        return None
+    normalized = repo.strip().lower()
+    return normalized or None
+
+
+def _private_repo_set(config: dict[str, Any], key: str) -> set[str]:
+    value = config.get(key, [])
+    if value is None:
+        return set()
+    if not isinstance(value, list):
+        logger.warning("private triage config key %s must be a list; ignoring", key)
+        return set()
+    repos: set[str] = set()
+    for repo in value:
+        normalized = _repo_key(repo)
+        if normalized:
+            repos.add(normalized)
+        else:
+            logger.warning("private triage config key %s has a non-string repo", key)
+    return repos
+
+
+def _private_reason_map(config: dict[str, Any], key: str) -> dict[str, set[str]]:
+    value = config.get(key, {})
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        logger.warning("private triage config key %s must be a mapping; ignoring", key)
+        return {}
+    filters: dict[str, set[str]] = {}
+    for repo, reasons in value.items():
+        normalized = _repo_key(repo)
+        if not normalized:
+            logger.warning("private triage config key %s has a non-string repo", key)
+            continue
+        if reasons is None:
+            filters[normalized] = set()
+            continue
+        if not isinstance(reasons, list):
+            logger.warning(
+                "private triage config key %s entry %s must be a list; ignoring",
+                key,
+                normalized,
+            )
+            continue
+        filters[normalized] = {
+            reason.strip().lower() for reason in reasons if isinstance(reason, str)
+        }
+    return filters
+
+
+def _private_keyword_map(
+    config: dict[str, Any], key: str
+) -> dict[str, tuple[str, ...]]:
+    value = config.get(key, {})
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        logger.warning("private triage config key %s must be a mapping; ignoring", key)
+        return {}
+    filters: dict[str, tuple[str, ...]] = {}
+    for repo, keywords in value.items():
+        normalized = _repo_key(repo)
+        if not normalized:
+            logger.warning("private triage config key %s has a non-string repo", key)
+            continue
+        if not isinstance(keywords, list):
+            logger.warning(
+                "private triage config key %s entry %s must be a list; ignoring",
+                key,
+                normalized,
+            )
+            continue
+        filters[normalized] = tuple(
+            keyword.lower() for keyword in keywords if isinstance(keyword, str)
+        )
+    return filters
+
+
+_PRIVATE_REPO_CONFIG = load_private_triage_repos()
+
+# Normally Dependabot bumps stay unread for triage-dependabot. Private
+# watch-only repos from local config mark passive bump notifications done.
+WATCH_ONLY_DEPENDABOT_MARK_DONE_REPOS: set[str] = _private_repo_set(
+    _PRIVATE_REPO_CONFIG, "watch_only_dependabot_mark_done_repos"
+)
+
 # Repos where I'm only interested in directed pings - everything else
 # (subscribed, team_mention, comment, ci_activity, author, etc.) is auto-
 # subscription noise that should drop and be marked done on GitHub.
@@ -179,25 +301,29 @@ DEPENDABOT_BUMP_PATTERNS: list[re.Pattern[str]] = [
 # REPO_OVERRIDE_PROTECTED_REASONS and always survive, so they do NOT need
 # to be listed here; these sets only decide the remaining reasons.
 SUBSCRIPTION_FILTERED_REPOS: dict[str, set[str]] = {
-    # NUX team repo: keep review requests (mention/assign/security_alert
-    # already survive via the carve-out); drop my own PR noise (`author`)
-    # and team_mention.
-    "github/new-user-experience": {"review_requested"},
     # curated-data: nothing beyond the carve-out - only direct pings and
     # security alerts get in.
     "github/curated-data": set(),
 }
+SUBSCRIPTION_FILTERED_REPOS.update(
+    _private_reason_map(_PRIVATE_REPO_CONFIG, "subscription_filtered_repos")
+)
 
 # Repos I've fully tuned out of: drop every notification regardless of
 # reason, including direct pings and security alerts. These are repos I
 # unsubscribe from entirely (profile READMEs, bot pings, ELT threads).
-ALWAYS_DROP_REPOS: set[str] = {"github/.github", "github/core-ux-elt"}
+ALWAYS_DROP_REPOS: set[str] = {"github/.github"} | _private_repo_set(
+    _PRIVATE_REPO_CONFIG, "always_drop_repos"
+)
 
 # Reasons that always survive the relevance/priority repo gates below (but
 # NOT ALWAYS_DROP_REPOS). A direct @-mention, a direct assignment, or a
 # vulnerability alert is too important to silently drop just because a
 # repo's title or subscription filter did not match.
 REPO_OVERRIDE_PROTECTED_REASONS: set[str] = {"mention", "assign", "security_alert"}
+DIRECTED_REPO_REASONS: set[str] = REPO_OVERRIDE_PROTECTED_REASONS | {
+    "review_requested"
+}
 
 # Owner-agnostic subscription filters, matched by regex against the
 # lowercased full_name. Used where the same project lives under multiple
@@ -215,12 +341,10 @@ SUBSCRIPTION_FILTERED_REPO_PATTERNS: list[tuple[re.Pattern[str], set[str]]] = [
 # reason. Maps full_name (lowercase) -> tuple of case-insensitive keyword
 # substrings. A notification is kept (routed normally) only if its title
 # contains one of the keywords; otherwise it drops regardless of reason.
-# Used for github/pull-requests, where NUX owns only the /pulls dashboard
-# and the inbox feature - the rest of that repo has its own first-responder
-# system and is noise to us.
-TITLE_AOR_REQUIRED_REPOS: dict[str, tuple[str, ...]] = {
-    "github/pull-requests": ("dashboard", "inbox", "/pulls", "pulls dashboard"),
-}
+# Private AoR repo filters live in the untracked local config.
+TITLE_AOR_REQUIRED_REPOS: dict[str, tuple[str, ...]] = _private_keyword_map(
+    _PRIVATE_REPO_CONFIG, "title_aor_required_repos"
+)
 
 # Repos I maintain but treat as low priority unless a notification is
 # security-related or a direct @-mention. Non-security, non-mention
@@ -239,8 +363,6 @@ DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
 BUCKET_DROP = "DROP"
 BUCKET_Q2 = "QUADRANT_Q2"
 BUCKET_INBOX = "INBOX"
-
-logger = logging.getLogger("triage")
 
 
 @dataclass
@@ -312,10 +434,8 @@ def repo_override(repo_full: str, reason: str, title: str) -> Classification | N
     if reason in REPO_OVERRIDE_PROTECTED_REASONS:
         return None
 
-    # github/pull-requests: keep only titles about NUX's area of
-    # responsibility (the /pulls dashboard and the inbox feature); the rest
-    # of the repo has its own first-responder system. AoR-matched titles
-    # route normally (and are still subject to KEEP_REASONS).
+    # AoR-title filters keep only titles about NUX's area of responsibility.
+    # AoR-matched titles route normally and still go through KEEP_REASONS.
     aor_keywords = TITLE_AOR_REQUIRED_REPOS.get(repo_lc)
     if aor_keywords is not None:
         if any(kw in title.lower() for kw in aor_keywords):
@@ -336,8 +456,8 @@ def repo_override(repo_full: str, reason: str, title: str) -> Classification | N
             BUCKET_DROP, f"{repo_full}: non-security, non-ping - low priority"
         )
 
-    # Exact-match subscription allowlists (NUX, curated-data). These list
-    # only the allowed NON-protected reasons; everything else drops.
+    # Exact-match subscription allowlists. These list only the allowed
+    # NON-protected reasons; everything else drops.
     allowed = SUBSCRIPTION_FILTERED_REPOS.get(repo_lc)
     if allowed is not None and reason not in allowed:
         return Classification(
@@ -561,23 +681,25 @@ def _classify_internal(
                     f"title matches drop pattern /{pattern.pattern}/",
                 )
 
-    # Dependabot version-bump PRs: drop from the inbox but NEVER mark the
-    # GitHub notification done - triage-dependabot consumes those threads
-    # and needs them unread. Detected by title (no extra API call) and
-    # placed before the closed-state and repo-override drops so a bump on
-    # any repo (incl. super-linter) is never marked done by those paths. A
-    # direct mention/assign overrides this so a human ping on a bump PR
-    # still reaches me.
-    if (
-        reason not in TITLE_DROP_PROTECTED_REASONS
-        and subject_type == "pullrequest"
-        and is_dependabot_bump(title)
-    ):
-        return Classification(
-            BUCKET_DROP,
-            "Dependabot version bump - left unread for triage-dependabot",
-            skip_mark_done=True,
-        )
+    # Dependabot version-bump PRs: drop from the inbox but normally NEVER
+    # mark the GitHub notification done - triage-dependabot consumes those
+    # threads and needs them unread. Watch-only repos from private config
+    # are the exception: passive bump notifications should be marked done
+    # instead of handed off.
+    if subject_type == "pullrequest" and is_dependabot_bump(title):
+        repo_lc = repo_full.lower()
+        if repo_lc in WATCH_ONLY_DEPENDABOT_MARK_DONE_REPOS:
+            if reason not in DIRECTED_REPO_REASONS:
+                return Classification(
+                    BUCKET_DROP,
+                    f"{repo_full}: watch-only Dependabot bump - mark done",
+                )
+        elif reason not in TITLE_DROP_PROTECTED_REASONS:
+            return Classification(
+                BUCKET_DROP,
+                "Dependabot version bump - left unread for triage-dependabot",
+                skip_mark_done=True,
+            )
 
     # Cheap early drop: if the subject is already closed/merged when the
     # notification first lands, there is nothing left to do. Only check
@@ -603,13 +725,11 @@ def _classify_internal(
                 archive_to_done=archive,
             )
 
-    # Repo-level overrides: per-repo policies that can be more restrictive
-    # than the global KEEP_REASONS (e.g. github/.github always drops,
-    # github/markup keeps only security/mention, github/pull-requests keeps
-    # only AoR titles, super-linter forks keep only mentions). Placed after
-    # the title / closed-state / Dependabot drops so those still fire on
-    # override repos, but before reason routing so we don't pay for
-    # state/author fetches on reasons we're about to discard.
+    # Repo-level overrides: repo policies that can be more restrictive than
+    # the global KEEP_REASONS. Placed after the title / closed-state /
+    # Dependabot drops so those still fire on override repos, but before
+    # reason routing so we don't pay for state/author fetches on reasons
+    # we're about to discard.
     override = repo_override(repo_full, reason, title)
     if override is not None:
         return override

@@ -3,3 +3,5 @@ __pycache__/
 *.pyo
 .DS_Store
 .coverage
+.copilot/private/
+*/.copilot/private/

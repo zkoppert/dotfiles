@@ -20,6 +20,36 @@ import pytest
 import triage_dependabot as td
 
 
+def test_load_private_triage_repos_reads_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "triage-repos.yml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "dependabot_skipped_repos:",
+                "  - acme/private-thing",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    data = td.load_private_triage_repos(config_path)
+
+    assert td._private_repo_set(data, "dependabot_skipped_repos") == {
+        "acme/private-thing"
+    }
+
+
+def test_load_private_triage_repos_missing_file_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config_path = tmp_path / "missing.yml"
+
+    data = td.load_private_triage_repos(config_path)
+
+    assert data == {}
+    assert "using public defaults" in caplog.text
+
+
 @pytest.fixture(autouse=True)
 def _stub_archive_lookup(request: Any) -> Any:
     """Default ``is_archived_repo`` to False for every test.
@@ -2343,6 +2373,13 @@ def test_skipped_repo_match_case_insensitive() -> None:
     assert td.skipped_repo_match("Super-Linter/Super-Linter") is not None
 
 
+def test_skipped_repo_match_private_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(td, "SKIPPED_REPOS", {"acme/private-thing"})
+
+    assert td.skipped_repo_match("acme/private-thing") == "acme/private-thing"
+    assert td.skipped_repo_match("Acme/Private-Thing") == "Acme/Private-Thing"
+
+
 def test_skipped_repo_match_negative() -> None:
     assert td.skipped_repo_match("github-community-projects/stale-repos") is None
     assert td.skipped_repo_match("") is None
@@ -2412,6 +2449,53 @@ def test_run_skips_super_linter_repo_pr_with_mention_keeps_notification(
     )
     assert stats.skipped_dependency == 1
     mark_mock.assert_not_called()
+
+
+def test_run_skips_private_config_repo_and_clears_notification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Passive Dependabot bumps in private skipped repos clear the notification."""
+    monkeypatch.setattr(td, "SKIPPED_REPOS", {"acme/private-thing"})
+    notif = {
+        "id": "thread-private-repo",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/acme/private-thing/pulls/42",
+        },
+    }
+    pr = _base_pr(
+        number=42,
+        url="https://github.com/acme/private-thing/pull/42",
+        title="Bump actions/checkout from 4.2.2 to 4.3.0",
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "fetch_repo_labels"
+    ) as fetch_labels_mock, mock.patch.object(
+        td, "do_merge"
+    ) as merge_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock:
+        stats = td.run(args)
+
+    assert stats.skipped_dependency == 1
+    assert stats.dependabot == 0
+    assert stats.merged == 0
+    assert stats.flagged == 0
+    fetch_labels_mock.assert_not_called()
+    merge_mock.assert_not_called()
+    mark_mock.assert_called_once_with("thread-private-repo", dry_run=False)
+    saved = td.load_state(args.state_file)
+    assert "https://github.com/acme/private-thing/pull/42" in saved
 
 
 # ---------------------------------------------------------------------------

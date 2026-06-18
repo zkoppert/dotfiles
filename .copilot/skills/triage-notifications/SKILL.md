@@ -35,12 +35,11 @@ dropped and cleared from GitHub, and only personal-action items survive.
    - **Repo overrides** run first and can be stricter. A safety carve-out
      applies: a direct `mention`/`assign` or a `security_alert` always
      survives these gates (except on fully tuned-out repos). Otherwise:
-     `github/.github` and `github/core-ux-elt` always drop everything;
+     `github/.github` plus private config entries always drop everything;
      `github/curated-data` keeps only the carve-out reasons;
      `github/markup` keeps security titles plus the carve-out;
-     `github/pull-requests` keeps only AoR titles (the /pulls dashboard
-     and inbox) plus the carve-out; any `*/super-linter` keeps only the
-     carve-out reasons.
+     private AoR config entries keep only matching titles plus the
+     carve-out; any `*/super-linter` keeps only the carve-out reasons.
    - **Dependabot bumps** drop from the inbox but are **left unread on
      GitHub** (never marked done) so the separate `triage-dependabot`
      tool can consume them.

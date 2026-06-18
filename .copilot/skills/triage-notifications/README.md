@@ -57,26 +57,24 @@ A series of early-exit drops fire before reason routing, in this order:
    survives these gates (except on the fully tuned-out repos), because a
    personal ping or a vulnerability alert is too important to silently
    drop on a title or subscription miss.
-   - `github/.github`, `github/core-ux-elt` (`ALWAYS_DROP_REPOS`): fully
-     tuned out, dropping **every** notification, including direct pings and
-     security alerts.
+   - `github/.github` plus private config entries (`ALWAYS_DROP_REPOS`):
+     fully tuned out, dropping **every** notification, including direct
+     pings and security alerts.
    - `github/curated-data`: drop everything except the carve-out (direct
      pings and security alerts).
    - `github/markup`: keep security-related titles (security / vuln /
      CVE, routed to INBOX) and the carve-out reasons; drop the rest as
      low priority.
-   - `github/pull-requests`: keep only titles about NUX's area of
-     responsibility (the `/pulls` dashboard and the inbox feature -
-     keywords `dashboard`, `inbox`, `/pulls`, `pulls dashboard`) plus the
-     carve-out reasons; drop anything else. The rest of that repo has its
-     own first-responder system.
+   - Private config entries in `title_aor_required_repos`: keep only
+     titles about NUX's area of responsibility plus the carve-out reasons;
+     drop anything else.
    - `*/super-linter` (any owner, matched by `^[^/]+/super-linter$`):
      keep only the carve-out reasons. This covers both
      `super-linter/super-linter` and the `github/super-linter` fork (an
      exact-match list missed the fork, so its Dependabot PRs slipped
      through).
-   - `github/new-user-experience`: keep `review_requested` plus the
-     carve-out reasons; drop my own PR noise (`author`) and team_mention.
+   - Private config entries in `subscription_filtered_repos`: keep the
+     listed reasons plus the carve-out reasons; drop everything else.
 
 After the drops, surviving KEEP_REASONS notifications route by reason.
 Both read and unread notifications classify through the same table; the
