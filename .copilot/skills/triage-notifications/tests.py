@@ -149,7 +149,9 @@ def test_classify_self_assign_on_non_pr_still_goes_to_q1():
     assert fetcher_called == [], "fetcher should be skipped for non-PR subjects"
 
 
-def test_classify_manual_goes_to_inbox():
+def test_classify_manual_drops():
+    """`manual` (deliberate subscription) is passive noise under the
+    aggressive policy - drop it."""
     c = triage.classify(
         _notif("manual"),
         my_login="zkoppert",
@@ -157,7 +159,7 @@ def test_classify_manual_goes_to_inbox():
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
     )
-    assert c.bucket == triage.BUCKET_INBOX
+    assert c.bucket == triage.BUCKET_DROP
 
 
 def test_review_requested_from_teammate_goes_to_q1():
@@ -287,7 +289,9 @@ def test_ci_activity_drops():
     assert c.bucket == triage.BUCKET_DROP
 
 
-def test_subscribed_open_goes_to_inbox():
+def test_subscribed_open_drops():
+    """`subscribed` is passive subscription noise under the aggressive
+    policy - drop even on an open subject (was INBOX before)."""
     c = triage.classify(
         _notif("subscribed"),
         my_login="zkoppert",
@@ -295,7 +299,7 @@ def test_subscribed_open_goes_to_inbox():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
     )
-    assert c.bucket == triage.BUCKET_INBOX
+    assert c.bucket == triage.BUCKET_DROP
 
 
 def test_subscribed_closed_drops():
@@ -309,7 +313,9 @@ def test_subscribed_closed_drops():
     assert c.bucket == triage.BUCKET_DROP
 
 
-def test_unknown_reason_falls_back_to_inbox():
+def test_unknown_reason_drops():
+    """An unrecognized reason is not a KEEP_REASONS ping, so it drops
+    under the aggressive policy (was INBOX-by-default before)."""
     c = triage.classify(
         _notif("invitation"),
         my_login="zkoppert",
@@ -317,7 +323,7 @@ def test_unknown_reason_falls_back_to_inbox():
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
     )
-    assert c.bucket == triage.BUCKET_INBOX
+    assert c.bucket == triage.BUCKET_DROP
 
 
 # ----------------------------------------------------------------------
@@ -1982,10 +1988,10 @@ def test_classify_skips_state_check_for_non_subject_types():
     assert c.bucket == triage.BUCKET_Q2
 
 
-def _enable_dependabot_notif() -> dict:
+def _enable_dependabot_notif(reason: str = "author") -> dict:
     """Helper: self-authored Enable Dependabot PR notification."""
     return _notif(
-        "author",
+        reason,
         subject={
             "title": "Enable Dependabot",
             "url": "https://api.github.com/repos/o/r/pulls/30",
@@ -1995,140 +2001,38 @@ def _enable_dependabot_notif() -> dict:
     )
 
 
-def test_classify_closed_enable_dependabot_drops_via_state_check_not_commenter_fetch():
-    """A closed self-authored Enable Dependabot PR must drop via the cheap
-    state check before paying for 3 commenter API calls. Regression guard
-    on the ordering of classify() branches."""
-    fetcher_calls = []
-
-    def fetcher(n, *, my_login):
-        fetcher_calls.append(n)
-        return set()
-
+def test_classify_enable_dependabot_author_drops():
+    """My own `Enable Dependabot` config PR (reason=author) drops via the
+    title-pattern rule - these are routine and never need triage."""
     c = triage.classify(
         _enable_dependabot_notif(),
         my_login="zkoppert",
         q1_logins=set(),
-        state_fetcher=lambda _: "closed",
+        state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
-        human_commenter_fetcher=fetcher,
     )
     assert c.bucket == triage.BUCKET_DROP
-    assert "closed pullrequest" in c.reason
-    assert fetcher_calls == []  # cheap state check short-circuited
+    assert "drop pattern" in c.reason
 
 
-def test_classify_drops_self_authored_enable_dependabot_with_no_human_commenters():
-    """My own Enable Dependabot PR with only bot reviewers (Copilot,
-    super-linter) is noise - drop it so the inbox stays clean."""
+def test_classify_enable_dependabot_kept_on_mention():
+    """A direct @-mention on an Enable Dependabot PR overrides the
+    title-drop (mention is a protected reason) and reaches Q1."""
     c = triage.classify(
-        _enable_dependabot_notif(),
+        _enable_dependabot_notif("mention"),
         my_login="zkoppert",
         q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
-        subject_author_fetcher=lambda _: "zkoppert",
-        human_commenter_fetcher=lambda _, my_login: set(),
+        subject_author_fetcher=lambda _: "someone-else",
     )
-    assert c.bucket == triage.BUCKET_DROP
-    assert "Enable Dependabot" in c.reason
-
-
-def test_classify_keeps_enable_dependabot_when_human_commented():
-    """If an actual teammate has commented, keep the notification so
-    the response reaches the inbox."""
-    c = triage.classify(
-        _enable_dependabot_notif(),
-        my_login="zkoppert",
-        q1_logins=set(),
-        state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
-        subject_author_fetcher=lambda _: "zkoppert",
-        human_commenter_fetcher=lambda _, my_login: {"andimiya"},
-    )
-    assert c.bucket != triage.BUCKET_DROP
-
-
-def test_classify_keeps_enable_dependabot_on_fetch_failure():
-    """On fetcher returning None (network blip, parse failure), fall
-    through to normal classification - never drop on uncertainty."""
-    c = triage.classify(
-        _enable_dependabot_notif(),
-        my_login="zkoppert",
-        q1_logins=set(),
-        state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
-        subject_author_fetcher=lambda _: "zkoppert",
-        human_commenter_fetcher=lambda _, my_login: None,
-    )
-    assert c.bucket != triage.BUCKET_DROP
-
-
-def test_classify_does_not_drop_unrelated_author_pr():
-    """`reason=author` on a PR with a different title is not affected
-    by the Enable Dependabot rule - falls through to normal classifier."""
-    notif = _notif(
-        "author",
-        subject={
-            "title": "Fix payment processing bug",
-            "url": "https://api.github.com/repos/o/r/pulls/30",
-            "latest_comment_url": None,
-            "type": "PullRequest",
-        },
-    )
-    fetcher_calls = []
-
-    def fetcher(n, *, my_login):
-        fetcher_calls.append(n)
-        return set()
-
-    c = triage.classify(
-        notif,
-        my_login="zkoppert",
-        q1_logins=set(),
-        state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
-        subject_author_fetcher=lambda _: "zkoppert",
-        human_commenter_fetcher=fetcher,
-    )
-    assert c.bucket != triage.BUCKET_DROP
-    assert fetcher_calls == []  # short-circuit before any API call
-
-
-def test_classify_enable_dependabot_only_fires_on_author_reason():
-    """Same title under a different reason (e.g. team_mention) doesn't
-    trigger the self-authored rule."""
-    notif = _notif(
-        "team_mention",
-        subject={
-            "title": "Enable Dependabot",
-            "url": "https://api.github.com/repos/o/r/pulls/30",
-            "latest_comment_url": None,
-            "type": "PullRequest",
-        },
-    )
-    fetcher_calls = []
-
-    def fetcher(n, *, my_login):
-        fetcher_calls.append(n)
-        return set()
-
-    c = triage.classify(
-        notif,
-        my_login="zkoppert",
-        q1_logins=set(),
-        state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
-        subject_author_fetcher=lambda _: "zkoppert",
-        human_commenter_fetcher=fetcher,
-    )
-    assert c.bucket != triage.BUCKET_DROP
-    assert fetcher_calls == []
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_enable_dependabot_title_match_is_case_insensitive():
-    """Whitespace and case variations on the exact title still match."""
+    """Whitespace and case variations on the title still match the
+    title-drop pattern."""
     notif = _notif(
         "author",
         subject={
@@ -2145,141 +2049,31 @@ def test_classify_enable_dependabot_title_match_is_case_insensitive():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
 
 
-# --- fetch_pr_human_commenters helper tests ---
-
-
-def _commenter(login: str, user_type: str = "User") -> dict:
-    return {"user": {"login": login, "type": user_type}}
-
-
-def test_fetch_pr_human_commenters_excludes_bots_and_self(monkeypatch):
-    """Bots (Copilot reviewer, super-linter) and my own comments are
-    excluded - only other humans count."""
-    page_responses = {
-        "/repos/o/r/issues/30/comments": [
-            _commenter("zkoppert"),
-            _commenter("super-linter[bot]", "Bot"),
-        ],
-        "/repos/o/r/pulls/30/comments": [
-            _commenter("Copilot", "Bot"),
-        ],
-        "/repos/o/r/pulls/30/reviews": [
-            _commenter("copilot-pull-request-reviewer[bot]", "Bot"),
-        ],
-    }
-
-    def fake_run_gh(args, *, timeout=60):
-        # args = ["api", "--paginate", "--slurp", "/repos/..."]
-        endpoint = args[-1]
-        # --slurp wraps each page in an outer array; here we have 1 page
-        return json.dumps([page_responses[endpoint]])
-
-    monkeypatch.setattr(triage, "run_gh", fake_run_gh)
-    notif = _enable_dependabot_notif()
-    result = triage.fetch_pr_human_commenters(notif, my_login="zkoppert")
-    assert result == set()
-
-
-def test_fetch_pr_human_commenters_includes_other_humans(monkeypatch):
-    """Real human reviewers (User type, not me) are counted."""
-    page_responses = {
-        "/repos/o/r/issues/30/comments": [_commenter("andimiya")],
-        "/repos/o/r/pulls/30/comments": [_commenter("iansan5653")],
-        "/repos/o/r/pulls/30/reviews": [],
-    }
-
-    def fake_run_gh(args, *, timeout=60):
-        return json.dumps([page_responses[args[-1]]])
-
-    monkeypatch.setattr(triage, "run_gh", fake_run_gh)
-    result = triage.fetch_pr_human_commenters(
-        _enable_dependabot_notif(), my_login="zkoppert"
-    )
-    assert result == {"andimiya", "iansan5653"}
-
-
-def test_fetch_pr_human_commenters_returns_none_on_api_failure(monkeypatch):
-    """Any subprocess failure surfaces as None so the caller stays
-    conservative."""
-
-    def fake_run_gh(args, *, timeout=60):
-        raise triage.subprocess.CalledProcessError(1, ["gh"])
-
-    monkeypatch.setattr(triage, "run_gh", fake_run_gh)
-    result = triage.fetch_pr_human_commenters(
-        _enable_dependabot_notif(), my_login="zkoppert"
-    )
-    assert result is None
-
-
-def test_fetch_pr_human_commenters_returns_none_on_non_pr_url():
-    """Issue URLs (no `/pulls/` segment) return None - the helper is
-    PR-only."""
+def test_classify_does_not_drop_unrelated_author_pr():
+    """`reason=author` on a PR with a different title is not affected by
+    the Enable Dependabot title-drop - it stays as an inbox status item."""
     notif = _notif(
         "author",
         subject={
-            "title": "Enable Dependabot",
-            "url": "https://api.github.com/repos/o/r/issues/30",
+            "title": "Fix payment processing bug",
+            "url": "https://api.github.com/repos/o/r/pulls/30",
             "latest_comment_url": None,
-            "type": "Issue",
+            "type": "PullRequest",
         },
     )
-    assert triage.fetch_pr_human_commenters(notif, my_login="zkoppert") is None
-
-
-def test_fetch_pr_human_commenters_handles_bracket_substring_in_body(monkeypatch):
-    """Regression: a comment body containing the literal substring ``][``
-    (markdown reference link, array indexing, table cell, etc.) MUST
-    NOT corrupt the parse. The earlier implementation used a custom
-    split-on-`][` parser that fragmented these payloads and silently
-    returned None, which made the rule no-op exactly when comments had
-    non-trivial content."""
-    page_responses = {
-        "/repos/o/r/issues/30/comments": [
-            {
-                "user": {"login": "alice", "type": "User"},
-                "body": "see [foo][bar] and arr[0][1]",
-            }
-        ],
-        "/repos/o/r/pulls/30/comments": [],
-        "/repos/o/r/pulls/30/reviews": [],
-    }
-
-    def fake_run_gh(args, *, timeout=60):
-        return json.dumps([page_responses[args[-1]]])
-
-    monkeypatch.setattr(triage, "run_gh", fake_run_gh)
-    result = triage.fetch_pr_human_commenters(
-        _enable_dependabot_notif(), my_login="zkoppert"
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "zkoppert",
     )
-    assert result == {"alice"}
-
-
-def test_fetch_pr_human_commenters_handles_multi_page_slurp(monkeypatch):
-    """--slurp returns [[page1],[page2],...] - the parser must flatten
-    across pages."""
-    page_responses = {
-        "/repos/o/r/issues/30/comments": [
-            [_commenter("alice")],
-            [_commenter("bob")],
-        ],
-        "/repos/o/r/pulls/30/comments": [[]],
-        "/repos/o/r/pulls/30/reviews": [[]],
-    }
-
-    def fake_run_gh(args, *, timeout=60):
-        return json.dumps(page_responses[args[-1]])
-
-    monkeypatch.setattr(triage, "run_gh", fake_run_gh)
-    result = triage.fetch_pr_human_commenters(
-        _enable_dependabot_notif(), my_login="zkoppert"
-    )
-    assert result == {"alice", "bob"}
+    assert c.bucket == triage.BUCKET_INBOX
 
 
 def _flaky_notif(reason: str, title: str) -> dict:
@@ -2395,10 +2189,11 @@ def test_classify_keeps_intermittent_test_failure_when_assigned():
 
 def test_classify_title_drop_does_not_match_unrelated_titles():
     """Regression guard: a title without any drop pattern still flows
-    through normal classification (here: team_mention falls through to
-    inbox-by-default)."""
+    through normal classification. Uses `review_requested` (a KEEP reason
+    that is still subject to the title-drop) so a non-matching title is
+    KEPT rather than swept up by the aggressive default-drop."""
     notif = _flaky_notif(
-        "team_mention",
+        "review_requested",
         "Real production bug: dashboard crashes",
     )
     c = triage.classify(
@@ -2414,17 +2209,18 @@ def test_classify_title_drop_does_not_match_unrelated_titles():
 
 def test_classify_title_drop_does_not_match_phrase_as_substring():
     """Regression guard from review feedback: legitimate titles that
-    contain the trigger phrase as a substring must NOT drop. Each of
-    these is a real PR or bug we'd actually want to triage."""
+    contain the trigger phrase as a substring must NOT drop via the title
+    pattern. Each uses `review_requested` (KEEP, not protected) so a
+    non-match is kept and the assertion isolates title-pattern behavior."""
     not_noise = [
-        ("review_requested", "Fix flaky test in dashboard"),
-        ("team_mention", "flaky test suite is failing CI completely"),
-        ("team_mention", "Intermittent test failure modes - design doc"),
-        ("subscribed", "test flake reproduction script"),
-        ("team_mention", "investigation: why is the flaky test detector broken"),
+        "Fix flaky test in dashboard",
+        "flaky test suite is failing CI completely",
+        "Intermittent test failure modes - design doc",
+        "test flake reproduction script",
+        "investigation: why is the flaky test detector broken",
     ]
-    for reason, title in not_noise:
-        notif = _flaky_notif(reason, title)
+    for title in not_noise:
+        notif = _flaky_notif("review_requested", title)
         c = triage.classify(
             notif,
             my_login="zkoppert",
@@ -2434,7 +2230,7 @@ def test_classify_title_drop_does_not_match_phrase_as_substring():
             subject_author_fetcher=lambda _: "someone-else",
         )
         assert c.bucket != triage.BUCKET_DROP, (
-            f"{reason!r} title {title!r} should not drop, got {c}"
+            f"title {title!r} should not drop, got {c}"
         )
 
 
@@ -2497,7 +2293,6 @@ def test_classify_read_open_notification_routes_like_unread():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     c_read = triage.classify(read, **kwargs)
     c_unread = triage.classify(unread, **kwargs)
@@ -2515,7 +2310,6 @@ def test_classify_read_closed_pr_still_drops_via_state_check():
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
     assert "closed pullrequest" in c.reason
@@ -2531,7 +2325,6 @@ def test_classify_drop_sets_archive_to_done_when_zack_is_pr_author():
         state_fetcher=lambda _: "merged",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
     assert c.archive_to_done is True
@@ -2547,7 +2340,6 @@ def test_classify_drop_does_not_archive_when_zack_is_not_author():
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andimiya",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
     assert c.archive_to_done is False
@@ -2566,7 +2358,6 @@ def test_classify_drop_does_not_archive_for_issues():
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
     assert c.archive_to_done is False
@@ -2590,7 +2381,6 @@ def test_classify_drop_does_not_call_author_fetcher_for_issues():
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=fetcher,
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert fetcher_calls == []
 
@@ -2655,10 +2445,11 @@ def test_run_archives_to_done_and_marks_notification_done(todo_file):
 
 
 def test_run_read_open_notification_added_to_inbox(todo_file):
-    """A read+open notification with no drop rule routes to inbox so it
-    stays visible in todo.yml until the user clears it. The notification
-    is NOT marked done on GitHub - that only happens on DROP."""
-    notif = _read_notif("manual")
+    """A read+open KEEP notification (reason=author) with no drop rule
+    routes to inbox so it stays visible in todo.yml until the user clears
+    it. The notification is NOT marked done on GitHub - that only happens
+    on DROP."""
+    notif = _read_notif("author")
     notif["id"] = "777"
 
     delete_calls = []
@@ -2719,7 +2510,6 @@ def test_classify_read_ci_activity_still_drops():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP, (
         "read ci_activity must drop so the notification gets cleared"
@@ -2737,7 +2527,6 @@ def test_classify_read_comment_on_closed_pr_still_drops():
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: ("someone", "body"),
         subject_author_fetcher=lambda _: "andi",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
     assert "closed" in c.reason
@@ -2753,7 +2542,6 @@ def test_classify_read_subscribed_on_closed_pr_still_drops():
         state_fetcher=lambda _: "merged",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
 
@@ -2768,17 +2556,16 @@ def test_classify_read_super_linter_comment_still_drops():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: ("super-linter", "lint failed"),
         subject_author_fetcher=lambda _: "andi",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
     assert "super-linter" in c.reason
 
 
 def test_classify_read_inbox_routing_now_returns_inbox():
-    """Read notification that routes to INBOX is no longer demoted to
-    KEEP - the inbox add is what we want, and the `already_tracked`
+    """A read KEEP notification that routes to INBOX (reason=author) is
+    not demoted - the inbox add is what we want, and the `already_tracked`
     short-circuit keeps it from re-adding next tick."""
-    notif = _read_notif("manual")
+    notif = _read_notif("author")
     c = triage.classify(
         notif,
         my_login="zkoppert",
@@ -2786,7 +2573,6 @@ def test_classify_read_inbox_routing_now_returns_inbox():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andi",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_INBOX
 
@@ -2802,7 +2588,6 @@ def test_classify_read_q1_mention_now_returns_q1():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andi",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_Q2
 
@@ -2997,7 +2782,6 @@ def test_classify_nux_subscribed_drops():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
     assert "subscription allowlist" in c.reason
@@ -3013,7 +2797,6 @@ def test_classify_nux_comment_drops():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: ("andimiya", "lgtm"),
         subject_author_fetcher=lambda _: "andimiya",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
     assert "subscription allowlist" in c.reason
@@ -3029,7 +2812,6 @@ def test_classify_nux_ci_activity_drops():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
 
@@ -3044,7 +2826,6 @@ def test_classify_nux_author_drops():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
 
@@ -3059,7 +2840,6 @@ def test_classify_nux_mention_still_routes_normally():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andimiya",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_Q2
 
@@ -3073,7 +2853,6 @@ def test_classify_nux_assign_still_routes_normally():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andimiya",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_Q2
 
@@ -3088,15 +2867,14 @@ def test_classify_nux_review_requested_still_routes_normally():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andimiya",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_Q2
 
 
-def test_classify_nux_team_mention_still_routes_normally():
-    """team_mention on NUX is a team-level directed ping - INBOX
-    (team_mention isn't in Q1_REASONS, so it gets the default INBOX
-    routing; the point is the subscription filter doesn't DROP it)."""
+def test_classify_nux_team_mention_drops():
+    """team_mention now drops globally (it isn't a KEEP_REASONS ping), so
+    even on NUX it's cleared. The directed-ping reasons (review_requested,
+    assign, mention, security_alert) still survive."""
     c = triage.classify(
         _nux_notif("team_mention"),
         my_login="zkoppert",
@@ -3104,14 +2882,14 @@ def test_classify_nux_team_mention_still_routes_normally():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andimiya",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
-    assert c.bucket == triage.BUCKET_INBOX
+    assert c.bucket == triage.BUCKET_DROP
 
 
-def test_classify_non_filtered_repo_subscribed_still_routes_to_inbox():
-    """Repos NOT in SUBSCRIPTION_FILTERED_REPOS keep the normal
-    subscribed→INBOX routing."""
+def test_classify_non_filtered_repo_subscribed_drops():
+    """Repos NOT in any override list still drop subscribed under the
+    aggressive default-drop policy (subscribed is not a KEEP_REASONS
+    ping)."""
     notif = _nux_notif("subscribed")
     notif["repository"]["full_name"] = "github/some-other-repo"
     notif["subject"]["url"] = "https://api.github.com/repos/github/some-other-repo/pulls/1"
@@ -3122,9 +2900,8 @@ def test_classify_non_filtered_repo_subscribed_still_routes_to_inbox():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
-    assert c.bucket == triage.BUCKET_INBOX
+    assert c.bucket == triage.BUCKET_DROP
 
 
 def test_classify_nux_filter_runs_after_closed_state_drop():
@@ -3139,7 +2916,6 @@ def test_classify_nux_filter_runs_after_closed_state_drop():
         state_fetcher=lambda _: "merged",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
     assert "merged pullrequest" in c.reason
@@ -3159,7 +2935,6 @@ def test_classify_nux_subscribed_drops_regardless_of_read_state():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
 
@@ -3174,7 +2949,6 @@ def test_classify_nux_security_alert_still_routes_to_q1():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_Q2
 
@@ -3191,25 +2965,31 @@ def test_classify_subscription_filter_is_case_insensitive():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_DROP
     assert "subscription allowlist" in c.reason
 
 
-# --- Tests for super-linter/super-linter subscription filter ---
+# --- Tests for the owner-agnostic super-linter subscription filter ---
 
 
-def _superlinter_notif(reason: str) -> dict:
-    """Notification on super-linter/super-linter with the given reason."""
+def _superlinter_notif(
+    reason: str,
+    *,
+    owner: str = "super-linter",
+    title: str = "Update linting rules",
+) -> dict:
+    """Notification on a super-linter repo (any owner) with the given
+    reason. Defaults to a non-dependabot title so these tests isolate the
+    repo-override behavior from the earlier dependabot-bump drop."""
     return {
         "id": "sl-1",
         "reason": reason,
         "unread": True,
-        "repository": {"full_name": "super-linter/super-linter"},
+        "repository": {"full_name": f"{owner}/super-linter"},
         "subject": {
-            "title": "chore(deps): bump foo",
-            "url": "https://api.github.com/repos/super-linter/super-linter/pulls/9999",
+            "title": title,
+            "url": f"https://api.github.com/repos/{owner}/super-linter/pulls/9999",
             "latest_comment_url": None,
             "type": "PullRequest",
         },
@@ -3217,17 +2997,15 @@ def _superlinter_notif(reason: str) -> dict:
 
 
 def test_classify_super_linter_repo_subscribed_drops():
-    """Dependabot bumps and other subscribed-thread activity in the
-    super-linter repo drop - I'm a passive subscriber, not a
-    maintainer there."""
+    """Subscribed-thread activity in the canonical super-linter repo drops
+    via the owner-agnostic allowlist - I'm a passive subscriber there."""
     c = triage.classify(
         _superlinter_notif("subscribed"),
         my_login="zkoppert",
         q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
-        subject_author_fetcher=lambda _: "dependabot[bot]",
-        human_commenter_fetcher=lambda _, my_login: set(),
+        subject_author_fetcher=lambda _: "maintainer",
     )
     assert c.bucket == triage.BUCKET_DROP
     assert "subscription allowlist" in c.reason
@@ -3243,6 +3021,379 @@ def test_classify_super_linter_repo_mention_routes_to_q1():
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: ("maintainer", "@zkoppert thoughts?"),
         subject_author_fetcher=lambda _: "maintainer",
-        human_commenter_fetcher=lambda _, my_login: set(),
     )
     assert c.bucket == triage.BUCKET_Q2
+
+
+def test_classify_super_linter_github_fork_subscribed_drops():
+    """The `github/super-linter` fork must drop subscribed noise too - the
+    owner-agnostic `^[^/]+/super-linter$` match is what stops the fork's
+    activity from slipping through (the old exact-match list missed it)."""
+    c = triage.classify(
+        _superlinter_notif("subscribed", owner="github"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "maintainer",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "subscription allowlist" in c.reason
+
+
+def test_classify_super_linter_github_fork_review_requested_drops():
+    """review_requested on the `github/super-linter` fork drops - I only
+    care about direct mentions there, not review traffic."""
+    c = triage.classify(
+        _superlinter_notif("review_requested", owner="github"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "maintainer",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert "subscription allowlist" in c.reason
+
+
+def test_classify_super_linter_github_fork_mention_kept():
+    """A direct @-mention on the `github/super-linter` fork is kept."""
+    c = triage.classify(
+        _superlinter_notif("mention", owner="github"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "maintainer",
+    )
+    assert c.bucket == triage.BUCKET_Q2
+
+
+def test_classify_super_linter_security_alert_survives():
+    """A security alert on a super-linter repo I maintain survives the
+    passive-subscriber filter - vulnerabilities are never silently
+    dropped (carve-out)."""
+    c = triage.classify(
+        _superlinter_notif("security_alert", owner="github"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "maintainer",
+    )
+    assert c.bucket == triage.BUCKET_Q2
+
+
+def test_classify_super_linter_fork_dependabot_bump_left_unread():
+    """A Dependabot bump on the `github/super-linter` fork drops from the
+    inbox but is left unread on GitHub (skip_mark_done) so the separate
+    triage-dependabot tool can consume it - it must not slip into the
+    inbox or be marked done by the repo override."""
+    c = triage.classify(
+        _superlinter_notif(
+            "subscribed", owner="github", title="chore(deps): bump foo from 1 to 2"
+        ),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "dependabot[bot]",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert c.skip_mark_done is True
+
+
+# ----------------------------------------------------------------------
+# Aggressive "bulk triage" policy: KEEP_REASONS default-drop, repo
+# overrides, dependabot skip-mark-done
+# ----------------------------------------------------------------------
+
+
+def _repo_notif(
+    reason: str,
+    *,
+    repo: str,
+    title: str = "Some PR",
+    subject_type: str = "PullRequest",
+    number: int = 7,
+) -> dict:
+    """A notification on an arbitrary repo with the given reason/title."""
+    kind = "pulls" if subject_type == "PullRequest" else "issues"
+    return {
+        "id": f"bulk-{reason}-{number}",
+        "reason": reason,
+        "unread": True,
+        "repository": {"full_name": repo},
+        "subject": {
+            "title": title,
+            "url": f"https://api.github.com/repos/{repo}/{kind}/{number}",
+            "latest_comment_url": None,
+            "type": subject_type,
+        },
+    }
+
+
+def _classify(notif, *, q1_logins=None, author="someone-else", state="open"):
+    """Classify with non-network stub fetchers."""
+    return triage.classify(
+        notif,
+        my_login="zkoppert",
+        q1_logins=q1_logins or set(),
+        state_fetcher=lambda _: state,
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: author,
+    )
+
+
+def test_team_mention_random_repo_drops():
+    """team_mention on an arbitrary repo drops (core behavioral change)."""
+    c = _classify(_repo_notif("team_mention", repo="some-org/some-repo"))
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_comment_random_repo_without_mention_drops():
+    """A plain comment with no body @-mention drops under the policy."""
+    c = _classify(_repo_notif("comment", repo="some-org/some-repo"))
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_state_change_random_repo_drops():
+    """state_change is passive noise - drop it."""
+    c = _classify(_repo_notif("state_change", repo="some-org/some-repo"))
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_author_random_repo_kept_in_inbox():
+    """author on an open PR in a non-override repo stays as an inbox
+    status item (a KEEP_REASONS ping)."""
+    c = _classify(_repo_notif("author", repo="some-org/some-repo"), author="zkoppert")
+    assert c.bucket == triage.BUCKET_INBOX
+
+
+def test_review_requested_random_repo_kept():
+    """review_requested survives - routes to INBOX when the author is not
+    a NUX teammate, Q2 when they are."""
+    inbox = _classify(_repo_notif("review_requested", repo="some-org/x"))
+    assert inbox.bucket == triage.BUCKET_INBOX
+    q2 = _classify(
+        _repo_notif("review_requested", repo="some-org/x"),
+        q1_logins={"andimiya"},
+        author="andimiya",
+    )
+    assert q2.bucket == triage.BUCKET_Q2
+
+
+def test_assign_and_mention_random_repo_kept_q2():
+    """assign and mention survive to Q2."""
+    for reason in ("assign", "mention"):
+        c = _classify(_repo_notif(reason, repo="some-org/x"))
+        assert c.bucket == triage.BUCKET_Q2, reason
+
+
+# --- github/pull-requests AoR title filter ---
+
+
+def test_pull_requests_aor_title_kept():
+    """A github/pull-requests notification whose title is about our AoR
+    (the /pulls dashboard or inbox) is kept and routed normally."""
+    for title in ("Improve the pulls dashboard", "Fix inbox grouping", "tweak /pulls"):
+        c = _classify(
+            _repo_notif("review_requested", repo="github/pull-requests", title=title)
+        )
+        assert c.bucket != triage.BUCKET_DROP, title
+
+
+def test_pull_requests_non_aor_title_drops():
+    """A github/pull-requests notification unrelated to our AoR drops for
+    non-protected reasons - the rest of that repo has its own FR system."""
+    for reason in ("review_requested", "subscribed", "team_mention"):
+        c = _classify(
+            _repo_notif(reason, repo="github/pull-requests", title="Refactor merge queue")
+        )
+        assert c.bucket == triage.BUCKET_DROP, reason
+
+
+def test_pull_requests_non_aor_direct_ping_survives():
+    """Carve-out: a direct @-mention, assignment, or security alert on
+    github/pull-requests survives even when the title is not about our AoR
+    - a personal ping is too important to silently drop."""
+    mention = _classify(
+        _repo_notif("mention", repo="github/pull-requests", title="Refactor merge queue")
+    )
+    assert mention.bucket == triage.BUCKET_Q2
+    assign = _classify(
+        _repo_notif("assign", repo="github/pull-requests", title="Refactor merge queue")
+    )
+    assert assign.bucket == triage.BUCKET_Q2
+    sec = _classify(
+        _repo_notif("security_alert", repo="github/pull-requests", title="Refactor merge queue")
+    )
+    assert sec.bucket == triage.BUCKET_Q2
+
+
+# --- always-drop repos ---
+
+
+def test_dot_github_repo_always_drops():
+    """github/.github is fully tuned out - drop every reason, including
+    direct pings and security alerts."""
+    for reason in ("mention", "assign", "review_requested", "subscribed", "security_alert"):
+        c = _classify(_repo_notif(reason, repo="github/.github"))
+        assert c.bucket == triage.BUCKET_DROP, reason
+
+
+def test_core_ux_elt_repo_always_drops():
+    """github/core-ux-elt is unsubscribed - always drop, even direct
+    pings and security alerts."""
+    for reason in ("mention", "assign", "review_requested", "subscribed", "security_alert"):
+        c = _classify(_repo_notif(reason, repo="github/core-ux-elt"))
+        assert c.bucket == triage.BUCKET_DROP, reason
+
+
+# --- github/curated-data: direct-ping / security only ---
+
+
+def test_curated_data_mention_kept():
+    c = _classify(_repo_notif("mention", repo="github/curated-data"))
+    assert c.bucket == triage.BUCKET_Q2
+
+
+def test_curated_data_subscribed_drops():
+    c = _classify(_repo_notif("subscribed", repo="github/curated-data"))
+    assert c.bucket == triage.BUCKET_DROP
+
+
+def test_curated_data_assign_and_security_alert_survive():
+    """Carve-out applies to curated-data too: a direct assignment or a
+    security alert gets in even though only `mention` was listed."""
+    for reason in ("assign", "security_alert"):
+        c = _classify(_repo_notif(reason, repo="github/curated-data"))
+        assert c.bucket == triage.BUCKET_Q2, reason
+
+
+# --- github/markup: security-title or direct-ping only ---
+
+
+def test_markup_security_title_kept():
+    """A security-titled markup notification is kept even on a passive
+    reason - vulnerabilities are never silently dropped."""
+    for title in ("Security: fix XSS in renderer", "Patch CVE-2025-0001", "vulnerability in parser"):
+        c = _classify(_repo_notif("subscribed", repo="github/markup", title=title))
+        assert c.bucket == triage.BUCKET_INBOX, title
+
+
+def test_markup_mention_kept():
+    c = _classify(_repo_notif("mention", repo="github/markup", title="question for you"))
+    assert c.bucket == triage.BUCKET_Q2
+
+
+def test_markup_assign_and_security_alert_survive():
+    """Carve-out: a direct assignment or a security alert on markup
+    survives even with a non-security title (low-priority repo, but a
+    direct ping still matters)."""
+    for reason in ("assign", "security_alert"):
+        c = _classify(_repo_notif(reason, repo="github/markup", title="Bump rendering perf"))
+        assert c.bucket == triage.BUCKET_Q2, reason
+
+
+def test_markup_normal_title_drops():
+    """A non-security, non-ping markup notification drops (low priority)."""
+    c = _classify(
+        _repo_notif("review_requested", repo="github/markup", title="Bump rendering perf")
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
+# --- dependabot bump: dropped from inbox, NOT marked done ---
+
+
+def test_dependabot_bump_classify_skips_mark_done():
+    """A conventional-commit dependabot bump drops with skip_mark_done."""
+    for title in (
+        "build(deps): bump actions/checkout from 4 to 5",
+        "chore(deps-dev): bump pytest from 8.1 to 8.2",
+        "Bump urllib3 from 2.0.0 to 2.2.0",
+        "deps(docker): bump python from 3.14.3 to 3.14.6 in /dir",
+        "deps(npm): bump the eslint group with 3 updates",
+        "Bump the npm group with 5 updates",
+        "Bump the production-dependencies group across 1 directory with 3 updates",
+        # super-linter uses varied conventional-commit types/scopes:
+        "ci(dev-docker): bump node from 26.1.0-trixie to 26.3.0-trixie in /dev",
+        "ci(github-actions): bump docker/login-action from 4.1.0 to 4.2.0",
+        "chore(dev-docker): bump node from 26.1.0-bookworm to 26.1.0-trixie",
+        "ci(github-actions): bump the dev-ci-tools group across 1 directory",
+    ):
+        c = _classify(_repo_notif("subscribed", repo="some-org/x", title=title))
+        assert c.bucket == triage.BUCKET_DROP, title
+        assert c.skip_mark_done is True, title
+
+
+def test_dependabot_bump_does_not_false_positive_on_human_titles():
+    """Human PR titles that merely contain "bump" mid-sentence must NOT be
+    mistaken for Dependabot bumps - otherwise they'd be dropped from the
+    inbox and left unread forever (triage-dependabot claims by author, so
+    it would never pick them up)."""
+    for title in (
+        "Refactor: bump the timeout from 5s to 30s",
+        "Investigate why the cache bump regressed latency",
+        "Fix payment processing bug",
+    ):
+        c = _classify(_repo_notif("review_requested", repo="some-org/x", title=title))
+        assert c.skip_mark_done is False, title
+        assert c.bucket != triage.BUCKET_DROP, title
+
+
+def test_run_dependabot_bump_dropped_but_not_marked_done(todo_file):
+    """End-to-end: a dependabot bump is dropped from the inbox, counted in
+    left_for_dependabot, and its GitHub thread is NOT deleted (marked
+    done) - triage-dependabot consumes it instead."""
+    notif = _repo_notif(
+        "subscribed",
+        repo="some-org/x",
+        title="Bump lodash from 4.17.20 to 4.17.21",
+        number=42,
+    )
+    notif["id"] = "dep-99"
+    delete_calls: list[tuple] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(tuple(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        responses = {
+            "/user": json.dumps({"login": "zkoppert"}),
+            "/notifications?all=true": json.dumps([notif]),
+        }
+        idx = cmd.index("api")
+        after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
+        path = after[0] if after else ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=responses.get(path, ""), stderr="")
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        stats = triage.run(args)
+
+    assert stats.dropped == 1
+    assert stats.left_for_dependabot == 1
+    assert stats.added_inbox == 0
+    assert delete_calls == [], "dependabot bump must NOT be marked done"
+
+
+def test_run_dependabot_bump_not_added_to_todo(todo_file):
+    """A dependabot bump leaves no entry in todo.yml."""
+    notif = _repo_notif(
+        "subscribed", repo="some-org/x", title="chore(deps): bump foo from 1 to 2"
+    )
+    notif["id"] = "dep-100"
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+    }
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        triage.run(args)
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["inbox"] == [] or all(
+        e.get("notification", {}).get("thread_id") != "dep-100"
+        for e in data["inbox"]
+    )

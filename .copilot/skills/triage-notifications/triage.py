@@ -75,6 +75,22 @@ Q1_REASONS: set[str] = {
     "security_alert",
 }
 
+# Aggressive "bulk triage" policy: only directed, personal-action reasons
+# survive. Everything else (subscribed, team_mention, comment,
+# state_change, ci_activity, manual, ...) is passive subscription noise
+# that drops and is marked done on GitHub. `author` stays so I keep
+# tracking my own open PRs/issues; closed/merged ones still drop (and
+# archive) via the closed-state check. Repo-level overrides below can be
+# MORE restrictive than this set (e.g. dropping `author` on a repo I'm
+# only passively subscribed to).
+KEEP_REASONS: set[str] = {
+    "review_requested",
+    "assign",
+    "author",
+    "mention",
+    "security_alert",
+}
+
 # Subject states that are candidates for the drop bucket.
 CLOSED_STATES: set[str] = {"closed", "merged"}
 
@@ -102,6 +118,11 @@ TITLE_DROP_PATTERNS: list[re.Pattern[str]] = [
     ),
     re.compile(_TITLE_DROP_PREFIX + r"flaky test\s*:", re.IGNORECASE),
     re.compile(_TITLE_DROP_PREFIX + r"test flake\s*:", re.IGNORECASE),
+    # `Enable Dependabot` PRs are routine config PRs I author to turn on
+    # Dependabot for a repo. They never need triage. No trailing colon
+    # here (unlike the flaky-test shapes) - the phrase IS the whole title.
+    # mention/assign still override via TITLE_DROP_PROTECTED_REASONS.
+    re.compile(_TITLE_DROP_PREFIX + r"enable dependabot\b", re.IGNORECASE),
 ]
 
 # Reasons where a direct human action overrides title-pattern drops.
@@ -112,41 +133,105 @@ TITLE_DROP_PROTECTED_REASONS: set[str] = {"mention", "assign"}
 # Reasons that get a subject-state check at classify time. If the PR / issue
 # is already closed/merged when the notification first arrives, drop it
 # instead of routing to a quadrant or inbox - there is nothing left to do.
+# Only KEEP_REASONS that could otherwise be surfaced need this check:
+# `author` so I can archive my own merged PRs, and review_requested /
+# mention / assign so a stale directed ping doesn't reach the inbox.
+# Passive reasons (team_mention, manual, subscribed, ...) are skipped here
+# because they default-drop regardless of subject state, so paying for a
+# state fetch on them would be wasted work.
 STATEFUL_REASONS: set[str] = {
     "review_requested",
     "mention",
     "assign",
-    "manual",
-    "team_mention",
     "author",
 }
 
+# Dependabot version-bump PRs. These drop from the inbox but are NEVER
+# marked done on GitHub: a separate dependency-handler tool
+# (triage-dependabot) consumes those notifications, so this tool must
+# leave them unread. Detection is title-based (no extra API call) because
+# Dependabot uses stable title shapes: conventional-commit
+# `build(deps): ...` / `chore(deps-dev): ...` / super-linter's
+# `deps(<ecosystem>): bump ...` and `ci(<scope>): bump ...`, the classic
+# `Bump <pkg> from <x> to <y>`, and grouped `Bump the <group> group`.
+# Missing a real bump is worse than a rare false positive: a missed bump
+# would be marked done and never reach triage-dependabot, so the patterns
+# err toward catching dependency-bump shapes. The single package token
+# (`\S+`) before `from` rules out human titles like
+# `Refactor: bump the timeout from 5s to 30s`.
+#
+# `_CC_PREFIX` is an optional leading conventional-commit `type(scope): `
+# tag (e.g. `ci(dev-docker): `) so super-linter's prefixed bump titles
+# still match.
+_CC_PREFIX = r"^\s*(?:[^:\n]{1,40}:\s+)?"
+DEPENDABOT_BUMP_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"^\s*(?:build|chore)\(deps(?:-dev)?\)", re.IGNORECASE),
+    re.compile(r"^\s*deps\([^)]*\)\s*:?\s*bump\b", re.IGNORECASE),
+    re.compile(_CC_PREFIX + r"bump\s+\S+\s+from\s+.+\s+to\s+", re.IGNORECASE),
+    re.compile(_CC_PREFIX + r"bump\s+the\s+.+\sgroup\b", re.IGNORECASE),
+]
+
 # Repos where I'm only interested in directed pings - everything else
-# (subscribed, manual, comment, ci_activity, author, etc.) is auto-
+# (subscribed, team_mention, comment, ci_activity, author, etc.) is auto-
 # subscription noise that should drop and be marked done on GitHub.
-# Maps full_name (lowercase) -> set of allowed reasons. Anything
-# outside the set drops at classify time, before any reason-based
-# routing. `security_alert` is kept so Dependabot vulnerability /
-# secret-scanning alerts still reach Q1 on filtered repos.
+# Maps full_name (lowercase) -> set of allowed NON-protected reasons.
+# Direct pings (mention, assign) and security_alert are handled earlier by
+# REPO_OVERRIDE_PROTECTED_REASONS and always survive, so they do NOT need
+# to be listed here; these sets only decide the remaining reasons.
 SUBSCRIPTION_FILTERED_REPOS: dict[str, set[str]] = {
-    "github/new-user-experience": {
-        "review_requested",
-        "assign",
-        "mention",
-        "team_mention",
-        "security_alert",
-    },
-    # super-linter is a community repo Zack subscribes to but isn't an
-    # active maintainer on. Drop subscription noise (dependabot bumps,
-    # comments on others' PRs, ci_activity) unless he's directly pinged.
-    "super-linter/super-linter": {
-        "mention",
-        "team_mention",
-        "assign",
-        "review_requested",
-        "security_alert",
-    },
+    # NUX team repo: keep review requests (mention/assign/security_alert
+    # already survive via the carve-out); drop my own PR noise (`author`)
+    # and team_mention.
+    "github/new-user-experience": {"review_requested"},
+    # curated-data: nothing beyond the carve-out - only direct pings and
+    # security alerts get in.
+    "github/curated-data": set(),
 }
+
+# Repos I've fully tuned out of: drop every notification regardless of
+# reason, including direct pings and security alerts. These are repos I
+# unsubscribe from entirely (profile READMEs, bot pings, ELT threads).
+ALWAYS_DROP_REPOS: set[str] = {"github/.github", "github/core-ux-elt"}
+
+# Reasons that always survive the relevance/priority repo gates below (but
+# NOT ALWAYS_DROP_REPOS). A direct @-mention, a direct assignment, or a
+# vulnerability alert is too important to silently drop just because a
+# repo's title or subscription filter did not match.
+REPO_OVERRIDE_PROTECTED_REASONS: set[str] = {"mention", "assign", "security_alert"}
+
+# Owner-agnostic subscription filters, matched by regex against the
+# lowercased full_name. Used where the same project lives under multiple
+# owners (e.g. `super-linter/super-linter` AND the `github/super-linter`
+# fork, whose Dependabot PRs would otherwise slip through an exact-match
+# allowlist). Each entry is (compiled_pattern, allowed_non_protected_reasons).
+SUBSCRIPTION_FILTERED_REPO_PATTERNS: list[tuple[re.Pattern[str], set[str]]] = [
+    # super-linter (any owner): I'm a passive subscriber, not a maintainer.
+    # Nothing beyond the carve-out gets in (direct pings / security alerts
+    # still survive); dependabot bumps, comments, and CI noise drop.
+    (re.compile(r"^[^/]+/super-linter$"), set()),
+]
+
+# Repos where the kept set is gated by the subject TITLE rather than the
+# reason. Maps full_name (lowercase) -> tuple of case-insensitive keyword
+# substrings. A notification is kept (routed normally) only if its title
+# contains one of the keywords; otherwise it drops regardless of reason.
+# Used for github/pull-requests, where NUX owns only the /pulls dashboard
+# and the inbox feature - the rest of that repo has its own first-responder
+# system and is noise to us.
+TITLE_AOR_REQUIRED_REPOS: dict[str, tuple[str, ...]] = {
+    "github/pull-requests": ("dashboard", "inbox", "/pulls", "pulls dashboard"),
+}
+
+# Repos I maintain but treat as low priority unless a notification is
+# security-related or a direct @-mention. Non-security, non-mention
+# notifications drop; security-titled ones are kept (INBOX) even on
+# otherwise-passive reasons so vulnerabilities are never silently dropped.
+SECURITY_TITLE_KEEP_REPOS: set[str] = {"github/markup"}
+
+# Matches security-related subject titles (security / vulnerability / CVE).
+SECURITY_TITLE_PATTERN: re.Pattern[str] = re.compile(
+    r"\b(?:security|vuln\w*|cve)\b", re.IGNORECASE
+)
 
 DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
 
@@ -168,6 +253,10 @@ class Classification:
     # an entry to todo.yml's `done` section so the work shows up in
     # biannual reflections.
     archive_to_done: bool = False
+    # When BUCKET_DROP fires on a Dependabot version-bump PR, drop it from
+    # the inbox but do NOT mark the GitHub notification done - the separate
+    # triage-dependabot tool consumes those threads and needs them unread.
+    skip_mark_done: bool = False
 
 
 @dataclass
@@ -183,7 +272,88 @@ class TriageStats:
     pruned_stale: int = 0
     pruned_by_reason: dict[str, int] = field(default_factory=dict)
     archived_to_done: int = 0
+    # Dependabot bumps dropped from the inbox but left unread on GitHub for
+    # triage-dependabot to consume.
+    left_for_dependabot: int = 0
     errors: list[str] = field(default_factory=list)
+
+
+def is_dependabot_bump(title: str) -> bool:
+    """Return True if `title` looks like a Dependabot version-bump PR."""
+    text = title or ""
+    return any(pattern.search(text) for pattern in DEPENDABOT_BUMP_PATTERNS)
+
+
+def is_security_title(title: str) -> bool:
+    """Return True if `title` mentions security / vulnerability / CVE."""
+    return bool(SECURITY_TITLE_PATTERN.search(title or ""))
+
+
+def repo_override(repo_full: str, reason: str, title: str) -> Classification | None:
+    """Apply repo-level overrides before reason routing.
+
+    Returns a Classification when a repo's policy decides the outcome
+    (usually ``BUCKET_DROP``, or ``BUCKET_INBOX`` for the markup
+    security-keep case), or ``None`` to fall through to normal reason
+    routing. Repo lookups are case-insensitive.
+    """
+    repo_lc = (repo_full or "").lower()
+
+    # Fully tuned-out repos: drop every notification, even direct pings and
+    # security alerts. These are repos I've unsubscribed from entirely.
+    if repo_lc in ALWAYS_DROP_REPOS:
+        return Classification(
+            BUCKET_DROP, f"{repo_full}: always-drop repo (unsubscribed)"
+        )
+
+    # Safety carve-out: a direct @-mention, a direct assignment, or a
+    # security alert always survives the relevance/priority gates below -
+    # they're too important to silently drop on a title/subscription miss.
+    if reason in REPO_OVERRIDE_PROTECTED_REASONS:
+        return None
+
+    # github/pull-requests: keep only titles about NUX's area of
+    # responsibility (the /pulls dashboard and the inbox feature); the rest
+    # of the repo has its own first-responder system. AoR-matched titles
+    # route normally (and are still subject to KEEP_REASONS).
+    aor_keywords = TITLE_AOR_REQUIRED_REPOS.get(repo_lc)
+    if aor_keywords is not None:
+        if any(kw in title.lower() for kw in aor_keywords):
+            return None
+        return Classification(
+            BUCKET_DROP,
+            f"{repo_full}: title not about NUX AoR (dashboard/inbox)",
+        )
+
+    # github/markup: low priority unless security-related (direct mentions
+    # and assignments already survived via the carve-out above).
+    if repo_lc in SECURITY_TITLE_KEEP_REPOS:
+        if is_security_title(title):
+            return Classification(
+                BUCKET_INBOX, f"{repo_full}: security-related title - kept"
+            )
+        return Classification(
+            BUCKET_DROP, f"{repo_full}: non-security, non-ping - low priority"
+        )
+
+    # Exact-match subscription allowlists (NUX, curated-data). These list
+    # only the allowed NON-protected reasons; everything else drops.
+    allowed = SUBSCRIPTION_FILTERED_REPOS.get(repo_lc)
+    if allowed is not None and reason not in allowed:
+        return Classification(
+            BUCKET_DROP,
+            f"{repo_full}: reason '{reason}' not in subscription allowlist",
+        )
+
+    # Owner-agnostic regex allowlists (super-linter and its forks).
+    for pattern, allowed_reasons in SUBSCRIPTION_FILTERED_REPO_PATTERNS:
+        if pattern.match(repo_lc) and reason not in allowed_reasons:
+            return Classification(
+                BUCKET_DROP,
+                f"{repo_full}: reason '{reason}' not in subscription allowlist",
+            )
+
+    return None
 
 
 # Pruner return sentinels for check_subject_stale().
@@ -321,81 +491,6 @@ def is_super_linter(author: str | None, body: str | None) -> bool:
     return False
 
 
-def fetch_pr_human_commenters(
-    notif: dict[str, Any], *, my_login: str
-) -> set[str] | None:
-    """Return the set of human GitHub logins (other than `my_login`) who
-    have commented or reviewed the PR.
-
-    Walks three endpoints because GitHub splits PR conversation across
-    them: ``/issues/{n}/comments`` (top-level), ``/pulls/{n}/comments``
-    (inline review comments), and ``/pulls/{n}/reviews`` (review summary
-    submissions). For each commenter we keep only ``user.type == "User"``
-    entries - bots like Copilot Code Review (``Bot``) are excluded by
-    design so a self-authored PR with only bot reviewers can still drop.
-
-    Returns ``None`` on any API or parse failure so callers can be
-    conservative (keep the notification instead of dropping it under
-    uncertainty).
-    """
-    subject = notif.get("subject") or {}
-    url = subject.get("url") or ""
-    if "/pulls/" not in url:
-        return None
-    # url is `https://api.github.com/repos/{owner}/{repo}/pulls/{n}` -
-    # extract the repo + number for the three derived endpoints.
-    path = url.replace("https://api.github.com", "")
-    parts = path.strip("/").split("/")
-    if len(parts) < 5 or parts[0] != "repos" or parts[3] != "pulls":
-        return None
-    owner, repo, number = parts[1], parts[2], parts[4]
-    base = f"/repos/{owner}/{repo}"
-    endpoints = [
-        f"{base}/issues/{number}/comments",
-        f"{base}/pulls/{number}/comments",
-        f"{base}/pulls/{number}/reviews",
-    ]
-    commenters: set[str] = set()
-    my_login_lc = my_login.lower()
-    for endpoint in endpoints:
-        try:
-            out = run_gh(
-                ["api", "--paginate", "--slurp", endpoint], timeout=30
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            logger.warning(
-                "fetch_pr_human_commenters %s failed: %s", endpoint, exc
-            )
-            return None
-        # `--slurp` wraps each page response in an outer JSON array so we
-        # can json.loads the whole thing safely - body content containing
-        # `][` (markdown reference links, array indexing) cannot fragment
-        # the parse. Matches the pattern used by fetch_notifications.
-        try:
-            pages = json.loads(out) if out.strip() else []
-        except json.JSONDecodeError as exc:
-            logger.warning(
-                "fetch_pr_human_commenters parse failed for %s: %s",
-                endpoint,
-                exc,
-            )
-            return None
-        for page in pages or []:
-            if not isinstance(page, list):
-                continue
-            for entry in page:
-                if not isinstance(entry, dict):
-                    continue
-                user = entry.get("user") or {}
-                if (user.get("type") or "").lower() != "user":
-                    continue
-                login = user.get("login") or ""
-                if not login or login.lower() == my_login_lc:
-                    continue
-                commenters.add(login)
-    return commenters
-
-
 def mentions_me(body: str | None, my_login: str) -> bool:
     """Return True if `body` contains an @-mention of `my_login` or `me`."""
     if not body:
@@ -412,13 +507,12 @@ def classify(
     state_fetcher=fetch_thread_state,
     comment_fetcher=fetch_latest_comment,
     subject_author_fetcher=fetch_subject_author,
-    human_commenter_fetcher=fetch_pr_human_commenters,
 ) -> Classification:
     """Decide which bucket a notification belongs in.
 
-    `state_fetcher`, `comment_fetcher`, `subject_author_fetcher`, and
-    `human_commenter_fetcher` are injectable so tests can avoid network
-    calls. They default to the live API helpers.
+    `state_fetcher`, `comment_fetcher`, and `subject_author_fetcher` are
+    injectable so tests can avoid network calls. They default to the live
+    API helpers.
 
     Read notifications classify identically to unread ones; the
     `already_tracked` short-circuit prevents the same notification from
@@ -431,7 +525,6 @@ def classify(
         state_fetcher=state_fetcher,
         comment_fetcher=comment_fetcher,
         subject_author_fetcher=subject_author_fetcher,
-        human_commenter_fetcher=human_commenter_fetcher,
     )
 
 
@@ -443,20 +536,22 @@ def _classify_internal(
     state_fetcher=fetch_thread_state,
     comment_fetcher=fetch_latest_comment,
     subject_author_fetcher=fetch_subject_author,
-    human_commenter_fetcher=fetch_pr_human_commenters,
 ) -> Classification:
-    """Reason-based classification. Split from `classify` for testability
-    and because the public entry point may grow additional pre/post
-    processing later.
+    """Reason-based classification under the aggressive "bulk triage"
+    policy: only directed personal-action reasons (KEEP_REASONS) and
+    AoR-matched items survive; everything else drops and is marked done.
+
+    Split from `classify` for testability and because the public entry
+    point may grow additional pre/post processing later.
     """
     reason = (notif.get("reason") or "").lower()
     subject = notif.get("subject") or {}
     subject_type = (subject.get("type") or "").lower()
     title = subject.get("title") or ""
+    repo_full = (notif.get("repository") or {}).get("full_name") or ""
 
-    # Title-pattern drop: repetitive system-generated noise (intermittent
-    # test failures, flaky test reports) lands as `team_mention` on open
-    # issues and would otherwise fall through to the inbox. Mention/assign
+    # Title-pattern drop: repetitive system-generated noise (flaky-test
+    # reports) and routine `Enable Dependabot` config PRs. Mention/assign
     # reasons skip this so a direct human ping always reaches the inbox.
     if reason not in TITLE_DROP_PROTECTED_REASONS:
         for pattern in TITLE_DROP_PATTERNS:
@@ -465,6 +560,24 @@ def _classify_internal(
                     BUCKET_DROP,
                     f"title matches drop pattern /{pattern.pattern}/",
                 )
+
+    # Dependabot version-bump PRs: drop from the inbox but NEVER mark the
+    # GitHub notification done - triage-dependabot consumes those threads
+    # and needs them unread. Detected by title (no extra API call) and
+    # placed before the closed-state and repo-override drops so a bump on
+    # any repo (incl. super-linter) is never marked done by those paths. A
+    # direct mention/assign overrides this so a human ping on a bump PR
+    # still reaches me.
+    if (
+        reason not in TITLE_DROP_PROTECTED_REASONS
+        and subject_type == "pullrequest"
+        and is_dependabot_bump(title)
+    ):
+        return Classification(
+            BUCKET_DROP,
+            "Dependabot version bump - left unread for triage-dependabot",
+            skip_mark_done=True,
+        )
 
     # Cheap early drop: if the subject is already closed/merged when the
     # notification first lands, there is nothing left to do. Only check
@@ -490,51 +603,21 @@ def _classify_internal(
                 archive_to_done=archive,
             )
 
-    # Self-authored `Enable Dependabot` housekeeping PRs are pure noise
-    # once any bots (Copilot reviewer, super-linter) have weighed in -
-    # there's nothing to triage unless an actual human reviewer joins.
-    # Drop only when no human besides me has commented. On fetch failure
-    # (None), fall through and let the normal classifier handle it.
-    # Placed AFTER the closed-state drop so already-closed Enable
-    # Dependabot PRs drop on the cheap state check instead of paying
-    # for 3 commenter API calls first.
-    if (
-        reason == "author"
-        and subject_type == "pullrequest"
-        and title.strip().lower() == "enable dependabot"
-    ):
-        commenters = human_commenter_fetcher(notif, my_login=my_login)
-        if commenters is not None and not commenters:
-            return Classification(
-                BUCKET_DROP,
-                "self-authored Enable Dependabot PR with no human commenters",
-            )
-
-    # Repo-scoped subscription filter: for repos in
-    # SUBSCRIPTION_FILTERED_REPOS (e.g. github/new-user-experience), only
-    # directed pings (review_requested / assign / mention / team_mention /
-    # security_alert) are interesting; everything else (subscribed,
-    # manual, comment, ci_activity, author, ...) is auto-subscription
-    # noise that should drop and be marked done. Placed after the title/
-    # closed-state/Enable Dependabot drops so those still fire on
-    # filtered repos too, but before reason routing so we don't pay for
+    # Repo-level overrides: per-repo policies that can be more restrictive
+    # than the global KEEP_REASONS (e.g. github/.github always drops,
+    # github/markup keeps only security/mention, github/pull-requests keeps
+    # only AoR titles, super-linter forks keep only mentions). Placed after
+    # the title / closed-state / Dependabot drops so those still fire on
+    # override repos, but before reason routing so we don't pay for
     # state/author fetches on reasons we're about to discard.
-    # Lookup is case-insensitive (`full_name.lower()`) so future entries
-    # for mixed-case repos like `github/CodeQL` don't silently miss.
-    repo_full = (notif.get("repository") or {}).get("full_name") or ""
-    allowed_reasons = SUBSCRIPTION_FILTERED_REPOS.get(repo_full.lower())
-    if allowed_reasons is not None and reason not in allowed_reasons:
-        return Classification(
-            BUCKET_DROP,
-            f"{repo_full}: reason '{reason}' not in subscription allowlist",
-        )
+    override = repo_override(repo_full, reason, title)
+    if override is not None:
+        return override
 
-    # Already-viewed notifications that would otherwise route to
-    # inbox/Q1 are handled by the `classify` wrapper which post-processes
-    # the result of this function. The DROP rules above already fire for
-    # read notifications too, so noise like `ci_activity` and
-    # comment-on-closed still get cleaned up regardless of read status.
-
+    # Reason routing for the surviving (KEEP_REASONS) notifications. Both
+    # read and unread notifications route identically; the DROP rules above
+    # already fire for read notifications too, so noise gets cleaned up
+    # regardless of read status.
     if reason == "review_requested":
         # Auto-Q2 only when the PR author is on the narrow allowlist.
         # GitHub doesn't put the requester in the notification payload, and
@@ -554,10 +637,9 @@ def _classify_internal(
             "review_requested - PR author not on Q2 allowlist (or unknown)",
         )
 
-    if reason in Q1_REASONS:
+    if reason in Q1_REASONS:  # mention, assign, security_alert
         if reason in {"assign", "mention"}:
-            subject_type = (notif.get("subject") or {}).get("type")
-            if subject_type == "PullRequest":
+            if (notif.get("subject") or {}).get("type") == "PullRequest":
                 author = subject_author_fetcher(notif)
                 if author and author.lower() == my_login.lower():
                     return Classification(
@@ -566,12 +648,16 @@ def _classify_internal(
                     )
         return Classification(BUCKET_Q2, f"{reason} → Q2")
 
-    if reason == "manual":
-        # Subscribed deliberately. Surface as actionable but let user
-        # triage rather than force Q1.
-        return Classification(BUCKET_INBOX, "manual subscription")
+    if reason == "author":
+        # A PR/issue I opened that is still open (closed/merged ones drop
+        # and archive via the closed-state check above). Keep as an inbox
+        # status item so I can see my own in-flight work.
+        return Classification(BUCKET_INBOX, "author - open PR/issue I opened")
 
     if reason == "comment":
+        # Under aggressive triage a plain comment is noise UNLESS the body
+        # @-mentions me directly (GitHub occasionally files a direct ping
+        # as `comment`). Closed/merged threads and super-linter posts drop.
         state = state_fetcher(notif)
         if state in CLOSED_STATES:
             return Classification(BUCKET_DROP, f"comment on {state} {subject_type}")
@@ -580,23 +666,21 @@ def _classify_internal(
             return Classification(BUCKET_Q2, f"@mention in comment by @{author}")
         if is_super_linter(author, body):
             return Classification(BUCKET_DROP, "super-linter comment without @mention")
-        return Classification(BUCKET_INBOX, "comment thread (not closed)")
+        return Classification(BUCKET_DROP, "comment without a direct @mention")
 
-    if reason == "ci_activity":
-        # CI on someone else's PR is generally noise; on Zack's own PRs
-        # it's still in his GitHub UI and rarely needs todo tracking.
-        return Classification(BUCKET_DROP, "ci_activity")
+    # Defensive: any KEEP reason not explicitly routed above surfaces for
+    # human triage rather than dropping (future-proofing if KEEP_REASONS
+    # grows). All current KEEP reasons are handled above, so this is rarely
+    # reached.
+    if reason in KEEP_REASONS:
+        return Classification(BUCKET_INBOX, f"{reason} - inbox by default")
 
-    if reason == "subscribed":
-        state = state_fetcher(notif)
-        if state in CLOSED_STATES:
-            return Classification(
-                BUCKET_DROP, f"subscribed notice on {state} {subject_type}"
-            )
-        return Classification(BUCKET_INBOX, "subscribed thread (not closed)")
-
-    # Unknown reason: be safe and surface for human triage.
-    return Classification(BUCKET_INBOX, f"unknown reason '{reason}' - inbox by default")
+    # Default drop: every other reason (subscribed, team_mention,
+    # state_change, ci_activity, manual, ...) is passive subscription noise
+    # under the aggressive triage policy. Drop and mark done on GitHub.
+    return Classification(
+        BUCKET_DROP, f"passive reason '{reason}' - not a KEEP_REASONS ping"
+    )
 
 
 def make_todo_id(notif: dict[str, Any]) -> str:
@@ -1319,6 +1403,11 @@ def run(args: argparse.Namespace) -> TriageStats:
             if classification.archive_to_done:
                 new_done.append(build_done_archive_entry(notif))
                 stats.archived_to_done += 1
+            if classification.skip_mark_done:
+                # Dependabot bump: drop from the inbox but leave the GitHub
+                # notification unread so triage-dependabot can consume it.
+                stats.left_for_dependabot += 1
+                continue
             if not args.dry_run:
                 try:
                     mark_thread_done(thread_id)
@@ -1408,6 +1497,7 @@ def main(argv: list[str] | None = None) -> int:
         f"archived_to_done={stats.archived_to_done} "
         f"already_tracked={stats.already_tracked} "
         f"marked_done={stats.marked_done} "
+        f"left_for_dependabot={stats.left_for_dependabot} "
         f"pruned_stale={stats.pruned_stale}"
     )
     if stats.pruned_by_reason:
