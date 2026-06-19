@@ -53,8 +53,66 @@ _RT_YAML.preserve_quotes = True
 _RT_YAML.width = 4096
 _RT_YAML.indent(mapping=2, sequence=4, offset=2)
 
+logger = logging.getLogger("triage-dependabot")
+
 DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
 DEFAULT_STATE_FILE = Path.home() / "Library" / "Logs" / "triage-dependabot-state.json"
+PRIVATE_TRIAGE_REPOS_PATH = Path.home() / ".copilot" / "private" / "triage-repos.yml"
+
+
+def load_private_triage_repos(
+    path: Path = PRIVATE_TRIAGE_REPOS_PATH,
+) -> dict[str, Any]:
+    """Load private repo filters from Zack's untracked local config."""
+    if not path.exists():
+        logger.warning(
+            "private triage repo config not found at %s; using public defaults",
+            path,
+        )
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        logger.warning(
+            "could not load private triage repo config at %s: %s; using public defaults",
+            path,
+            exc,
+        )
+        return {}
+    if not isinstance(data, dict):
+        logger.warning(
+            "private triage repo config at %s is not a mapping; using public defaults",
+            path,
+        )
+        return {}
+    return data
+
+
+def _repo_key(repo: Any) -> str | None:
+    if not isinstance(repo, str):
+        return None
+    normalized = repo.strip().lower()
+    return normalized or None
+
+
+def _private_repo_set(config: dict[str, Any], key: str) -> set[str]:
+    value = config.get(key, [])
+    if value is None:
+        return set()
+    if not isinstance(value, list):
+        logger.warning("private triage config key %s must be a list; ignoring", key)
+        return set()
+    repos: set[str] = set()
+    for repo in value:
+        normalized = _repo_key(repo)
+        if normalized:
+            repos.add(normalized)
+        else:
+            logger.warning("private triage config key %s has a non-string repo", key)
+    return repos
+
+
+_PRIVATE_REPO_CONFIG = load_private_triage_repos()
 
 DEPENDABOT_LOGINS: set[str] = {
     "dependabot[bot]",
@@ -130,6 +188,9 @@ SKIPPED_DEPENDENCY_PATTERNS: tuple[re.Pattern[str], ...] = (
 SKIPPED_REPO_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^super-linter/super-linter$", re.IGNORECASE),
 )
+SKIPPED_REPOS: set[str] = _private_repo_set(
+    _PRIVATE_REPO_CONFIG, "dependabot_skipped_repos"
+)
 
 # Notification reasons that count as "passive subscription" - if a PR is
 # excluded from action AND we got notified for one of these reasons, mark
@@ -158,8 +219,6 @@ _PRERELEASE_TARGET_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-
-logger = logging.getLogger("triage-dependabot")
 
 
 @dataclass
@@ -344,13 +403,16 @@ def skipped_dependency_match(pr: dict[str, Any]) -> str | None:
 def skipped_repo_match(repo: str) -> str | None:
     """Return the matched repo if it is on the skipped-repo list.
 
-    Repos on this list (e.g. ``super-linter/super-linter``) are ones Zack
-    subscribes to but doesn't actively maintain. Dependabot PRs there get
-    auto-skipped + notification-cleared so they stop landing in the inbox
-    or Q1, mirroring the @mention-only rule in the notification triage.
+    Repos on this list are ones Zack subscribes to but doesn't actively
+    maintain. Dependabot PRs there get auto-skipped + notification-cleared
+    so they stop landing in the inbox or Q1, mirroring the @mention-only
+    rule in the notification triage.
     """
     if not repo:
         return None
+    repo_lc = repo.lower()
+    if repo_lc in SKIPPED_REPOS:
+        return repo
     for pattern in SKIPPED_REPO_PATTERNS:
         if pattern.search(repo):
             return repo

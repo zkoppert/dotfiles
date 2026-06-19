@@ -20,6 +20,52 @@ import yaml
 import triage
 
 # ----------------------------------------------------------------------
+# private config loader
+# ----------------------------------------------------------------------
+
+
+def test_load_private_triage_repos_reads_config(tmp_path: Path):
+    config_path = tmp_path / "triage-repos.yml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "subscription_filtered_repos:",
+                "  acme/private-thing: [review_requested]",
+                "watch_only_dependabot_mark_done_repos:",
+                "  - acme/watch-only",
+                "always_drop_repos:",
+                "  - acme/always-drop",
+                "title_aor_required_repos:",
+                "  acme/aor-repo: [dashboard, inbox]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    data = triage.load_private_triage_repos(config_path)
+
+    assert triage._private_reason_map(data, "subscription_filtered_repos") == {
+        "acme/private-thing": {"review_requested"}
+    }
+    assert triage._private_repo_set(data, "watch_only_dependabot_mark_done_repos") == {
+        "acme/watch-only"
+    }
+    assert triage._private_repo_set(data, "always_drop_repos") == {"acme/always-drop"}
+    assert triage._private_keyword_map(data, "title_aor_required_repos") == {
+        "acme/aor-repo": ("dashboard", "inbox")
+    }
+
+
+def test_load_private_triage_repos_missing_file_warns(tmp_path: Path, caplog):
+    config_path = tmp_path / "missing.yml"
+
+    data = triage.load_private_triage_repos(config_path)
+
+    assert data == {}
+    assert "using public defaults" in caplog.text
+
+
+# ----------------------------------------------------------------------
 # classify()
 # ----------------------------------------------------------------------
 
@@ -2076,6 +2122,117 @@ def test_classify_does_not_drop_unrelated_author_pr():
     assert c.bucket == triage.BUCKET_INBOX
 
 
+WATCH_ONLY_REPO = "acme/watch-only"
+
+
+@pytest.fixture
+def watch_only_dependabot_repo(monkeypatch):
+    monkeypatch.setattr(
+        triage,
+        "WATCH_ONLY_DEPENDABOT_MARK_DONE_REPOS",
+        {WATCH_ONLY_REPO},
+    )
+    monkeypatch.setitem(
+        triage.SUBSCRIPTION_FILTERED_REPOS,
+        WATCH_ONLY_REPO,
+        {"review_requested"},
+    )
+
+
+def _watch_only_dependabot_notif(reason: str = "subscribed", **overrides) -> dict:
+    """Helper: watch-only private Dependabot bump notification."""
+    return _notif(
+        reason,
+        subject={
+            "title": "Bump actions/checkout from 4.2.2 to 4.3.0",
+            "url": f"https://api.github.com/repos/{WATCH_ONLY_REPO}/pulls/42",
+            "latest_comment_url": None,
+            "type": "PullRequest",
+        },
+        repository={"full_name": WATCH_ONLY_REPO},
+        **overrides,
+    )
+
+
+def test_classify_watch_only_dependabot_bump_drops_and_marks_done(
+    watch_only_dependabot_repo,
+):
+    """Watch-only repo bumps drop without being left unread for triage-dependabot."""
+    c = triage.classify(
+        _watch_only_dependabot_notif(),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "dependabot[bot]",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert c.skip_mark_done is False
+    assert WATCH_ONLY_REPO in c.reason
+
+
+def test_classify_watch_only_dependabot_mention_still_surfaces(
+    watch_only_dependabot_repo,
+):
+    c = triage.classify(
+        _watch_only_dependabot_notif("mention"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_Q2
+
+
+def test_classify_watch_only_dependabot_review_requested_still_surfaces(
+    watch_only_dependabot_repo,
+):
+    c = triage.classify(
+        _watch_only_dependabot_notif("review_requested"),
+        my_login="zkoppert",
+        q1_logins=set(),
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "dependabot[bot]",
+    )
+    assert c.bucket == triage.BUCKET_INBOX
+
+
+def test_run_watch_only_dependabot_bump_marks_done(
+    todo_file,
+    watch_only_dependabot_repo,
+):
+    notif = _watch_only_dependabot_notif(id="thread-watch-only")
+    delete_paths: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
+            delete_paths.append(cmd[-1])
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        responses = {
+            "/user": json.dumps({"login": "zkoppert"}),
+            "/notifications?all=true": json.dumps([notif]),
+        }
+        idx = cmd.index("api")
+        after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
+        path = after[0] if after else ""
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=responses.get(path, ""),
+            stderr="",
+        )
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        stats = triage.run(args)
+
+    assert stats.dropped == 1
+    assert stats.left_for_dependabot == 0
+    assert any("/notifications/threads/thread-watch-only" in p for p in delete_paths)
+
+
 def _flaky_notif(reason: str, title: str) -> dict:
     """Helper: open Issue with a flaky/intermittent test title under the
     given reason. Mirrors the github-ui pattern seen in production."""
@@ -2753,30 +2910,43 @@ def test_prune_archive_visible_to_dedup_on_next_run():
     assert "thr-88" in ids
 
 
-# --- Tests for SUBSCRIPTION_FILTERED_REPOS (NUX subscription filter) ---
+# --- Tests for SUBSCRIPTION_FILTERED_REPOS loaded from private config ---
 
 
-def _nux_notif(reason: str, *, subject_type: str = "PullRequest") -> dict:
-    """A notification on github/new-user-experience with the given reason."""
+PRIVATE_SUBSCRIPTION_REPO = "acme/private-thing"
+
+
+@pytest.fixture
+def private_subscription_filter(monkeypatch):
+    monkeypatch.setitem(
+        triage.SUBSCRIPTION_FILTERED_REPOS,
+        PRIVATE_SUBSCRIPTION_REPO,
+        {"review_requested"},
+    )
+
+
+def _private_subscription_notif(
+    reason: str, *, subject_type: str = "PullRequest"
+) -> dict:
+    """A notification on a private subscription-filtered repo."""
     return {
-        "id": "nux-1",
+        "id": "private-1",
         "reason": reason,
         "unread": True,
-        "repository": {"full_name": "github/new-user-experience"},
+        "repository": {"full_name": PRIVATE_SUBSCRIPTION_REPO},
         "subject": {
-            "title": "Some NUX notification",
-            "url": "https://api.github.com/repos/github/new-user-experience/pulls/1",
+            "title": "Some private notification",
+            "url": f"https://api.github.com/repos/{PRIVATE_SUBSCRIPTION_REPO}/pulls/1",
             "latest_comment_url": None,
             "type": subject_type,
         },
     }
 
 
-def test_classify_nux_subscribed_drops():
-    """Subscribed-thread noise on github/new-user-experience drops -
-    I only want directed pings from that repo."""
+def test_classify_private_subscription_subscribed_drops(private_subscription_filter):
+    """Subscribed-thread noise on a private filtered repo drops."""
     c = triage.classify(
-        _nux_notif("subscribed"),
+        _private_subscription_notif("subscribed"),
         my_login="zkoppert",
         q1_logins=set(),
         state_fetcher=lambda _: "open",
@@ -2787,11 +2957,11 @@ def test_classify_nux_subscribed_drops():
     assert "subscription allowlist" in c.reason
 
 
-def test_classify_nux_comment_drops():
-    """Plain comment notifications on NUX repo drop - if I was
+def test_classify_private_subscription_comment_drops(private_subscription_filter):
+    """Plain comment notifications on the private filtered repo drop - if I was
     @-mentioned in the comment the reason would be `mention`."""
     c = triage.classify(
-        _nux_notif("comment"),
+        _private_subscription_notif("comment"),
         my_login="zkoppert",
         q1_logins=set(),
         state_fetcher=lambda _: "open",
@@ -2802,11 +2972,11 @@ def test_classify_nux_comment_drops():
     assert "subscription allowlist" in c.reason
 
 
-def test_classify_nux_ci_activity_drops():
-    """ci_activity on NUX drops via the subscription filter (it would
+def test_classify_private_subscription_ci_activity_drops(private_subscription_filter):
+    """ci_activity drops via the subscription filter (it would
     drop anyway via the always-drop ci_activity rule - both paths agree)."""
     c = triage.classify(
-        _nux_notif("ci_activity"),
+        _private_subscription_notif("ci_activity"),
         my_login="zkoppert",
         q1_logins=set(),
         state_fetcher=lambda _: "open",
@@ -2816,11 +2986,11 @@ def test_classify_nux_ci_activity_drops():
     assert c.bucket == triage.BUCKET_DROP
 
 
-def test_classify_nux_author_drops():
-    """My own PRs on NUX (reason=author) drop too - I don't want the
+def test_classify_private_subscription_author_drops(private_subscription_filter):
+    """My own PRs on the private filtered repo (reason=author) drop too - I don't want the
     cron tracking PRs I authored unless someone pings me on them."""
     c = triage.classify(
-        _nux_notif("author"),
+        _private_subscription_notif("author"),
         my_login="zkoppert",
         q1_logins=set(),
         state_fetcher=lambda _: "open",
@@ -2830,11 +3000,13 @@ def test_classify_nux_author_drops():
     assert c.bucket == triage.BUCKET_DROP
 
 
-def test_classify_nux_mention_still_routes_normally():
-    """An @-mention on NUX is a directed ping - keep the normal
+def test_classify_private_subscription_mention_still_routes_normally(
+    private_subscription_filter,
+):
+    """An @-mention on the private filtered repo is a directed ping - keep the normal
     Q1 routing for it."""
     c = triage.classify(
-        _nux_notif("mention"),
+        _private_subscription_notif("mention"),
         my_login="zkoppert",
         q1_logins=set(),
         state_fetcher=lambda _: "open",
@@ -2844,10 +3016,12 @@ def test_classify_nux_mention_still_routes_normally():
     assert c.bucket == triage.BUCKET_Q2
 
 
-def test_classify_nux_assign_still_routes_normally():
-    """Assign on NUX is a directed ping - Q1."""
+def test_classify_private_subscription_assign_still_routes_normally(
+    private_subscription_filter,
+):
+    """Assign on the private filtered repo is a directed ping - Q1."""
     c = triage.classify(
-        _nux_notif("assign"),
+        _private_subscription_notif("assign"),
         my_login="zkoppert",
         q1_logins=set(),
         state_fetcher=lambda _: "open",
@@ -2857,11 +3031,12 @@ def test_classify_nux_assign_still_routes_normally():
     assert c.bucket == triage.BUCKET_Q2
 
 
-def test_classify_nux_review_requested_still_routes_normally():
-    """review_requested on NUX is a directed ping - either Q1 (if PR
-    author is on the NUX teammate list) or INBOX."""
+def test_classify_private_subscription_review_requested_still_routes_normally(
+    private_subscription_filter,
+):
+    """review_requested on the private filtered repo routes normally."""
     c = triage.classify(
-        _nux_notif("review_requested"),
+        _private_subscription_notif("review_requested"),
         my_login="zkoppert",
         q1_logins={"andimiya"},
         state_fetcher=lambda _: "open",
@@ -2871,12 +3046,12 @@ def test_classify_nux_review_requested_still_routes_normally():
     assert c.bucket == triage.BUCKET_Q2
 
 
-def test_classify_nux_team_mention_drops():
+def test_classify_private_subscription_team_mention_drops(private_subscription_filter):
     """team_mention now drops globally (it isn't a KEEP_REASONS ping), so
-    even on NUX it's cleared. The directed-ping reasons (review_requested,
-    assign, mention, security_alert) still survive."""
+    even on the private filtered repo it's cleared. Directed-ping reasons
+    still survive."""
     c = triage.classify(
-        _nux_notif("team_mention"),
+        _private_subscription_notif("team_mention"),
         my_login="zkoppert",
         q1_logins=set(),
         state_fetcher=lambda _: "open",
@@ -2890,7 +3065,7 @@ def test_classify_non_filtered_repo_subscribed_drops():
     """Repos NOT in any override list still drop subscribed under the
     aggressive default-drop policy (subscribed is not a KEEP_REASONS
     ping)."""
-    notif = _nux_notif("subscribed")
+    notif = _private_subscription_notif("subscribed")
     notif["repository"]["full_name"] = "github/some-other-repo"
     notif["subject"]["url"] = "https://api.github.com/repos/github/some-other-repo/pulls/1"
     c = triage.classify(
@@ -2904,11 +3079,13 @@ def test_classify_non_filtered_repo_subscribed_drops():
     assert c.bucket == triage.BUCKET_DROP
 
 
-def test_classify_nux_filter_runs_after_closed_state_drop():
-    """A closed/merged PR on NUX still drops via the closed-state rule
+def test_classify_private_subscription_filter_runs_after_closed_state_drop(
+    private_subscription_filter,
+):
+    """A closed/merged PR on the private filtered repo still drops via the closed-state rule
     (cheaper than the subscription filter), and self-authored ones
     still archive to done."""
-    notif = _nux_notif("author")
+    notif = _private_subscription_notif("author")
     c = triage.classify(
         notif,
         my_login="zkoppert",
@@ -2922,11 +3099,13 @@ def test_classify_nux_filter_runs_after_closed_state_drop():
     assert c.archive_to_done is True
 
 
-def test_classify_nux_subscribed_drops_regardless_of_read_state():
-    """A read subscribed notification on NUX must DROP (so the cron
+def test_classify_private_subscription_subscribed_drops_regardless_of_read_state(
+    private_subscription_filter,
+):
+    """A read subscribed notification on the private filtered repo must DROP (so the cron
     clears it). Verifies the subscription filter applies to read items
     too, not just unread."""
-    notif = _nux_notif("subscribed")
+    notif = _private_subscription_notif("subscribed")
     notif["unread"] = False
     c = triage.classify(
         notif,
@@ -2939,11 +3118,13 @@ def test_classify_nux_subscribed_drops_regardless_of_read_state():
     assert c.bucket == triage.BUCKET_DROP
 
 
-def test_classify_nux_security_alert_still_routes_to_q1():
-    """security_alert on NUX must still reach Q1 - vulnerabilities
+def test_classify_private_subscription_security_alert_still_routes_to_q1(
+    private_subscription_filter,
+):
+    """security_alert on the private filtered repo must still reach Q1 - vulnerabilities
     and secret scans are too important to silently drop."""
     c = triage.classify(
-        _nux_notif("security_alert"),
+        _private_subscription_notif("security_alert"),
         my_login="zkoppert",
         q1_logins=set(),
         state_fetcher=lambda _: "open",
@@ -2953,11 +3134,11 @@ def test_classify_nux_security_alert_still_routes_to_q1():
     assert c.bucket == triage.BUCKET_Q2
 
 
-def test_classify_subscription_filter_is_case_insensitive():
+def test_classify_subscription_filter_is_case_insensitive(private_subscription_filter):
     """Repo full_name lookup is lowercased so future entries for
-    mixed-case repos (e.g. github/CodeQL) don't silently miss."""
-    notif = _nux_notif("subscribed")
-    notif["repository"]["full_name"] = "GitHub/New-User-Experience"
+    mixed-case repos don't silently miss."""
+    notif = _private_subscription_notif("subscribed")
+    notif["repository"]["full_name"] = "Acme/Private-Thing"
     c = triage.classify(
         notif,
         my_login="zkoppert",
@@ -3190,44 +3371,43 @@ def test_assign_and_mention_random_repo_kept_q2():
         assert c.bucket == triage.BUCKET_Q2, reason
 
 
-# --- github/pull-requests AoR title filter ---
+# --- Private AoR title filter loaded from config ---
 
 
-def test_pull_requests_aor_title_kept():
-    """A github/pull-requests notification whose title is about our AoR
-    (the /pulls dashboard or inbox) is kept and routed normally."""
+PRIVATE_AOR_REPO = "acme/aor-repo"
+
+
+@pytest.fixture
+def private_aor_filter(monkeypatch):
+    monkeypatch.setitem(
+        triage.TITLE_AOR_REQUIRED_REPOS,
+        PRIVATE_AOR_REPO,
+        ("dashboard", "inbox", "/pulls", "pulls dashboard"),
+    )
+
+
+def test_private_aor_title_kept(private_aor_filter):
+    """A private AoR repo notification whose title is in scope is kept."""
     for title in ("Improve the pulls dashboard", "Fix inbox grouping", "tweak /pulls"):
-        c = _classify(
-            _repo_notif("review_requested", repo="github/pull-requests", title=title)
-        )
+        c = _classify(_repo_notif("review_requested", repo=PRIVATE_AOR_REPO, title=title))
         assert c.bucket != triage.BUCKET_DROP, title
 
 
-def test_pull_requests_non_aor_title_drops():
-    """A github/pull-requests notification unrelated to our AoR drops for
-    non-protected reasons - the rest of that repo has its own FR system."""
+def test_private_aor_non_aor_title_drops(private_aor_filter):
+    """A private AoR repo notification unrelated to our area drops."""
     for reason in ("review_requested", "subscribed", "team_mention"):
-        c = _classify(
-            _repo_notif(reason, repo="github/pull-requests", title="Refactor merge queue")
-        )
+        c = _classify(_repo_notif(reason, repo=PRIVATE_AOR_REPO, title="Refactor merge queue"))
         assert c.bucket == triage.BUCKET_DROP, reason
 
 
-def test_pull_requests_non_aor_direct_ping_survives():
+def test_private_aor_non_aor_direct_ping_survives(private_aor_filter):
     """Carve-out: a direct @-mention, assignment, or security alert on
-    github/pull-requests survives even when the title is not about our AoR
-    - a personal ping is too important to silently drop."""
-    mention = _classify(
-        _repo_notif("mention", repo="github/pull-requests", title="Refactor merge queue")
-    )
+    the private AoR repo survives even when the title is not in scope."""
+    mention = _classify(_repo_notif("mention", repo=PRIVATE_AOR_REPO, title="Refactor merge queue"))
     assert mention.bucket == triage.BUCKET_Q2
-    assign = _classify(
-        _repo_notif("assign", repo="github/pull-requests", title="Refactor merge queue")
-    )
+    assign = _classify(_repo_notif("assign", repo=PRIVATE_AOR_REPO, title="Refactor merge queue"))
     assert assign.bucket == triage.BUCKET_Q2
-    sec = _classify(
-        _repo_notif("security_alert", repo="github/pull-requests", title="Refactor merge queue")
-    )
+    sec = _classify(_repo_notif("security_alert", repo=PRIVATE_AOR_REPO, title="Refactor merge queue"))
     assert sec.bucket == triage.BUCKET_Q2
 
 
@@ -3242,11 +3422,22 @@ def test_dot_github_repo_always_drops():
         assert c.bucket == triage.BUCKET_DROP, reason
 
 
-def test_core_ux_elt_repo_always_drops():
-    """github/core-ux-elt is unsubscribed - always drop, even direct
-    pings and security alerts."""
+PRIVATE_ALWAYS_DROP_REPO = "acme/always-drop"
+
+
+@pytest.fixture
+def private_always_drop_repo(monkeypatch):
+    monkeypatch.setattr(
+        triage,
+        "ALWAYS_DROP_REPOS",
+        triage.ALWAYS_DROP_REPOS | {PRIVATE_ALWAYS_DROP_REPO},
+    )
+
+
+def test_private_always_drop_repo_always_drops(private_always_drop_repo):
+    """Private always-drop repos drop every reason, including directed pings."""
     for reason in ("mention", "assign", "review_requested", "subscribed", "security_alert"):
-        c = _classify(_repo_notif(reason, repo="github/core-ux-elt"))
+        c = _classify(_repo_notif(reason, repo=PRIVATE_ALWAYS_DROP_REPO))
         assert c.bucket == triage.BUCKET_DROP, reason
 
 

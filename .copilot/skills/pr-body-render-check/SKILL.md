@@ -15,10 +15,10 @@ After any `gh pr edit`, `gh issue edit`, or `gh gist create/edit` that sets a bo
 
 ```bash
 # Check a PR after editing
-python3 ~/.copilot/skills/pr-body-render-check/check.py --pr 435051 --repo github/github
+python3 ~/.copilot/skills/pr-body-render-check/check.py --pr 123 --repo owner/repo
 
 # Check an issue
-python3 ~/.copilot/skills/pr-body-render-check/check.py --issue 1505 --repo github/new-user-experience
+python3 ~/.copilot/skills/pr-body-render-check/check.py --issue 123 --repo owner/repo
 
 # Check a local file (dry-run, no fetch)
 python3 ~/.copilot/skills/pr-body-render-check/check.py --file /tmp/pr-body.md
