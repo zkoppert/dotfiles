@@ -966,12 +966,197 @@ def test_write_todo_atomic_cleans_up_on_failure(tmp_path: Path) -> None:
     path = tmp_path / "todo.yml"
     path.write_text("inbox: []\n", encoding="utf-8")
 
-    with mock.patch.object(td.shutil, "move", side_effect=OSError("boom")):
+    with mock.patch.object(td.os, "replace", side_effect=OSError("boom")):
         with pytest.raises(OSError):
             td.write_todo_atomic(path, {"inbox": []})
 
     leftovers = list(tmp_path.glob(".todo-*"))
     assert leftovers == []
+
+
+def test_apply_todo_mutations_with_lock_preserves_concurrent_manual_edit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "todo.yml"
+    path.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first: []\ndone: []\n",
+        encoding="utf-8",
+    )
+    _stale_snapshot = td.load_todo(path)
+    path.write_text(
+        "inbox:\n"
+        "  - id: manual-added\n"
+        "    title: Manual edit\n"
+        "prioritized:\n"
+        "  q1_do_first: []\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+    entry = td.build_flag_entry(
+        _base_pr(number=7, url="https://github.com/o/r/pull/7"),
+        "o/r",
+        {"id": "thread-new", "reason": "subscribed"},
+        td.Decision(td.OUTCOME_FLAG, "needs review", bump=td.BUMP_MAJOR),
+    )
+    mutations = td.TodoMutations(
+        flags=[td.FlagTodoDelta(entry=entry, pr_url="https://github.com/o/r/pull/7")]
+    )
+
+    applied = td.apply_todo_mutations_with_lock(path, mutations)
+
+    assert applied["changed"] is True
+    reloaded = td.load_todo(path)
+    assert [item["id"] for item in reloaded["inbox"]] == ["manual-added"]
+    assert [item["id"] for item in reloaded["prioritized"]["q1_do_first"]] == [
+        "dependabot-r-pr-7"
+    ]
+
+
+def test_apply_todo_mutations_with_lock_acquires_file_lock(tmp_path: Path) -> None:
+    path = tmp_path / "todo.yml"
+    path.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first: []\ndone: []\n",
+        encoding="utf-8",
+    )
+    entry = td.build_flag_entry(
+        _base_pr(number=8, url="https://github.com/o/r/pull/8"),
+        "o/r",
+        {"id": "thread-lock", "reason": "subscribed"},
+        td.Decision(td.OUTCOME_FLAG, "needs review"),
+    )
+    mutations = td.TodoMutations(
+        flags=[td.FlagTodoDelta(entry=entry, pr_url="https://github.com/o/r/pull/8")]
+    )
+
+    with mock.patch.object(td.fcntl, "flock") as flock_mock:
+        td.apply_todo_mutations_with_lock(path, mutations)
+
+    assert flock_mock.call_args_list[0].args[1] == td.fcntl.LOCK_EX
+    assert flock_mock.call_args_list[-1].args[1] == td.fcntl.LOCK_UN
+
+
+def test_commit_todo_changes_skips_commit_when_nothing_staged(tmp_path: Path) -> None:
+    repo = tmp_path
+    (repo / ".git").mkdir()
+    todo_path = repo / "todo.yml"
+    todo_path.write_text("inbox: []\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if "diff" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if "commit" in cmd:
+            raise AssertionError("commit should not run with an empty staged diff")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with mock.patch.object(td.subprocess, "run", side_effect=fake_run):
+        committed = td.commit_todo_changes(
+            todo_path,
+            "Record Dependabot triage todo updates",
+        )
+
+    assert committed is False
+    assert any("diff" in call for call in calls)
+    assert not any("commit" in call for call in calls)
+
+
+def _staged_commit_fake_run(
+    calls: list[list[str]], *, fail_step: str | None = None
+):
+    """Fake subprocess.run for commit_todo_changes with a staged diff.
+
+    ``diff --cached --quiet`` returns 1 (changes staged) so the commit
+    proceeds. ``fail_step`` (e.g. "commit", "pull", "push") raises a
+    CalledProcessError when that token appears in the git command.
+    """
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if "diff" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if fail_step is not None and fail_step in cmd:
+            raise subprocess.CalledProcessError(1, cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    return fake_run
+
+
+def test_commit_todo_changes_scopes_commit_to_todo_file(tmp_path: Path) -> None:
+    repo = tmp_path
+    (repo / ".git").mkdir()
+    todo_path = repo / "todo.yml"
+    todo_path.write_text("inbox: []\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    with mock.patch.object(
+        td.subprocess, "run", side_effect=_staged_commit_fake_run(calls)
+    ):
+        result = td.commit_todo_changes(todo_path, "msg")
+
+    assert result is True
+    commit_cmd = next(c for c in calls if "commit" in c)
+    # The commit must be scoped to todo.yml so unrelated staged files in
+    # the repo are never swept into the cron's commit.
+    assert commit_cmd[-2:] == ["--", "todo.yml"]
+
+
+def test_commit_todo_changes_aborts_rebase_on_pull_failure(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path
+    (repo / ".git").mkdir()
+    todo_path = repo / "todo.yml"
+    todo_path.write_text("inbox: []\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    with mock.patch.object(
+        td.subprocess,
+        "run",
+        side_effect=_staged_commit_fake_run(calls, fail_step="pull"),
+    ):
+        result = td.commit_todo_changes(todo_path, "msg")
+
+    # A failed rebase must be aborted so the repo is not left wedged.
+    assert result is True
+    assert any("rebase" in c and "--abort" in c for c in calls)
+
+
+def test_commit_todo_changes_push_failure_returns_true(tmp_path: Path) -> None:
+    repo = tmp_path
+    (repo / ".git").mkdir()
+    todo_path = repo / "todo.yml"
+    todo_path.write_text("inbox: []\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    with mock.patch.object(
+        td.subprocess,
+        "run",
+        side_effect=_staged_commit_fake_run(calls, fail_step="push"),
+    ):
+        result = td.commit_todo_changes(todo_path, "msg")
+
+    # Commit succeeded locally; a push failure degrades gracefully.
+    assert result is True
+
+
+def test_commit_todo_changes_commit_failure_returns_false(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path
+    (repo / ".git").mkdir()
+    todo_path = repo / "todo.yml"
+    todo_path.write_text("inbox: []\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    with mock.patch.object(
+        td.subprocess,
+        "run",
+        side_effect=_staged_commit_fake_run(calls, fail_step="commit"),
+    ):
+        result = td.commit_todo_changes(todo_path, "msg")
+
+    assert result is False
 
 
 # ---------------------------------------------------------------------------
@@ -2181,6 +2366,17 @@ def test_run_excluded_dep_clear_calls_cleanup_stale(tmp_path: Path) -> None:
         title="Bump super-linter/super-linter from 7.0.0 to 8.0.0",
     )
     args = _make_args(tmp_path)
+    args.todo_file.write_text(
+        "inbox:\n"
+        "  - id: stale-dependabot\n"
+        "    notification:\n"
+        "      thread_id: thread-with-stale\n"
+        "      url: https://github.com/o/r/pull/42\n"
+        "prioritized:\n"
+        "  q1_do_first: []\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
 
     with mock.patch.object(
         td, "get_my_login", return_value="zkoppert"
@@ -2190,19 +2386,13 @@ def test_run_excluded_dep_clear_calls_cleanup_stale(tmp_path: Path) -> None:
         td, "fetch_pr", return_value=pr
     ), mock.patch.object(
         td, "mark_thread_done"
-    ), mock.patch.object(
-        td, "_cleanup_stale_entries", return_value=2
-    ) as cleanup_mock:
+    ):
         stats = td.run(args)
 
     assert stats.skipped_dependency == 1
-    assert stats.stale_removed == 2
-    cleanup_mock.assert_called_once_with(
-        mock.ANY,
-        thread_id="thread-with-stale",
-        pr_url="https://github.com/o/r/pull/42",
-        dry_run=False,
-    )
+    assert stats.stale_removed == 1
+    reloaded = td.load_todo(args.todo_file)
+    assert reloaded["inbox"] == []
 
 
 def test_run_excluded_dep_mark_done_failure_does_not_abort_run(
@@ -2652,7 +2842,7 @@ def test_run_skips_archived_repo_and_clears_notification(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# Branch-protection / idempotent approval (bug 3)
+# Branch-protection / consistent approval (bug 3)
 # ---------------------------------------------------------------------------
 
 

@@ -119,6 +119,20 @@ Each new entry carries a `notification` block:
     repo: org/repo
 ```
 
+Writes to `todo.yml` are race-safe. The tool computes GitHub outcomes
+first, then takes an exclusive `todo.yml.lock`, re-reads the file from
+disk, applies only the planned deltas by `id` or
+`notification.thread_id`, and writes with an atomic `os.replace`. That
+keeps manual edits made during a run instead of replaying a stale
+in-memory snapshot.
+
+After a successful write, the tool stages `todo.yml` in the todo repo,
+skips the commit when there is no staged diff, and otherwise creates a
+signed-off local commit with the Copilot co-author trailer. It then tries
+`git pull --rebase --autostash` and `git push`. Pull or push failures
+are logged as warnings so launchd keeps running, while the local commit
+still records the change.
+
 When you move the todo to `status: done`, the next triage run will:
 
 1. DELETE `/notifications/threads/{thread_id}` to mark it done on GitHub

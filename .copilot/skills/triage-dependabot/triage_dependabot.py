@@ -32,11 +32,11 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import fcntl
 import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -256,6 +256,30 @@ class Decision:
     bump: str = BUMP_UNKNOWN
     is_security: bool = False
     terminal: bool = False
+
+
+@dataclass
+class FlagTodoDelta:
+    """A Q1 todo entry to add if it is not already tracked."""
+
+    entry: dict[str, Any]
+    pr_url: str
+
+
+@dataclass
+class PruneTodoDelta:
+    """A resolved notification entry to remove from todo.yml."""
+
+    thread_id: str | None = None
+    pr_url: str | None = None
+
+
+@dataclass
+class TodoMutations:
+    """The todo.yml deltas computed before the locked write section."""
+
+    flags: list[FlagTodoDelta] = field(default_factory=list)
+    prunes: list[PruneTodoDelta] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -1007,7 +1031,7 @@ def do_merge(
     ``Auto merge is not allowed for this repository``. In that case, fall
     back to approving the PR (to satisfy required-review branch
     protection) and then performing a synchronous merge. The approve step
-    is idempotent: if ``my_login`` already has an ``APPROVED`` review on
+    is consistent: if ``my_login`` already has an ``APPROVED`` review on
     ``head_sha``, the approval call is skipped to avoid the 52-retries-
     per-hour loop seen on PRs whose merge ultimately fails branch
     protection.
@@ -1391,10 +1415,14 @@ def load_todo(path: Path) -> dict[str, Any]:
         raise FileNotFoundError(f"todo file not found: {path}")
     with path.open("r", encoding="utf-8") as fh:
         data = _RT_YAML.load(fh) or {}
-    data.setdefault("inbox", [])
-    data.setdefault("prioritized", {})
-    data["prioritized"].setdefault("q1_do_first", [])
-    data.setdefault("done", [])
+    if data.get("inbox") is None:
+        data["inbox"] = []
+    if data.get("prioritized") is None:
+        data["prioritized"] = {}
+    if data["prioritized"].get("q1_do_first") is None:
+        data["prioritized"]["q1_do_first"] = []
+    if data.get("done") is None:
+        data["done"] = []
     return data
 
 
@@ -1405,7 +1433,7 @@ def write_todo_atomic(path: Path, data: dict[str, Any]) -> None:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
             _RT_YAML.dump(data, fh)
-        shutil.move(tmp_path, path)
+        os.replace(tmp_path, path)
     except Exception:
         if Path(tmp_path).exists():
             os.unlink(tmp_path)
@@ -1447,7 +1475,7 @@ def remove_stale_entries(
     """Drop todo entries that point at a notification we just resolved.
 
     Once we auto-merge a Dependabot PR (or close-skip it), any pre-existing
-    inbox or quadrant entry tracking that same PR is now stale — the PR is
+    inbox or quadrant entry tracking that same PR is now stale - the PR is
     gone but the entry still says "review this". Match by
     ``notification.thread_id`` first (1:1 with the GitHub thread we marked
     done), and fall back to ``notification.url`` so we catch the case where
@@ -1523,6 +1551,194 @@ def remove_stale_entries(
         for quadrant_key, items in list(prioritized.items()):
             prune(f"prioritized.{quadrant_key}", items)
     return removed
+
+
+def _iter_todo_items(data: dict[str, Any]) -> list[Any]:
+    items: list[Any] = []
+    for key in ("inbox", "done", "in_progress", "blocked", "in_review"):
+        value = data.get(key)
+        if isinstance(value, list):
+            items.extend(value)
+    prioritized = data.get("prioritized")
+    if isinstance(prioritized, dict):
+        for value in prioritized.values():
+            if isinstance(value, list):
+                items.extend(value)
+    return items
+
+
+def _item_thread_id(item: Any) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    notif = item.get("notification")
+    if not isinstance(notif, dict):
+        return None
+    thread_id = notif.get("thread_id")
+    return str(thread_id) if thread_id else None
+
+
+def _entry_exists(data: dict[str, Any], entry: dict[str, Any]) -> bool:
+    entry_id = entry.get("id")
+    entry_thread_id = _item_thread_id(entry)
+    for item in _iter_todo_items(data):
+        if not isinstance(item, dict):
+            continue
+        if entry_id and item.get("id") == entry_id:
+            return True
+        if entry_thread_id and _item_thread_id(item) == entry_thread_id:
+            return True
+    return False
+
+
+def apply_todo_mutations(
+    data: dict[str, Any],
+    mutations: TodoMutations,
+) -> dict[str, int | bool | list[str]]:
+    """Apply precomputed todo.yml deltas to a freshly loaded document."""
+    if data.get("inbox") is None:
+        data["inbox"] = []
+    if data.get("prioritized") is None:
+        data["prioritized"] = {}
+    if data["prioritized"].get("q1_do_first") is None:
+        data["prioritized"]["q1_do_first"] = []
+    if data.get("done") is None:
+        data["done"] = []
+
+    added_pr_urls: list[str] = []
+    changed = False
+    applied: dict[str, int | bool | list[str]] = {
+        "added_flags": 0,
+        "already_tracked": 0,
+        "stale_removed": 0,
+        "changed": False,
+        "added_pr_urls": added_pr_urls,
+    }
+
+    for delta in mutations.prunes:
+        removed = remove_stale_entries(
+            data,
+            thread_id=delta.thread_id,
+            pr_url=delta.pr_url,
+        )
+        if removed:
+            applied["stale_removed"] = int(applied["stale_removed"]) + removed
+            changed = True
+
+    for delta in mutations.flags:
+        if _entry_exists(data, delta.entry):
+            applied["already_tracked"] = int(applied["already_tracked"]) + 1
+            continue
+        data["prioritized"]["q1_do_first"].append(delta.entry)
+        applied["added_flags"] = int(applied["added_flags"]) + 1
+        added_pr_urls.append(delta.pr_url)
+        changed = True
+
+    applied["changed"] = changed
+    return applied
+
+
+def apply_todo_mutations_with_lock(path: Path, mutations: TodoMutations) -> dict[str, int | bool | list[str]]:
+    """Re-read todo.yml under an exclusive lock, apply deltas, and write."""
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            data = load_todo(path)
+            applied = apply_todo_mutations(data, mutations)
+            if applied["changed"]:
+                write_todo_atomic(path, data)
+            return applied
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+COPILOT_COAUTHOR_TRAILER = (
+    "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+)
+
+
+def _git_repo_for_todo(path: Path) -> Path:
+    return path.parent
+
+
+def _git_metadata_exists(repo: Path) -> bool:
+    return (repo / ".git").exists()
+
+
+def _run_git(repo: Path, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=check,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def _log_git_warning(action: str, exc: BaseException) -> None:
+    stderr = getattr(exc, "stderr", "") or ""
+    detail = stderr.strip() or str(exc)
+    logger.warning("git %s failed: %s", action, detail)
+
+
+def commit_todo_changes(path: Path, message: str) -> bool:
+    """Commit todo.yml changes locally, then try to pull and push."""
+    repo = _git_repo_for_todo(path)
+    if not _git_metadata_exists(repo):
+        logger.debug("todo repo %s has no git metadata; skipping commit", repo)
+        return False
+    try:
+        _run_git(repo, ["add", "--", path.name])
+        diff = _run_git(repo, ["diff", "--cached", "--quiet", "--", path.name], check=False)
+    except (FileNotFoundError, subprocess.SubprocessError) as exc:
+        _log_git_warning("add", exc)
+        return False
+
+    if diff.returncode == 0:
+        logger.info("todo.yml unchanged after staging; skipping commit")
+        return False
+    if diff.returncode != 1:
+        logger.warning("git diff --cached failed: %s", (diff.stderr or "").strip())
+        return False
+
+    try:
+        _run_git(
+            repo,
+            [
+                "commit",
+                "--signoff",
+                "-m",
+                message,
+                "-m",
+                COPILOT_COAUTHOR_TRAILER,
+                "--",
+                path.name,
+            ],
+        )
+    except (FileNotFoundError, subprocess.SubprocessError) as exc:
+        _log_git_warning("commit", exc)
+        return False
+
+    try:
+        _run_git(repo, ["pull", "--rebase", "--autostash"])
+    except (FileNotFoundError, subprocess.SubprocessError) as exc:
+        _log_git_warning("pull --rebase", exc)
+        # A conflicting rebase leaves the repo mid-rebase with conflict
+        # markers written into todo.yml, which would break every later run
+        # (load_todo would raise). Abort it best-effort so the worktree is
+        # left clean on the local commit.
+        try:
+            _run_git(repo, ["rebase", "--abort"], check=False)
+        except (FileNotFoundError, subprocess.SubprocessError) as abort_exc:
+            _log_git_warning("rebase --abort", abort_exc)
+        return True
+
+    try:
+        _run_git(repo, ["push"])
+    except (FileNotFoundError, subprocess.SubprocessError) as exc:
+        _log_git_warning("push", exc)
+    return True
 
 
 def make_todo_id(repo: str, number: int) -> str:
@@ -1699,6 +1915,32 @@ def _cleanup_stale_entries(
     return count
 
 
+def _record_stale_cleanup(
+    mutations: TodoMutations,
+    stats: TriageStats,
+    todo_file: Path,
+    *,
+    thread_id: str | None,
+    pr_url: str | None,
+    dry_run: bool,
+) -> None:
+    """Record or preview stale todo entry removal after a PR is resolved."""
+    if dry_run:
+        try:
+            data = load_todo(todo_file)
+        except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+            stats.errors.append(f"failed to load todo file: {exc}")
+            return
+        stats.stale_removed += _cleanup_stale_entries(
+            data,
+            thread_id=thread_id,
+            pr_url=pr_url,
+            dry_run=True,
+        )
+        return
+    mutations.prunes.append(PruneTodoDelta(thread_id=thread_id, pr_url=pr_url))
+
+
 def run(args: argparse.Namespace) -> TriageStats:
     """Main entrypoint. Returns stats so tests can assert behaviour."""
     stats = TriageStats()
@@ -1725,16 +1967,9 @@ def run(args: argparse.Namespace) -> TriageStats:
     stats.fetched = len(notifications)
     logger.info("fetched %d notification(s)", stats.fetched)
 
-    try:
-        data = load_todo(args.todo_file)
-    except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
-        stats.errors.append(f"failed to load todo file: {exc}")
-        return stats
-
     state = load_state(args.state_file)
     now = datetime.datetime.now(datetime.timezone.utc).timestamp()
-    seen_thread_ids = existing_thread_ids(data)
-    new_flags: list[dict[str, Any]] = []
+    mutations = TodoMutations()
     use_copilot = not args.no_copilot_subagent
     allowed = set(args.allowed_repo)
     coverage_cache: dict[str, int | None] = {}
@@ -1775,8 +2010,10 @@ def run(args: argparse.Namespace) -> TriageStats:
                     stats=stats,
                     context=f"archived repo {pr_url}",
                 ):
-                    stats.stale_removed += _cleanup_stale_entries(
-                        data,
+                    _record_stale_cleanup(
+                        mutations,
+                        stats,
+                        args.todo_file,
                         thread_id=thread_id,
                         pr_url=pr_url,
                         dry_run=args.dry_run,
@@ -1799,8 +2036,10 @@ def run(args: argparse.Namespace) -> TriageStats:
                 if thread_id:
                     try:
                         mark_thread_done(thread_id, dry_run=args.dry_run)
-                        stats.stale_removed += _cleanup_stale_entries(
-                            data,
+                        _record_stale_cleanup(
+                            mutations,
+                            stats,
+                            args.todo_file,
                             thread_id=thread_id,
                             pr_url=pr_url,
                             dry_run=args.dry_run,
@@ -1832,8 +2071,10 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
                 try:
                     mark_thread_done(thread_id, dry_run=args.dry_run)
-                    stats.stale_removed += _cleanup_stale_entries(
-                        data,
+                    _record_stale_cleanup(
+                        mutations,
+                        stats,
+                        args.todo_file,
                         thread_id=thread_id,
                         pr_url=pr_url,
                         dry_run=args.dry_run,
@@ -1892,8 +2133,13 @@ def run(args: argparse.Namespace) -> TriageStats:
                     stats=stats,
                     context=f"merged {pr_url}",
                 )
-                stats.stale_removed += _cleanup_stale_entries(
-                    data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
+                _record_stale_cleanup(
+                    mutations,
+                    stats,
+                    args.todo_file,
+                    thread_id=thread_id,
+                    pr_url=pr_url,
+                    dry_run=args.dry_run,
                 )
             elif decision.outcome == OUTCOME_LABEL_AND_MERGE:
                 labels = fetch_repo_labels(repo)
@@ -1914,8 +2160,13 @@ def run(args: argparse.Namespace) -> TriageStats:
                     stats=stats,
                     context=f"labeled-and-merged {pr_url}",
                 )
-                stats.stale_removed += _cleanup_stale_entries(
-                    data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
+                _record_stale_cleanup(
+                    mutations,
+                    stats,
+                    args.todo_file,
+                    thread_id=thread_id,
+                    pr_url=pr_url,
+                    dry_run=args.dry_run,
                 )
             elif decision.outcome == OUTCOME_REBASE:
                 do_rebase_comment(repo, number, dry_run=args.dry_run)
@@ -1931,16 +2182,23 @@ def run(args: argparse.Namespace) -> TriageStats:
                     stats=stats,
                     context=f"closed-prerelease {pr_url}",
                 )
-                stats.stale_removed += _cleanup_stale_entries(
-                    data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
+                _record_stale_cleanup(
+                    mutations,
+                    stats,
+                    args.todo_file,
+                    thread_id=thread_id,
+                    pr_url=pr_url,
+                    dry_run=args.dry_run,
                 )
             elif decision.outcome == OUTCOME_FLAG:
-                if thread_id and thread_id in seen_thread_ids:
-                    stats.already_tracked += 1
-                else:
-                    new_flags.append(build_flag_entry(pr, repo, notif, decision))
+                mutations.flags.append(
+                    FlagTodoDelta(
+                        entry=build_flag_entry(pr, repo, notif, decision),
+                        pr_url=pr_url,
+                    )
+                )
+                if args.dry_run:
                     stats.flagged += 1
-                    state[pr_url] = now
             else:
                 if decision.terminal and thread_id:
                     if pr_url:
@@ -1951,8 +2209,13 @@ def run(args: argparse.Namespace) -> TriageStats:
                         stats=stats,
                         context=f"terminal-skip {pr_url}",
                     )
-                    stats.stale_removed += _cleanup_stale_entries(
-                        data, thread_id=thread_id, pr_url=pr_url, dry_run=args.dry_run
+                    _record_stale_cleanup(
+                        mutations,
+                        stats,
+                        args.todo_file,
+                        thread_id=thread_id,
+                        pr_url=pr_url,
+                        dry_run=args.dry_run,
                     )
                 stats.skipped += 1
         except BranchProtectionBlocked as exc:
@@ -1968,10 +2231,13 @@ def run(args: argparse.Namespace) -> TriageStats:
                 bump=decision.bump,
                 is_security=decision.is_security,
             )
-            if thread_id and thread_id in seen_thread_ids:
-                stats.already_tracked += 1
-            else:
-                new_flags.append(build_flag_entry(pr, repo, notif, bp_decision))
+            mutations.flags.append(
+                FlagTodoDelta(
+                    entry=build_flag_entry(pr, repo, notif, bp_decision),
+                    pr_url=pr_url,
+                )
+            )
+            if args.dry_run:
                 stats.flagged += 1
             # Extend the cooldown to ~24h so the cron stops re-approving
             # and re-trying the same blocked PR every hour. The standard
@@ -1992,14 +2258,20 @@ def run(args: argparse.Namespace) -> TriageStats:
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             stats.errors.append(f"action {decision.outcome} failed for {pr_url}: {exc}")
 
-    if (new_flags or stats.stale_removed) and not args.dry_run:
-        if new_flags:
-            data["prioritized"]["q1_do_first"].extend(new_flags)
+    if (mutations.flags or mutations.prunes) and not args.dry_run:
         try:
-            write_todo_atomic(args.todo_file, data)
-        except OSError as exc:
+            applied = apply_todo_mutations_with_lock(args.todo_file, mutations)
+        except (OSError, FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
             stats.errors.append(f"failed to write todo file: {exc}")
             return stats
+        stats.flagged = int(applied["added_flags"])
+        stats.already_tracked += int(applied["already_tracked"])
+        stats.stale_removed = int(applied["stale_removed"])
+        for added_pr_url in applied["added_pr_urls"]:
+            if added_pr_url and state.get(added_pr_url, 0) <= now:
+                state[added_pr_url] = now
+        if applied["changed"]:
+            commit_todo_changes(args.todo_file, "Record Dependabot triage todo updates")
 
     if not args.dry_run:
         save_state(args.state_file, state)
