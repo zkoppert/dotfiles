@@ -43,6 +43,9 @@ upgrades or seeing a backlog of dependabot notifications.
 5. Persists a per-PR cooldown timestamp in
    `~/Library/Logs/triage-dependabot-state.json` so re-runs within an
    hour do not double-act.
+6. Writes `todo.yml` through an exclusive `todo.yml.lock`, fresh re-read,
+   delta apply, and atomic replace. Any resulting change is committed in
+   the todo repo, followed by a best-effort pull and push.
 
 A launchd job (`com.zkoppert.triage-dependabot.plist`) runs this every
 hour on weekdays from 08:00 through 18:00. This skill is for ad-hoc runs
@@ -94,8 +97,9 @@ python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py 
 ## What this skill must NOT do
 
 - Do not modify `todo.yml` directly. The script handles atomic writes.
-- Do not commit changes to `zkoppert-todo` automatically. The user
-  reviews and commits manually (matches existing workflow).
+- Do not edit `todo.yml` outside the script's lock plus fresh re-read path.
+- Do not fail the triage run just because the best-effort git pull or push
+  could not complete.
 - Do not relax the five-outcome decision tree without explicit approval.
   Routing to `flag-for-review` is the safe default whenever any
   uncertainty exists (sub-agent failure, unknown bump kind, missing

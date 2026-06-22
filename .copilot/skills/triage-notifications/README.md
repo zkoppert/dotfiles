@@ -119,6 +119,20 @@ Each new entry carries a `notification` block:
     repo: org/repo
 ```
 
+Writes to `todo.yml` are race-safe. The tool computes GitHub outcomes
+first, then takes an exclusive `todo.yml.lock`, re-reads the file from
+disk, applies only the planned deltas by `id` or
+`notification.thread_id`, and writes with an atomic `os.replace`. That
+keeps manual edits made during a run instead of replaying a stale
+in-memory snapshot.
+
+After a successful write, the tool stages `todo.yml` in the todo repo,
+skips the commit when there is no staged diff, and otherwise creates a
+signed-off local commit with the Copilot co-author trailer. It then tries
+`git pull --rebase --autostash` and `git push`. Pull or push failures
+are logged as warnings so launchd keeps running, while the local commit
+still records the change.
+
 When you move the todo to `status: done`, the next triage run will:
 
 1. DELETE `/notifications/threads/{thread_id}` to mark it done on GitHub
@@ -166,7 +180,10 @@ on a PR URL), it is also copied into `done` with
 PRs first tracked while open and merged later still land in the
 biannual reflection archive instead of vanishing silently. Pruner
 stats land in the final summary line as `pruned_stale=N` plus a
-`pruned_breakdown:` line when anything was dropped.
+`pruned_breakdown:` line when anything was dropped. The summary uses the
+deltas that actually applied to the fresh `todo.yml` load under the
+lock. In `--dry-run`, the tool applies the same deltas to a fresh
+in-memory load and reports that preview without writing.
 
 ## Ad-hoc usage
 
@@ -232,8 +249,8 @@ python3 -m pytest tests.py -v
   pruned and you still care about it, run triage again and the
   notification will come back through the inbox. To audit what was
   dropped, check the cron log
-  (`~/Library/Logs/notification-triage.log`) or run with `--verbose` -
-  each drop logs `pruned inbox item <id> (<reason>)`. To disable the
+  (`~/Library/Logs/notification-triage.log`) or run with `--verbose`;
+  each drop logs `planned prune of <section> item <id> (<reason>)`. To disable the
   pruner entirely for a run, pass `--no-prune`. To recover a specific
   entry, the previous version of `todo.yml` lives in
   `~/repos/zkoppert-todo`'s git history.

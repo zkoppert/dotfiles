@@ -120,6 +120,19 @@ Flagged PRs are written using the same notification schema as
 checked against `inbox`, every `prioritized` quadrant, `in_progress`,
 `blocked`, `in_review`, and `done`.
 
+Writes to `todo.yml` are race-safe. The tool completes GitHub API work
+first, then takes an exclusive `todo.yml.lock`, re-reads the file from
+disk, applies only the planned flag and stale-removal deltas, and writes
+with an atomic `os.replace`. That keeps manual edits made during a run
+instead of replaying a stale in-memory snapshot.
+
+After a successful write, the tool stages `todo.yml` in the todo repo,
+skips the commit when there is no staged diff, and otherwise creates a
+signed-off local commit with the Copilot co-author trailer. It then tries
+`git pull --rebase --autostash` and `git push`. Pull or push failures
+are logged as warnings so launchd keeps running, while the local commit
+still records the change.
+
 When the user moves a flagged todo to `done`, the existing
 `triage-notifications` mark-done loop will catch it on its next run and
 DELETE the underlying notification thread.
@@ -210,16 +223,10 @@ python3 -m pytest tests.py -v
 
 ## Known limitations
 
-These are tracked for a follow-up PR rather than blocking this one. Each
-has a narrow blast radius given the hourly cron with a 10-30 second run
-window, but they're worth surfacing.
+This is tracked for a follow-up PR rather than blocking this one. The
+remaining item has a narrow blast radius given the hourly cron with a
+10-30 second run window, but it is worth surfacing.
 
-- **Manual edits to `todo.yml` during a run can be overwritten.** The
-  script reads the file at the start and writes it atomically at the end.
-  If I edit `todo.yml` by hand in between, my edits are lost when the
-  triage script's writeback overwrites the file. Mitigation under
-  consideration: file locking via `fcntl.flock`, or re-reading and
-  diffing immediately before write.
 - **Per-PR cooldown state has a read-then-write race across overlapping
   runs.** The launchd schedule runs hourly and a single invocation
   finishes well under a minute, so two runs should not overlap in

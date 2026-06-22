@@ -31,17 +31,17 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import fcntl
 import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import urlparse
 
 import yaml
@@ -398,6 +398,51 @@ class TriageStats:
     # triage-dependabot to consume.
     left_for_dependabot: int = 0
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class MarkDoneDelta:
+    """A local todo notification flag to set after GitHub accepted DELETE."""
+
+    item_id: str
+    thread_id: str
+    marked_done_at: str
+
+
+@dataclass
+class PruneDelta:
+    """A stale local todo entry to remove from active notification buckets."""
+
+    item_id: str
+    thread_id: str | None = None
+    stale_reason: str = "stale"
+    notification_reason: str | None = None
+    section: str = ""
+    archive_entry: dict[str, Any] | None = None
+
+
+@dataclass
+class TodoMutations:
+    """The todo.yml deltas computed before the locked write section."""
+
+    add_q2: list[dict[str, Any]] = field(default_factory=list)
+    add_inbox: list[dict[str, Any]] = field(default_factory=list)
+    add_done: list[dict[str, Any]] = field(default_factory=list)
+    mark_done: list[MarkDoneDelta] = field(default_factory=list)
+    prune: list[PruneDelta] = field(default_factory=list)
+
+
+class AppliedTodoMutations(TypedDict):
+    """Counts from applying todo.yml deltas to a concrete document."""
+
+    added_q2: int
+    added_inbox: int
+    added_done: int
+    already_tracked: int
+    marked_done: int
+    pruned: int
+    pruned_by_reason: dict[str, int]
+    changed: bool
 
 
 def is_dependabot_bump(title: str) -> bool:
@@ -918,7 +963,7 @@ def build_done_archive_entry(notif: dict[str, Any]) -> dict[str, Any]:
 def build_done_archive_entry_from_tracked(entry: dict[str, Any]) -> dict[str, Any]:
     """Build a done-archive entry from an existing tracked todo entry.
 
-    Used by ``prune_stale_notifications`` when it drops an inbox/quadrant
+    Used by the stale notification collector when it drops an inbox/quadrant
     entry whose original notification ``reason`` was ``"author"`` (i.e.
     the PR was mine). Without this archive step, self-authored PRs that
     were first tracked while open and then merged later would silently
@@ -997,11 +1042,312 @@ def write_todo_atomic(path: Path, data: dict[str, Any]) -> None:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
             _RT_YAML.dump(data, fh)
-        shutil.move(tmp_path, path)
+        os.replace(tmp_path, path)
     except Exception:
         if Path(tmp_path).exists():
             os.unlink(tmp_path)
         raise
+
+
+def _ensure_todo_sections(data: dict[str, Any]) -> None:
+    """Ensure the sections this tool writes are present and list-shaped."""
+    if data.get("inbox") is None:
+        data["inbox"] = []
+    if data.get("prioritized") is None:
+        data["prioritized"] = {}
+    for quadrant in PRUNE_QUADRANTS:
+        if data["prioritized"].get(quadrant) is None:
+            data["prioritized"][quadrant] = []
+    if data.get("done") is None:
+        data["done"] = []
+
+
+def _item_thread_id(item: Any) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    notif = item.get("notification")
+    if not isinstance(notif, dict):
+        return None
+    thread_id = notif.get("thread_id")
+    return str(thread_id) if thread_id else None
+
+
+def _entry_exists(data: dict[str, Any], entry: dict[str, Any]) -> bool:
+    entry_id = entry.get("id")
+    entry_thread_id = _item_thread_id(entry)
+    for item in _iter_todo_items(data):
+        if not isinstance(item, dict):
+            continue
+        if entry_id and item.get("id") == entry_id:
+            return True
+        if entry_thread_id and _item_thread_id(item) == entry_thread_id:
+            return True
+    return False
+
+
+def _iter_todo_items(data: dict[str, Any]) -> list[Any]:
+    items: list[Any] = []
+    for key in ("inbox", "done", "in_progress", "blocked", "in_review"):
+        value = data.get(key)
+        if isinstance(value, list):
+            items.extend(value)
+    prioritized = data.get("prioritized")
+    if isinstance(prioritized, dict):
+        for value in prioritized.values():
+            if isinstance(value, list):
+                items.extend(value)
+    return items
+
+
+def _append_unique(
+    data: dict[str, Any],
+    target: list[Any],
+    entry: dict[str, Any],
+) -> bool:
+    if _entry_exists(data, entry):
+        return False
+    target.append(entry)
+    return True
+
+
+def _active_notification_buckets(data: dict[str, Any]) -> list[tuple[str, list[Any]]]:
+    buckets: list[tuple[str, list[Any]]] = []
+    inbox = data.get("inbox")
+    if isinstance(inbox, list):
+        buckets.append(("inbox", inbox))
+    prioritized = data.get("prioritized")
+    if isinstance(prioritized, dict):
+        for quadrant in PRUNE_QUADRANTS:
+            items = prioritized.get(quadrant)
+            if isinstance(items, list):
+                buckets.append((f"prioritized.{quadrant}", items))
+    return buckets
+
+
+def _remove_pruned_entry(data: dict[str, Any], delta: PruneDelta) -> int:
+    removed = 0
+    for bucket, items in _active_notification_buckets(data):
+        kept: list[Any] = []
+        for item in items:
+            item_id = item.get("id") if isinstance(item, dict) else None
+            thread_id = _item_thread_id(item)
+            if item_id == delta.item_id:
+                logger.info("pruned %s item %s", bucket, delta.item_id)
+                removed += 1
+                continue
+            if delta.thread_id and thread_id == delta.thread_id:
+                logger.info("pruned %s item %s by thread_id", bucket, item_id)
+                removed += 1
+                continue
+            kept.append(item)
+        if removed:
+            items[:] = kept
+    return removed
+
+
+def _mark_local_notification_done(data: dict[str, Any], delta: MarkDoneDelta) -> bool:
+    for item in _iter_todo_items(data):
+        if not isinstance(item, dict):
+            continue
+        if item.get("id") != delta.item_id and _item_thread_id(item) != delta.thread_id:
+            continue
+        notif = item.get("notification")
+        if not isinstance(notif, dict):
+            continue
+        if notif.get("marked_done") and notif.get("marked_done_at") == delta.marked_done_at:
+            return False
+        notif["marked_done"] = True
+        notif["marked_done_at"] = delta.marked_done_at
+        return True
+    return False
+
+
+def apply_todo_mutations(
+    data: dict[str, Any],
+    mutations: TodoMutations,
+) -> AppliedTodoMutations:
+    """Apply precomputed todo.yml deltas to a freshly loaded document."""
+    _ensure_todo_sections(data)
+    changed = False
+    pruned_by_reason: dict[str, int] = {}
+    applied: AppliedTodoMutations = {
+        "added_q2": 0,
+        "added_inbox": 0,
+        "added_done": 0,
+        "already_tracked": 0,
+        "marked_done": 0,
+        "pruned": 0,
+        "pruned_by_reason": pruned_by_reason,
+        "changed": False,
+    }
+
+    for delta in mutations.prune:
+        removed = _remove_pruned_entry(data, delta)
+        if removed:
+            applied["pruned"] += removed
+            pruned_by_reason[delta.stale_reason] = (
+                pruned_by_reason.get(delta.stale_reason, 0) + removed
+            )
+            changed = True
+        if removed and delta.archive_entry and _append_unique(
+            data, data["done"], delta.archive_entry
+        ):
+            applied["added_done"] += 1
+            changed = True
+
+    for delta in mutations.mark_done:
+        if _mark_local_notification_done(data, delta):
+            applied["marked_done"] += 1
+            changed = True
+
+    for entry in mutations.add_done:
+        if _append_unique(data, data["done"], entry):
+            applied["added_done"] += 1
+            changed = True
+        else:
+            applied["already_tracked"] += 1
+
+    for entry in mutations.add_q2:
+        if _append_unique(data, data["prioritized"]["q2_schedule"], entry):
+            applied["added_q2"] += 1
+            changed = True
+        else:
+            applied["already_tracked"] += 1
+
+    for entry in mutations.add_inbox:
+        if _append_unique(data, data["inbox"], entry):
+            applied["added_inbox"] += 1
+            changed = True
+        else:
+            applied["already_tracked"] += 1
+
+    applied["changed"] = changed
+    return applied
+
+
+def apply_todo_mutations_with_lock(
+    path: Path, mutations: TodoMutations
+) -> AppliedTodoMutations:
+    """Re-read todo.yml under an exclusive lock, apply deltas, and write."""
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            data = load_todo(path)
+            applied = apply_todo_mutations(data, mutations)
+            if applied["changed"]:
+                write_todo_atomic(path, data)
+            return applied
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def preview_todo_mutations(path: Path, mutations: TodoMutations) -> AppliedTodoMutations:
+    """Apply deltas to a read-only fresh load for dry-run reporting."""
+    data = load_todo(path)
+    return apply_todo_mutations(data, mutations)
+
+
+def reconcile_stats_from_applied(
+    stats: TriageStats, applied: AppliedTodoMutations
+) -> None:
+    """Update digest counters from deltas applied to a concrete document."""
+    stats.added_q2 = applied["added_q2"]
+    stats.added_inbox = applied["added_inbox"]
+    stats.already_tracked += applied["already_tracked"]
+    stats.marked_done = applied["marked_done"]
+    stats.pruned_stale = applied["pruned"]
+    stats.pruned_by_reason = dict(applied["pruned_by_reason"])
+    stats.archived_to_done = applied["added_done"]
+
+
+COPILOT_COAUTHOR_TRAILER = (
+    "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+)
+
+
+def _git_repo_for_todo(path: Path) -> Path:
+    return path.parent
+
+
+def _git_metadata_exists(repo: Path) -> bool:
+    return (repo / ".git").exists()
+
+
+def _run_git(repo: Path, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=check,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def _log_git_warning(action: str, exc: BaseException) -> None:
+    stderr = getattr(exc, "stderr", "") or ""
+    detail = stderr.strip() or str(exc)
+    logger.warning("git %s failed: %s", action, detail)
+
+
+def commit_todo_changes(path: Path, message: str) -> bool:
+    """Commit todo.yml changes locally, then try to pull and push."""
+    repo = _git_repo_for_todo(path)
+    if not _git_metadata_exists(repo):
+        logger.debug("todo repo %s has no git metadata; skipping commit", repo)
+        return False
+    try:
+        _run_git(repo, ["add", "--", path.name])
+        diff = _run_git(repo, ["diff", "--cached", "--quiet", "--", path.name], check=False)
+    except (FileNotFoundError, subprocess.SubprocessError) as exc:
+        _log_git_warning("add", exc)
+        return False
+
+    if diff.returncode == 0:
+        logger.info("todo.yml unchanged after staging; skipping commit")
+        return False
+    if diff.returncode != 1:
+        logger.warning("git diff --cached failed: %s", (diff.stderr or "").strip())
+        return False
+
+    try:
+        _run_git(
+            repo,
+            [
+                "commit",
+                "--signoff",
+                "-m",
+                message,
+                "-m",
+                COPILOT_COAUTHOR_TRAILER,
+                "--",
+                path.name,
+            ],
+        )
+    except (FileNotFoundError, subprocess.SubprocessError) as exc:
+        _log_git_warning("commit", exc)
+        return False
+
+    try:
+        _run_git(repo, ["pull", "--rebase", "--autostash"])
+    except (FileNotFoundError, subprocess.SubprocessError) as exc:
+        _log_git_warning("pull --rebase", exc)
+        # A conflicting rebase leaves the repo mid-rebase with conflict
+        # markers written into todo.yml, which would break every later run
+        # (load_todo would raise). Abort it best-effort so the worktree is
+        # left clean on the local commit.
+        try:
+            _run_git(repo, ["rebase", "--abort"], check=False)
+        except (FileNotFoundError, subprocess.SubprocessError) as abort_exc:
+            _log_git_warning("rebase --abort", abort_exc)
+        return True
+
+    try:
+        _run_git(repo, ["push"])
+    except (FileNotFoundError, subprocess.SubprocessError) as exc:
+        _log_git_warning("push", exc)
+    return True
 
 
 def existing_thread_ids(data: dict[str, Any]) -> set[str]:
@@ -1281,84 +1627,6 @@ def check_subject_stale(parsed: dict[str, Any]) -> tuple[str, str]:
     return (STALE_UNKNOWN, f"unsupported kind: {kind}")
 
 
-def _check_and_drop_stale(
-    entries: list[Any],
-    stats: TriageStats,
-    *,
-    section: str,
-    dry_run: bool,
-) -> tuple[list[Any], int, list[dict[str, Any]]]:
-    """Filter one list of todo entries, dropping the stale github-notification ones.
-
-    Returns ``(kept_entries, checked_count, archive_entries)``. Mutates
-    ``stats`` in place: increments ``pruned_stale``, updates
-    ``pruned_by_reason``, appends to ``errors`` on mark-done failures.
-    ``section`` is included in log lines so inbox vs. quadrant drops are
-    distinguishable in the cron log.
-
-    Stale-detection and mark-done policy match the original inbox pruner:
-    only confirmed-closed subjects drop, transient errors keep the entry,
-    and a mark-done failure is logged but does not block the drop.
-
-    Archive policy: when a dropped entry's stored
-    ``notification.reason == "author"`` and the parsed URL kind is
-    ``"pr"``, build a ``done``-shaped archive entry and return it.
-    Callers append these to ``data["done"]`` so self-authored PRs that
-    were first tracked open and later merged still land in the biannual
-    reflection archive instead of vanishing silently.
-    """
-    kept: list[Any] = []
-    archive: list[dict[str, Any]] = []
-    checked = 0
-    for entry in entries:
-        if not isinstance(entry, dict):
-            kept.append(entry)
-            continue
-        if entry.get("source") != "github-notification":
-            kept.append(entry)
-            continue
-        notif = entry.get("notification")
-        if not isinstance(notif, dict):
-            kept.append(entry)
-            continue
-        url = notif.get("url", "")
-        parsed = parse_github_url(url)
-        if parsed is None:
-            kept.append(entry)
-            continue
-        checked += 1
-        action, reason = check_subject_stale(parsed)
-        if action == STALE_DROP:
-            stats.pruned_stale += 1
-            stats.pruned_by_reason[reason] = stats.pruned_by_reason.get(reason, 0) + 1
-            if (
-                parsed.get("kind") == "pr"
-                and (notif.get("reason") or "").lower() == "author"
-            ):
-                archive.append(build_done_archive_entry_from_tracked(entry))
-                stats.archived_to_done += 1
-            thread_id = notif.get("thread_id")
-            if thread_id and not dry_run:
-                try:
-                    mark_thread_done(str(thread_id))
-                except (
-                    subprocess.CalledProcessError,
-                    subprocess.TimeoutExpired,
-                ) as exc:
-                    stats.errors.append(
-                        f"prune mark-done failed for thread {thread_id}: {exc}"
-                    )
-            logger.info(
-                "pruned %s item %s (%s)",
-                section,
-                entry.get("id"),
-                reason,
-            )
-            continue
-        kept.append(entry)
-    return kept, checked, archive
-
-
 # Quadrants that the pruner sweeps in addition to ``inbox``. Order is
 # stable for predictable log output but does not affect correctness.
 PRUNE_QUADRANTS: tuple[str, ...] = (
@@ -1369,73 +1637,76 @@ PRUNE_QUADRANTS: tuple[str, ...] = (
 )
 
 
-def prune_stale_notifications(
-    data: dict[str, Any], stats: TriageStats, dry_run: bool = False
-) -> None:
-    """Drop stale github-notification entries from inbox and all quadrants.
-
-    Walks ``data['inbox']`` and each quadrant in ``data['prioritized']``,
-    dropping entries where ``source == 'github-notification'`` and whose
-    subject URL parses as a PR / issue / discussion that is now closed,
-    merged, locked, or answered. Manually added items (any other
-    ``source``) are left alone, as are entries with unparseable URLs.
-
-    This is the only mechanism that cleans entries already promoted to a
-    quadrant - ``classify()`` only sees fresh notifications because the
-    ``run()`` loop skips ``already_tracked`` thread IDs. Without this
-    sweep, a Q2 PR that gets merged sits in the quadrant forever unless
-    the user manually marks it done.
-
-    Drop policy matches the original inbox pruner: confirmed-closed →
-    drop + mark thread done; transient errors → keep; mark-done failures
-    → log to ``stats.errors`` but still drop the local entry.
-
-    Archive: when a dropped entry's stored ``notification.reason`` was
-    ``"author"`` (so the PR was mine) and the URL kind is a PR, an
-    archive entry is appended to ``data["done"]`` before the inbox/
-    quadrant entry is discarded. This catches the dominant
-    self-authored-PR lifecycle (open → tracked in inbox → merged later)
-    which classify() can no longer see because the run loop skips
-    ``already_tracked`` thread ids.
-    """
-    total_checked = 0
-    archive_entries: list[dict[str, Any]] = []
-    inbox = data.get("inbox")
-    if inbox:
-        kept, checked, archive = _check_and_drop_stale(
-            inbox, stats, section="inbox", dry_run=dry_run
-        )
-        data["inbox"] = kept
-        archive_entries.extend(archive)
-        total_checked += checked
-
-    prioritized = data.get("prioritized") or {}
-    for quadrant in PRUNE_QUADRANTS:
-        entries = prioritized.get(quadrant)
-        if not entries:
-            continue
-        kept, checked, archive = _check_and_drop_stale(
-            entries, stats, section=quadrant, dry_run=dry_run
-        )
-        prioritized[quadrant] = kept
-        archive_entries.extend(archive)
-        total_checked += checked
-
-    if archive_entries:
-        data.setdefault("done", []).extend(archive_entries)
-
-    logger.debug(
-        "pruner checked %d github-notification entries across inbox + quadrants, dropped %d (archived %d)",
-        total_checked,
-        stats.pruned_stale,
-        len(archive_entries),
+def _stale_notification_prune_delta(
+    entry: dict[str, Any], *, section: str
+) -> PruneDelta | None:
+    """Build a prune delta when a tracked GitHub subject is stale."""
+    if entry.get("source") != "github-notification":
+        return None
+    notif = entry.get("notification")
+    if not isinstance(notif, dict):
+        return None
+    parsed = parse_github_url(notif.get("url", ""))
+    if parsed is None:
+        return None
+    action, stale_reason = check_subject_stale(parsed)
+    if action != STALE_DROP:
+        return None
+    notification_reason = (notif.get("reason") or "").lower()
+    archive_entry = None
+    if parsed.get("kind") == "pr" and notification_reason == "author":
+        archive_entry = build_done_archive_entry_from_tracked(entry)
+    thread_id = str(notif.get("thread_id") or "")
+    return PruneDelta(
+        item_id=str(entry.get("id") or ""),
+        thread_id=thread_id or None,
+        stale_reason=stale_reason,
+        notification_reason=notification_reason or None,
+        section=section,
+        archive_entry=archive_entry,
     )
 
 
-# Backward-compatible alias for the old single-section pruner. The
-# function now sweeps quadrants too despite the legacy name, so external
-# callers keep working without code changes.
-prune_stale_inbox = prune_stale_notifications
+def stale_notification_prune_deltas(data: dict[str, Any]) -> list[PruneDelta]:
+    """Return stale notification deltas for inbox and quadrant entries."""
+    prunes: list[PruneDelta] = []
+    for section, items in _active_notification_buckets(data):
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            delta = _stale_notification_prune_delta(entry, section=section)
+            if delta is not None:
+                prunes.append(delta)
+    return prunes
+
+
+def collect_stale_notification_prunes(
+    data: dict[str, Any],
+    stats: TriageStats,
+    *,
+    dry_run: bool,
+) -> list[PruneDelta]:
+    """Compute stale-entry removals without mutating the loaded todo snapshot."""
+    prunes = stale_notification_prune_deltas(data)
+    for delta in prunes:
+        if delta.thread_id and not dry_run:
+            try:
+                mark_thread_done(delta.thread_id)
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+            ) as exc:
+                stats.errors.append(
+                    f"prune mark-done failed for thread {delta.thread_id}: {exc}"
+                )
+        logger.info(
+            "planned prune of %s item %s (%s)",
+            delta.section,
+            delta.item_id,
+            delta.stale_reason,
+        )
+    logger.debug("pruner planned %d stale notification prune(s)", len(prunes))
+    return prunes
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1498,9 +1769,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         return stats
 
     seen_ids = existing_thread_ids(data)
-    new_q2: list[dict[str, Any]] = []
-    new_inbox: list[dict[str, Any]] = []
-    new_done: list[dict[str, Any]] = []
+    mutations = TodoMutations()
 
     for notif in notifications:
         thread_id = str(notif.get("id") or "")
@@ -1521,8 +1790,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         if classification.bucket == BUCKET_DROP:
             stats.dropped += 1
             if classification.archive_to_done:
-                new_done.append(build_done_archive_entry(notif))
-                stats.archived_to_done += 1
+                mutations.add_done.append(build_done_archive_entry(notif))
             if classification.skip_mark_done:
                 # Dependabot bump: drop from the inbox but leave the GitHub
                 # notification unread so triage-dependabot can consume it.
@@ -1541,10 +1809,10 @@ def run(args: argparse.Namespace) -> TriageStats:
             continue
         entry = build_todo_entry(notif, classification)
         if classification.bucket == BUCKET_Q2:
-            new_q2.append(entry)
+            mutations.add_q2.append(entry)
             stats.added_q2 += 1
         else:
-            new_inbox.append(entry)
+            mutations.add_inbox.append(entry)
             stats.added_inbox += 1
 
     # Mark-done-on-completed loop: scan tracked items now marked done.
@@ -1552,12 +1820,15 @@ def run(args: argparse.Namespace) -> TriageStats:
     for item in ready:
         notif_meta = item["notification"]
         thread_id = str(notif_meta["thread_id"])
+        mark_done_delta = MarkDoneDelta(
+            item_id=str(item.get("id") or ""),
+            thread_id=thread_id,
+            marked_done_at=datetime.date.today().isoformat(),
+        )
         if not args.dry_run:
             try:
                 mark_thread_done(thread_id)
-                notif_meta["marked_done"] = True
-                notif_meta["marked_done_at"] = datetime.date.today().isoformat()
-                stats.marked_done += 1
+                mutations.mark_done.append(mark_done_delta)
             except (
                 subprocess.CalledProcessError,
                 subprocess.TimeoutExpired,
@@ -1566,31 +1837,52 @@ def run(args: argparse.Namespace) -> TriageStats:
                     f"mark-done-on-completed failed for thread {thread_id}: {exc}"
                 )
         else:
-            stats.marked_done += 1
+            mutations.mark_done.append(mark_done_delta)
 
     # Stale-notification pruner: drop github-notification entries from
     # inbox and quadrants whose subject is now closed/merged/locked/
     # answered. Runs even on --dry-run (so we can see what would be
     # pruned) but the write itself is gated below.
     if not args.no_prune:
-        prune_stale_notifications(data, stats, dry_run=args.dry_run)
+        mutations.prune.extend(
+            collect_stale_notification_prunes(data, stats, dry_run=args.dry_run)
+        )
 
-    # Append new entries to todo.yml.
-    if (
-        new_q2
-        or new_inbox
-        or new_done
-        or stats.marked_done
-        or stats.pruned_stale
-    ) and not args.dry_run:
-        data["inbox"].extend(new_inbox)
-        data["prioritized"]["q2_schedule"].extend(new_q2)
-        data["done"].extend(new_done)
-        try:
-            write_todo_atomic(args.todo_file, data)
-        except OSError as exc:
-            stats.errors.append(f"failed to write todo file: {exc}")
-            return stats
+    has_todo_mutations = bool(
+        mutations.add_q2
+        or mutations.add_inbox
+        or mutations.add_done
+        or mutations.mark_done
+        or mutations.prune
+    )
+    if has_todo_mutations:
+        if args.dry_run:
+            try:
+                applied = preview_todo_mutations(args.todo_file, mutations)
+            except (
+                OSError,
+                FileNotFoundError,
+                yaml.YAMLError,
+                _RuamelYAMLError,
+            ) as exc:
+                stats.errors.append(f"failed to preview todo updates: {exc}")
+                return stats
+        else:
+            try:
+                applied = apply_todo_mutations_with_lock(args.todo_file, mutations)
+            except (
+                OSError,
+                FileNotFoundError,
+                yaml.YAMLError,
+                _RuamelYAMLError,
+            ) as exc:
+                stats.errors.append(f"failed to write todo file: {exc}")
+                return stats
+            if applied["changed"]:
+                commit_todo_changes(
+                    args.todo_file, "Record notification triage todo updates"
+                )
+        reconcile_stats_from_applied(stats, applied)
 
     new_actionable = stats.added_q2 + stats.added_inbox
     if new_actionable and not args.no_notify:

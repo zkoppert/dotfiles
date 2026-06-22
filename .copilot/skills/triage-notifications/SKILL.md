@@ -44,12 +44,16 @@ dropped and cleared from GitHub, and only personal-action items survive.
      GitHub** (never marked done) so the separate `triage-dependabot`
      tool can consume them.
 3. Adds Q1 and INBOX entries to `~/repos/zkoppert-todo/todo.yml`
-   (deduped by `notification.thread_id`).
+   (deduped by `notification.thread_id`). Writes take an exclusive
+   `todo.yml.lock`, re-read the file, apply only the computed deltas, and
+   use an atomic replace so concurrent manual edits are preserved.
 4. Marks DROP threads done on GitHub (no human confirmation), which
    removes them from the inbox (except Dependabot bumps, which stay
    unread).
 5. Scans the todo file for items previously created by this tool that
    have moved to `status: done` and marks those notifications done.
+6. Commits any resulting `todo.yml` change in the todo repo, then tries
+   a best-effort pull and push. Git failures are logged as warnings.
 
 A launchd job (`com.zkoppert.notification-triage.plist`) runs this every
 two hours on weekdays at 8/10/12/14/16/18. This skill is for ad-hoc
@@ -83,8 +87,9 @@ python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py \
 ## What this skill must NOT do
 
 - Don't modify `todo.yml` directly. The script handles atomic writes.
-- Don't commit changes to `zkoppert-todo` automatically. The user
-  reviews and commits manually (matches existing workflow).
+- Don't edit `todo.yml` outside the script's lock plus fresh re-read path.
+- Don't fail the triage run just because the best-effort git pull or push
+  could not complete.
 - Don't mark Dependabot bump notifications done on GitHub. They are left
   unread on purpose for `triage-dependabot`; the classifier already
   enforces this via `skip_mark_done`.
