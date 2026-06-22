@@ -1092,6 +1092,22 @@ def _mock_run_gh(return_value=None, side_effect=None):
     )
 
 
+def _collect_and_apply_stale_prunes(
+    data: dict, stats: triage.TriageStats, *, dry_run: bool = False
+) -> triage.AppliedTodoMutations:
+    """Exercise the production stale collector and delta applier."""
+    mutations = triage.TodoMutations(
+        prune=triage.collect_stale_notification_prunes(
+            data,
+            stats,
+            dry_run=dry_run,
+        )
+    )
+    applied = triage.apply_todo_mutations(data, mutations)
+    triage.reconcile_stats_from_applied(stats, applied)
+    return applied
+
+
 def test_check_subject_stale_pr_open_keeps():
     parsed = {"owner": "o", "repo": "r", "kind": "pr", "number": 1}
     with _mock_run_gh(return_value=json.dumps({"state": "open"})):
@@ -1326,26 +1342,26 @@ def test_check_subject_stale_unsupported_kind():
 
 
 # ----------------------------------------------------------------------
-# prune_stale_inbox
+# stale prune collector
 # ----------------------------------------------------------------------
 
 
-def test_prune_stale_inbox_empty_is_noop():
+def test_stale_prune_collector_empty_is_noop():
     stats = triage.TriageStats()
     data = {"inbox": []}
-    triage.prune_stale_inbox(data, stats)
+    _collect_and_apply_stale_prunes(data, stats)
     assert stats.pruned_stale == 0
     assert data["inbox"] == []
 
 
-def test_prune_stale_inbox_skips_missing_inbox():
+def test_stale_prune_collector_skips_missing_inbox():
     stats = triage.TriageStats()
     data = {}
-    triage.prune_stale_inbox(data, stats)
+    _collect_and_apply_stale_prunes(data, stats)
     assert stats.pruned_stale == 0
 
 
-def test_prune_stale_inbox_keeps_non_github_source():
+def test_stale_prune_collector_keeps_non_github_source():
     stats = triage.TriageStats()
     data = {
         "inbox": [
@@ -1358,13 +1374,13 @@ def test_prune_stale_inbox_keeps_non_github_source():
     }
     # run_gh should never be called for non-github items.
     with patch("triage.run_gh") as run_gh_mock:
-        triage.prune_stale_inbox(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     run_gh_mock.assert_not_called()
     assert len(data["inbox"]) == 1
     assert stats.pruned_stale == 0
 
 
-def test_prune_stale_inbox_keeps_unparseable_url():
+def test_stale_prune_collector_keeps_unparseable_url():
     stats = triage.TriageStats()
     data = {
         "inbox": [
@@ -1376,12 +1392,12 @@ def test_prune_stale_inbox_keeps_unparseable_url():
         ]
     }
     with patch("triage.run_gh") as run_gh_mock:
-        triage.prune_stale_inbox(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     run_gh_mock.assert_not_called()
     assert len(data["inbox"]) == 1
 
 
-def test_prune_stale_inbox_drops_stale_and_keeps_active():
+def test_stale_prune_collector_drops_stale_and_keeps_active():
     stats = triage.TriageStats()
     data = {
         "inbox": [
@@ -1412,7 +1428,7 @@ def test_prune_stale_inbox_drops_stale_and_keeps_active():
         raise AssertionError(f"unexpected call: {cmd}")
 
     with patch("triage.run_gh", side_effect=fake_run_gh):
-        triage.prune_stale_inbox(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
 
     ids = [e["id"] for e in data["inbox"]]
     assert ids == ["active-pr", "manual"]
@@ -1420,7 +1436,7 @@ def test_prune_stale_inbox_drops_stale_and_keeps_active():
     assert stats.pruned_by_reason == {"merged": 1}
 
 
-def test_prune_stale_inbox_unknown_keeps():
+def test_stale_prune_collector_unknown_keeps():
     stats = triage.TriageStats()
     data = {
         "inbox": [
@@ -1433,15 +1449,15 @@ def test_prune_stale_inbox_unknown_keeps():
     }
     err = _called_process_error(1, "HTTP 503: Service Unavailable")
     with patch("triage.run_gh", side_effect=err):
-        triage.prune_stale_inbox(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     assert len(data["inbox"]) == 1
     assert stats.pruned_stale == 0
 
 
-def test_prune_stale_inbox_handles_non_dict_entries():
+def test_stale_prune_collector_handles_non_dict_entries():
     stats = triage.TriageStats()
     data = {"inbox": ["not a dict", None, {"id": "good", "source": "manual"}]}
-    triage.prune_stale_inbox(data, stats)
+    _collect_and_apply_stale_prunes(data, stats)
     assert data["inbox"] == ["not a dict", None, {"id": "good", "source": "manual"}]
 
 
@@ -1588,6 +1604,61 @@ def test_run_prunes_and_writes_when_live(todo_file):
     data = yaml.safe_load(todo_file.read_text())
     ids = [e["id"] for e in data["inbox"]]
     assert ids == ["active-1"]
+
+
+def test_run_reports_prunes_from_applied_deltas_after_manual_edit(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [_stale_self_authored_entry("stale-removed-manually", 42)],
+                "prioritized": {"q1_do_first": []},
+                "done": [],
+            }
+        )
+    )
+    delete_calls: list[tuple[str, ...]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        joined = " ".join(cmd)
+        if "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(tuple(cmd))
+            todo_file.write_text(
+                yaml.safe_dump(
+                    {
+                        "inbox": [],
+                        "prioritized": {"q1_do_first": []},
+                        "done": [],
+                    }
+                )
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if "/user" in joined:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps({"login": "zkoppert"}), stderr=""
+            )
+        if "/notifications" in joined and "/threads" not in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+        if "/repos/github/example/pulls/42" in joined:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps({"state": "closed", "merged_at": "x"}),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        stats = triage.run(args)
+
+    assert any("/notifications/threads/thr-42" in " ".join(c) for c in delete_calls)
+    assert stats.pruned_stale == 0
+    assert stats.archived_to_done == 0
+    assert stats.pruned_by_reason == {}
+    assert stats.pruned_stale == sum(stats.pruned_by_reason.values())
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["inbox"] == []
+    assert data["done"] == []
 
 
 def test_run_prune_marks_thread_done_so_it_does_not_reappear(todo_file):
@@ -1738,7 +1809,7 @@ def test_run_prune_dry_run_does_not_mark_thread_done(todo_file):
     assert delete_calls == [], "dry-run must not DELETE threads"
 
 
-def test_prune_stale_inbox_skips_non_dict_notification():
+def test_stale_prune_collector_skips_non_dict_notification():
     # A user-edited todo.yml could put a string (or anything else) under
     # ``notification``. The pruner must keep the entry instead of crashing
     # with AttributeError on ``.get()``.
@@ -1760,13 +1831,13 @@ def test_prune_stale_inbox_skips_non_dict_notification():
     # If the pruner ever calls run_gh on these, that's also a bug - mock it
     # to raise so we'd notice.
     with _mock_run_gh(side_effect=AssertionError("should not be called")):
-        triage.prune_stale_inbox(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     assert len(data["inbox"]) == 2
     assert stats.pruned_stale == 0
     assert stats.errors == []
 
 
-def test_prune_stale_inbox_handles_mark_done_timeout():
+def test_stale_prune_collector_handles_mark_done_timeout():
     # ``run_gh`` can raise subprocess.TimeoutExpired, not just
     # CalledProcessError. A timeout during mark-done must be logged and the
     # drop must still proceed - it must not crash the prune loop.
@@ -1788,7 +1859,7 @@ def test_prune_stale_inbox_handles_mark_done_timeout():
         "triage.check_subject_stale",
         MagicMock(return_value=(triage.STALE_DROP, "closed issue")),
     ), patch("triage.mark_thread_done", MagicMock(side_effect=timeout_exc)):
-        triage.prune_stale_inbox(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     assert data["inbox"] == []  # drop still happened
     assert stats.pruned_stale == 1
     assert len(stats.errors) == 1
@@ -1873,7 +1944,7 @@ def test_run_marks_done_on_completed_handles_timeout(todo_file):
 
 
 # ----------------------------------------------------------------------
-# prune_stale_notifications: quadrant sweep
+# stale prune collector: quadrant sweep
 # ----------------------------------------------------------------------
 
 
@@ -1893,7 +1964,7 @@ def _all_prs_merged(cmd, *args, **kwargs):
     return json.dumps({"state": "closed", "merged_at": "2024-01-01T00:00:00Z"})
 
 
-def test_prune_stale_notifications_drops_from_q1_do_first():
+def test_stale_prune_collector_drops_from_q1_do_first():
     stats = triage.TriageStats()
     data = {
         "inbox": [],
@@ -1906,12 +1977,12 @@ def test_prune_stale_notifications_drops_from_q1_do_first():
     with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
         "triage.mark_thread_done"
     ):
-        triage.prune_stale_notifications(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     assert data["prioritized"]["q1_do_first"] == []
     assert stats.pruned_stale == 1
 
 
-def test_prune_stale_notifications_drops_from_q2_schedule():
+def test_stale_prune_collector_drops_from_q2_schedule():
     stats = triage.TriageStats()
     data = {
         "inbox": [],
@@ -1924,12 +1995,12 @@ def test_prune_stale_notifications_drops_from_q2_schedule():
     with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
         "triage.mark_thread_done"
     ):
-        triage.prune_stale_notifications(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     assert data["prioritized"]["q2_schedule"] == []
     assert stats.pruned_stale == 1
 
 
-def test_prune_stale_notifications_drops_from_q3_and_q4():
+def test_stale_prune_collector_drops_from_q3_and_q4():
     stats = triage.TriageStats()
     data = {
         "inbox": [],
@@ -1941,13 +2012,13 @@ def test_prune_stale_notifications_drops_from_q3_and_q4():
     with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
         "triage.mark_thread_done"
     ):
-        triage.prune_stale_notifications(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     assert data["prioritized"]["q3_delegate"] == []
     assert data["prioritized"]["q4_eliminate"] == []
     assert stats.pruned_stale == 2
 
 
-def test_prune_stale_notifications_sweeps_inbox_and_quadrants_together():
+def test_stale_prune_collector_sweeps_inbox_and_quadrants_together():
     stats = triage.TriageStats()
     data = {
         "inbox": [_stale_notification_entry("inbox-pr", 1)],
@@ -1959,14 +2030,14 @@ def test_prune_stale_notifications_sweeps_inbox_and_quadrants_together():
     with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
         "triage.mark_thread_done"
     ):
-        triage.prune_stale_notifications(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     assert data["inbox"] == []
     assert data["prioritized"]["q1_do_first"] == []
     assert data["prioritized"]["q2_schedule"] == []
     assert stats.pruned_stale == 3
 
 
-def test_prune_stale_notifications_keeps_active_quadrant_entries():
+def test_stale_prune_collector_keeps_active_quadrant_entries():
     stats = triage.TriageStats()
     data = {
         "inbox": [],
@@ -1989,13 +2060,13 @@ def test_prune_stale_notifications_keeps_active_quadrant_entries():
     with patch("triage.run_gh", side_effect=mixed_states), patch(
         "triage.mark_thread_done"
     ):
-        triage.prune_stale_notifications(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     ids = [e["id"] for e in data["prioritized"]["q2_schedule"]]
     assert ids == ["active-pr"]
     assert stats.pruned_stale == 1
 
 
-def test_prune_stale_notifications_keeps_non_github_quadrant_entries():
+def test_stale_prune_collector_keeps_non_github_quadrant_entries():
     """Manually added quadrant todos must never be touched, even if they
     happen to have a github.com URL stashed somewhere."""
     stats = triage.TriageStats()
@@ -2013,22 +2084,22 @@ def test_prune_stale_notifications_keeps_non_github_quadrant_entries():
         "prioritized": {"q2_schedule": [manual, no_source]},
     }
     with patch("triage.run_gh") as run_gh_mock:
-        triage.prune_stale_notifications(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     run_gh_mock.assert_not_called()
     assert len(data["prioritized"]["q2_schedule"]) == 2
     assert stats.pruned_stale == 0
 
 
-def test_prune_stale_notifications_handles_missing_prioritized_key():
+def test_stale_prune_collector_handles_missing_prioritized_key():
     """An older or partially populated todo.yml may have no
     ``prioritized`` key at all - the pruner must not crash."""
     stats = triage.TriageStats()
     data = {"inbox": []}
-    triage.prune_stale_notifications(data, stats)
+    _collect_and_apply_stale_prunes(data, stats)
     assert stats.pruned_stale == 0
 
 
-def test_prune_stale_notifications_handles_missing_quadrant():
+def test_stale_prune_collector_handles_missing_quadrant():
     """Only some quadrants may exist - skip absent ones cleanly."""
     stats = triage.TriageStats()
     data = {
@@ -2041,12 +2112,12 @@ def test_prune_stale_notifications_handles_missing_quadrant():
     with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
         "triage.mark_thread_done"
     ):
-        triage.prune_stale_notifications(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     assert data["prioritized"]["q2_schedule"] == []
     assert stats.pruned_stale == 1
 
 
-def test_prune_stale_notifications_dry_run_skips_mark_done():
+def test_stale_prune_collector_dry_run_skips_mark_done():
     stats = triage.TriageStats()
     data = {
         "inbox": [],
@@ -2057,16 +2128,30 @@ def test_prune_stale_notifications_dry_run_skips_mark_done():
     with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
         "triage.mark_thread_done"
     ) as mark_done_mock:
-        triage.prune_stale_notifications(data, stats, dry_run=True)
+        _collect_and_apply_stale_prunes(data, stats, dry_run=True)
     # The entry is still removed from the in-memory structure (caller
     # decides whether to persist), but no DELETE was sent to GitHub.
     assert data["prioritized"]["q1_do_first"] == []
     mark_done_mock.assert_not_called()
 
 
-def test_prune_stale_inbox_alias_points_at_new_pruner():
-    """Backwards-compat alias still works and sweeps quadrants too."""
-    assert triage.prune_stale_inbox is triage.prune_stale_notifications
+def test_stale_prune_core_emits_reason_metadata():
+    data = {
+        "inbox": [],
+        "prioritized": {
+            "q1_do_first": [_stale_self_authored_entry("author-pr", 42)],
+        },
+    }
+    with patch("triage.run_gh", side_effect=_all_prs_merged):
+        deltas = triage.stale_notification_prune_deltas(data)
+
+    assert len(deltas) == 1
+    delta = deltas[0]
+    assert delta.item_id == "author-pr"
+    assert delta.thread_id == "thr-42"
+    assert delta.stale_reason == "merged"
+    assert delta.notification_reason == "author"
+    assert delta.archive_entry is not None
 
 
 # ----------------------------------------------------------------------
@@ -3014,7 +3099,7 @@ def test_prune_archives_self_authored_pr_to_done():
     with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
         "triage.mark_thread_done"
     ):
-        triage.prune_stale_notifications(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     assert data["inbox"] == []
     assert len(data["done"]) == 1
     assert data["done"][0]["source"] == "github-notification-auto-archive"
@@ -3032,7 +3117,7 @@ def test_prune_does_not_archive_non_author_pr():
     with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
         "triage.mark_thread_done"
     ):
-        triage.prune_stale_notifications(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     assert data["inbox"] == []
     assert data["done"] == []
     assert stats.archived_to_done == 0
@@ -3048,7 +3133,7 @@ def test_prune_does_not_archive_self_authored_issue():
     with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
         "triage.mark_thread_done"
     ):
-        triage.prune_stale_notifications(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     assert data["inbox"] == []
     assert data["done"] == []
     assert stats.archived_to_done == 0
@@ -3066,7 +3151,7 @@ def test_prune_archives_from_quadrant_too():
     with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
         "triage.mark_thread_done"
     ):
-        triage.prune_stale_notifications(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     assert data["prioritized"]["q1_do_first"] == []
     assert len(data["done"]) == 1
     assert data["done"][0]["notification"]["thread_id"] == "thr-11"
@@ -3083,7 +3168,7 @@ def test_prune_archive_visible_to_dedup_on_next_run():
     with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
         "triage.mark_thread_done"
     ):
-        triage.prune_stale_notifications(data, stats)
+        _collect_and_apply_stale_prunes(data, stats)
     ids = triage.existing_thread_ids(data)
     assert "thr-88" in ids
 
