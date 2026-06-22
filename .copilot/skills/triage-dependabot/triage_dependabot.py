@@ -1475,7 +1475,7 @@ def remove_stale_entries(
     """Drop todo entries that point at a notification we just resolved.
 
     Once we auto-merge a Dependabot PR (or close-skip it), any pre-existing
-    inbox or quadrant entry tracking that same PR is now stale - the PR is
+    inbox or quadrant entry tracking that same PR is now stale: the PR is
     gone but the entry still says "review this". Match by
     ``notification.thread_id`` first (1:1 with the GitHub thread we marked
     done), and fall back to ``notification.url`` so we catch the case where
@@ -2197,8 +2197,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                         pr_url=pr_url,
                     )
                 )
-                if args.dry_run:
-                    stats.flagged += 1
             else:
                 if decision.terminal and thread_id:
                     if pr_url:
@@ -2237,8 +2235,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                     pr_url=pr_url,
                 )
             )
-            if args.dry_run:
-                stats.flagged += 1
             # Extend the cooldown to ~24h so the cron stops re-approving
             # and re-trying the same blocked PR every hour. The standard
             # in_cooldown() check uses (now - last) < ACTION_COOLDOWN_SECONDS
@@ -2272,6 +2268,21 @@ def run(args: argparse.Namespace) -> TriageStats:
                 state[added_pr_url] = now
         if applied["changed"]:
             commit_todo_changes(args.todo_file, "Record Dependabot triage todo updates")
+    elif mutations.flags and args.dry_run:
+        # Dry-run preview: mirror the real dedup so flagged / already_tracked
+        # match what a live run would record. apply_todo_mutations only
+        # mutates the in-memory copy; nothing is written. Prunes are already
+        # counted into stale_removed by _record_stale_cleanup on dry runs, so
+        # mutations.prunes is empty here and is left untouched.
+        try:
+            preview = load_todo(args.todo_file)
+        except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+            stats.errors.append(f"failed to load todo file: {exc}")
+            preview = None
+        if preview is not None:
+            applied = apply_todo_mutations(preview, mutations)
+            stats.flagged = int(applied["added_flags"])
+            stats.already_tracked += int(applied["already_tracked"])
 
     if not args.dry_run:
         save_state(args.state_file, state)

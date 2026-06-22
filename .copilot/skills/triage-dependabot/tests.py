@@ -1716,6 +1716,47 @@ def test_run_skips_already_tracked_thread(tmp_path: Path) -> None:
     assert stats.flagged == 0
 
 
+def test_run_dry_run_dedupes_flag_against_already_tracked(tmp_path: Path) -> None:
+    # A dry run must mirror the real dedup: a flag for a PR already tracked
+    # in todo.yml counts as already_tracked, not flagged, so the preview
+    # digest stays an accurate harness.
+    notif = {
+        "id": "thread-flag",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/9",
+        },
+    }
+    pr = _base_pr(number=9, title="Bump foo from 1 to 2")
+
+    args = _make_args(tmp_path, dry_run=True)
+    args.todo_file.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: existing\n"
+        "      notification:\n"
+        "        thread_id: thread-flag\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=None
+    ):
+        stats = td.run(args)
+
+    assert stats.already_tracked == 1
+    assert stats.flagged == 0
+
+
 def test_run_respects_cooldown(tmp_path: Path) -> None:
     notif = {
         "id": "t",

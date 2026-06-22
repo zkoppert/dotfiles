@@ -223,7 +223,7 @@ python3 -m pytest tests.py -v
 
 ## Known limitations
 
-These are tracked for a follow-up PR rather than blocking this one. The
+This is tracked for a follow-up PR rather than blocking this one. The
 remaining item has a narrow blast radius given the hourly cron with a
 10-30 second run window, but it is worth surfacing.
 
