@@ -23,7 +23,10 @@ upgrades or seeing a backlog of dependabot notifications.
 1. Fetches all unread notifications via `gh api /notifications --paginate`.
 2. Filters to notifications whose subject is a PullRequest authored by
    `dependabot[bot]` (or `dependabot-preview[bot]`).
-3. For each PR, fetches metadata (`gh pr view --json`) and decides one
+3. Skips repos whose owner is not `github`, `github-community-projects`,
+   or `zkoppert`; passive notifications are marked done, direct pings stay in
+   the inbox, and no todo is created.
+4. For each remaining PR, fetches metadata (`gh pr view --json`) and decides one
    of five outcomes:
    - `merge` - enable `gh pr merge --auto --squash --delete-branch`.
    - `rebase` - comment `@dependabot rebase` (suppressed when a prior
@@ -39,11 +42,11 @@ upgrades or seeing a backlog of dependabot notifications.
      has historically ignored `@dependabot close` comments for hours.
    - `flag-for-review` - write a Q1 entry to
      `~/repos/zkoppert-todo/todo.yml` for human attention.
-4. Marks the notification done on GitHub when an action runs.
-5. Persists a per-PR cooldown timestamp in
+5. Marks the notification done on GitHub when an action runs.
+6. Persists a per-PR cooldown timestamp in
    `~/Library/Logs/triage-dependabot-state.json` so re-runs within an
    hour do not double-act.
-6. Writes `todo.yml` through an exclusive `todo.yml.lock`, fresh re-read,
+7. Writes `todo.yml` through an exclusive `todo.yml.lock`, fresh re-read,
    delta apply, and atomic replace. Any resulting change is committed in
    the todo repo, followed by a best-effort pull and push.
 
@@ -68,7 +71,7 @@ python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py 
   --dry-run --verbose
 ```
 
-Restrict to specific repos while expanding the allowlist:
+Restrict to specific repos inside the owned-owner allowlist:
 
 ```bash
 python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py \

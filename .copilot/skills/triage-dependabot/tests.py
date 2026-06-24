@@ -20,6 +20,12 @@ import pytest
 import triage_dependabot as td
 
 
+@pytest.fixture(autouse=True)
+def _treat_fixture_owners_as_owned(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Most tests use sample owners to avoid real repo names.
+    monkeypatch.setattr(td, "OWNED_OWNERS", td.OWNED_OWNERS | {"o"})
+
+
 def test_load_private_triage_repos_reads_config(tmp_path: Path) -> None:
     config_path = tmp_path / "triage-repos.yml"
     config_path.write_text(
@@ -686,7 +692,7 @@ def _decide(
     return td.decide(
         pr,
         my_login="zkoppert",
-        repo="o/r",
+        repo="github/example",
         coverage_lookup=lambda _r: coverage,
         use_copilot=False,
         **kwargs,
@@ -699,6 +705,38 @@ def test_decide_skip_when_closed() -> None:
     assert decision.terminal is True
 
 
+def test_decide_skips_third_party_repo_with_passive_reason() -> None:
+    coverage_lookup = mock.Mock(return_value=95)
+
+    decision = td.decide(
+        _base_pr(title="Bump foo from 1.0.0 to 2.0.0"),
+        my_login="zkoppert",
+        repo="acme/widget",
+        coverage_lookup=coverage_lookup,
+        use_copilot=False,
+        notif_reason="subscribed",
+    )
+
+    assert decision.outcome == td.OUTCOME_SKIP
+    assert decision.terminal is True
+    assert decision.reason == "repo owner not in owned allowlist: acme"
+    coverage_lookup.assert_not_called()
+
+
+def test_decide_third_party_owner_check_is_case_insensitive() -> None:
+    decision = td.decide(
+        _base_pr(title="Bump foo from 1.0.0 to 2.0.0"),
+        my_login="zkoppert",
+        repo="AcMe/widget",
+        coverage_lookup=lambda _repo: 95,
+        use_copilot=False,
+        notif_reason="subscribed",
+    )
+
+    assert decision.outcome == td.OUTCOME_SKIP
+    assert decision.reason == "repo owner not in owned allowlist: acme"
+
+
 def test_decide_skip_when_ci_pending_is_not_terminal() -> None:
     # CI may go green on the next run, so the notification must come back.
     decision = _decide(_base_pr(statusCheckRollup=[{"status": "IN_PROGRESS"}]))
@@ -707,7 +745,7 @@ def test_decide_skip_when_ci_pending_is_not_terminal() -> None:
 
 
 def test_decide_flag_unknown_bump_even_with_high_coverage() -> None:
-    # Unparseable titles should always route to flag-for-review - high
+    # Unparseable titles should always route to flag-for-review. High
     # coverage is not a license to merge something the parser couldn't read.
     pr = _base_pr(title="chore(deps): refresh transitive dependencies")
     decision = _decide(pr, coverage=99)
@@ -763,7 +801,7 @@ def test_decide_flag_when_coverage_lookup_raises() -> None:
     decision = td.decide(
         pr,
         my_login="zkoppert",
-        repo="o/r",
+        repo="github/example",
         coverage_lookup=boom,
         use_copilot=False,
     )
@@ -1792,17 +1830,17 @@ def test_run_filters_by_allowed_repo(tmp_path: Path) -> None:
         "id": "in",
         "subject": {
             "type": "PullRequest",
-            "url": "https://api.github.com/repos/keep/me/pulls/1",
+            "url": "https://api.github.com/repos/github/keep/pulls/1",
         },
     }
     notif_out = {
         "id": "out",
         "subject": {
             "type": "PullRequest",
-            "url": "https://api.github.com/repos/skip/me/pulls/1",
+            "url": "https://api.github.com/repos/github/skip/pulls/1",
         },
     }
-    args = _make_args(tmp_path, allowed_repo=["keep/me"])
+    args = _make_args(tmp_path, allowed_repo=["github/keep"])
 
     with mock.patch.object(
         td, "get_my_login", return_value="zkoppert"
@@ -2086,7 +2124,7 @@ def test_run_marks_thread_done_for_closed_pr(tmp_path: Path) -> None:
 
 
 def test_run_does_not_mark_thread_done_for_transient_skip(tmp_path: Path) -> None:
-    """CI-pending skips must NOT mark the thread done - we want to retry next hour."""
+    """CI-pending skips must NOT mark the thread done so the next hour retries."""
     notif = {
         "id": "thread-pending",
         "subject": {
@@ -2297,7 +2335,7 @@ def _run_skipped_super_linter_with_reason(
 def test_run_skips_super_linter_pr_with_review_requested_clears_notification(
     tmp_path: Path,
 ) -> None:
-    """``review_requested`` on an excluded dependency is a passive ping - clear
+    """``review_requested`` on an excluded dependency is a passive ping, so clear
     the notification so the inbox stops accumulating super-linter PRs."""
     stats, mark_mock = _run_skipped_super_linter_with_reason(
         tmp_path, "review_requested"
@@ -2324,7 +2362,7 @@ def test_run_skips_super_linter_pr_with_subscribed_clears_notification(
 def test_run_skips_super_linter_pr_with_ci_activity_clears_notification(
     tmp_path: Path,
 ) -> None:
-    """CI activity on an excluded dep is noise - clear the notification."""
+    """CI activity on an excluded dep is noise, so clear the notification."""
     stats, mark_mock = _run_skipped_super_linter_with_reason(tmp_path, "ci_activity")
     assert stats.skipped_dependency == 1
     mark_mock.assert_called_once_with(
@@ -2592,16 +2630,8 @@ def test_run_closed_excluded_dep_mark_done_failure_does_not_abort_run(
 
 
 # ---------------------------------------------------------------------------
-# SKIPPED_REPO_PATTERNS - filter Dependabot PRs in super-linter repo itself
+# Private skipped-repo config
 # ---------------------------------------------------------------------------
-
-
-def test_skipped_repo_match_super_linter() -> None:
-    assert td.skipped_repo_match("super-linter/super-linter") == "super-linter/super-linter"
-
-
-def test_skipped_repo_match_case_insensitive() -> None:
-    assert td.skipped_repo_match("Super-Linter/Super-Linter") is not None
 
 
 def test_skipped_repo_match_private_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2613,18 +2643,25 @@ def test_skipped_repo_match_private_config(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_skipped_repo_match_negative() -> None:
     assert td.skipped_repo_match("github-community-projects/stale-repos") is None
+    assert td.skipped_repo_match("super-linter/super-linter") is None
     assert td.skipped_repo_match("") is None
-    # Partial / superstring matches must not fire - pattern is anchored.
-    assert td.skipped_repo_match("foo/super-linter") is None
-    assert td.skipped_repo_match("super-linter/super-linter-fork") is None
+
+
+def test_is_owned_repo_matches_owner_case_insensitive() -> None:
+    assert td.is_owned_repo("GitHub/example")
+    assert td.is_owned_repo("github-community-projects/contributors")
+    assert td.is_owned_repo("zkoppert/dotfiles")
+    assert not td.is_owned_repo("AcMe/widget")
 
 
 def _run_skipped_super_linter_repo_with_reason(
     tmp_path: Path, reason: str
 ) -> tuple[td.TriageStats, mock.MagicMock]:
-    """Run() against a Dependabot PR *inside* super-linter/super-linter with a
-    title that does NOT mention super-linter (so only the repo filter can
-    catch it). Returns stats + mark_thread_done mock."""
+    """Run() against a Dependabot PR inside an unowned super-linter repo.
+
+    The title does not mention super-linter, so the unowned-repo branch must
+    handle notification clearing. Returns stats plus the mark_thread_done mock.
+    """
     notif = {
         "id": f"thread-super-linter-repo-{reason}",
         "reason": reason,
@@ -2657,13 +2694,12 @@ def _run_skipped_super_linter_repo_with_reason(
 def test_run_skips_super_linter_repo_pr_with_subscribed_clears_notification(
     tmp_path: Path,
 ) -> None:
-    """Passive subscription noise inside super-linter repo: clear the
-    notification so the inbox stops accumulating. Matches the @-mention-only
-    behavior of the notification-triage SUBSCRIPTION_FILTERED_REPOS entry."""
+    """Passive subscription noise inside an unowned repo clears the notification."""
     stats, mark_mock = _run_skipped_super_linter_repo_with_reason(
         tmp_path, "subscribed"
     )
-    assert stats.skipped_dependency == 1
+    assert stats.skipped == 1
+    assert stats.skipped_dependency == 0
     assert stats.dependabot == 0
     mark_mock.assert_called_once_with(
         "thread-super-linter-repo-subscribed", dry_run=False
@@ -2673,12 +2709,12 @@ def test_run_skips_super_linter_repo_pr_with_subscribed_clears_notification(
 def test_run_skips_super_linter_repo_pr_with_mention_keeps_notification(
     tmp_path: Path,
 ) -> None:
-    """@-mentions in the super-linter repo are actionable: skip the auto
-    action but leave the notification so the user can respond."""
+    """Direct pings inside an unowned repo keep the notification open."""
     stats, mark_mock = _run_skipped_super_linter_repo_with_reason(
         tmp_path, "mention"
     )
-    assert stats.skipped_dependency == 1
+    assert stats.skipped == 1
+    assert stats.skipped_dependency == 0
     mark_mock.assert_not_called()
 
 
@@ -2687,18 +2723,18 @@ def test_run_skips_private_config_repo_and_clears_notification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Passive Dependabot bumps in private skipped repos clear the notification."""
-    monkeypatch.setattr(td, "SKIPPED_REPOS", {"acme/private-thing"})
+    monkeypatch.setattr(td, "SKIPPED_REPOS", {"github/private-thing"})
     notif = {
         "id": "thread-private-repo",
         "reason": "subscribed",
         "subject": {
             "type": "PullRequest",
-            "url": "https://api.github.com/repos/acme/private-thing/pulls/42",
+            "url": "https://api.github.com/repos/github/private-thing/pulls/42",
         },
     }
     pr = _base_pr(
         number=42,
-        url="https://github.com/acme/private-thing/pull/42",
+        url="https://github.com/github/private-thing/pull/42",
         title="Bump actions/checkout from 4.2.2 to 4.3.0",
     )
     args = _make_args(tmp_path)
@@ -2726,19 +2762,198 @@ def test_run_skips_private_config_repo_and_clears_notification(
     merge_mock.assert_not_called()
     mark_mock.assert_called_once_with("thread-private-repo", dry_run=False)
     saved = td.load_state(args.state_file)
-    assert "https://github.com/acme/private-thing/pull/42" in saved
+    assert "https://github.com/github/private-thing/pull/42" in saved
+
+
+def test_run_skips_third_party_repo_and_clears_notification(tmp_path: Path) -> None:
+    notif = {
+        "id": "thread-third-party",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/acme/widget/pulls/42",
+        },
+    }
+    pr = _base_pr(
+        number=42,
+        url="https://github.com/acme/widget/pull/42",
+        title="Bump foo from 1.0.0 to 2.0.0",
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=50
+    ) as coverage_mock, mock.patch.object(
+        td, "fetch_repo_labels"
+    ) as fetch_labels_mock, mock.patch.object(
+        td, "do_merge"
+    ) as merge_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock:
+        stats = td.run(args)
+
+    assert stats.skipped == 1
+    assert stats.skipped_dependency == 0
+    assert stats.dependabot == 0
+    assert stats.merged == 0
+    assert stats.flagged == 0
+    coverage_mock.assert_not_called()
+    fetch_labels_mock.assert_not_called()
+    merge_mock.assert_not_called()
+    mark_mock.assert_called_once_with("thread-third-party", dry_run=False)
+    reloaded = td.load_todo(args.todo_file)
+    assert reloaded["inbox"] == []
+    assert reloaded["prioritized"]["q1_do_first"] == []
+    saved = td.load_state(args.state_file)
+    assert "https://github.com/acme/widget/pull/42" in saved
+
+
+def test_run_skips_third_party_repo_mention_keeps_notification(
+    tmp_path: Path,
+) -> None:
+    notif = {
+        "id": "thread-third-party-mention",
+        "reason": "mention",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/acme/widget/pulls/42",
+        },
+    }
+    pr = _base_pr(
+        number=42,
+        url="https://github.com/acme/widget/pull/42",
+        title="Bump foo from 1.0.0 to 2.0.0",
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=50
+    ) as coverage_mock, mock.patch.object(
+        td, "fetch_repo_labels"
+    ) as fetch_labels_mock, mock.patch.object(
+        td, "do_merge"
+    ) as merge_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock, mock.patch.object(
+        td, "_cleanup_stale_entries"
+    ) as cleanup_mock:
+        stats = td.run(args)
+
+    assert stats.skipped == 1
+    assert stats.skipped_dependency == 0
+    assert stats.dependabot == 0
+    assert stats.merged == 0
+    assert stats.flagged == 0
+    coverage_mock.assert_not_called()
+    fetch_labels_mock.assert_not_called()
+    merge_mock.assert_not_called()
+    mark_mock.assert_not_called()
+    cleanup_mock.assert_not_called()
+    reloaded = td.load_todo(args.todo_file)
+    assert reloaded["inbox"] == []
+    assert reloaded["prioritized"]["q1_do_first"] == []
+
+
+def test_run_owned_org_repo_still_flags_without_clearing_notification(
+    tmp_path: Path,
+) -> None:
+    notif = {
+        "id": "thread-owned-flag",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/github/example/pulls/42",
+        },
+    }
+    pr = _base_pr(
+        number=42,
+        url="https://github.com/github/example/pull/42",
+        title="Bump foo from 1.0.0 to 2.0.0",
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=50
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock:
+        stats = td.run(args)
+
+    assert stats.skipped_dependency == 0
+    assert stats.dependabot == 1
+    assert stats.flagged == 1
+    mark_mock.assert_not_called()
+    reloaded = td.load_todo(args.todo_file)
+    flags = reloaded["prioritized"]["q1_do_first"]
+    assert len(flags) == 1
+    assert flags[0]["notification"]["repo"] == "github/example"
+
+
+def test_run_owned_org_private_skip_still_clears_notification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(td, "SKIPPED_REPOS", {"github/example-skipped"})
+    notif = {
+        "id": "thread-owned-private-skip",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/github/example-skipped/pulls/42",
+        },
+    }
+    pr = _base_pr(
+        number=42,
+        url="https://github.com/github/example-skipped/pull/42",
+        title="Bump actions/checkout from 4.2.2 to 4.3.0",
+    )
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "do_merge"
+    ) as merge_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock:
+        stats = td.run(args)
+
+    assert stats.skipped_dependency == 1
+    assert stats.dependabot == 0
+    assert stats.flagged == 0
+    merge_mock.assert_not_called()
+    mark_mock.assert_called_once_with("thread-owned-private-skip", dry_run=False)
 
 
 # ---------------------------------------------------------------------------
-# decide() defense-in-depth: repo/dep skip takes priority over bump severity
+# decide() defense-in-depth: owner/dep skip takes priority over bump severity
 # ---------------------------------------------------------------------------
 
 
-def test_decide_skips_super_linter_repo_major_bump_with_passive_reason() -> None:
-    """A major bump PR in super-linter/super-linter with a passive notification
-    reason must be skipped inside decide() - not flagged for review. This is the
-    defense-in-depth fix for the filter priority bug where bump severity ran
-    before the repo-level skip."""
+def test_decide_skips_unowned_repo_major_bump_before_bump_severity() -> None:
+    """A major bump PR in an unowned repo must be skipped inside decide()."""
     pr = _base_pr(
         title="Bump actions/checkout from 4 to 5",
         statusCheckRollup=[{"conclusion": "SUCCESS"}],
@@ -2746,18 +2961,17 @@ def test_decide_skips_super_linter_repo_major_bump_with_passive_reason() -> None
     decision = td.decide(
         pr,
         my_login="zkoppert",
-        repo="super-linter/super-linter",
+        repo="acme/widget",
         coverage_lookup=lambda _r: None,
         use_copilot=False,
         notif_reason="review_requested",
     )
     assert decision.outcome == td.OUTCOME_SKIP
-    assert "excluded repo/dependency" in decision.reason
+    assert "repo owner not in owned allowlist" in decision.reason
 
 
-def test_decide_does_not_skip_super_linter_repo_when_mentioned() -> None:
-    """If the notification reason is a direct @mention, the repo-level skip
-    should NOT suppress the decision - the user needs to act."""
+def test_decide_unowned_repo_stays_skip_when_mentioned() -> None:
+    """run() preserves the notification for direct pings before decide() runs."""
     pr = _base_pr(
         title="Bump actions/checkout from 4 to 5",
         statusCheckRollup=[{"conclusion": "SUCCESS"}],
@@ -2765,13 +2979,13 @@ def test_decide_does_not_skip_super_linter_repo_when_mentioned() -> None:
     decision = td.decide(
         pr,
         my_login="zkoppert",
-        repo="super-linter/super-linter",
+        repo="acme/widget",
         coverage_lookup=lambda _r: 95,
         use_copilot=False,
         notif_reason="mention",
     )
-    # Should proceed through normal logic (not skipped)
-    assert decision.outcome != td.OUTCOME_SKIP
+    assert decision.outcome == td.OUTCOME_SKIP
+    assert "repo owner not in owned allowlist" in decision.reason
 
 
 def test_decide_skips_super_linter_dependency_major_bump() -> None:
@@ -2785,7 +2999,7 @@ def test_decide_skips_super_linter_dependency_major_bump() -> None:
     decision = td.decide(
         pr,
         my_login="zkoppert",
-        repo="o/r",
+        repo="github/example",
         coverage_lookup=lambda _r: None,
         use_copilot=False,
         notif_reason="review_requested",
@@ -2833,7 +3047,7 @@ def test_is_archived_repo_falls_back_to_false_on_api_error() -> None:
 
 
 def test_run_skips_archived_repo_and_clears_notification(tmp_path: Path) -> None:
-    """Archived repos can never accept merges - skip + clear, never flag."""
+    """Archived repos can never accept merges, so skip + clear without flagging."""
     notif = {
         "id": "thread-archived",
         "reason": "subscribed",
@@ -3080,19 +3294,19 @@ def test_run_branch_protection_failure_flags_and_sets_long_cooldown(
         "reason": "subscribed",
         "subject": {
             "type": "PullRequest",
-            "url": "https://api.github.com/repos/jmeridth/gh-health-files/pulls/59",
+            "url": "https://api.github.com/repos/github/example/pulls/59",
         },
     }
     pr = _base_pr(
         number=59,
-        url="https://github.com/jmeridth/gh-health-files/pull/59",
+        url="https://github.com/github/example/pull/59",
     )
     pr["headRefOid"] = "abc123"
 
     args = _make_args(tmp_path)
 
     bp_err = td.BranchProtectionBlocked(
-        repo="jmeridth/gh-health-files",
+        repo="github/example",
         number=59,
         marker="the base branch policy prohibits the merge",
     )
@@ -3134,7 +3348,7 @@ def test_run_branch_protection_failure_flags_and_sets_long_cooldown(
 
     # Long cooldown set: a follow-up run within the next 24h must skip.
     state = td.load_state(args.state_file)
-    pr_url = "https://github.com/jmeridth/gh-health-files/pull/59"
+    pr_url = "https://github.com/github/example/pull/59"
     assert pr_url in state
     # Within the 24h window in_cooldown should still return True.
     now_plus_23h = datetime.datetime.now(datetime.timezone.utc).timestamp() + (
@@ -3318,7 +3532,7 @@ def test_is_prerelease_target_negative(title: str) -> None:
 
 
 def test_is_prerelease_target_detects_in_body_for_grouped_pr() -> None:
-    """Grouped PR titles often hide the version - body must be scanned too."""
+    """Grouped PR titles often hide the version, so body must be scanned too."""
     pr = {
         "title": "Bump the dependencies group with 1 update",
         "body": "Updates python from 3.14.5-slim to 3.15.0b2-slim",
@@ -3351,7 +3565,7 @@ def test_decide_prerelease_check_is_after_humans_engaged(tmp_path: Path) -> None
 
 
 def test_decide_prerelease_check_runs_before_rebase(tmp_path: Path) -> None:
-    """A prerelease PR that's behind shouldn't get a rebase comment - we're
+    """A prerelease PR that's behind shouldn't get a rebase comment because we're
     just going to close it. Saves a wasted rebase round-trip."""
     pr = _base_pr(
         title="Bump foo from 1.0.0 to 2.0.0-beta.1",
