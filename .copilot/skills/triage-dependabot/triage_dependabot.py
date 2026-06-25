@@ -58,6 +58,9 @@ logger = logging.getLogger("triage-dependabot")
 DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
 DEFAULT_STATE_FILE = Path.home() / "Library" / "Logs" / "triage-dependabot-state.json"
 PRIVATE_TRIAGE_REPOS_PATH = Path.home() / ".copilot" / "private" / "triage-repos.yml"
+OWNED_OWNERS: frozenset[str] = frozenset(
+    {"github", "github-community-projects", "zkoppert"}
+)
 
 
 def load_private_triage_repos(
@@ -95,6 +98,20 @@ def _repo_key(repo: Any) -> str | None:
     return normalized or None
 
 
+def repo_owner(repo: str) -> str | None:
+    """Return the normalized owner from an ``owner/repo`` name."""
+    owner, separator, _repo_name = repo.strip().partition("/")
+    if separator != "/" or not owner:
+        return None
+    return owner.lower()
+
+
+def is_owned_repo(repo: str) -> bool:
+    """Return True when Dependabot triage owns or maintains the repo."""
+    owner = repo_owner(repo)
+    return owner in OWNED_OWNERS if owner else False
+
+
 def _private_repo_set(config: dict[str, Any], key: str) -> set[str]:
     value = config.get(key, [])
     if value is None:
@@ -130,7 +147,7 @@ OUTCOME_REBASE = "rebase"
 OUTCOME_LABEL_AND_MERGE = "label-and-merge"
 OUTCOME_CLOSE_PRERELEASE = "close-prerelease"
 OUTCOME_FLAG = "flag-for-review"
-OUTCOME_SKIP = "skip"  # pending CI, closed PR, cooldown - no action this run.
+OUTCOME_SKIP = "skip"  # pending CI, closed PR, cooldown with no action this run.
 
 # Bump kinds, in increasing order of risk.
 BUMP_PATCH = "patch"
@@ -176,18 +193,13 @@ SKIPPED_DEPENDENCY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"super-linter/super-linter", re.IGNORECASE),
 )
 
-# Repositories the triage skill must never auto-merge / rebase / label
-# Dependabot PRs in. Treated identically to SKIPPED_DEPENDENCY_PATTERNS:
-# the action is skipped and (for passive subscription reasons in
-# EXCLUDED_DEP_AUTO_CLEAR_REASONS) the notification is cleared so the
-# inbox stays quiet. @mention / team_mention / author reasons still leave
-# the notification alone so the user can act directly. This is for repos
-# where Zack is a passive contributor (subscribed but not maintaining),
-# distinct from SKIPPED_DEPENDENCY_PATTERNS which targets PRs *bumping*
-# those tools as a dependency elsewhere.
-SKIPPED_REPO_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^super-linter/super-linter$", re.IGNORECASE),
-)
+# Repositories from Zack's private config that the triage skill must never
+# auto-merge / rebase / label Dependabot PRs in. Treated identically to
+# SKIPPED_DEPENDENCY_PATTERNS: passive subscription reasons in
+# EXCLUDED_DEP_AUTO_CLEAR_REASONS are cleared, while @mention / team_mention /
+# author reasons leave the notification alone so the user can act directly.
+# Third-party repos outside OWNED_OWNERS are handled by the unowned-repo branch
+# in run(), not by this private owned-repo skip list.
 SKIPPED_REPOS: set[str] = _private_repo_set(
     _PRIVATE_REPO_CONFIG, "dependabot_skipped_repos"
 )
@@ -411,8 +423,8 @@ def skipped_dependency_match(pr: dict[str, Any]) -> str | None:
     """Return the matched coordinate if the PR touches a skipped dependency.
 
     Checks the PR title first and falls back to the body so grouped
-    Dependabot PRs - which omit the dependency name from the title and list
-    each bump in the body - are still recognized. Returns the matched
+    Dependabot PRs omit the dependency name from the title and list each
+    bump in the body, so this helper still recognizes them. Returns the matched
     substring (useful for logging) or None when nothing matches.
     """
     title = pr.get("title") or ""
@@ -428,18 +440,14 @@ def skipped_repo_match(repo: str) -> str | None:
     """Return the matched repo if it is on the skipped-repo list.
 
     Repos on this list are ones Zack subscribes to but doesn't actively
-    maintain. Dependabot PRs there get auto-skipped + notification-cleared
-    so they stop landing in the inbox or Q1, mirroring the @mention-only
-    rule in the notification triage.
+    maintain. Passive Dependabot notifications there get cleared, while
+    direct pings stay in the inbox for a response.
     """
     if not repo:
         return None
     repo_lc = repo.lower()
     if repo_lc in SKIPPED_REPOS:
         return repo
-    for pattern in SKIPPED_REPO_PATTERNS:
-        if pattern.search(repo):
-            return repo
     return None
 
 
@@ -697,7 +705,7 @@ def humans_engaged(pr: dict[str, Any], my_login: str) -> bool:
     """Return True if a non-bot human (other than me) interacted with the PR.
 
     Treats reviews and review-comments as engagement. Comments authored by
-    Dependabot itself, by my own account, or by bots are ignored - the
+    Dependabot itself, by my own account, or by bots are ignored because the
     rationale is that human review feedback is the signal that the PR
     needs human attention; my own comments mean I am already handling it.
     """
@@ -755,7 +763,7 @@ def summarize_checks(pr: dict[str, Any]) -> str:
     if any(state in _PENDING_CONCLUSIONS for state in states):
         return "pending"
     if any(state not in _PASSING_CONCLUSIONS for state in states):
-        # An unknown state we don't recognize - treat as failing so we flag for review
+        # Treat an unrecognized state as failing so we flag for review
         # rather than auto-merge on something GitHub considers non-green.
         return "failing"
     return "passing"
@@ -911,7 +919,9 @@ def in_cooldown(state: dict[str, float], pr_url: str, *, now: float) -> bool:
     last = state.get(pr_url)
     if last is None:
         return False
-    return (now - last) < ACTION_COOLDOWN_SECONDS
+    elapsed = now
+    elapsed -= last
+    return elapsed < ACTION_COOLDOWN_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -937,10 +947,21 @@ def decide(
     ``review_requested``, ``mention``). When the repo or dependency is on
     the skip list and the reason is passive, the PR is skipped before any
     bump-severity or CI evaluation runs.
+
+    Repos outside ``OWNED_OWNERS`` are terminal skips before repo-specific
+    skip lists or dependency rules run. ``run()`` owns notification clearing
+    for those unowned repos so direct pings can stay in the inbox.
     """
     state = (pr.get("state") or "").lower()
     if state in {"closed", "merged"}:
         return Decision(OUTCOME_SKIP, "pr already closed", terminal=True)
+
+    if not is_owned_repo(repo):
+        return Decision(
+            OUTCOME_SKIP,
+            f"repo owner not in owned allowlist: {repo_owner(repo) or 'unknown'}",
+            terminal=True,
+        )
 
     # Repo-level and dependency-level skip list: takes priority over all
     # other decision logic (bump severity, CI, coverage, etc.). Only
@@ -1119,7 +1140,7 @@ _AUTO_MERGE_DISABLED_MARKERS = (
 )
 
 
-# Branch-protection failures - gh's stderr when a merge is permanently
+# Branch-protection failures from gh's stderr when a merge is permanently
 # blocked by repo policy. Matched case-insensitively so future GitHub
 # wording tweaks (capitalisation, punctuation) still catch. When any of
 # these fire, the run loop converts the failure into a flag-for-review
@@ -1321,8 +1342,8 @@ def do_dependabot_close(repo: str, number: int, *, dry_run: bool) -> None:
 
     Only the narrow "already closed / not found" race is swallowed
     (e.g. a parallel run, or Dependabot closing the PR itself between
-    cron ticks). Every other ``gh pr close`` failure - auth, rate
-    limit, timeout, transient API error, branch-deletion failure -
+    cron ticks). Every other ``gh pr close`` failure, including auth, rate
+    limit, timeout, transient API error, or branch-deletion failure,
     propagates so the outer run loop records it in ``stats.errors`` and
     skips the ``mark_thread_done`` + cooldown that would otherwise hide
     the open PR until the next cron tick.
@@ -1382,7 +1403,7 @@ def _safe_mark_thread_done(
     close-prerelease / terminal-skip) where the action has already
     landed and the per-PR cooldown has already been written. A flaky
     notifications API call (``CalledProcessError`` /
-    ``TimeoutExpired``) must NOT unwind any of that - otherwise the
+    ``TimeoutExpired``) must NOT unwind any of that. Otherwise the
     outer ``except`` would skip the cooldown set, and the next cron
     tick would re-attempt the already-completed action (re-merge,
     re-close, re-comment) producing the exact spam pathology this
@@ -1852,8 +1873,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         metavar="OWNER/REPO",
         help=(
-            "Process only PRs in the given repo. Pass multiple times for "
-            "multiple repos. Default: process every dependabot PR notification."
+            "Process only PRs in the given owned repo. Pass multiple times for "
+            "multiple repos. Default: process every dependabot PR notification "
+            "inside the owned-owner allowlist."
         ),
     )
     parser.add_argument(
@@ -2018,6 +2040,51 @@ def run(args: argparse.Namespace) -> TriageStats:
                         pr_url=pr_url,
                         dry_run=args.dry_run,
                     )
+            continue
+        if not is_owned_repo(repo):
+            thread_id = str(notif.get("id") or "")
+            pr_url = pr.get("url") or ""
+            owner = repo_owner(repo) or "unknown"
+            logger.info(
+                "%s#%d -> skipping unowned repo owner %s",
+                repo,
+                number,
+                owner,
+            )
+            stats.skipped += 1
+            reason = (notif.get("reason") or "").lower()
+            cleared = True
+            if thread_id and reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS:
+                logger.info(
+                    "%s#%d -> clearing unowned repo notification (reason=%s)",
+                    repo,
+                    number,
+                    reason,
+                )
+                cleared = _safe_mark_thread_done(
+                    thread_id,
+                    dry_run=args.dry_run,
+                    stats=stats,
+                    context=f"unowned repo {pr_url}",
+                )
+                if cleared:
+                    _record_stale_cleanup(
+                        mutations,
+                        stats,
+                        args.todo_file,
+                        thread_id=thread_id,
+                        pr_url=pr_url,
+                        dry_run=args.dry_run,
+                    )
+            elif thread_id:
+                logger.info(
+                    "%s#%d -> leaving unowned repo notification open (reason=%s)",
+                    repo,
+                    number,
+                    reason or "unknown",
+                )
+            if pr_url and cleared:
+                state[pr_url] = now
             continue
         skipped_dep = skipped_dependency_match(pr) or skipped_repo_match(repo)
         if skipped_dep:
@@ -2237,13 +2304,13 @@ def run(args: argparse.Namespace) -> TriageStats:
             )
             # Extend the cooldown to ~24h so the cron stops re-approving
             # and re-trying the same blocked PR every hour. The standard
-            # in_cooldown() check uses (now - last) < ACTION_COOLDOWN_SECONDS
+            # in_cooldown() checks elapsed seconds against ACTION_COOLDOWN_SECONDS,
             # so storing a future timestamp keeps the entry "in cooldown"
             # for the offset interval.
             if pr_url:
-                state[pr_url] = now + (
-                    BRANCH_PROTECTION_COOLDOWN_SECONDS - ACTION_COOLDOWN_SECONDS
-                )
+                cooldown_offset = BRANCH_PROTECTION_COOLDOWN_SECONDS
+                cooldown_offset -= ACTION_COOLDOWN_SECONDS
+                state[pr_url] = now + cooldown_offset
             if thread_id:
                 _safe_mark_thread_done(
                     thread_id,

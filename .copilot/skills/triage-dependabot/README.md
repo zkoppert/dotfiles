@@ -24,6 +24,8 @@ by `dependabot[bot]` or `dependabot-preview[bot]`:
 | Condition | Outcome |
 | --- | --- |
 | PR closed or merged | skip and mark notification done |
+| Repo owner is not `github`, `github-community-projects`, or `zkoppert` AND notification reason is `review_requested`, `subscribed`, or `ci_activity` | skip and mark notification done |
+| Repo owner is not `github`, `github-community-projects`, or `zkoppert` AND notification reason is `mention`, `team_mention`, `author`, or `manual` | skip, leave notification in inbox for direct response |
 | Title or body references an excluded dependency (e.g. `super-linter/super-linter`) AND notification reason is `review_requested`, `subscribed`, or `ci_activity` | skip and mark notification done |
 | Title or body references an excluded dependency AND notification reason is `mention`, `team_mention`, `author`, or `manual` | skip, leave notification in inbox for direct response |
 | Draft PR | flag-for-review |
@@ -39,6 +41,17 @@ by `dependabot[bot]` or `dependabot-preview[bot]`:
 The script never auto-merges when uncertainty exists; sub-agent
 timeouts, unknown bump kinds, and missing coverage signals all route to
 `flag-for-review`.
+
+### Owned repo allowlist
+
+The script only processes repos whose owner is `github`,
+`github-community-projects`, or `zkoppert`. The owner comparison is
+case-insensitive. Dependabot PRs from every other owner are skipped and no Q1
+todo entry is created. Passive notification reasons (`review_requested`,
+`subscribed`, `ci_activity`) are marked done so third-party subscription noise
+stays out of the inbox. Direct pings (`mention`, `team_mention`, `author`,
+`manual`) leave the notification in place so the user can respond. Repo-specific
+skips from the private config still apply inside the owned owners.
 
 ### Prerelease detection
 
