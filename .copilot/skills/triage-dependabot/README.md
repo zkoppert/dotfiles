@@ -102,12 +102,19 @@ conservative default.
 
 ## Outputs
 
-- **Auto-merge**: `gh pr merge --auto --squash --delete-branch` and the
-  notification is marked done.
+- **Auto-merge**: submit an approving review, then
+  `gh pr merge --auto --squash --delete-branch`, and the notification is
+  marked done. The approval comes first because most target repos require
+  an approving code-owner review; enabling auto-merge alone would leave
+  the PR stuck until a human approved. When the repo doesn't allow
+  auto-merge at the repo level, the merge falls back to a synchronous
+  merge. The approval is consistent: it's skipped when the current login
+  already approved the PR's head SHA.
 - **Rebase**: `gh pr comment --body "@dependabot rebase"`; the
   notification stays open so the next push triggers another evaluation.
 - **Label-and-merge**: `gh pr edit --add-label release` (only if the
-  repo defines a `release` label) followed by auto-merge.
+  repo defines a `release` label) followed by the same approve-then-merge
+  flow.
 - **Close-prerelease**: `gh pr close --delete-branch` (force-close via
   the API, so we do not depend on Dependabot acting on a comment) for
   PRs whose target version is an alpha / beta / rc / dev / preview;
