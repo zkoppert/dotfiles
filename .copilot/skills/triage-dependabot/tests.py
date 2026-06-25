@@ -1211,11 +1211,36 @@ def test_do_merge_dry_run_no_subprocess() -> None:
 def test_do_merge_invokes_gh() -> None:
     with mock.patch.object(td, "run_gh") as mocked:
         td.do_merge("o/r", 1, dry_run=False)
-    mocked.assert_called_once()
-    args = mocked.call_args[0][0]
-    assert "--auto" in args
-    assert "--squash" in args
-    assert "--delete-branch" in args
+    # Approve first, then enable auto-merge.
+    assert mocked.call_count == 2
+    approve_call = mocked.call_args_list[0][0][0]
+    merge_call = mocked.call_args_list[1][0][0]
+    assert approve_call[:2] == ["pr", "review"]
+    assert "--approve" in approve_call
+    assert "--auto" in merge_call
+    assert "--squash" in merge_call
+    assert "--delete-branch" in merge_call
+
+
+def test_do_merge_approves_before_merge_on_happy_path() -> None:
+    """Regression: auto-merge must be preceded by an approval.
+
+    Repos that require a code-owner approving review would otherwise sit
+    with auto-merge enabled but unapproved until a human approved.
+    """
+    call_log: list[list[str]] = []
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        call_log.append(list(args))
+        return ""
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
+        td.do_merge("o/r", 1, dry_run=False)
+
+    # The approve call happens strictly before the merge call.
+    approve_idx = next(i for i, a in enumerate(call_log) if "--approve" in a)
+    merge_idx = next(i for i, a in enumerate(call_log) if "--auto" in a)
+    assert approve_idx < merge_idx
 
 
 def test_do_merge_falls_back_when_auto_merge_disabled() -> None:
@@ -1227,15 +1252,23 @@ def test_do_merge_falls_back_when_auto_merge_disabled() -> None:
         output="",
         stderr="GraphQL: Auto merge is not allowed for this repository (enablePullRequestAutoMerge)",
     )
-    with mock.patch.object(td, "run_gh") as mocked:
-        mocked.side_effect = [err, None, None]
+
+    call_log: list[list[str]] = []
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        call_log.append(list(args))
+        if "--auto" in args:
+            raise err
+        return ""
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
         td.do_merge("o/r", 7, dry_run=False)
-    assert mocked.call_count == 3
-    auto_call = mocked.call_args_list[0][0][0]
-    approve_call = mocked.call_args_list[1][0][0]
-    plain_merge_call = mocked.call_args_list[2][0][0]
+
+    # approve -> merge --auto (fails) -> synchronous merge.
+    assert len(call_log) == 3
+    approve_call, auto_call, plain_merge_call = call_log
+    assert approve_call[:2] == ["pr", "review"] and "--approve" in approve_call
     assert "--auto" in auto_call
-    assert "review" in approve_call and "--approve" in approve_call
     assert "merge" in plain_merge_call and "--auto" not in plain_merge_call
     assert "--squash" in plain_merge_call and "--delete-branch" in plain_merge_call
 
@@ -1249,11 +1282,23 @@ def test_do_merge_propagates_other_errors() -> None:
         output="",
         stderr="GraphQL: Pull request is not mergeable (mergeable)",
     )
-    with mock.patch.object(td, "run_gh") as mocked:
-        mocked.side_effect = err
+
+    call_log: list[list[str]] = []
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        call_log.append(list(args))
+        if "--auto" in args:
+            raise err
+        return ""
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
         with pytest.raises(subprocess.CalledProcessError):
             td.do_merge("o/r", 9, dry_run=False)
-    mocked.assert_called_once()
+
+    # Approve happened, the --auto error propagated, sync merge never ran.
+    assert any("--approve" in a for a in call_log)
+    assert any("--auto" in a for a in call_log)
+    assert not any("--auto" not in a and "merge" in a for a in call_log)
 
 
 def test_do_approve_dry_run() -> None:
@@ -3252,6 +3297,33 @@ def test_do_merge_skips_approve_when_already_approved(tmp_path: Path) -> None:
     )
 
 
+def test_do_merge_already_approved_auto_merge_succeeds_no_fallback(
+    tmp_path: Path,
+) -> None:
+    """Already approved + auto-merge available: no re-approve, no sync merge."""
+    call_log: list[list[str]] = []
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        call_log.append(list(args))
+        return ""
+
+    with mock.patch.object(
+        td, "has_existing_approval", return_value=True
+    ), mock.patch.object(
+        td, "do_approve"
+    ) as approve_mock, mock.patch.object(
+        td, "run_gh", side_effect=fake_run_gh
+    ):
+        td.do_merge(
+            "o/r", 1, dry_run=False, my_login="zkoppert", head_sha="abc123"
+        )
+
+    approve_mock.assert_not_called()
+    # Only the --auto merge ran; no plain (fallback) merge.
+    assert len(call_log) == 1
+    assert "--auto" in call_log[0]
+
+
 def test_do_merge_raises_branch_protection_blocked_on_sync_merge_failure(
     tmp_path: Path,
 ) -> None:
@@ -3283,6 +3355,39 @@ def test_do_merge_raises_branch_protection_blocked_on_sync_merge_failure(
             )
 
     assert "the base branch policy prohibits the merge" in exc_info.value.marker
+
+
+def test_do_merge_raises_branch_protection_blocked_on_auto_merge_failure(
+    tmp_path: Path,
+) -> None:
+    """A branch-protection error on the --auto attempt blocks before the sync merge."""
+    bp_err = td.subprocess.CalledProcessError(1, "gh")
+    bp_err.stderr = "at least 1 approving review is required"
+
+    call_log: list[list[str]] = []
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        call_log.append(list(args))
+        if "--auto" in args:
+            raise bp_err
+        return ""
+
+    with mock.patch.object(
+        td, "has_existing_approval", return_value=True
+    ), mock.patch.object(
+        td, "do_approve"
+    ), mock.patch.object(
+        td, "run_gh", side_effect=fake_run_gh
+    ):
+        with pytest.raises(td.BranchProtectionBlocked) as exc_info:
+            td.do_merge(
+                "o/r", 3, dry_run=False, my_login="zkoppert", head_sha="abc"
+            )
+
+    assert "at least 1 approving review is required" in exc_info.value.marker
+    # The --auto attempt raised; the synchronous merge must not have run.
+    assert any("--auto" in a for a in call_log)
+    assert not any("--auto" not in a and "merge" in a for a in call_log)
 
 
 def test_run_branch_protection_failure_flags_and_sets_long_cooldown(

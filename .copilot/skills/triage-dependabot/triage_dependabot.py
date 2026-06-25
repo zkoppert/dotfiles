@@ -1045,17 +1045,29 @@ def do_merge(
     my_login: str | None = None,
     head_sha: str | None = None,
 ) -> None:
-    """Enable auto-merge for a PR (squash + delete branch).
+    """Approve a PR, then merge it (squash + delete branch).
 
-    When the target repository doesn't have auto-merge enabled at the repo
-    level, ``gh pr merge --auto`` fails with stderr containing
-    ``Auto merge is not allowed for this repository``. In that case, fall
-    back to approving the PR (to satisfy required-review branch
-    protection) and then performing a synchronous merge. The approve step
-    is consistent: if ``my_login`` already has an ``APPROVED`` review on
-    ``head_sha``, the approval call is skipped to avoid the 52-retries-
+    We always submit an approving review *before* attempting the merge.
+    Most target repos require an approving code-owner review via branch
+    protection or repository rulesets, and enabling auto-merge alone does
+    not satisfy that requirement: the PR would sit with auto-merge enabled
+    but unapproved until a human happened to approve it. Approving up
+    front lets the merge proceed whether or not the repo enforces a
+    required review.
+
+    The approve step is consistent: if ``my_login`` already has an
+    ``APPROVED`` review on ``head_sha`` the approval call is skipped, so
+    hourly re-runs don't pile up redundant approvals (the 52-approvals-
     per-hour loop seen on PRs whose merge ultimately fails branch
-    protection.
+    protection).
+
+    After approving we try ``gh pr merge --auto``. When the target
+    repository doesn't allow auto-merge at the repo level, gh fails with
+    ``Auto merge is not allowed for this repository`` /
+    ``enablePullRequestAutoMerge`` and we fall back to a synchronous
+    merge. The same marker comes back when the PR is already in a clean,
+    immediately-mergeable state, so the fallback also covers the
+    "approved + green CI" case.
 
     Branch-protection failures (required reviewer not satisfied, required
     status check missing, etc.) raise ``BranchProtectionBlocked`` so the
@@ -1067,8 +1079,20 @@ def do_merge(
     surface it in stats.errors.
     """
     if dry_run:
-        logger.info("dry-run: would auto-merge %s#%d", repo, number)
+        logger.info("dry-run: would approve and auto-merge %s#%d", repo, number)
         return
+
+    if my_login and head_sha and has_existing_approval(repo, number, my_login, head_sha):
+        logger.info(
+            "%s#%d already approved by %s at %s, skipping approve",
+            repo,
+            number,
+            my_login,
+            head_sha,
+        )
+    else:
+        do_approve(repo, number, dry_run=False)
+
     try:
         run_gh(
             [
@@ -1095,21 +1119,11 @@ def do_merge(
         if not _is_auto_merge_disabled_error(stderr):
             raise
         logger.info(
-            "auto-merge unavailable for %s#%d; falling back to approve + merge",
+            "auto-merge unavailable for %s#%d; performing synchronous merge",
             repo,
             number,
         )
 
-    if my_login and head_sha and has_existing_approval(repo, number, my_login, head_sha):
-        logger.info(
-            "%s#%d already approved by %s at %s, skipping approve",
-            repo,
-            number,
-            my_login,
-            head_sha,
-        )
-    else:
-        do_approve(repo, number, dry_run=False)
     try:
         run_gh(
             [

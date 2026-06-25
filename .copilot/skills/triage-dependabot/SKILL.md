@@ -28,11 +28,12 @@ upgrades or seeing a backlog of dependabot notifications.
    the inbox, and no todo is created.
 4. For each remaining PR, fetches metadata (`gh pr view --json`) and decides one
    of five outcomes:
-   - `merge` - enable `gh pr merge --auto --squash --delete-branch`.
+   - `merge` - approve, then enable `gh pr merge --auto --squash --delete-branch`
+     (synchronous merge fallback when the repo disallows auto-merge).
    - `rebase` - comment `@dependabot rebase` (suppressed when a prior
      rebase request is newer than the most recent dependabot push).
    - `label-and-merge` - add the `release` label (if the repo defines
-     one) and enable auto-merge, for changes the Copilot sub-agent or
+     one), then approve and merge, for changes the Copilot sub-agent or
      fallback regex classifies as security-related.
    - `close-prerelease` - force-close via
      `gh pr close --delete-branch` when the target version is a
