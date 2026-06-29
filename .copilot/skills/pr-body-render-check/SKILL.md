@@ -1,3 +1,8 @@
+---
+name: pr-body-render-check
+description: This skill should be used AFTER updating a PR description, issue body, or gist via `gh pr edit --body-file`, `gh issue edit --body-file`, or `gh gist create/edit` to verify the body renders cleanly on GitHub. It runs a Python checker that flags hard-wrapped paragraphs (orphaned line breaks), markdown links split across lines, split table rows, and bodies approaching GitHub's 65,535-char limit. Also triggered when the user asks to "check PR body rendering", "verify the PR description renders", or "did the markdown wrap correctly".
+---
+
 # pr-body-render-check: verify PR/issue body rendering after edit
 
 Use this skill **after** updating a PR description, issue body, or gist via `gh pr edit --body-file`, `gh issue edit --body-file`, or `gh gist edit`.
