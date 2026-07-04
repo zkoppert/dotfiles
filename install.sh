@@ -58,6 +58,20 @@ if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
   done
 fi
 
+# Install pr-marker helper as a PATH shim at ~/.local/bin/pr-marker.
+# Writes the per-branch plan/code/demo/PR-description review markers that the
+# gh-guard `gh pr create` gate checks, keeping the path encoding in one place.
+if [ -x "$DOTFILES_DIR/bin/pr-marker" ]; then
+  mkdir -p "$HOME/.local/bin"
+  PR_MARKER_TARGET="$HOME/.local/bin/pr-marker"
+  if [ -L "$PR_MARKER_TARGET" ] || [ ! -e "$PR_MARKER_TARGET" ]; then
+    ln -sfn "$DOTFILES_DIR/bin/pr-marker" "$PR_MARKER_TARGET"
+    echo "✓ Linked pr-marker → ~/.local/bin/pr-marker"
+  else
+    echo "⚠ $PR_MARKER_TARGET exists and is not a symlink - skipping"
+  fi
+fi
+
 # Install notification-triage launchd agent (macOS only).
 # The wrapper itself goes in ~/.local/bin so it stays on PATH for ad-hoc runs,
 # and the plist gets symlinked into ~/Library/LaunchAgents so launchctl can

@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""Read/write the per-branch PR-readiness marker files that gh-guard gates on.
+
+Zack's change workflow requires four multi-model review / demo artifacts to
+exist before `gh pr create` is allowed to open a PR (enforced by the gh-guard
+PATH shim). The artifacts for a branch live together in a per-branch directory
+`<git-dir>/copilot-pr-review/<encoded-branch>/`, one file per kind.
+
+This helper is the single source of truth for the marker path encoding so that
+agents and humans never have to reproduce the fiddly git-dir resolution and
+branch-name percent-encoding by hand (getting it wrong means writing the marker
+to the wrong path and then being blocked by the gate for no visible reason).
+
+Marker kinds (filename inside `<git-dir>/copilot-pr-review/<encoded-branch>/`,
+minimum size in bytes, and whether HEAD-pinned):
+
+  code-review  code-review.md   200   multi-model review of the code diff  (pinned)
+  plan         plan.md          120   multi-model review of the plan
+  demo         demo.md          120   demo video + before/after images
+                                      (or an explicit "N/A" justification)
+  pr-review    pr-review.md     120   multi-model review of the PR body
+
+The code-review marker is HEAD-pinned: `write` records the current HEAD commit
+on its first line (`<!-- reviewed-commit: <sha> -->`), and it is reported stale
+once HEAD moves past that commit, so a review that never saw the shipping diff
+cannot satisfy the gate. Re-run the code review and rewrite the marker after any
+later commit.
+
+The branch directory name is percent-encoded. The encoding MUST stay identical
+to gh-guard's inline computation:
+  printf '%s' "$branch" | sed -e 's/%/%25/g' -e 's|/|%2F|g'
+i.e. replace '%' with '%25' first, then '/' with '%2F'. `bin/test_pr_marker.py`
+asserts this helper agrees with that exact sed pipeline, and that gh-guard's
+byte floors, filenames, and pin flags match KINDS. Giving each branch its own
+directory (rather than suffixing the encoded branch onto every filename) avoids
+collisions between, e.g., branch `x`'s plan marker and branch `x.plan`'s
+code-review marker.
+
+Usage:
+  pr-marker path <kind>            print the marker file path for the current branch
+  pr-marker artifacts-dir <kind>   print the sibling artifacts directory path
+  pr-marker write <kind> [FILE]    write marker content from FILE (or stdin if '-'/omitted)
+  pr-marker status                 show all four markers and whether each passes
+  pr-marker check                  exit 0 only if every marker passes (fresh, over floor)
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class Kind:
+    """A marker kind: its filename, minimum size, and whether it is HEAD-pinned."""
+
+    name: str
+    filename: str
+    min_bytes: int
+    summary: str
+    pinned: bool = False
+
+
+KINDS: dict[str, Kind] = {
+    "code-review": Kind(
+        "code-review",
+        "code-review.md",
+        200,
+        "multi-model review of the code diff",
+        pinned=True,
+    ),
+    "plan": Kind("plan", "plan.md", 120, "multi-model review of the plan"),
+    "demo": Kind(
+        "demo",
+        "demo.md",
+        120,
+        "demo video + before/after images (or N/A justification)",
+    ),
+    "pr-review": Kind(
+        "pr-review", "pr-review.md", 120, "multi-model review of the PR description"
+    ),
+}
+
+MARKER_SUBDIR = "copilot-pr-review"
+
+# A pinned marker records the commit it reviewed on its first line so the gate
+# can reject it once HEAD moves past that commit (a review that never saw the
+# shipping diff). Keep this literal in sync with gh-guard's sed extraction.
+REVIEWED_COMMIT_PREFIX = "<!-- reviewed-commit: "
+REVIEWED_COMMIT_SUFFIX = " -->"
+
+
+def _git(*args: str) -> str:
+    """Run a git command and return stripped stdout, or raise on failure."""
+    result = subprocess.run(
+        ["git", *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def encode_branch(branch: str) -> str:
+    """Percent-encode a branch name for use as a marker filename.
+
+    Order matters: encode '%' before '/' so a literal '%2F' in a branch name is
+    not confused with an encoded slash. This mirrors gh-guard's sed pipeline.
+    """
+    return branch.replace("%", "%25").replace("/", "%2F")
+
+
+def marker_dir() -> Path:
+    """Return the base `<git-dir>/copilot-pr-review` directory for this checkout.
+
+    Uses `git rev-parse --absolute-git-dir`, which resolves to `<repo>/.git`
+    for plain checkouts and to `<main>/.git/worktrees/<name>/` for worktrees.
+    """
+    git_dir = _git("rev-parse", "--absolute-git-dir")
+    return Path(git_dir) / MARKER_SUBDIR
+
+
+def current_branch() -> str:
+    """Return the current branch name, or raise if on a detached HEAD.
+
+    Uses `git symbolic-ref --short HEAD` rather than `rev-parse --abbrev-ref`
+    so it also works before the first commit (an unborn branch), while still
+    failing on a genuinely detached HEAD. On a normal branch this yields the
+    same name gh-guard's `rev-parse --abbrev-ref HEAD` produces, so both agree
+    on the marker filename.
+    """
+    try:
+        branch = _git("symbolic-ref", "--short", "HEAD")
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "cannot resolve a branch name (detached HEAD?); "
+            "check out a branch before writing markers"
+        ) from exc
+    if not branch:
+        raise RuntimeError(
+            "cannot resolve a branch name (detached HEAD?); "
+            "check out a branch before writing markers"
+        )
+    return branch
+
+
+def current_head() -> str | None:
+    """Return the current HEAD commit SHA, or None on an unborn/detached repo."""
+    try:
+        return _git("rev-parse", "HEAD")
+    except subprocess.CalledProcessError:
+        return None
+
+
+def read_reviewed_commit(path: Path) -> str | None:
+    """Return the reviewed-commit SHA recorded on a marker's first line, if any."""
+    try:
+        first_line = path.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, IndexError):
+        return None
+    if first_line.startswith(REVIEWED_COMMIT_PREFIX) and first_line.endswith(
+        REVIEWED_COMMIT_SUFFIX
+    ):
+        return first_line.removeprefix(REVIEWED_COMMIT_PREFIX).removesuffix(
+            REVIEWED_COMMIT_SUFFIX
+        )
+    return None
+
+
+def branch_dir(branch: str | None = None) -> Path:
+    """Return the per-branch marker directory `<...>/copilot-pr-review/<branch>`.
+
+    The branch component is percent-encoded so a name containing `/` stays a
+    single flat directory rather than a nested path.
+    """
+    if branch is None:
+        branch = current_branch()
+    return marker_dir() / encode_branch(branch)
+
+
+def marker_path(kind: Kind, branch: str | None = None) -> Path:
+    """Return the absolute marker file path for a kind on the given branch."""
+    return branch_dir(branch) / kind.filename
+
+
+def artifacts_dir(kind: Kind, branch: str | None = None) -> Path:
+    """Return the sibling artifacts directory for a kind (e.g. demo.artifacts)."""
+    return branch_dir(branch) / f"{kind.name}.artifacts"
+
+
+def _resolve_kind(name: str) -> Kind:
+    """Return the Kind for a name, exiting with a helpful error if unknown."""
+    try:
+        return KINDS[name]
+    except KeyError:
+        valid = ", ".join(KINDS)
+        raise SystemExit(f"pr-marker: unknown kind '{name}' (valid: {valid})") from None
+
+
+def cmd_path(args: argparse.Namespace) -> int:
+    """Print the marker file path for a kind on the current branch."""
+    print(marker_path(_resolve_kind(args.kind)))
+    return 0
+
+
+def cmd_artifacts_dir(args: argparse.Namespace) -> int:
+    """Print the sibling artifacts directory for a kind."""
+    print(artifacts_dir(_resolve_kind(args.kind)))
+    return 0
+
+
+def cmd_write(args: argparse.Namespace) -> int:
+    """Write marker content from a file or stdin, refusing content below the floor."""
+    kind = _resolve_kind(args.kind)
+    if args.file in (None, "-"):
+        content = sys.stdin.read()
+    else:
+        content = Path(args.file).read_text(encoding="utf-8")
+
+    # The byte floor applies to the review content the caller provides, not to
+    # any reviewed-commit header prepended below.
+    size = len(content.encode("utf-8"))
+    if size < kind.min_bytes:
+        print(
+            f"pr-marker: refusing to write {kind.name} marker: "
+            f"content is {size} bytes, but the gate requires >= {kind.min_bytes}. "
+            f"Write the real {kind.summary}.",
+            file=sys.stderr,
+        )
+        return 1
+
+    pinned_sha: str | None = None
+    if kind.pinned:
+        head = current_head()
+        if head is None:
+            print(
+                f"pr-marker: cannot pin the {kind.name} marker: no HEAD commit "
+                "to review (unborn or detached). Commit the change first.",
+                file=sys.stderr,
+            )
+            return 1
+        pinned_sha = head
+        content = f"{REVIEWED_COMMIT_PREFIX}{head}{REVIEWED_COMMIT_SUFFIX}\n{content}"
+
+    path = marker_path(kind)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    note = f" (pinned to {pinned_sha[:12]})" if pinned_sha else ""
+    print(f"pr-marker: wrote {size} bytes to {path}{note}")
+    return 0
+
+
+def marker_status(kind: Kind, branch: str) -> tuple[bool, str, int, Path]:
+    """Return (ok, detail, size_bytes, path); detail in ok/missing/small/stale."""
+    path = marker_path(kind, branch)
+    if not path.is_file():
+        return (False, "missing", 0, path)
+    size = path.stat().st_size
+    if size < kind.min_bytes:
+        return (False, "too small", size, path)
+    if kind.pinned:
+        recorded = read_reviewed_commit(path)
+        head = current_head()
+        if not recorded or not head or recorded != head:
+            return (False, "stale", size, path)
+    return (True, "ok", size, path)
+
+
+def cmd_status(_args: argparse.Namespace) -> int:
+    """Print each marker's status and whether the gate would pass."""
+    branch = current_branch()
+    print(f"branch: {branch}")
+    print(f"marker dir: {branch_dir(branch)}")
+    print()
+    all_ok = True
+    for kind in KINDS.values():
+        ok, detail, size, path = marker_status(kind, branch)
+        all_ok = all_ok and ok
+        mark = "ok " if ok else detail.upper()
+        pin = " pinned" if kind.pinned else ""
+        print(
+            f"  [{mark:>9}] {kind.name:<12} {size:>5}B (>= {kind.min_bytes}B)  "
+            f"{path.name}{pin}"
+        )
+    print()
+    if all_ok:
+        print("all markers satisfied")
+    else:
+        print("gate would BLOCK: fill the missing/stale markers")
+        print(
+            "(a stale code-review marker means HEAD moved since the review; "
+            "re-run the code review and rewrite it)"
+        )
+    return 0 if all_ok else 1
+
+
+def cmd_check(_args: argparse.Namespace) -> int:
+    """Exit non-zero (printing each gap) unless every marker passes its floor."""
+    branch = current_branch()
+    failures = []
+    for kind in KINDS.values():
+        ok, detail, _size, path = marker_status(kind, branch)
+        if not ok:
+            failures.append((detail, kind, path))
+    if failures:
+        for detail, kind, path in failures:
+            print(
+                f"pr-marker: {detail} {kind.name} marker at {path}",
+                file=sys.stderr,
+            )
+        return 1
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for the pr-marker subcommands."""
+    parser = argparse.ArgumentParser(
+        prog="pr-marker",
+        description="Read/write the per-branch PR-readiness markers gh-guard gates on.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_path = sub.add_parser("path", help="print the marker file path for a kind")
+    p_path.add_argument("kind", help="one of: " + ", ".join(KINDS))
+    p_path.set_defaults(func=cmd_path)
+
+    p_art = sub.add_parser(
+        "artifacts-dir", help="print the sibling artifacts dir for a kind"
+    )
+    p_art.add_argument("kind", help="one of: " + ", ".join(KINDS))
+    p_art.set_defaults(func=cmd_artifacts_dir)
+
+    p_write = sub.add_parser("write", help="write marker content from a file or stdin")
+    p_write.add_argument("kind", help="one of: " + ", ".join(KINDS))
+    p_write.add_argument(
+        "file", nargs="?", default="-", help="file to read (default: stdin)"
+    )
+    p_write.set_defaults(func=cmd_write)
+
+    p_status = sub.add_parser("status", help="show all markers and whether each passes")
+    p_status.set_defaults(func=cmd_status)
+
+    p_check = sub.add_parser("check", help="exit 0 only if every marker passes")
+    p_check.set_defaults(func=cmd_check)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Parse args and dispatch to the selected subcommand."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except subprocess.CalledProcessError:
+        print(
+            "pr-marker: not inside a git checkout (git rev-parse failed)",
+            file=sys.stderr,
+        )
+        return 2
+    except (RuntimeError, OSError) as exc:
+        print(f"pr-marker: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
