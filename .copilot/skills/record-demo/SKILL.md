@@ -12,7 +12,7 @@ description, human review, then push and open a draft PR. This skill owns the
 demo-and-before/after step.
 
 The output feeds the `demo` marker that gh-guard gates on. `gh pr create` stays
-blocked until `<branch>.demo.md` exists (see the `pr-marker` helper below), so
+blocked until `<branch>/demo.md` exists (see the `pr-marker` helper below), so
 running this skill is what unblocks that part of the gate.
 
 ## When to invoke
@@ -43,8 +43,8 @@ the PR description. Two paths:
 python3 ~/.copilot/skills/record-demo/scaffold.py init
 ```
 
-Artifacts live next to the review markers, under
-`<git-dir>/copilot-pr-review/<branch>.demo.artifacts/`. Save before/after images
+Artifacts live next to the review markers, in the per-branch directory under
+`<git-dir>/copilot-pr-review/<branch>/demo.artifacts/`. Save before/after images
 and any video there so the paths in the marker stay stable and never get
 committed into the working tree.
 

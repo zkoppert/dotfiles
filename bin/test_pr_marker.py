@@ -154,6 +154,10 @@ def test_pin_roundtrip() -> None:
         with tempfile.TemporaryDirectory() as tmp:
             os.chdir(tmp)
             _run("git", "init", "-q")
+            # Configure a repo-local identity so the commits work in a fresh
+            # container without an ambient git user.name / user.email.
+            _run("git", "config", "user.email", "test@example.com")
+            _run("git", "config", "user.name", "pr-marker test")
             _run("git", "checkout", "-q", "-b", "feat/pin")
             _run("git", "commit", "-q", "--allow-empty", "-m", "c1")
             code = pr_marker.KINDS["code-review"]
