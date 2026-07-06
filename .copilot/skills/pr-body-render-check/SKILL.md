@@ -1,3 +1,8 @@
+---
+name: pr-body-render-check
+description: This skill should be used after updating a PR description, issue body, or gist via `gh pr edit --body-file`, `gh issue edit --body-file`, or `gh gist edit`, to verify the body renders correctly on GitHub (no orphaned line breaks from hard-wrapped prose, broken table alignment, links split across a newline, or silent truncation past GitHub's size limit). Also triggered when the user asks to "check the PR body rendering", "did my body render right", or "verify the issue body after editing".
+---
+
 # pr-body-render-check: verify PR/issue body rendering after edit
 
 Use this skill **after** updating a PR description, issue body, or gist via `gh pr edit --body-file`, `gh issue edit --body-file`, or `gh gist edit`.
