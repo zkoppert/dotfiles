@@ -387,9 +387,8 @@ if [ "$is_pr_create" = "1" ]; then
     # plan marker cannot collide with branch `x.plan`'s code-review marker.
     marker_base="$git_dir/copilot-pr-review/$safe_branch"
 
-    # Zack's staged workflow requires four artifacts before a PR opens, shown
-    # here in workflow order: plan review, code review, demo/before-after, then
-    # PR-description review.
+    # Start optimistic; any failing eval_marker clears the flag. All four must
+    # pass, so their order here is cosmetic (shown in workflow order).
     marker_all_ok=1
     eval_marker "plan review"          "$marker_base/plan.md"        "$PLAN_MIN_BYTES"        0
     eval_marker "code review"          "$marker_base/code-review.md" "$CODE_REVIEW_MIN_BYTES" 1
