@@ -97,13 +97,20 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 ### Multi-model review
 - Launch **at least 3 code review agents in parallel** using different models (e.g., Claude Opus, Claude Sonnet, GPT) to get diverse perspectives
 - Synthesize findings across all models. Surface a finding once you independently verify it, even if only one model raised it; multiple models flagging an issue is a strong signal but still requires verification before reporting. Do not downgrade or drop a verified finding solely because it is pre-existing or sits outside the diff; label it instead (see "What to focus on")
-- Present a unified, deduplicated report organized by severity
+- Present a unified, deduplicated report using the **Output format** below: lead with a merge decision, group findings by blocking impact, and name what looks right
 
 ### Verification standard
 - **Every finding must be verified before reporting it.** Do not report potential issues based on assumptions alone.
 - Verify by reading the actual source files, checking call sites, tracing data flow, or running tests/experiments
 - Clearly label findings with verification status: **Verified** (confirmed by reading code or testing), **Observation** (plausible but depends on context outside the diff), or **Unverified** (could not confirm; include reasoning)
 - When a finding involves runtime behavior, write or run a test to confirm it rather than speculating
+
+### Review passes: scope, reuse, and reliability
+Before drilling into line-level correctness, judge the shape of the change. These are first-class findings, not nitpicks.
+- **Smallest safe change (MVP scope)** - ask what business problem this solves *now* and what the smallest safe version is. Flag scope that solves a larger imagined problem: speculative extension points, config knobs nothing uses yet, generalization added ahead of a second caller. Recommend what could be follow-up once the pattern proves itself.
+- **Reuse existing primitives** - before accepting a new helper, service, dependency, queue, table, or abstraction, check whether an existing helper, policy, schema, job, pattern, or owner already covers it. Duplicating or bypassing an existing primitive creates drift; name the primitive the change should reuse. Generalizes the library-migration redundancy check below.
+- **Over-optimization and premature abstraction** - flag caching without evidence of a bottleneck, batching without need, complex config, or abstractions built for imagined future cases. Optimize only what a measurement shows is the bottleneck.
+- **Reliability and operations** - for changes to production behavior, check retries, timeouts, consistency on retry/replay, migrations, partial-failure handling, deploy order, the rollback path, and whether the failure mode would surprise on-call. Tie this to the "Include monitoring context in code PRs" rule. Use "consistency", never "idempotency".
 
 ### What to focus on
 - **Correctness over style** - only report bugs, logic errors, security issues, race conditions, type mismatches, and missing edge cases. Do not flag subjective style, formatting, naming conventions, or personal preferences. This suppression does not extend to codified conventions documented in these instructions (such as the comment-minimalism rule below); enforce those as first-class findings, not nitpicks.
@@ -122,6 +129,26 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 - **Idiomatic language check (self-review only)** - when conducting a self-review, do a pass for language idiom violations that would signal unfamiliarity to a reviewer. Examples: `filter` vs `select` in Ruby, `list()` vs list comprehension in Python, `.forEach` vs `.map` in JS when the return value matters. This is not about style nitpicking; it's about using the language the way its community expects. Only flag during self-review, not when reviewing others' PRs.
 - **React composition check** - when reviewing React code, flag components that build a large derived data shape and then walk it with conditionals. The canonical smell: a `.map()` containing a multi-branch `if`/`switch` with type casts handling 3 or more variants inline. Suggest extraction into per-variant components; this improves testability (each component is independently unit-testable) and readability (the container reads like a table of contents). When the extracted components also co-locate their data subscriptions via hooks, siblings avoid unnecessary re-renders.
 
+### Visible reasoning bar
+A diff can look finished before the author has shown why it is safe. This matters most for agent-assisted changes. After reading the diff and surrounding code, check whether the PR (body, comments, tests) makes enough reasoning visible to review without reconstructing the author's thinking:
+- Why does this change exist now?
+- Why this approach instead of the obvious alternatives?
+- What validation is trusted, and what did it prove?
+- What is least certain or intentionally left as follow-up?
+
+Missing reasoning is not automatically blocking; it becomes blocking when a reviewer cannot judge correctness, safety, rollback, or scope without guessing. Ask for the smallest useful explanation, not a transcript dump: prefer "I can't tell whether this handles the empty-result case because the PR only says tests pass; add the case you validated or a focused test" over "add more context".
+
+### Comment quality bar
+Only raise a comment that clears at least one of these bars:
+- The change can ship wrong behavior, break an important path, or make rollback hard.
+- It introduces a credible security, privacy, or data-integrity risk.
+- It duplicates or bypasses an existing primitive in a way that creates drift.
+- It adds scope, abstraction, dependency, or optimization the business problem doesn't need.
+- It makes future maintenance materially harder without a clear tradeoff.
+- The tests miss a meaningful edge case tied to the changed behavior.
+
+Do not leave bare "consider..." comments: if the issue is real, say what can fail and what simpler or safer shape fixes it. Reinforces "one point per comment" below.
+
 ### Tone and voice
 - All review feedback must match the tone and voice described in the **Writing Style** section of these instructions
 - Use additive, curious framing, not corrective or prescriptive
@@ -132,6 +159,27 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 - If findings warrant PR comments, draft them in my voice and **show me the draft before posting**
 - When specific code changes are needed, use GitHub suggestion blocks
 - One actionable point per comment; do not bundle multiple concerns
+
+### Output format
+Lead with a merge decision, group findings by blocking impact, and name what's right. Keep each finding's evidence tag (Verified / Observation / Unverified from the Verification standard) so the format adds a verdict without dropping the evidence bar. Decide each concern's disposition first: blocking issues go under **Blocking**; fix-before-merge and follow-up items go under **Non-blocking** (name which it is); concerns you decide to ignore don't get a comment at all.
+
+```markdown
+**Decision:** Needs changes before merge.  (or: Approve, or: Approve with follow-ups)
+
+**Blocking**
+1. `path/file.py:123` [Verified] - Authorization runs after the lookup, so a 404-vs-403 split leaks which private IDs exist. Move the permission check before the lookup, or reuse `ExistingPolicy.check`.
+
+**Non-blocking**
+1. `path/other.py:45` [Observation] - This helper duplicates `normalize_account_id`; reusing it reduces drift, but it can be follow-up if the behavior is intentionally different.
+
+**What looks right**
+The change keeps the data model unchanged and avoids a worker for a synchronous path, which is a reasonable MVP scope.
+```
+
+For a small review, a short paragraph with one or two findings beats a padded template. When composing from the code-review or security-review agents, re-rank findings by real impact and drop low-signal items; don't forward raw tool output.
+
+### Durable context loop
+When a review surfaces a repeated miss or hidden knowledge a future reviewer would have to rediscover, recommend the smallest durable artifact that prevents the same miss: a focused test, a short instruction in the repo's `.github/copilot-instructions.md` or `AGENTS.md`, adoption of an existing helper, a short decision note, or a lint/CI check when the failure is mechanical and likely to repeat (matches "Guardrails over guidelines"). Don't turn every finding into process; only do this when the miss is likely to recur. If it's a convention worth remembering across sessions, prompt me to store it as a memory.
 
 ## Code Style & Languages
 - **Python** is the preferred scripting language for automation, data processing, and tooling
