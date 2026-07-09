@@ -7,13 +7,17 @@
 #      multi-model review / demo artifacts before a PR is opened, so this
 #      wrapper blocks PR creation until all four marker files exist in the
 #      per-branch directory <git-dir>/copilot-pr-review/<encoded-branch>/:
-#        - plan review          plan.md         (>=120 bytes)
-#        - code review          code-review.md  (>=200 bytes, HEAD-pinned)
+#        - plan review          plan.md         (>=120 bytes, >=3 models)
+#        - code review          code-review.md  (>=200 bytes, HEAD-pinned,
+#                                                >=3 models)
 #        - demo/before-after     demo.md         (>=120 bytes)
-#        - PR-description review pr-review.md    (>=120 bytes)
+#        - PR-description review pr-review.md    (>=120 bytes, >=3 models)
 #      Write them with the bin/pr-marker helper. The code-review marker is
 #      HEAD-pinned: it records the reviewed commit and is rejected as STALE once
-#      HEAD moves past it, so late commits force a re-review. Additionally, the
+#      HEAD moves past it, so late commits force a re-review. The three review
+#      markers must also declare >=3 distinct models in a reviewed-by-models
+#      header (pr-marker `--models a,b,c`), so a single-pass self-review cannot
+#      satisfy a gate meant to require a multi-model review. Additionally, the
 #      PR body is piped through the `validate-style` lint skill and the create is
 #      blocked if any hard-rule violations are reported (em-dashes, "per" misuse,
 #      "This PR" as a sentence subject, subjectless action-verb bullets, etc.).
@@ -276,6 +280,42 @@ PLAN_MIN_BYTES=120
 DEMO_MIN_BYTES=120
 PR_REVIEW_MIN_BYTES=120
 
+# Minimum distinct models a review marker (plan, code-review, pr-review) must
+# declare in its `<!-- reviewed-by-models: a, b, c -->` header. MUST match
+# bin/pr-marker's MIN_MODELS so the writer and the gate agree. The demo marker
+# is exempt (it is not a multi-model review).
+MIN_REVIEW_MODELS=3
+
+# count_review_models <path>
+# Echo the number of distinct (case-insensitive) models declared in the marker's
+# reviewed-by-models header, or 0 if there is none. Parses the same header
+# format bin/pr-marker writes: splits the inner list on commas, trims each name,
+# lowercases, drops empties, and dedupes. The header is not position-pinned, so
+# `sed` scans every line and `head -n1` takes the first match.
+#
+# The whole pipeline is captured into a variable so the fallback REPLACES the
+# result rather than appending a second value: under `set -o pipefail` an
+# earlier fix used `grep -v '^$'`, which exits non-zero when it filters every
+# line (a header-less marker), tripping pipefail AFTER `wc -l` had already
+# printed 0 and yielding the two-line string "0\n0" that made the `-lt` test
+# error out and the gate FAIL OPEN. Empty lines are now dropped with
+# `sed '/^$/d'` (always exit 0), and the substitution result is defaulted to 0.
+count_review_models() {
+  local path="$1" count
+  count="$(
+    sed -n 's/^<!-- reviewed-by-models: \(.*\) -->$/\1/p' "$path" 2>/dev/null \
+      | head -n1 \
+      | tr ',' '\n' \
+      | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+      | tr '[:upper:]' '[:lower:]' \
+      | sed '/^$/d' \
+      | sort -u \
+      | wc -l \
+      | tr -d ' '
+  )" || count=""
+  printf '%s' "${count:-0}"
+}
+
 # check_marker <path> <min_bytes>
 # Succeeds (returns 0) when the marker file exists and is at least <min_bytes>
 # bytes, so a bare `touch` never satisfies the gate. Always called from an `if`
@@ -287,16 +327,20 @@ check_marker() {
   [ "${size:-0}" -ge "$min" ]
 }
 
-# eval_marker <label> <path> <min_bytes> <pinned:0|1>
+# eval_marker <label> <path> <min_bytes> <pinned:0|1> <requires_models:0|1>
 # Appends a status line and clears marker_all_ok (both globals) when a marker
 # fails. Takes separate positional args rather than a delimiter-packed spec so a
 # branch name or path containing any character, including `|`, parses correctly.
 # A pinned marker records the reviewed commit on its first line
 # (`<!-- reviewed-commit: <sha> -->`); it is rejected as STALE once HEAD moves
 # past that commit, so a review that never saw the shipping diff cannot pass.
-# The reviewed-commit format MUST match bin/pr-marker's REVIEWED_COMMIT_PREFIX.
+# A requires_models marker must declare >= MIN_REVIEW_MODELS distinct models in
+# its reviewed-by-models header, so a single-pass self-review cannot pass a gate
+# meant to require a multi-model review. The reviewed-commit and
+# reviewed-by-models formats MUST match bin/pr-marker's REVIEWED_COMMIT_PREFIX
+# and REVIEWED_MODELS_PREFIX.
 eval_marker() {
-  local label="$1" path="$2" min="$3" pinned="$4"
+  local label="$1" path="$2" min="$3" pinned="$4" requires_models="${5:-0}"
   if ! check_marker "$path" "$min"; then
     marker_all_ok=0
     status_lines="${status_lines}  [ MISSING ] ${label} -> ${path} (>= ${min} bytes)"$'\n'
@@ -309,6 +353,15 @@ eval_marker() {
     if [ -z "$recorded" ] || [ -z "$current" ] || [ "$recorded" != "$current" ]; then
       marker_all_ok=0
       status_lines="${status_lines}  [ STALE   ] ${label} -> ${path} (reviewed ${recorded:-none}, HEAD ${current:-none}; re-review and rewrite)"$'\n'
+      return
+    fi
+  fi
+  if [ "$requires_models" = "1" ]; then
+    local models_count
+    models_count="$(count_review_models "$path")"
+    if [ "${models_count:-0}" -lt "$MIN_REVIEW_MODELS" ]; then
+      marker_all_ok=0
+      status_lines="${status_lines}  [ FEW-MODELS ] ${label} -> ${path} (declares ${models_count:-0} of >= ${MIN_REVIEW_MODELS} models; re-run a multi-model review and rewrite with pr-marker --models a,b,c)"$'\n'
       return
     fi
   fi
@@ -390,10 +443,10 @@ if [ "$is_pr_create" = "1" ]; then
     # Start optimistic; any failing eval_marker clears the flag. All four must
     # pass, so their order here is cosmetic (shown in workflow order).
     marker_all_ok=1
-    eval_marker "plan review"          "$marker_base/plan.md"        "$PLAN_MIN_BYTES"        0
-    eval_marker "code review"          "$marker_base/code-review.md" "$CODE_REVIEW_MIN_BYTES" 1
-    eval_marker "demo/before-after"    "$marker_base/demo.md"        "$DEMO_MIN_BYTES"        0
-    eval_marker "PR-description review" "$marker_base/pr-review.md"  "$PR_REVIEW_MIN_BYTES"   0
+    eval_marker "plan review"          "$marker_base/plan.md"        "$PLAN_MIN_BYTES"        0 1
+    eval_marker "code review"          "$marker_base/code-review.md" "$CODE_REVIEW_MIN_BYTES" 1 1
+    eval_marker "demo/before-after"    "$marker_base/demo.md"        "$DEMO_MIN_BYTES"        0 0
+    eval_marker "PR-description review" "$marker_base/pr-review.md"  "$PR_REVIEW_MIN_BYTES"   0 1
   fi
 
   if [ -t 0 ] && [ -t 1 ]; then
@@ -444,10 +497,15 @@ Fill each missing marker by piping the synthesized content through pr-marker
 (on PATH via ~/.local/bin, or ~/repos/dotfiles/bin/pr-marker), which writes to
 the correct per-branch path:
 
-  <synthesized plan review>        | pr-marker write plan -
-  <synthesized code review>        | pr-marker write code-review -
+  <synthesized plan review>        | pr-marker write plan --models a,b,c -
+  <synthesized code review>        | pr-marker write code-review --models a,b,c -
   <demo summary + image/video paths, or N/A justification> | pr-marker write demo -
-  <synthesized PR-description review> | pr-marker write pr-review -
+  <synthesized PR-description review> | pr-marker write pr-review --models a,b,c -
+
+The plan, code-review, and PR-description markers each require a multi-model
+review: pass >=3 distinct models via --models (e.g. --models
+opus-4.8,sonnet-4.6,gpt-5.5). A "1-MODEL" status above means the marker declares
+fewer than 3 models; re-run the review across different models and rewrite it.
 
 For the demo marker, use the record-demo skill (codespace + playwright,
 before/after images). If the change has no visual surface, the demo marker may
