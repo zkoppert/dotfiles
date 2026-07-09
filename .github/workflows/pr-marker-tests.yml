@@ -1,0 +1,23 @@
+name: pr-marker-tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      # Run on 3.9 to enforce the CPython 3.9.6 floor bin/pr-marker targets.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.9'
+      - name: Run pr-marker / gh-guard gate tests
+        run: python3 bin/test_pr_marker.py
