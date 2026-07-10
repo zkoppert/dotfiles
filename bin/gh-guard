@@ -3,18 +3,21 @@
 # unconfirmed use:
 #
 #   1. `gh pr ready`  - marks a draft PR ready and notifies reviewers.
-#   2. `gh pr create` - opens a PR. Zack's staged change workflow requires four
-#      multi-model review / demo artifacts before a PR is opened, so this
-#      wrapper blocks PR creation until all four marker files exist in the
+#   2. `gh pr create` - opens a PR. Zack's staged change workflow requires five
+#      review, demo, and check-run artifacts before a PR is opened, so this
+#      wrapper blocks PR creation until all five marker files exist in the
 #      per-branch directory <git-dir>/copilot-pr-review/<encoded-branch>/:
 #        - plan review          plan.md         (>=120 bytes, >=3 models)
 #        - code review          code-review.md  (>=200 bytes, HEAD-pinned,
 #                                                >=3 models)
 #        - demo/before-after     demo.md         (>=120 bytes)
 #        - PR-description review pr-review.md    (>=120 bytes, >=3 models)
-#      Write them with the bin/pr-marker helper. The code-review marker is
-#      HEAD-pinned: it records the reviewed commit and is rejected as STALE once
-#      HEAD moves past it, so late commits force a re-review. The three review
+#        - full test suite       tests.md        (>=120 bytes, HEAD-pinned,
+#                                                machine-produced by run-tests)
+#      Write them with the bin/pr-marker helper. The code-review and tests
+#      markers are HEAD-pinned: they record the reviewed/tested commit and are
+#      rejected as STALE once HEAD moves past it, so late commits force a
+#      re-review and a re-run. The three review
 #      markers must also declare >=3 distinct models in a reviewed-by-models
 #      header (pr-marker `--models a,b,c`), so a single-pass self-review cannot
 #      satisfy a gate meant to require a multi-model review. Additionally, the
@@ -35,8 +38,9 @@
 #
 # Per-command confirmation:
 #   - `gh pr ready`:  set ZACK_CONFIRMED_PR_READY=1 in the same invocation.
-#   - `gh pr create`: write all four per-branch review/demo markers under
-#       <git-dir>/copilot-pr-review/ (use `pr-marker write <kind> -`)
+#   - `gh pr create`: write all five per-branch review/demo/tests markers under
+#       <git-dir>/copilot-pr-review/ (use `pr-marker write <kind> -`, and
+#       `pr-marker run-tests` for the tests marker)
 #     AND set ZACK_CONFIRMED_PR_CREATE=1 in the same invocation. `<git-dir>` is
 #     the per-checkout git directory as reported by `git rev-parse
 #     --absolute-git-dir`, so worktrees resolve to the per-worktree gitdir
@@ -279,6 +283,7 @@ CODE_REVIEW_MIN_BYTES=200
 PLAN_MIN_BYTES=120
 DEMO_MIN_BYTES=120
 PR_REVIEW_MIN_BYTES=120
+TESTS_MIN_BYTES=120
 
 # Minimum distinct models a review marker (plan, code-review, pr-review) must
 # declare in its `<!-- reviewed-by-models: a, b, c -->` header. MUST match
@@ -440,23 +445,26 @@ if [ "$is_pr_create" = "1" ]; then
     # plan marker cannot collide with branch `x.plan`'s code-review marker.
     marker_base="$git_dir/copilot-pr-review/$safe_branch"
 
-    # Start optimistic; any failing eval_marker clears the flag. All four must
-    # pass, so their order here is cosmetic (shown in workflow order).
+    # Start optimistic; any failing eval_marker clears the flag. All five must
+    # pass, so their order here is cosmetic (shown in workflow order). This block
+    # runs before the TTY/non-TTY split, so it feeds both the soft prompt and the
+    # non-TTY hard gate.
     marker_all_ok=1
     eval_marker "plan review"          "$marker_base/plan.md"        "$PLAN_MIN_BYTES"        0 1
     eval_marker "code review"          "$marker_base/code-review.md" "$CODE_REVIEW_MIN_BYTES" 1 1
     eval_marker "demo/before-after"    "$marker_base/demo.md"        "$DEMO_MIN_BYTES"        0 0
     eval_marker "PR-description review" "$marker_base/pr-review.md"  "$PR_REVIEW_MIN_BYTES"   0 1
+    eval_marker "full test suite"      "$marker_base/tests.md"       "$TESTS_MIN_BYTES"       1 0
   fi
 
   if [ -t 0 ] && [ -t 1 ]; then
     echo "About to run: gh $*" >&2
     if [ "$marker_all_ok" = "1" ]; then
-      echo "All four PR-readiness markers present (plan, code, demo, PR-description)." >&2
+      echo "All five PR-readiness markers present (plan, code, demo, PR-description, tests)." >&2
     else
       echo "Missing PR-readiness markers (Zack's staged change workflow):" >&2
       printf '%s' "$status_lines" >&2
-      echo "Run the plan review, code review, demo/before-after capture, and PR-description review, then write each with pr-marker." >&2
+      echo "Run the plan review, code review, demo/before-after capture, PR-description review, and the full test suite (pr-marker run-tests), then write each with pr-marker." >&2
     fi
     printf "Continue? [y/N] " >&2
     read -r ans
@@ -467,7 +475,7 @@ if [ "$is_pr_create" = "1" ]; then
   else
     pass=0
     if [ "$in_repo" = "1" ]; then
-      # Inside a resolvable repo: require ALL four markers and the env var.
+      # Inside a resolvable repo: require ALL five markers and the env var.
       if [ "$marker_all_ok" = "1" ] && [ "${ZACK_CONFIRMED_PR_CREATE:-}" = "1" ]; then
         pass=1
       fi
@@ -484,10 +492,11 @@ if [ "$is_pr_create" = "1" ]; then
         cat >&2 <<EOF
 gh-guard: \`gh pr create\` blocked.
 
-Reason: Zack's staged change workflow requires four artifacts before a PR is
+Reason: Zack's staged change workflow requires five artifacts before a PR is
 opened: a multi-model review of the PLAN, a multi-model review of the CODE, a
-demo + before/after capture (or an explicit N/A justification), and a
-multi-model review of the PR DESCRIPTION. Each is a marker file under
+demo + before/after capture (or an explicit N/A justification), a multi-model
+review of the PR DESCRIPTION, and a full CI-equivalent test run (tests, lint,
+type-check, build) passing green in a Codespace. Each is a marker file under
 $git_dir/copilot-pr-review/.
 
 Marker status this invocation:
@@ -501,6 +510,7 @@ the correct per-branch path:
   <synthesized code review>        | pr-marker write code-review --models a,b,c -
   <demo summary + image/video paths, or N/A justification> | pr-marker write demo -
   <synthesized PR-description review> | pr-marker write pr-review --models a,b,c -
+  pr-marker run-tests --cmd '<full test/lint/type/build command>' [--cmd ...]
 
 The plan, code-review, and PR-description markers each require a multi-model
 review: pass >=3 distinct models via --models (e.g. --models
@@ -512,15 +522,20 @@ before/after images). If the change has no visual surface, the demo marker may
 record an explicit "N/A - no visual surface" justification plus an alternative
 visual aid (table / mermaid / terminal output).
 
-A STALE code-review marker means HEAD moved since the review was written (the
-review never saw the shipping commits). Re-run the code review and rewrite it
-with \`pr-marker write code-review -\` so it re-pins to the current HEAD.
+The tests marker is machine-produced: \`pr-marker run-tests\` runs the check
+commands in a Codespace and writes it only if every command exits 0, so it
+proves a green run. Slowness is never a reason to narrow the suite; only genuine
+infeasibility, recorded via --narrow.
+
+A STALE code-review or tests marker means HEAD moved since it was written (the
+artifact never saw the shipping commits). Re-run it and rewrite so it re-pins to
+the current HEAD.
 
 Then set the explicit confirmation env var in the same invocation:
 
   ZACK_CONFIRMED_PR_CREATE=1 gh pr create <args>
 
-Both all four markers AND the env var are required inside a git checkout.
+Both all five markers AND the env var are required inside a git checkout.
 ZACK_CONFIRMED_PR_CREATE='${ZACK_CONFIRMED_PR_CREATE:-}'.
 EOF
       else
@@ -528,8 +543,9 @@ EOF
 gh-guard: \`gh pr create\` blocked.
 
 Reason: Zack's staged change workflow requires plan review, code review,
-demo/before-after capture, and PR-description review before a PR is opened.
-This wrapper prevents skipping those steps from automation.
+demo/before-after capture, PR-description review, and a full test-suite run
+before a PR is opened. This wrapper prevents skipping those steps from
+automation.
 
 You appear to be running outside a resolvable git checkout (no repo root or
 branch detectable; branch was '${branch:-}'). The marker-file checks are

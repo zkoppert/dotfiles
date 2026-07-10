@@ -130,13 +130,19 @@ def test_kinds_and_thresholds() -> None:
     """The kind filenames, byte floors, and model requirement match gh-guard."""
     assert pr_marker.KINDS["code-review"].filename == "code-review.md"
     assert pr_marker.KINDS["code-review"].min_bytes == 200
-    for name in ("plan", "demo", "pr-review"):
+    for name in ("plan", "demo", "pr-review", "tests"):
         assert pr_marker.KINDS[name].filename == f"{name}.md"
         assert pr_marker.KINDS[name].min_bytes == 120
-    # The three review kinds require a multi-model review; demo is exempt.
+    # The three review kinds require a multi-model review; demo and tests are exempt.
     for name in ("code-review", "plan", "pr-review"):
         assert pr_marker.KINDS[name].requires_models, name
     assert not pr_marker.KINDS["demo"].requires_models
+    assert not pr_marker.KINDS["tests"].requires_models
+    # code-review and tests are HEAD-pinned; the others are not.
+    for name in ("code-review", "tests"):
+        assert pr_marker.KINDS[name].pinned, name
+    for name in ("plan", "demo", "pr-review"):
+        assert not pr_marker.KINDS[name].pinned, name
 
 
 def test_branch_dir_and_paths() -> None:
@@ -244,6 +250,47 @@ def test_pin_roundtrip() -> None:
 
             _run("git", "commit", "-q", "--allow-empty", "-m", "c2")
             ok, detail, _size, _path = pr_marker.marker_status(code, "feat/pin")
+            assert not ok and detail == "stale", detail
+    finally:
+        os.chdir(restore)
+
+
+def test_run_tests() -> None:
+    """run-tests writes a pinned tests marker only when every command passes."""
+    restore = Path.cwd()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            _run("git", "init", "-q")
+            _run("git", "config", "user.email", "test@example.com")
+            _run("git", "config", "user.name", "pr-marker test")
+            _run("git", "checkout", "-q", "-b", "feat/tests")
+            _run("git", "commit", "-q", "--allow-empty", "-m", "c1")
+            tests = pr_marker.KINDS["tests"]
+            marker = pr_marker.marker_path(tests, branch="feat/tests")
+
+            # A failing command writes nothing and exits non-zero.
+            assert pr_marker.main(["run-tests", "--cmd", "false"]) == 1
+            assert not marker.exists()
+
+            # A failure among passing commands still writes nothing.
+            assert pr_marker.main(["run-tests", "--cmd", "true", "--cmd", "false"]) == 1
+            assert not marker.exists()
+
+            # All commands passing writes a HEAD-pinned marker recording them.
+            assert pr_marker.main(["run-tests", "--cmd", "true", "--cmd", "true"]) == 0
+            head1 = pr_marker.current_head()
+            assert marker.exists()
+            assert pr_marker.read_reviewed_commit(marker) == head1
+            body = marker.read_text(encoding="utf-8")
+            assert "RESULT: passed" in body
+            assert "exit 0" in body
+            ok, detail, _size, _path = pr_marker.marker_status(tests, "feat/tests")
+            assert ok and detail == "ok", detail
+
+            # A later commit makes the pinned tests marker stale.
+            _run("git", "commit", "-q", "--allow-empty", "-m", "c2")
+            ok, detail, _size, _path = pr_marker.marker_status(tests, "feat/tests")
             assert not ok and detail == "stale", detail
     finally:
         os.chdir(restore)
@@ -448,11 +495,18 @@ def test_gh_guard_gate() -> None:
             assert res.returncode == 1, out
             assert "FEW-MODELS" in out, out
 
-            # (3) Three distinct models -> PASS (execs the fake gh).
+            # (3) Three distinct models -> still BLOCK until the tests marker exists.
             assert (
                 pr_marker.main(["write", "pr-review", str(body), "--models", "a,b,c"])
                 == 0
             )
+            res = _gh_guard_create(repo, fake_bin)
+            out = res.stdout + res.stderr
+            assert res.returncode == 1, out
+            assert "FAKE-GH-EXECUTED" not in out, out
+
+            # (4) Machine-produced tests marker present -> PASS (execs the fake gh).
+            assert pr_marker.main(["run-tests", "--cmd", "true"]) == 0
             res = _gh_guard_create(repo, fake_bin)
             out = res.stdout + res.stderr
             assert res.returncode == 0, out
@@ -479,6 +533,7 @@ def main() -> int:
         test_artifacts_dir_derivation,
         test_gh_guard_matches_kinds,
         test_pin_roundtrip,
+        test_run_tests,
         test_parse_models,
         test_models_provenance,
         test_models_argv_order,

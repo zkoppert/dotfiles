@@ -59,7 +59,7 @@ if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
 fi
 
 # Install pr-marker helper as a PATH shim at ~/.local/bin/pr-marker.
-# Writes the per-branch plan/code/demo/PR-description review markers that the
+# Writes the per-branch plan/code/demo/PR-description/tests markers that the
 # gh-guard `gh pr create` gate checks, keeping the path encoding in one place.
 if [ -x "$DOTFILES_DIR/bin/pr-marker" ]; then
   mkdir -p "$HOME/.local/bin"

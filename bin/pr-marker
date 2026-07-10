@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read/write the per-branch PR-readiness marker files that gh-guard gates on.
 
-Zack's change workflow requires four multi-model review / demo artifacts to
+Zack's change workflow requires five review, demo, and check-run artifacts to
 exist before `gh pr create` is allowed to open a PR (enforced by the gh-guard
 PATH shim). The artifacts for a branch live together in a per-branch directory
 `<git-dir>/copilot-pr-review/<encoded-branch>/`, one file per kind.
@@ -22,19 +22,26 @@ minimum size in bytes, whether HEAD-pinned, and whether a multi-model review):
                                       (or an explicit "N/A" justification)
   pr-review    pr-review.md     120   multi-model review of the PR body
                                       (requires >=3 models)
+  tests        tests.md         120   machine-produced record of a full
+                                      CI-equivalent check run passing green
+                                      (pinned; written by `run-tests`)
 
-The code-review marker is HEAD-pinned: `write` records the current HEAD commit
-on its first line (`<!-- reviewed-commit: <sha> -->`), and it is reported stale
-once HEAD moves past that commit, so a review that never saw the shipping diff
-cannot satisfy the gate. Re-run the code review and rewrite the marker after any
-later commit.
+The code-review and tests markers are HEAD-pinned: `write`/`run-tests` records
+the current HEAD commit on the first line (`<!-- reviewed-commit: <sha> -->`),
+and the marker is reported stale once HEAD moves past that commit, so an
+artifact that never saw the shipping diff cannot satisfy the gate. Re-run and
+rewrite the marker after any later commit.
 
 The three review markers (code-review, plan, pr-review) also require a
 multi-model review: `write` refuses them unless `--models` names >=3 distinct
 models, and records them in a `<!-- reviewed-by-models: a, b, c -->` header, so
 a lightweight single-pass self-review cannot satisfy a gate meant to require a
 multi-model review. `status`/`check` and gh-guard reject a review marker that
-declares fewer than 3 distinct models. The demo marker is exempt.
+declares fewer than 3 distinct models. The demo and tests markers are exempt.
+
+The tests marker is machine-produced: `run-tests` executes the given check
+commands, and writes the marker only if every command exits 0, so it records a
+real green run (tests, lint, type-check, build) rather than a self-reported note.
 
 The branch directory name is percent-encoded. The encoding MUST stay identical
 to gh-guard's inline computation:
@@ -52,16 +59,22 @@ Usage:
   pr-marker write <kind> [FILE] [--models a,b,c]
                                    write marker content from FILE (or stdin if '-'/omitted);
                                    review kinds require >=3 distinct --models
-  pr-marker status                 show all four markers and whether each passes
+  pr-marker run-tests --cmd '<command>' [--cmd '<command>' ...] [--narrow reason]
+                                   run each check command; write the HEAD-pinned tests
+                                   marker only if every command exits 0
+  pr-marker status                 show all five markers and whether each passes
   pr-marker check                  exit 0 only if every marker passes (fresh, over floor)
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -105,6 +118,14 @@ KINDS: dict[str, Kind] = {
         120,
         "multi-model review of the PR description",
         requires_models=True,
+    ),
+    "tests": Kind(
+        "tests",
+        "tests.md",
+        120,
+        "machine-produced record of a full CI-equivalent check run "
+        "(tests, lint, type-check, build) passing green in a Codespace",
+        pinned=True,
     ),
 }
 
@@ -358,6 +379,76 @@ def cmd_write(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_tests(args: argparse.Namespace) -> int:
+    """Run the check commands and write the `tests` marker only if all pass.
+
+    Streams each command's output live (so a long full-suite run is watchable),
+    records the exit codes as machine proof, and writes the HEAD-pinned marker
+    only when every command exits 0. Any failure writes nothing and exits
+    non-zero, so the gate stays blocked until a real green run exists.
+    """
+    kind = KINDS["tests"]
+    head = current_head()
+    if head is None:
+        print(
+            "pr-marker: cannot pin the tests marker: no HEAD commit "
+            "(unborn or detached). Commit the change first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    codespace = args.codespace or os.environ.get("CODESPACE_NAME") or "unknown"
+    results: list[tuple[str, int, float]] = []
+    for cmd in args.cmd:
+        print(f"pr-marker run-tests: running: {cmd}", file=sys.stderr)
+        start = time.monotonic()
+        # shell=True runs the author-supplied check commands (make test, etc.)
+        code = subprocess.run(cmd, shell=True).returncode
+        duration = time.monotonic() - start
+        results.append((cmd, code, duration))
+        label = "passed" if code == 0 else f"FAILED (exit {code})"
+        print(
+            f"pr-marker run-tests: {label} in {duration:.1f}s: {cmd}",
+            file=sys.stderr,
+        )
+
+    failed = [c for c, code, _ in results if code != 0]
+    if failed:
+        print(
+            f"pr-marker run-tests: {len(failed)} of {len(results)} command(s) failed; "
+            "not writing the tests marker.",
+            file=sys.stderr,
+        )
+        return 1
+
+    ran_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines = [
+        f"{REVIEWED_COMMIT_PREFIX}{head}{REVIEWED_COMMIT_SUFFIX}",
+        "<!-- tests-result: passed -->",
+        "# tests: full CI-equivalent check run",
+        "",
+        f"RESULT: passed (all {len(results)} command(s) exited 0)",
+        f"Codespace: {codespace}",
+        f"Ran at: {ran_at}",
+        f"Commit: {head}",
+        "",
+        "Commands:",
+    ]
+    lines += [f"- exit {code} in {dur:.1f}s: {cmd}" for cmd, code, dur in results]
+    lines += ["", f"Narrowing: {args.narrow or 'none (full suite)'}"]
+    content = "\n".join(lines) + "\n"
+
+    path = marker_path(kind)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    size = len(content.encode("utf-8"))
+    print(
+        f"pr-marker: wrote {size} bytes to {path} "
+        f"(pinned to {head[:12]}) [tests: passed]"
+    )
+    return 0
+
+
 def marker_status(kind: Kind, branch: str) -> tuple[bool, str, int, Path]:
     """Return (ok, detail, size_bytes, path); detail in ok/missing/small/stale."""
     path = marker_path(kind, branch)
@@ -398,8 +489,8 @@ def cmd_status(_args: argparse.Namespace) -> int:
     else:
         print("gate would BLOCK: fill the missing/stale markers")
         print(
-            "(a stale code-review marker means HEAD moved since the review; "
-            "re-run the code review and rewrite it)"
+            "(a STALE pinned marker means HEAD moved since it was written; "
+            "re-run it and rewrite so it re-pins to the current HEAD)"
         )
     return 0 if all_ok else 1
 
@@ -461,6 +552,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_check = sub.add_parser("check", help="exit 0 only if every marker passes")
     p_check.set_defaults(func=cmd_check)
+
+    p_run = sub.add_parser(
+        "run-tests",
+        help="run check commands and write the tests marker only if all pass",
+    )
+    p_run.add_argument(
+        "--cmd",
+        action="append",
+        required=True,
+        metavar="COMMAND",
+        help=(
+            "a check command to run (repeatable), e.g. "
+            "--cmd 'make test' --cmd 'make lint'"
+        ),
+    )
+    p_run.add_argument(
+        "--codespace",
+        default=None,
+        help="Codespace name to record (defaults to $CODESPACE_NAME)",
+    )
+    p_run.add_argument(
+        "--narrow",
+        default=None,
+        help=(
+            "record an explicit infeasibility narrowing "
+            "(genuine infeasibility only, never slowness)"
+        ),
+    )
+    p_run.set_defaults(func=cmd_run_tests)
 
     return parser
 
