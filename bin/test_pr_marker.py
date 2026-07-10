@@ -130,13 +130,24 @@ def test_kinds_and_thresholds() -> None:
     """The kind filenames, byte floors, and model requirement match gh-guard."""
     assert pr_marker.KINDS["code-review"].filename == "code-review.md"
     assert pr_marker.KINDS["code-review"].min_bytes == 200
-    for name in ("plan", "demo", "pr-review"):
+    for name in ("plan", "demo", "pr-review", "tests"):
         assert pr_marker.KINDS[name].filename == f"{name}.md"
         assert pr_marker.KINDS[name].min_bytes == 120
-    # The three review kinds require a multi-model review; demo is exempt.
+    # The three review kinds require a multi-model review; demo and tests are exempt.
     for name in ("code-review", "plan", "pr-review"):
         assert pr_marker.KINDS[name].requires_models, name
     assert not pr_marker.KINDS["demo"].requires_models
+    assert not pr_marker.KINDS["tests"].requires_models
+    # code-review and tests are HEAD-pinned; the others are not.
+    for name in ("code-review", "tests"):
+        assert pr_marker.KINDS[name].pinned, name
+    for name in ("plan", "demo", "pr-review"):
+        assert not pr_marker.KINDS[name].pinned, name
+    # Only tests is machine-produced (requires the tests-result header); the
+    # rest are hand-written and must NOT require it.
+    assert pr_marker.KINDS["tests"].requires_result
+    for name in ("code-review", "plan", "demo", "pr-review"):
+        assert not pr_marker.KINDS[name].requires_result, name
 
 
 def test_branch_dir_and_paths() -> None:
@@ -168,12 +179,12 @@ def test_artifacts_dir_derivation() -> None:
 
 
 def test_gh_guard_matches_kinds() -> None:
-    """gh-guard's floors, filenames, pin flags, and model rule must equal KINDS.
+    """gh-guard's floors, filenames, pin flags, model + result rules must equal KINDS.
 
-    gh-guard duplicates the byte floors, marker filenames, pin flags, and the
-    requires-models flag for resilience (so the gate works without pr-marker).
-    This asserts the two never drift, which is the real risk the "single source
-    of truth" claim rests on.
+    gh-guard duplicates the byte floors, marker filenames, pin flags, the
+    requires-models flag, and the requires-result flag for resilience (so the gate
+    works without pr-marker). This asserts the two never drift, which is the real
+    risk the "single source of truth" claim rests on.
     """
     gh = Path(__file__).resolve().with_name("gh-guard").read_text(encoding="utf-8")
     for kind in pr_marker.KINDS.values():
@@ -187,7 +198,8 @@ def test_gh_guard_matches_kinds() -> None:
         assert int(match.group(1)) == kind.min_bytes, const
 
         # The eval_marker line for this kind must reference that constant and end
-        # with the pin flag then the requires-models flag (each 1 or 0).
+        # with the pin flag, the requires-models flag, then the requires-result
+        # flag (each 1 or 0).
         line = next(
             ln
             for ln in gh.splitlines()
@@ -195,15 +207,24 @@ def test_gh_guard_matches_kinds() -> None:
         )
         assert f'"${const}"' in line, f"{kind.name} eval_marker uses wrong floor"
         fields = line.split()
-        assert fields[-2] == str(int(kind.pinned)), f"{kind.name} pin flag drift"
-        assert fields[-1] == str(
+        assert fields[-3] == str(int(kind.pinned)), f"{kind.name} pin flag drift"
+        assert fields[-2] == str(
             int(kind.requires_models)
         ), f"{kind.name} requires-models flag drift"
+        assert fields[-1] == str(
+            int(kind.requires_result)
+        ), f"{kind.name} requires-result flag drift"
 
     # The minimum-model threshold must agree between the two implementations.
     match = re.search(r"^MIN_REVIEW_MODELS=(\d+)$", gh, re.MULTILINE)
     assert match, "gh-guard missing constant MIN_REVIEW_MODELS"
     assert int(match.group(1)) == pr_marker.MIN_MODELS, "MIN_MODELS drift"
+
+    # The tests-result header gh-guard greps for must match pr-marker's literal,
+    # and use whole-line (-x) matching so it agrees with has_result_header.
+    assert (
+        f"grep -qxF -- '{pr_marker.TESTS_RESULT_HEADER}'" in gh
+    ), "gh-guard tests-result header literal drift from pr_marker.TESTS_RESULT_HEADER"
 
 
 def test_pin_roundtrip() -> None:
@@ -245,6 +266,103 @@ def test_pin_roundtrip() -> None:
             _run("git", "commit", "-q", "--allow-empty", "-m", "c2")
             ok, detail, _size, _path = pr_marker.marker_status(code, "feat/pin")
             assert not ok and detail == "stale", detail
+    finally:
+        os.chdir(restore)
+
+
+def test_run_tests() -> None:
+    """run-tests writes a pinned tests marker only when every command passes."""
+    restore = Path.cwd()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            _run("git", "init", "-q")
+            _run("git", "config", "user.email", "test@example.com")
+            _run("git", "config", "user.name", "pr-marker test")
+            _run("git", "checkout", "-q", "-b", "feat/tests")
+            _run("git", "commit", "-q", "--allow-empty", "-m", "c1")
+            tests = pr_marker.KINDS["tests"]
+            marker = pr_marker.marker_path(tests, branch="feat/tests")
+
+            # A failing command writes nothing and exits non-zero.
+            assert pr_marker.main(["run-tests", "--cmd", "false"]) == 1
+            assert not marker.exists()
+
+            # A failure among passing commands still writes nothing.
+            assert pr_marker.main(["run-tests", "--cmd", "true", "--cmd", "false"]) == 1
+            assert not marker.exists()
+
+            # All commands passing writes a HEAD-pinned marker recording them.
+            assert pr_marker.main(["run-tests", "--cmd", "true", "--cmd", "true"]) == 0
+            head1 = pr_marker.current_head()
+            assert marker.exists()
+            assert pr_marker.read_reviewed_commit(marker) == head1
+            body = marker.read_text(encoding="utf-8")
+            assert "RESULT: passed" in body
+            assert "exit 0" in body
+            # The machine-produced result header must be present (the gate keys on it).
+            assert pr_marker.TESTS_RESULT_HEADER in body
+            assert pr_marker.has_result_header(marker)
+            ok, detail, _size, _path = pr_marker.marker_status(tests, "feat/tests")
+            assert ok and detail == "ok", detail
+
+            # A later failing run must invalidate the prior passing marker, so a
+            # green marker can never outlive a subsequent red run.
+            assert pr_marker.main(["run-tests", "--cmd", "false"]) == 1
+            assert not marker.exists()
+
+            # An empty (or whitespace-only) command is rejected before running,
+            # so `run-tests --cmd ''` cannot fabricate a passing marker.
+            assert pr_marker.main(["run-tests", "--cmd", "   "]) == 1
+            assert not marker.exists()
+
+            # Re-establish a green marker, then confirm a later commit makes the
+            # pinned tests marker stale.
+            assert pr_marker.main(["run-tests", "--cmd", "true"]) == 0
+            assert marker.exists()
+            _run("git", "commit", "-q", "--allow-empty", "-m", "c2")
+            ok, detail, _size, _path = pr_marker.marker_status(tests, "feat/tests")
+            assert not ok and detail == "stale", detail
+    finally:
+        os.chdir(restore)
+
+
+def test_tests_marker_is_machine_only() -> None:
+    """`write tests` is rejected, and a hand-forged marker lacks the result header."""
+    restore = Path.cwd()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            _run("git", "init", "-q")
+            _run("git", "config", "user.email", "test@example.com")
+            _run("git", "config", "user.name", "pr-marker test")
+            _run("git", "checkout", "-q", "-b", "feat/tests-write")
+            _run("git", "commit", "-q", "--allow-empty", "-m", "c1")
+            tests = pr_marker.KINDS["tests"]
+            marker = pr_marker.marker_path(tests, branch="feat/tests-write")
+
+            # `pr-marker write tests` must refuse: the tests marker is machine-produced.
+            # The reject happens before the content is read, so a real file over the
+            # byte floor still fails.
+            src = Path(tmp) / "payload.md"
+            src.write_text("x" * 300, encoding="utf-8")
+            assert pr_marker.main(["write", "tests", str(src)]) == 1
+            assert not marker.exists()
+
+            # A hand-forged file over the byte floor with a reviewed-commit but no
+            # result header must still fail marker_status (the gate keys on the
+            # machine-produced header, not just size + pin).
+            head = pr_marker.current_head()
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            forged = (
+                f"{pr_marker.REVIEWED_COMMIT_PREFIX}{head}"
+                f"{pr_marker.REVIEWED_COMMIT_SUFFIX}\n" + ("y" * 300) + "\n"
+            )
+            marker.write_text(forged, encoding="utf-8")
+            ok, detail, _size, _path = pr_marker.marker_status(
+                tests, "feat/tests-write"
+            )
+            assert not ok and detail == "no result", detail
     finally:
         os.chdir(restore)
 
@@ -448,11 +566,52 @@ def test_gh_guard_gate() -> None:
             assert res.returncode == 1, out
             assert "FEW-MODELS" in out, out
 
-            # (3) Three distinct models -> PASS (execs the fake gh).
+            # (3) Three distinct models -> still BLOCK until the tests marker exists.
             assert (
                 pr_marker.main(["write", "pr-review", str(body), "--models", "a,b,c"])
                 == 0
             )
+            res = _gh_guard_create(repo, fake_bin)
+            out = res.stdout + res.stderr
+            assert res.returncode == 1, out
+            assert "FAKE-GH-EXECUTED" not in out, out
+
+            # (3b) A forged tests marker over the byte floor and correctly pinned to
+            # HEAD, but WITHOUT the machine-produced result header, must still BLOCK
+            # with NO-RESULT (the gate keys on the header, not size + pin).
+            tests_path = pr_marker.marker_path(
+                pr_marker.KINDS["tests"], branch="feat/gate"
+            )
+            head = pr_marker.current_head()
+            tests_path.parent.mkdir(parents=True, exist_ok=True)
+            tests_path.write_text(
+                f"{pr_marker.REVIEWED_COMMIT_PREFIX}{head}"
+                f"{pr_marker.REVIEWED_COMMIT_SUFFIX}\n" + ("z" * 300) + "\n",
+                encoding="utf-8",
+            )
+            res = _gh_guard_create(repo, fake_bin)
+            out = res.stdout + res.stderr
+            assert res.returncode == 1, out
+            assert "NO-RESULT" in out, out
+            assert "FAKE-GH-EXECUTED" not in out, out
+
+            # (3c) The result header embedded MID-LINE (not on its own line) must
+            # also BLOCK: gh-guard's grep -qxF matches whole lines only, agreeing
+            # with pr-marker's exact-line membership test (no substring bypass).
+            tests_path.write_text(
+                f"{pr_marker.REVIEWED_COMMIT_PREFIX}{head}"
+                f"{pr_marker.REVIEWED_COMMIT_SUFFIX}\n"
+                f"prefix {pr_marker.TESTS_RESULT_HEADER} suffix\n" + ("z" * 300) + "\n",
+                encoding="utf-8",
+            )
+            res = _gh_guard_create(repo, fake_bin)
+            out = res.stdout + res.stderr
+            assert res.returncode == 1, out
+            assert "NO-RESULT" in out, out
+            assert "FAKE-GH-EXECUTED" not in out, out
+
+            # (4) Machine-produced tests marker present -> PASS (execs the fake gh).
+            assert pr_marker.main(["run-tests", "--cmd", "true"]) == 0
             res = _gh_guard_create(repo, fake_bin)
             out = res.stdout + res.stderr
             assert res.returncode == 0, out
@@ -479,6 +638,8 @@ def main() -> int:
         test_artifacts_dir_derivation,
         test_gh_guard_matches_kinds,
         test_pin_roundtrip,
+        test_run_tests,
+        test_tests_marker_is_machine_only,
         test_parse_models,
         test_models_provenance,
         test_models_argv_order,
