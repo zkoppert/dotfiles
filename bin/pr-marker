@@ -57,13 +57,14 @@ Usage:
   pr-marker path <kind>            print the marker file path for the current branch
   pr-marker artifacts-dir <kind>   print the sibling artifacts directory path
   pr-marker write <kind> [FILE] [--models a,b,c]
-                                   write marker content from FILE (or stdin if '-'/omitted);
-                                   review kinds require >=3 distinct --models
+                                   write marker content from FILE (or stdin if
+                                   '-'/omitted); review kinds require >=3 --models
   pr-marker run-tests --cmd '<command>' [--cmd '<command>' ...] [--narrow reason]
                                    run each check command; write the HEAD-pinned tests
                                    marker only if every command exits 0
   pr-marker status                 show all five markers and whether each passes
-  pr-marker check                  exit 0 only if every marker passes (fresh, over floor)
+  pr-marker check                  exit 0 only if every marker passes (fresh + over
+                                   floor)
 """
 
 from __future__ import annotations
@@ -80,7 +81,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Kind:
-    """A marker kind: filename, min size, HEAD-pin flag, and multi-model flag."""
+    """A marker kind: filename, min size, pin/model/result flags."""
 
     name: str
     filename: str
@@ -88,6 +89,7 @@ class Kind:
     summary: str
     pinned: bool = False
     requires_models: bool = False
+    requires_result: bool = False
 
 
 KINDS: dict[str, Kind] = {
@@ -126,6 +128,7 @@ KINDS: dict[str, Kind] = {
         "machine-produced record of a full CI-equivalent check run "
         "(tests, lint, type-check, build) passing green in a Codespace",
         pinned=True,
+        requires_result=True,
     ),
 }
 
@@ -147,6 +150,12 @@ REVIEWED_COMMIT_SUFFIX = " -->"
 REVIEWED_MODELS_PREFIX = "<!-- reviewed-by-models: "
 REVIEWED_MODELS_SUFFIX = " -->"
 MIN_MODELS = 3
+
+# A machine-produced marker (tests) must carry this exact header, written only
+# by `run-tests` after every check command exits 0. `status`/`check` and gh-guard
+# require it, so a hand-written note or bare `touch` cannot satisfy the gate.
+# Keep this literal in sync with gh-guard's grep.
+TESTS_RESULT_HEADER = "<!-- tests-result: passed -->"
 
 
 def _git(*args: str) -> str:
@@ -273,6 +282,20 @@ def read_reviewed_models(path: Path) -> list[str]:
     return []
 
 
+def has_result_header(path: Path) -> bool:
+    """Return True if the marker carries the machine-produced tests-result header.
+
+    The header is written only by `run-tests` after every check command exits 0,
+    so requiring it prevents a hand-written or bare-touch file from satisfying the
+    tests gate. gh-guard greps for the identical literal.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    return TESTS_RESULT_HEADER in lines
+
+
 def branch_dir(branch: str | None = None) -> Path:
     """Return the per-branch marker directory `<...>/copilot-pr-review/<branch>`.
 
@@ -318,6 +341,14 @@ def cmd_artifacts_dir(args: argparse.Namespace) -> int:
 def cmd_write(args: argparse.Namespace) -> int:
     """Write marker content from a file or stdin, refusing content below the floor."""
     kind = _resolve_kind(args.kind)
+    if kind.requires_result:
+        print(
+            f"pr-marker: the {kind.name} marker is machine-produced; write it with "
+            f"`pr-marker run-tests --cmd '<command>'` (it runs the checks and only "
+            f"writes when every command exits 0), not `write`.",
+            file=sys.stderr,
+        )
+        return 1
     if args.file in (None, "-"):
         content = sys.stdin.read()
     else:
@@ -397,9 +428,18 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         )
         return 1
 
+    commands = [c.strip() for c in args.cmd]
+    if any(not c for c in commands):
+        print(
+            "pr-marker run-tests: refusing to run: an empty --cmd was given; "
+            "pass the real check commands.",
+            file=sys.stderr,
+        )
+        return 1
+
     codespace = args.codespace or os.environ.get("CODESPACE_NAME") or "unknown"
     results: list[tuple[str, int, float]] = []
-    for cmd in args.cmd:
+    for cmd in commands:
         print(f"pr-marker run-tests: running: {cmd}", file=sys.stderr)
         start = time.monotonic()
         # shell=True runs the author-supplied check commands (make test, etc.)
@@ -414,9 +454,15 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
 
     failed = [c for c, code, _ in results if code != 0]
     if failed:
+        # Invalidate any prior passing marker so the latest run must be green.
+        stale = marker_path(kind)
+        removed = ""
+        if stale.exists():
+            stale.unlink()
+            removed = " (removed the previous tests marker)"
         print(
             f"pr-marker run-tests: {len(failed)} of {len(results)} command(s) failed; "
-            "not writing the tests marker.",
+            f"not writing the tests marker{removed}.",
             file=sys.stderr,
         )
         return 1
@@ -424,7 +470,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
     ran_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     lines = [
         f"{REVIEWED_COMMIT_PREFIX}{head}{REVIEWED_COMMIT_SUFFIX}",
-        "<!-- tests-result: passed -->",
+        TESTS_RESULT_HEADER,
         "# tests: full CI-equivalent check run",
         "",
         f"RESULT: passed (all {len(results)} command(s) exited 0)",
@@ -450,7 +496,12 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
 
 
 def marker_status(kind: Kind, branch: str) -> tuple[bool, str, int, Path]:
-    """Return (ok, detail, size_bytes, path); detail in ok/missing/small/stale."""
+    """Return (ok, detail, size_bytes, path).
+
+    detail is one of: "ok", "missing", "too small", "stale" (pinned marker whose
+    reviewed-commit no longer equals HEAD), "needs models" (fewer than MIN_MODELS
+    declared), or "no result" (a requires_result marker missing the machine header).
+    """
     path = marker_path(kind, branch)
     if not path.is_file():
         return (False, "missing", 0, path)
@@ -464,6 +515,8 @@ def marker_status(kind: Kind, branch: str) -> tuple[bool, str, int, Path]:
             return (False, "stale", size, path)
     if kind.requires_models and len(read_reviewed_models(path)) < MIN_MODELS:
         return (False, "needs models", size, path)
+    if kind.requires_result and not has_result_header(path):
+        return (False, "no result", size, path)
     return (True, "ok", size, path)
 
 

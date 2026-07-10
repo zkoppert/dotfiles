@@ -332,7 +332,7 @@ check_marker() {
   [ "${size:-0}" -ge "$min" ]
 }
 
-# eval_marker <label> <path> <min_bytes> <pinned:0|1> <requires_models:0|1>
+# eval_marker <label> <path> <min_bytes> <pinned:0|1> <requires_models:0|1> <requires_result:0|1>
 # Appends a status line and clears marker_all_ok (both globals) when a marker
 # fails. Takes separate positional args rather than a delimiter-packed spec so a
 # branch name or path containing any character, including `|`, parses correctly.
@@ -341,11 +341,14 @@ check_marker() {
 # past that commit, so a review that never saw the shipping diff cannot pass.
 # A requires_models marker must declare >= MIN_REVIEW_MODELS distinct models in
 # its reviewed-by-models header, so a single-pass self-review cannot pass a gate
-# meant to require a multi-model review. The reviewed-commit and
-# reviewed-by-models formats MUST match bin/pr-marker's REVIEWED_COMMIT_PREFIX
-# and REVIEWED_MODELS_PREFIX.
+# meant to require a multi-model review. A requires_result marker (the tests
+# marker) must carry the machine-produced `<!-- tests-result: passed -->` header,
+# which pr-marker writes only after every check command exits 0, so a hand-written
+# note cannot pass a gate meant to require a real green run. The reviewed-commit,
+# reviewed-by-models, and tests-result formats MUST match bin/pr-marker's
+# REVIEWED_COMMIT_PREFIX, REVIEWED_MODELS_PREFIX, and TESTS_RESULT_HEADER.
 eval_marker() {
-  local label="$1" path="$2" min="$3" pinned="$4" requires_models="${5:-0}"
+  local label="$1" path="$2" min="$3" pinned="$4" requires_models="${5:-0}" requires_result="${6:-0}"
   if ! check_marker "$path" "$min"; then
     marker_all_ok=0
     status_lines="${status_lines}  [ MISSING ] ${label} -> ${path} (>= ${min} bytes)"$'\n'
@@ -367,6 +370,16 @@ eval_marker() {
     if [ "${models_count:-0}" -lt "$MIN_REVIEW_MODELS" ]; then
       marker_all_ok=0
       status_lines="${status_lines}  [ FEW-MODELS ] ${label} -> ${path} (declares ${models_count:-0} of >= ${MIN_REVIEW_MODELS} models; re-run a multi-model review and rewrite with pr-marker --models a,b,c)"$'\n'
+      return
+    fi
+  fi
+  if [ "$requires_result" = "1" ]; then
+    # -x matches the WHOLE line, so this agrees exactly with pr-marker's
+    # `TESTS_RESULT_HEADER in lines` membership test (an embedded-but-not-whole
+    # header line must not pass here while failing there).
+    if ! grep -qxF -- '<!-- tests-result: passed -->' "$path" 2>/dev/null; then
+      marker_all_ok=0
+      status_lines="${status_lines}  [ NO-RESULT ] ${label} -> ${path} (missing the machine-produced tests-result header; run pr-marker run-tests in a Codespace so a real green run writes it)"$'\n'
       return
     fi
   fi
@@ -450,11 +463,11 @@ if [ "$is_pr_create" = "1" ]; then
     # runs before the TTY/non-TTY split, so it feeds both the soft prompt and the
     # non-TTY hard gate.
     marker_all_ok=1
-    eval_marker "plan review"          "$marker_base/plan.md"        "$PLAN_MIN_BYTES"        0 1
-    eval_marker "code review"          "$marker_base/code-review.md" "$CODE_REVIEW_MIN_BYTES" 1 1
-    eval_marker "demo/before-after"    "$marker_base/demo.md"        "$DEMO_MIN_BYTES"        0 0
-    eval_marker "PR-description review" "$marker_base/pr-review.md"  "$PR_REVIEW_MIN_BYTES"   0 1
-    eval_marker "full test suite"      "$marker_base/tests.md"       "$TESTS_MIN_BYTES"       1 0
+    eval_marker "plan review"          "$marker_base/plan.md"        "$PLAN_MIN_BYTES"        0 1 0
+    eval_marker "code review"          "$marker_base/code-review.md" "$CODE_REVIEW_MIN_BYTES" 1 1 0
+    eval_marker "demo/before-after"    "$marker_base/demo.md"        "$DEMO_MIN_BYTES"        0 0 0
+    eval_marker "PR-description review" "$marker_base/pr-review.md"  "$PR_REVIEW_MIN_BYTES"   0 1 0
+    eval_marker "full test suite"      "$marker_base/tests.md"       "$TESTS_MIN_BYTES"       1 0 1
   fi
 
   if [ -t 0 ] && [ -t 1 ]; then
