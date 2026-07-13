@@ -656,6 +656,77 @@ def test_apply_todo_mutations_with_lock_acquires_file_lock(tmp_path):
     assert flock_mock.call_args_list[-1].args[1] == triage.fcntl.LOCK_UN
 
 
+def test_apply_todo_mutations_with_lock_dedupes_url_against_fresh_document(tmp_path):
+    todo_path = tmp_path / "todo.yml"
+    # Snapshot state: the PR is not yet tracked anywhere.
+    todo_path.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first: []\n  q2_schedule: []\ndone: []\n",
+        encoding="utf-8",
+    )
+    _stale_snapshot = triage.load_todo(todo_path)
+    # Concurrent edit: another writer records the PR as a Q1 artifact after the
+    # snapshot was taken but before this locked write runs.
+    todo_path.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: tracked-pr\n"
+        "      title: Already tracked PR\n"
+        "      artifacts:\n"
+        "        - https://github.com/octocat/Hello-World/pull/99\n"
+        "  q2_schedule: []\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+    mutations = triage.TodoMutations(
+        add_inbox=[
+            {
+                "id": "notif-inbox",
+                "title": "Assigned on tracked PR",
+                "notification": {
+                    "thread_id": "2001",
+                    "url": "https://github.com/octocat/Hello-World/pull/99",
+                },
+            }
+        ]
+    )
+
+    applied = triage.apply_todo_mutations_with_lock(todo_path, mutations)
+
+    # Deduped against the fresh locked document, not the stale snapshot.
+    assert applied["added_inbox"] == 0
+    assert applied["url_deduped_thread_ids"] == ["2001"]
+    reloaded = yaml.safe_load(todo_path.read_text())
+    assert reloaded["inbox"] == []
+
+
+def test_apply_todo_mutations_keeps_untracked_inbox_url(tmp_path):
+    todo_path = tmp_path / "todo.yml"
+    todo_path.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first: []\n  q2_schedule: []\ndone: []\n",
+        encoding="utf-8",
+    )
+    mutations = triage.TodoMutations(
+        add_inbox=[
+            {
+                "id": "notif-inbox",
+                "title": "Assigned on untracked PR",
+                "notification": {
+                    "thread_id": "2002",
+                    "url": "https://github.com/octocat/Hello-World/pull/123",
+                },
+            }
+        ]
+    )
+
+    applied = triage.apply_todo_mutations_with_lock(todo_path, mutations)
+
+    assert applied["added_inbox"] == 1
+    assert applied["url_deduped_thread_ids"] == []
+    reloaded = yaml.safe_load(todo_path.read_text())
+    assert [item["id"] for item in reloaded["inbox"]] == ["notif-inbox"]
+
+
 def test_commit_todo_changes_skips_commit_when_nothing_staged(tmp_path):
     repo = tmp_path
     (repo / ".git").mkdir()

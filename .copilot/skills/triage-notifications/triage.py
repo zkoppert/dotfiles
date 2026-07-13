@@ -442,6 +442,7 @@ class AppliedTodoMutations(TypedDict):
     marked_done: int
     pruned: int
     pruned_by_reason: dict[str, int]
+    url_deduped_thread_ids: list[str]
     changed: bool
 
 
@@ -1178,6 +1179,7 @@ def apply_todo_mutations(
         "marked_done": 0,
         "pruned": 0,
         "pruned_by_reason": pruned_by_reason,
+        "url_deduped_thread_ids": [],
         "changed": False,
     }
 
@@ -1215,6 +1217,22 @@ def apply_todo_mutations(
             applied["already_tracked"] += 1
 
     for entry in mutations.add_inbox:
+        notification = entry.get("notification") if isinstance(entry, dict) else None
+        notif_url = notification.get("url") if isinstance(notification, dict) else None
+        notif_thread_id = (
+            notification.get("thread_id") if isinstance(notification, dict) else None
+        )
+        # Dedupe against the freshly loaded document (under the caller's lock)
+        # so a concurrent edit cannot make this decision stale before the
+        # notification is cleared on GitHub.
+        if notif_url and _tracked_pr_issue_url_exists_elsewhere(
+            data,
+            notif_url,
+            exclude_thread_id=str(notif_thread_id) if notif_thread_id else None,
+        ):
+            if notif_thread_id:
+                applied["url_deduped_thread_ids"].append(str(notif_thread_id))
+            continue
         if _append_unique(data, data["inbox"], entry):
             applied["added_inbox"] += 1
             changed = True
@@ -1256,6 +1274,9 @@ def reconcile_stats_from_applied(
     stats.added_q2 = applied["added_q2"]
     stats.added_inbox = applied["added_inbox"]
     stats.already_tracked += applied["already_tracked"]
+    url_deduped = len(applied["url_deduped_thread_ids"])
+    stats.dropped += url_deduped
+    stats.already_tracked += url_deduped
     stats.marked_done = applied["marked_done"]
     stats.pruned_stale = applied["pruned"]
     stats.pruned_by_reason = dict(applied["pruned_by_reason"])
@@ -1858,27 +1879,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
             continue
         entry = build_todo_entry(notif, classification)
-        if (
-            classification.bucket == BUCKET_INBOX
-            and _tracked_pr_issue_url_exists_elsewhere(
-                data,
-                entry["notification"]["url"],
-                exclude_thread_id=thread_id or None,
-            )
-        ):
-            stats.dropped += 1
-            stats.already_tracked += 1
-            if not args.dry_run:
-                try:
-                    mark_thread_done(thread_id)
-                except (
-                    subprocess.CalledProcessError,
-                    subprocess.TimeoutExpired,
-                ) as exc:
-                    stats.errors.append(
-                        f"mark-done failed for thread {thread_id}: {exc}"
-                    )
-            continue
         if classification.bucket == BUCKET_Q2:
             mutations.add_q2.append(entry)
             stats.added_q2 += 1
@@ -1953,6 +1953,18 @@ def run(args: argparse.Namespace) -> TriageStats:
                 commit_todo_changes(
                     args.todo_file, "Record notification triage todo updates"
                 )
+            # Clear GitHub threads for inbox entries deduped against the
+            # freshly locked document, only after that decision is committed.
+            for deduped_thread_id in applied["url_deduped_thread_ids"]:
+                try:
+                    mark_thread_done(deduped_thread_id)
+                except (
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                ) as exc:
+                    stats.errors.append(
+                        f"mark-done failed for thread {deduped_thread_id}: {exc}"
+                    )
         reconcile_stats_from_applied(stats, applied)
 
     new_actionable = stats.added_q2 + stats.added_inbox
