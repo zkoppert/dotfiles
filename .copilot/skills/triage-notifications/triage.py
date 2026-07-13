@@ -10,7 +10,7 @@ unread), this tool:
    - INBOX           (actionable but needs human triage)
 2. For DROP items: marks the thread done on GitHub (deletes from inbox).
 3. For Q1/INBOX items: adds an entry to ~/repos/zkoppert-todo/todo.yml
-   (deduped by notification thread_id).
+   (deduped by notification thread_id and tracked PR/issue URLs).
 4. Scans active todos for items in `done` status with a recorded
    notification thread_id and marks those notifications done on GitHub
    (the "mark-done-on-completed" loop).
@@ -1381,6 +1381,56 @@ def existing_thread_ids(data: dict[str, Any]) -> set[str]:
     return ids
 
 
+def _canonical_pr_issue_url_key(url: Any) -> tuple[str, str, str, int] | None:
+    parsed = parse_github_url(url) if isinstance(url, str) else None
+    if parsed is None or parsed["kind"] not in {"pr", "issue"}:
+        return None
+    return (
+        parsed["owner"].lower(),
+        parsed["repo"].lower(),
+        "issue_or_pr",
+        parsed["number"],
+    )
+
+
+def _item_reference_urls(item: Any) -> list[str]:
+    if not isinstance(item, dict):
+        return []
+    urls: list[str] = []
+    link = item.get("link")
+    if isinstance(link, str):
+        urls.append(link)
+    artifacts = item.get("artifacts")
+    if isinstance(artifacts, list):
+        for artifact in artifacts:
+            if isinstance(artifact, str):
+                urls.append(artifact)
+            elif isinstance(artifact, dict):
+                for key in ("link", "url"):
+                    value = artifact.get(key)
+                    if isinstance(value, str):
+                        urls.append(value)
+    return urls
+
+
+def _tracked_pr_issue_url_exists_elsewhere(
+    data: dict[str, Any],
+    url: str,
+    *,
+    exclude_thread_id: str | None = None,
+) -> bool:
+    target = _canonical_pr_issue_url_key(url)
+    if target is None:
+        return False
+    for item in _iter_todo_items(data):
+        if exclude_thread_id and _item_thread_id(item) == exclude_thread_id:
+            continue
+        for reference_url in _item_reference_urls(item):
+            if _canonical_pr_issue_url_key(reference_url) == target:
+                return True
+    return False
+
+
 def items_to_mark_done(data: dict[str, Any]) -> list[dict[str, Any]]:
     """Return items with a thread_id whose notification can be marked done.
 
@@ -1471,7 +1521,7 @@ def parse_github_url(url: str) -> dict[str, Any] | None:
         parsed = urlparse(url)
     except ValueError:
         return None
-    if parsed.netloc not in ("github.com", "www.github.com"):
+    if parsed.netloc.lower() not in ("github.com", "www.github.com"):
         return None
     match = _GH_PATH_RE.match(parsed.path)
     if not match:
@@ -1808,6 +1858,27 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
             continue
         entry = build_todo_entry(notif, classification)
+        if (
+            classification.bucket == BUCKET_INBOX
+            and _tracked_pr_issue_url_exists_elsewhere(
+                data,
+                entry["notification"]["url"],
+                exclude_thread_id=thread_id or None,
+            )
+        ):
+            stats.dropped += 1
+            stats.already_tracked += 1
+            if not args.dry_run:
+                try:
+                    mark_thread_done(thread_id)
+                except (
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                ) as exc:
+                    stats.errors.append(
+                        f"mark-done failed for thread {thread_id}: {exc}"
+                    )
+            continue
         if classification.bucket == BUCKET_Q2:
             mutations.add_q2.append(entry)
             stats.added_q2 += 1

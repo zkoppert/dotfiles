@@ -842,6 +842,57 @@ def _gh_returns(responses: dict[str, str]):
     return fake_run
 
 
+def _assign_notif_for_tracked_url(
+    *, thread_id: str = "2001", number: int = 99
+) -> dict:
+    return {
+        "id": thread_id,
+        "reason": "assign",
+        "subject": {
+            "title": "Tracked PR",
+            "url": f"https://api.github.com/repos/octocat/Hello-World/pulls/{number}",
+            "type": "PullRequest",
+        },
+        "repository": {
+            "full_name": "octocat/Hello-World",
+            "html_url": "https://github.com/octocat/Hello-World",
+        },
+    }
+
+
+def _run_with_assign_notification(todo_file: Path, notif: dict):
+    delete_calls: list[tuple] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        joined = " ".join(cmd)
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(tuple(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if "/user" in joined:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps({"login": "zkoppert"}), stderr=""
+            )
+        if "/notifications" in joined and "/threads" not in joined:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps([notif]), stderr=""
+            )
+        if "/repos/octocat/Hello-World/pulls/99" in joined:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps(
+                    {"state": "open", "user": {"login": "zkoppert"}}
+                ),
+                stderr="",
+            )
+        raise AssertionError(f"unexpected gh call: {cmd}")
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        stats = triage.run(args)
+    return stats, delete_calls, yaml.safe_load(todo_file.read_text())
+
+
 def test_run_dedupes_already_tracked(todo_file):
     existing = {
         "inbox": [
@@ -861,6 +912,117 @@ def test_run_dedupes_already_tracked(todo_file):
         stats = triage.run(args)
     assert stats.already_tracked == 1
     assert stats.added_q2 == 0
+
+
+def test_run_drops_inbox_notification_when_url_is_prioritized_artifact(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {
+                    "q1_do_first": [
+                        {
+                            "id": "tracked-pr",
+                            "title": "Already tracked PR",
+                            "artifacts": [
+                                "https://github.com/octocat/Hello-World/pull/99"
+                            ],
+                        },
+                    ],
+                },
+                "done": [],
+            }
+        )
+    )
+
+    stats, delete_calls, data = _run_with_assign_notification(
+        todo_file, _assign_notif_for_tracked_url()
+    )
+
+    assert stats.dropped == 1
+    assert stats.added_inbox == 0
+    assert stats.already_tracked == 1
+    assert any("/notifications/threads/2001" in " ".join(c) for c in delete_calls)
+    assert data["inbox"] == []
+
+
+def test_run_drops_inbox_notification_when_url_is_done_link(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": []},
+                "done": [
+                    {
+                        "id": "done-pr",
+                        "title": "Shipped PR",
+                        "completed": "2026-07-01",
+                        "link": "https://github.com/octocat/Hello-World/pull/99",
+                    },
+                ],
+            }
+        )
+    )
+
+    stats, delete_calls, data = _run_with_assign_notification(
+        todo_file, _assign_notif_for_tracked_url()
+    )
+
+    assert stats.dropped == 1
+    assert stats.added_inbox == 0
+    assert stats.already_tracked == 1
+    assert any("/notifications/threads/2001" in " ".join(c) for c in delete_calls)
+    assert data["inbox"] == []
+
+
+def test_run_keeps_new_inbox_notification_when_url_is_untracked(todo_file):
+    stats, delete_calls, data = _run_with_assign_notification(
+        todo_file, _assign_notif_for_tracked_url()
+    )
+
+    assert stats.dropped == 0
+    assert stats.added_inbox == 1
+    assert stats.already_tracked == 0
+    assert delete_calls == []
+    assert data["inbox"][0]["notification"]["url"] == (
+        "https://github.com/octocat/Hello-World/pull/99"
+    )
+
+
+def test_run_tracked_url_dedup_normalizes_artifact_url(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {
+                    "q1_do_first": [
+                        {
+                            "id": "tracked-pr",
+                            "title": "Already tracked PR",
+                            "artifacts": [
+                                {
+                                    "url": (
+                                        "https://GITHUB.com/octocat/Hello-World/"
+                                        "issues/99/?foo=bar#discussion_r1"
+                                    )
+                                }
+                            ],
+                        },
+                    ],
+                },
+                "done": [],
+            }
+        )
+    )
+
+    stats, delete_calls, data = _run_with_assign_notification(
+        todo_file, _assign_notif_for_tracked_url()
+    )
+
+    assert stats.dropped == 1
+    assert stats.added_inbox == 0
+    assert any("/notifications/threads/2001" in " ".join(c) for c in delete_calls)
+    assert data["inbox"] == []
 
 
 def test_run_adds_q2_for_mention(todo_file):
