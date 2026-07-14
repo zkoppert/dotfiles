@@ -1336,6 +1336,10 @@ def test_main_returns_zero_on_success(todo_file):
             "https://www.github.com/octocat/Hello-World/pull/1",
             {"owner": "octocat", "repo": "Hello-World", "kind": "pr", "number": 1},
         ),
+        (
+            "https://github.com/octocat/Hello-World/pull/99/files",
+            {"owner": "octocat", "repo": "Hello-World", "kind": "pr", "number": 99},
+        ),
     ],
 )
 def test_parse_github_url_supported(url, expected):
@@ -1353,6 +1357,8 @@ def test_parse_github_url_supported(url, expected):
         "https://github.com/octocat/Hello-World/actions/runs/123",
         "https://example.com/octocat/Hello-World/pull/123",
         "not a url",
+        "https://github.com/octocat/Hello-World/issues/99-notes",
+        "https://github.com/octocat/Hello-World/pull/99x",
     ],
 )
 def test_parse_github_url_unsupported(url):

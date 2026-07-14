@@ -1527,7 +1527,7 @@ def get_my_login() -> str:
 
 _GH_PATH_RE = re.compile(
     r"^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/"
-    r"(?P<kind>pull|issues|discussions)/(?P<number>\d+)"
+    r"(?P<kind>pull|issues|discussions)/(?P<number>\d+)(?=/|$)"
 )
 
 
