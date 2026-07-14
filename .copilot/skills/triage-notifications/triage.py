@@ -442,7 +442,7 @@ class AppliedTodoMutations(TypedDict):
     marked_done: int
     pruned: int
     pruned_by_reason: dict[str, int]
-    url_deduped_thread_ids: list[str]
+    url_deduped: list[dict[str, str]]
     changed: bool
 
 
@@ -1179,7 +1179,7 @@ def apply_todo_mutations(
         "marked_done": 0,
         "pruned": 0,
         "pruned_by_reason": pruned_by_reason,
-        "url_deduped_thread_ids": [],
+        "url_deduped": [],
         "changed": False,
     }
 
@@ -1223,15 +1223,17 @@ def apply_todo_mutations(
             notification.get("thread_id") if isinstance(notification, dict) else None
         )
         # Dedupe against the freshly loaded document (under the caller's lock)
-        # so a concurrent edit cannot make this decision stale before the
-        # notification is cleared on GitHub.
+        # so a concurrent edit cannot make this decision stale. The URL is
+        # revalidated again after commit, before the notification is cleared.
         if notif_url and _tracked_pr_issue_url_exists_elsewhere(
             data,
             notif_url,
             exclude_thread_id=str(notif_thread_id) if notif_thread_id else None,
         ):
             if notif_thread_id:
-                applied["url_deduped_thread_ids"].append(str(notif_thread_id))
+                applied["url_deduped"].append(
+                    {"thread_id": str(notif_thread_id), "url": notif_url}
+                )
             continue
         if _append_unique(data, data["inbox"], entry):
             applied["added_inbox"] += 1
@@ -1274,7 +1276,7 @@ def reconcile_stats_from_applied(
     stats.added_q2 = applied["added_q2"]
     stats.added_inbox = applied["added_inbox"]
     stats.already_tracked += applied["already_tracked"]
-    url_deduped = len(applied["url_deduped_thread_ids"])
+    url_deduped = len(applied["url_deduped"])
     stats.dropped += url_deduped
     stats.already_tracked += url_deduped
     stats.marked_done = applied["marked_done"]
@@ -1813,6 +1815,49 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def clear_url_deduped_threads(
+    path: Path,
+    deduped: list[dict[str, str]],
+    stats: TriageStats,
+) -> None:
+    """Clear GitHub threads for URL-deduped inbox entries.
+
+    The dedupe decision was made under the write lock, but the lock is
+    released (and ``commit_todo_changes`` may ``git pull --rebase``) before
+    this runs. Revalidate each URL against the current on-disk document so a
+    concurrent removal of the tracking item cannot orphan the notification:
+    if the URL is no longer tracked, leave the thread unread so the next run
+    re-surfaces it to the inbox.
+    """
+    if not deduped:
+        return
+    try:
+        current = load_todo(path)
+    except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+        stats.errors.append(
+            f"failed to reload todo before clearing deduped threads: {exc}"
+        )
+        return
+    for record in deduped:
+        thread_id = record.get("thread_id") or ""
+        url = record.get("url") or ""
+        if not thread_id:
+            continue
+        if not _tracked_pr_issue_url_exists_elsewhere(
+            current, url, exclude_thread_id=thread_id
+        ):
+            continue
+        try:
+            mark_thread_done(thread_id)
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as exc:
+            stats.errors.append(
+                f"mark-done failed for thread {thread_id}: {exc}"
+            )
+
+
 def run(args: argparse.Namespace) -> TriageStats:
     """Main entrypoint - returns stats so tests can assert behaviour."""
     stats = TriageStats()
@@ -1953,18 +1998,10 @@ def run(args: argparse.Namespace) -> TriageStats:
                 commit_todo_changes(
                     args.todo_file, "Record notification triage todo updates"
                 )
-            # Clear GitHub threads for inbox entries deduped against the
-            # freshly locked document, only after that decision is committed.
-            for deduped_thread_id in applied["url_deduped_thread_ids"]:
-                try:
-                    mark_thread_done(deduped_thread_id)
-                except (
-                    subprocess.CalledProcessError,
-                    subprocess.TimeoutExpired,
-                ) as exc:
-                    stats.errors.append(
-                        f"mark-done failed for thread {deduped_thread_id}: {exc}"
-                    )
+            # Clear GitHub threads for URL-deduped inbox entries, revalidating
+            # each URL against the post-commit document so a concurrent removal
+            # during the commit's pull/rebase cannot orphan a notification.
+            clear_url_deduped_threads(args.todo_file, applied["url_deduped"], stats)
         reconcile_stats_from_applied(stats, applied)
 
     new_actionable = stats.added_q2 + stats.added_inbox

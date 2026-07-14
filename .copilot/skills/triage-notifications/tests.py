@@ -695,7 +695,12 @@ def test_apply_todo_mutations_with_lock_dedupes_url_against_fresh_document(tmp_p
 
     # Deduped against the fresh locked document, not the stale snapshot.
     assert applied["added_inbox"] == 0
-    assert applied["url_deduped_thread_ids"] == ["2001"]
+    assert applied["url_deduped"] == [
+        {
+            "thread_id": "2001",
+            "url": "https://github.com/octocat/Hello-World/pull/99",
+        }
+    ]
     reloaded = yaml.safe_load(todo_path.read_text())
     assert reloaded["inbox"] == []
 
@@ -722,9 +727,61 @@ def test_apply_todo_mutations_keeps_untracked_inbox_url(tmp_path):
     applied = triage.apply_todo_mutations_with_lock(todo_path, mutations)
 
     assert applied["added_inbox"] == 1
-    assert applied["url_deduped_thread_ids"] == []
+    assert applied["url_deduped"] == []
     reloaded = yaml.safe_load(todo_path.read_text())
     assert [item["id"] for item in reloaded["inbox"]] == ["notif-inbox"]
+
+
+def test_clear_url_deduped_threads_clears_when_still_tracked(tmp_path):
+    todo_path = tmp_path / "todo.yml"
+    todo_path.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: tracked-pr\n"
+        "      artifacts:\n"
+        "        - https://github.com/octocat/Hello-World/pull/99\n"
+        "  q2_schedule: []\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+    deduped = [
+        {
+            "thread_id": "2001",
+            "url": "https://github.com/octocat/Hello-World/pull/99",
+        }
+    ]
+    stats = triage.TriageStats()
+
+    with patch("triage.mark_thread_done") as mark_done:
+        triage.clear_url_deduped_threads(todo_path, deduped, stats)
+
+    mark_done.assert_called_once_with("2001")
+    assert stats.errors == []
+
+
+def test_clear_url_deduped_threads_skips_when_untracked_after_commit(tmp_path):
+    # Simulates a concurrent removal during the commit's pull/rebase: the
+    # tracking item is gone by the time we would clear, so the thread must be
+    # left unread for the next run to re-surface.
+    todo_path = tmp_path / "todo.yml"
+    todo_path.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first: []\n  q2_schedule: []\ndone: []\n",
+        encoding="utf-8",
+    )
+    deduped = [
+        {
+            "thread_id": "2001",
+            "url": "https://github.com/octocat/Hello-World/pull/99",
+        }
+    ]
+    stats = triage.TriageStats()
+
+    with patch("triage.mark_thread_done") as mark_done:
+        triage.clear_url_deduped_threads(todo_path, deduped, stats)
+
+    mark_done.assert_not_called()
+    assert stats.errors == []
 
 
 def test_commit_todo_changes_skips_commit_when_nothing_staged(tmp_path):
