@@ -784,6 +784,46 @@ def test_clear_url_deduped_threads_skips_when_untracked_after_commit(tmp_path):
     assert stats.errors == []
 
 
+def test_clear_url_deduped_threads_serializes_clear_under_lock(tmp_path):
+    # The reload, URL check, and DELETE must all happen while the exclusive
+    # todo lock is held so a concurrent writer cannot remove the item between
+    # the check and the clear.
+    todo_path = tmp_path / "todo.yml"
+    todo_path.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: tracked-pr\n"
+        "      artifacts:\n"
+        "        - https://github.com/octocat/Hello-World/pull/99\n"
+        "  q2_schedule: []\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+    deduped = [
+        {
+            "thread_id": "2001",
+            "url": "https://github.com/octocat/Hello-World/pull/99",
+        }
+    ]
+    stats = triage.TriageStats()
+    events: list[str] = []
+
+    def record_flock(_fileno, op):
+        if op == triage.fcntl.LOCK_EX:
+            events.append("lock")
+        elif op == triage.fcntl.LOCK_UN:
+            events.append("unlock")
+
+    with patch("triage.fcntl.flock", side_effect=record_flock), patch(
+        "triage.mark_thread_done", side_effect=lambda tid: events.append("clear")
+    ):
+        triage.clear_url_deduped_threads(todo_path, deduped, stats)
+
+    # The clear happens between acquiring and releasing the lock.
+    assert events == ["lock", "clear", "unlock"]
+
+
 def test_commit_todo_changes_skips_commit_when_nothing_staged(tmp_path):
     repo = tmp_path
     (repo / ".git").mkdir()

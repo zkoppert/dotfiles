@@ -30,6 +30,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import fcntl
 import json
@@ -1245,22 +1246,29 @@ def apply_todo_mutations(
     return applied
 
 
-def apply_todo_mutations_with_lock(
-    path: Path, mutations: TodoMutations
-) -> AppliedTodoMutations:
-    """Re-read todo.yml under an exclusive lock, apply deltas, and write."""
+@contextlib.contextmanager
+def _todo_write_lock(path: Path):
+    """Hold the exclusive todo.yml lock shared by all todo writers."""
     lock_path = path.with_name(f"{path.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            data = load_todo(path)
-            applied = apply_todo_mutations(data, mutations)
-            if applied["changed"]:
-                write_todo_atomic(path, data)
-            return applied
+            yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def apply_todo_mutations_with_lock(
+    path: Path, mutations: TodoMutations
+) -> AppliedTodoMutations:
+    """Re-read todo.yml under an exclusive lock, apply deltas, and write."""
+    with _todo_write_lock(path):
+        data = load_todo(path)
+        applied = apply_todo_mutations(data, mutations)
+        if applied["changed"]:
+            write_todo_atomic(path, data)
+        return applied
 
 
 def preview_todo_mutations(path: Path, mutations: TodoMutations) -> AppliedTodoMutations:
@@ -1824,38 +1832,41 @@ def clear_url_deduped_threads(
 
     The dedupe decision was made under the write lock, but the lock is
     released (and ``commit_todo_changes`` may ``git pull --rebase``) before
-    this runs. Revalidate each URL against the current on-disk document so a
-    concurrent removal of the tracking item cannot orphan the notification:
-    if the URL is no longer tracked, leave the thread unread so the next run
-    re-surfaces it to the inbox.
+    this runs. Reacquire the same exclusive lock and serialize the reload,
+    the URL revalidation, and the notification clear so no todo writer can
+    remove the tracking item between the check and the DELETE: if the URL is
+    no longer tracked, leave the thread unread so the next run re-surfaces
+    it. The clear (a network call) is held under the lock deliberately, so a
+    concurrent removal cannot orphan the notification.
     """
     if not deduped:
         return
-    try:
-        current = load_todo(path)
-    except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
-        stats.errors.append(
-            f"failed to reload todo before clearing deduped threads: {exc}"
-        )
-        return
-    for record in deduped:
-        thread_id = record.get("thread_id") or ""
-        url = record.get("url") or ""
-        if not thread_id:
-            continue
-        if not _tracked_pr_issue_url_exists_elsewhere(
-            current, url, exclude_thread_id=thread_id
-        ):
-            continue
+    with _todo_write_lock(path):
         try:
-            mark_thread_done(thread_id)
-        except (
-            subprocess.CalledProcessError,
-            subprocess.TimeoutExpired,
-        ) as exc:
+            current = load_todo(path)
+        except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
             stats.errors.append(
-                f"mark-done failed for thread {thread_id}: {exc}"
+                f"failed to reload todo before clearing deduped threads: {exc}"
             )
+            return
+        for record in deduped:
+            thread_id = record.get("thread_id") or ""
+            url = record.get("url") or ""
+            if not thread_id:
+                continue
+            if not _tracked_pr_issue_url_exists_elsewhere(
+                current, url, exclude_thread_id=thread_id
+            ):
+                continue
+            try:
+                mark_thread_done(thread_id)
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+            ) as exc:
+                stats.errors.append(
+                    f"mark-done failed for thread {thread_id}: {exc}"
+                )
 
 
 def run(args: argparse.Namespace) -> TriageStats:
