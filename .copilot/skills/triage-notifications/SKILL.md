@@ -44,7 +44,10 @@ dropped and cleared from GitHub, and only personal-action items survive.
      GitHub** (never marked done) so the separate `triage-dependabot`
      tool can consume them.
 3. Adds Q1 and INBOX entries to `~/repos/zkoppert-todo/todo.yml`
-   (deduped by `notification.thread_id`). Writes take an exclusive
+   (deduped by `notification.thread_id`; an INBOX entry is also
+   suppressed when the notification's PR/issue URL is already tracked as
+   a `link` or `artifact` on another item, and the suppressed thread is
+   marked done on GitHub so it stops re-adding). Writes take an exclusive
    `todo.yml.lock`, re-read the file, apply only the computed deltas, and
    use an atomic replace so concurrent manual edits are preserved.
 4. Marks DROP threads done on GitHub (no human confirmation), which
