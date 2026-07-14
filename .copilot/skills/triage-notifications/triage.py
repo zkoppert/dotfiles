@@ -1323,62 +1323,71 @@ def _log_git_warning(action: str, exc: BaseException) -> None:
 
 
 def commit_todo_changes(path: Path, message: str) -> bool:
-    """Commit todo.yml changes locally, then try to pull and push."""
+    """Commit todo.yml changes locally, then try to pull and push.
+
+    Every git operation that can rewrite the working tree runs under the
+    shared todo lock. Git does not honor the advisory flock on its own, so
+    each todo writer must take this lock around its git operations; that
+    way a concurrent writer's ``git pull --rebase`` cannot rewrite todo.yml
+    mid-sequence or between another holder's check and its notification
+    clear.
+    """
     repo = _git_repo_for_todo(path)
     if not _git_metadata_exists(repo):
         logger.debug("todo repo %s has no git metadata; skipping commit", repo)
         return False
-    try:
-        _run_git(repo, ["add", "--", path.name])
-        diff = _run_git(repo, ["diff", "--cached", "--quiet", "--", path.name], check=False)
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        _log_git_warning("add", exc)
-        return False
-
-    if diff.returncode == 0:
-        logger.info("todo.yml unchanged after staging; skipping commit")
-        return False
-    if diff.returncode != 1:
-        logger.warning("git diff --cached failed: %s", (diff.stderr or "").strip())
-        return False
-
-    try:
-        _run_git(
-            repo,
-            [
-                "commit",
-                "--signoff",
-                "-m",
-                message,
-                "-m",
-                COPILOT_COAUTHOR_TRAILER,
-                "--",
-                path.name,
-            ],
-        )
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        _log_git_warning("commit", exc)
-        return False
-
-    try:
-        _run_git(repo, ["pull", "--rebase", "--autostash"])
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        _log_git_warning("pull --rebase", exc)
-        # A conflicting rebase leaves the repo mid-rebase with conflict
-        # markers written into todo.yml, which would break every later run
-        # (load_todo would raise). Abort it best-effort so the worktree is
-        # left clean on the local commit.
+    with _todo_write_lock(path):
         try:
-            _run_git(repo, ["rebase", "--abort"], check=False)
-        except (FileNotFoundError, subprocess.SubprocessError) as abort_exc:
-            _log_git_warning("rebase --abort", abort_exc)
-        return True
+            _run_git(repo, ["add", "--", path.name])
+            diff = _run_git(repo, ["diff", "--cached", "--quiet", "--", path.name], check=False)
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            _log_git_warning("add", exc)
+            return False
 
-    try:
-        _run_git(repo, ["push"])
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        _log_git_warning("push", exc)
-    return True
+        if diff.returncode == 0:
+            logger.info("todo.yml unchanged after staging; skipping commit")
+            return False
+        if diff.returncode != 1:
+            logger.warning("git diff --cached failed: %s", (diff.stderr or "").strip())
+            return False
+
+        try:
+            _run_git(
+                repo,
+                [
+                    "commit",
+                    "--signoff",
+                    "-m",
+                    message,
+                    "-m",
+                    COPILOT_COAUTHOR_TRAILER,
+                    "--",
+                    path.name,
+                ],
+            )
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            _log_git_warning("commit", exc)
+            return False
+
+        try:
+            _run_git(repo, ["pull", "--rebase", "--autostash"])
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            _log_git_warning("pull --rebase", exc)
+            # A conflicting rebase leaves the repo mid-rebase with conflict
+            # markers written into todo.yml, which would break every later run
+            # (load_todo would raise). Abort it best-effort so the worktree is
+            # left clean on the local commit.
+            try:
+                _run_git(repo, ["rebase", "--abort"], check=False)
+            except (FileNotFoundError, subprocess.SubprocessError) as abort_exc:
+                _log_git_warning("rebase --abort", abort_exc)
+            return True
+
+        try:
+            _run_git(repo, ["push"])
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            _log_git_warning("push", exc)
+        return True
 
 
 def existing_thread_ids(data: dict[str, Any]) -> set[str]:

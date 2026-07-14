@@ -937,6 +937,37 @@ def test_commit_todo_changes_commit_failure_returns_false(tmp_path):
     assert result is False
 
 
+def test_commit_todo_changes_runs_git_ops_under_lock(tmp_path):
+    # Git does not honor the advisory flock, so commit_todo_changes must run
+    # its worktree-changing git operations while holding the shared lock.
+    repo = tmp_path
+    (repo / ".git").mkdir()
+    todo_path = repo / "todo.yml"
+    todo_path.write_text("inbox: []\n", encoding="utf-8")
+    events: list[str] = []
+
+    def record_flock(_fileno, op):
+        events.append("lock" if op == triage.fcntl.LOCK_EX else "unlock")
+
+    def fake_run(cmd, *args, **kwargs):
+        sub = cmd[3] if len(cmd) > 3 else ""
+        events.append("git:" + sub)
+        rc = 1 if sub == "diff" else 0
+        return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
+
+    with patch("triage.fcntl.flock", side_effect=record_flock), patch(
+        "triage.subprocess.run", side_effect=fake_run
+    ):
+        result = triage.commit_todo_changes(todo_path, "msg")
+
+    assert result is True
+    assert events[0] == "lock"
+    assert events[-1] == "unlock"
+    git_idxs = [i for i, e in enumerate(events) if e.startswith("git:")]
+    assert git_idxs
+    assert all(0 < i < len(events) - 1 for i in git_idxs)
+
+
 def test_write_todo_atomic_cleans_up_on_failure(tmp_path):
     todo_path = tmp_path / "todo.yml"
     todo_path.write_text("inbox: []\n", encoding="utf-8")
