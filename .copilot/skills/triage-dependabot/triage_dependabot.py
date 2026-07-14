@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import fcntl
 import json
@@ -1672,20 +1673,27 @@ def apply_todo_mutations(
     return applied
 
 
-def apply_todo_mutations_with_lock(path: Path, mutations: TodoMutations) -> dict[str, int | bool | list[str]]:
-    """Re-read todo.yml under an exclusive lock, apply deltas, and write."""
+@contextlib.contextmanager
+def _todo_write_lock(path: Path):
+    """Hold the exclusive todo.yml lock shared by all todo writers."""
     lock_path = path.with_name(f"{path.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            data = load_todo(path)
-            applied = apply_todo_mutations(data, mutations)
-            if applied["changed"]:
-                write_todo_atomic(path, data)
-            return applied
+            yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def apply_todo_mutations_with_lock(path: Path, mutations: TodoMutations) -> dict[str, int | bool | list[str]]:
+    """Re-read todo.yml under an exclusive lock, apply deltas, and write."""
+    with _todo_write_lock(path):
+        data = load_todo(path)
+        applied = apply_todo_mutations(data, mutations)
+        if applied["changed"]:
+            write_todo_atomic(path, data)
+        return applied
 
 
 COPILOT_COAUTHOR_TRAILER = (
@@ -1718,62 +1726,70 @@ def _log_git_warning(action: str, exc: BaseException) -> None:
 
 
 def commit_todo_changes(path: Path, message: str) -> bool:
-    """Commit todo.yml changes locally, then try to pull and push."""
+    """Commit todo.yml changes locally, then try to pull and push.
+
+    Every git operation that can rewrite the working tree runs under the
+    shared todo lock. Git does not honor the advisory flock on its own, so
+    each todo writer (this tool and notification triage) must take this lock
+    around its git operations, otherwise a concurrent ``git pull --rebase``
+    could rewrite todo.yml while another holder relies on it.
+    """
     repo = _git_repo_for_todo(path)
     if not _git_metadata_exists(repo):
         logger.debug("todo repo %s has no git metadata; skipping commit", repo)
         return False
-    try:
-        _run_git(repo, ["add", "--", path.name])
-        diff = _run_git(repo, ["diff", "--cached", "--quiet", "--", path.name], check=False)
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        _log_git_warning("add", exc)
-        return False
-
-    if diff.returncode == 0:
-        logger.info("todo.yml unchanged after staging; skipping commit")
-        return False
-    if diff.returncode != 1:
-        logger.warning("git diff --cached failed: %s", (diff.stderr or "").strip())
-        return False
-
-    try:
-        _run_git(
-            repo,
-            [
-                "commit",
-                "--signoff",
-                "-m",
-                message,
-                "-m",
-                COPILOT_COAUTHOR_TRAILER,
-                "--",
-                path.name,
-            ],
-        )
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        _log_git_warning("commit", exc)
-        return False
-
-    try:
-        _run_git(repo, ["pull", "--rebase", "--autostash"])
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        _log_git_warning("pull --rebase", exc)
-        # A conflicting rebase leaves the repo mid-rebase with conflict
-        # markers written into todo.yml, which would break every later run
-        # (load_todo would raise). Abort it best-effort so the worktree is
-        # left clean on the local commit.
+    with _todo_write_lock(path):
         try:
-            _run_git(repo, ["rebase", "--abort"], check=False)
-        except (FileNotFoundError, subprocess.SubprocessError) as abort_exc:
-            _log_git_warning("rebase --abort", abort_exc)
-        return True
+            _run_git(repo, ["add", "--", path.name])
+            diff = _run_git(repo, ["diff", "--cached", "--quiet", "--", path.name], check=False)
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            _log_git_warning("add", exc)
+            return False
 
-    try:
-        _run_git(repo, ["push"])
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        _log_git_warning("push", exc)
-    return True
+        if diff.returncode == 0:
+            logger.info("todo.yml unchanged after staging; skipping commit")
+            return False
+        if diff.returncode != 1:
+            logger.warning("git diff --cached failed: %s", (diff.stderr or "").strip())
+            return False
+
+        try:
+            _run_git(
+                repo,
+                [
+                    "commit",
+                    "--signoff",
+                    "-m",
+                    message,
+                    "-m",
+                    COPILOT_COAUTHOR_TRAILER,
+                    "--",
+                    path.name,
+                ],
+            )
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            _log_git_warning("commit", exc)
+            return False
+
+        try:
+            _run_git(repo, ["pull", "--rebase", "--autostash"])
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            _log_git_warning("pull --rebase", exc)
+            # A conflicting rebase leaves the repo mid-rebase with conflict
+            # markers written into todo.yml, which would break every later run
+            # (load_todo would raise). Abort it best-effort so the worktree is
+            # left clean on the local commit.
+            try:
+                _run_git(repo, ["rebase", "--abort"], check=False)
+            except (FileNotFoundError, subprocess.SubprocessError) as abort_exc:
+                _log_git_warning("rebase --abort", abort_exc)
+            return True
+
+        try:
+            _run_git(repo, ["push"])
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            _log_git_warning("push", exc)
+        return True
 
 
 def make_todo_id(repo: str, number: int) -> str:
