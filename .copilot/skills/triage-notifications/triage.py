@@ -1544,7 +1544,7 @@ def get_my_login() -> str:
 
 _GH_PATH_RE = re.compile(
     r"^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/"
-    r"(?P<kind>pull|issues|discussions)/(?P<number>\d+)(?=/|$)"
+    r"(?P<kind>pull|issues|discussions)/(?P<number>\d+)(?=/|$|\.(?:diff|patch)$)"
 )
 
 
@@ -1560,6 +1560,8 @@ def parse_github_url(url: str) -> dict[str, Any] | None:
     try:
         parsed = urlparse(url)
     except ValueError:
+        return None
+    if parsed.scheme.lower() not in ("http", "https"):
         return None
     if parsed.netloc.lower() not in ("github.com", "www.github.com"):
         return None

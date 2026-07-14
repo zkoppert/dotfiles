@@ -1411,6 +1411,14 @@ def test_main_returns_zero_on_success(todo_file):
             "https://github.com/octocat/Hello-World/pull/99/files",
             {"owner": "octocat", "repo": "Hello-World", "kind": "pr", "number": 99},
         ),
+        (
+            "https://github.com/octocat/Hello-World/pull/99.diff",
+            {"owner": "octocat", "repo": "Hello-World", "kind": "pr", "number": 99},
+        ),
+        (
+            "https://github.com/octocat/Hello-World/pull/99.patch",
+            {"owner": "octocat", "repo": "Hello-World", "kind": "pr", "number": 99},
+        ),
     ],
 )
 def test_parse_github_url_supported(url, expected):
@@ -1430,6 +1438,9 @@ def test_parse_github_url_supported(url, expected):
         "not a url",
         "https://github.com/octocat/Hello-World/issues/99-notes",
         "https://github.com/octocat/Hello-World/pull/99x",
+        "ftp://github.com/octocat/Hello-World/pull/1",
+        "https://github.com/octocat/Hello-World/pull/99.json",
+        "https://github.com/octocat/Hello-World/pull/99.diffx",
     ],
 )
 def test_parse_github_url_unsupported(url):
