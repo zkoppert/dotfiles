@@ -263,6 +263,28 @@ More content here.
     assert "literal `</draft>`" in draft
 
 
+def test_parse_synthesis_response_allows_text_between_blocks():
+    response = """
+<session-audit>
+{"window_start":"2026-07-20","window_end":"2026-07-24","all_session_ids":["a"],"relevant_session_ids":["a"]}
+</session-audit>
+Here is the draft:
+<draft>
+## Actionable
+
+Nothing open.
+
+## Informational
+
+One completed item.
+</draft>
+"""
+
+    _, draft = handoff.parse_synthesis_response(response)
+
+    assert draft.startswith("## Actionable")
+
+
 def test_extract_artifact_refs_deduplicates():
     markdown = """
 [one](https://github.com/github/github/pull/42)
@@ -388,6 +410,26 @@ def test_dry_run_does_not_notify_existing_gist(
 
     assert handoff.run_workflow(args, make_config(tmp_path)) == 0
     mocked_notify.assert_not_called()
+
+
+@patch("nux_fr_handoff.fetch_issue")
+@patch("nux_fr_handoff.get_login")
+def test_explicit_issue_url_skips_user_lookup(mocked_get_login, mocked_fetch_issue):
+    expected = handoff.Issue(
+        number=2160,
+        title="On-call handoff July 24th",
+        url="https://github.com/github/new-user-experience/issues/2160",
+        body="",
+        created_at=dt.datetime.now(dt.timezone.utc),
+    )
+    mocked_fetch_issue.return_value = expected
+    args = SimpleNamespace(issue_url=expected.url)
+
+    login, issue = handoff.resolve_handoff_issue(args, make_config(Path("/tmp")))
+
+    assert login == ""
+    assert issue == expected
+    mocked_get_login.assert_not_called()
 
 
 @patch("nux_fr_handoff.find_handoff_issue")

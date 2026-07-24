@@ -55,6 +55,7 @@ if $DRY_RUN; then
   echo "+ write $BIN_TARGET"
   echo "+ write $PLIST_TARGET"
 else
+  rm -f "$BIN_TARGET"
   cat >"$BIN_TARGET" <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -65,6 +66,7 @@ exec /usr/bin/env python3 \
 EOF
   chmod +x "$BIN_TARGET"
 
+  rm -f "$PLIST_TARGET"
   cat >"$PLIST_TARGET" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

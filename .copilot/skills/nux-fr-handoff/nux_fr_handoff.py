@@ -29,7 +29,7 @@ GITHUB_ARTIFACT_RE = re.compile(
     r"(?P<kind>pull|issues)/(?P<number>\d+)"
 )
 SYNTHESIS_RE = re.compile(
-    r"<session-audit>\s*(?P<audit>\{.*?\})\s*</session-audit>\s*"
+    r"<session-audit>\s*(?P<audit>\{.*?\})\s*</session-audit>.*?"
     r"<draft>\s*(?P<draft>.*)\s*</draft>\s*$",
     re.DOTALL,
 )
@@ -783,13 +783,10 @@ def resume_existing_run(
 def resolve_handoff_issue(
     args: argparse.Namespace, config: Config
 ) -> tuple[str, Issue | None]:
+    if args.issue_url:
+        return "", fetch_issue(args.issue_url)
     login = get_login()
-    issue = (
-        fetch_issue(args.issue_url)
-        if args.issue_url
-        else find_handoff_issue(config, login)
-    )
-    return login, issue
+    return login, find_handoff_issue(config, login)
 
 
 def run_workflow(args: argparse.Namespace, config: Config) -> int:
