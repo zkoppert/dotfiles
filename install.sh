@@ -108,9 +108,23 @@ if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ]; then
 fi
 
 # Install the Friday NUX first-responder handoff generator.
+NUX_HANDOFF_WRAPPER="$DOTFILES_DIR/bin/nux-fr-handoff"
 NUX_HANDOFF_INSTALLER="$DOTFILES_DIR/.copilot/skills/nux-fr-handoff/install.sh"
+if [ -x "$NUX_HANDOFF_WRAPPER" ]; then
+  mkdir -p "$HOME/.local/bin"
+  NUX_HANDOFF_BIN_TARGET="$HOME/.local/bin/nux-fr-handoff"
+  if [ -L "$NUX_HANDOFF_BIN_TARGET" ] || [ ! -e "$NUX_HANDOFF_BIN_TARGET" ]; then
+    ln -sfn "$NUX_HANDOFF_WRAPPER" "$NUX_HANDOFF_BIN_TARGET"
+    echo "✓ Linked nux-fr-handoff → ~/.local/bin/nux-fr-handoff"
+  else
+    echo "⚠ $NUX_HANDOFF_BIN_TARGET exists and is not a symlink - skipping"
+  fi
+fi
+
 if [ -x "$NUX_HANDOFF_INSTALLER" ] && [ "$(uname)" = "Darwin" ]; then
-  "$NUX_HANDOFF_INSTALLER"
+  if ! "$NUX_HANDOFF_INSTALLER"; then
+    echo "⚠ NUX FR handoff scheduling was skipped; run $NUX_HANDOFF_INSTALLER after installing its prerequisites"
+  fi
 fi
 
 echo "Dotfiles install complete."
