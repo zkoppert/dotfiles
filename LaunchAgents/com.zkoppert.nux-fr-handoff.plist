@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zkoppert.nux-fr-handoff</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>exec "$HOME/.local/bin/nux-fr-handoff"</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Friday at 12:00 local time. Same-week wake catch-up is safe to re-run. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key><integer>5</integer>
+        <key>Hour</key><integer>12</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/zkoppert</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/zkoppert/Library/Logs/nux-fr-handoff.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/zkoppert/Library/Logs/nux-fr-handoff.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/zkoppert</string>
+    </dict>
+</dict>
+</plist>

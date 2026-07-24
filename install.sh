@@ -107,4 +107,37 @@ if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ]; then
   fi
 fi
 
+# Install the Friday NUX first-responder handoff generator.
+NUX_HANDOFF_WRAPPER="$DOTFILES_DIR/bin/nux-fr-handoff"
+NUX_HANDOFF_PLIST="$DOTFILES_DIR/LaunchAgents/com.zkoppert.nux-fr-handoff.plist"
+if [ -x "$NUX_HANDOFF_WRAPPER" ] && [ "$(uname)" = "Darwin" ]; then
+  mkdir -p "$HOME/.local/bin" "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+  NUX_HANDOFF_BIN_TARGET="$HOME/.local/bin/nux-fr-handoff"
+  if [ -L "$NUX_HANDOFF_BIN_TARGET" ] || [ ! -e "$NUX_HANDOFF_BIN_TARGET" ]; then
+    ln -sfn "$NUX_HANDOFF_WRAPPER" "$NUX_HANDOFF_BIN_TARGET"
+    echo "✓ Linked nux-fr-handoff → ~/.local/bin/nux-fr-handoff"
+  else
+    echo "⚠ $NUX_HANDOFF_BIN_TARGET exists and is not a symlink - skipping"
+  fi
+
+  if [ -f "$NUX_HANDOFF_PLIST" ]; then
+    NUX_HANDOFF_PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.nux-fr-handoff.plist"
+    if [ -L "$NUX_HANDOFF_PLIST_TARGET" ] || [ ! -e "$NUX_HANDOFF_PLIST_TARGET" ]; then
+      launchctl unload "$NUX_HANDOFF_PLIST_TARGET" >/dev/null 2>&1 || true
+      ln -sfn "$NUX_HANDOFF_PLIST" "$NUX_HANDOFF_PLIST_TARGET"
+      if launchctl load "$NUX_HANDOFF_PLIST_TARGET" 2>/dev/null; then
+        echo "✓ Loaded launchd agent com.zkoppert.nux-fr-handoff"
+      else
+        echo "⚠ launchctl load failed for $NUX_HANDOFF_PLIST_TARGET - check ~/Library/Logs/nux-fr-handoff.log"
+      fi
+    else
+      echo "⚠ $NUX_HANDOFF_PLIST_TARGET exists and is not a symlink - skipping"
+    fi
+  fi
+
+  if ! command -v terminal-notifier >/dev/null 2>&1; then
+    echo "⚠ terminal-notifier is missing - install it with 'brew install terminal-notifier'"
+  fi
+fi
+
 echo "Dotfiles install complete."
