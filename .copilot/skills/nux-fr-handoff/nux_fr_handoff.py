@@ -159,7 +159,12 @@ def parse_github_time(value: str) -> dt.datetime:
 
 
 def week_bounds(now: dt.datetime | None = None) -> tuple[dt.datetime, dt.datetime]:
-    current = (now or dt.datetime.now().astimezone()).astimezone()
+    if now is None:
+        current = dt.datetime.now().astimezone()
+    elif now.tzinfo is None:
+        current = now.astimezone()
+    else:
+        current = now
     monday = (current - dt.timedelta(days=current.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
