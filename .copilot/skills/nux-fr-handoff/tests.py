@@ -106,6 +106,7 @@ def test_build_copilot_command_exposes_only_session_store():
     assert "--available-tools=session_store_sql" in command
     assert "--allow-tool=session_store_sql" in command
     assert "--no-ask-user" in command
+    assert "--no-custom-instructions" in command
     assert "--disable-builtin-mcps" in command
     assert "--allow-all-tools" not in command
     assert "--allow-all" not in command
@@ -272,6 +273,39 @@ def test_extract_artifact_refs_deduplicates():
     refs = handoff.extract_artifact_refs(markdown)
 
     assert {(ref.kind, ref.number) for ref in refs} == {("pull", 42), ("issues", 9)}
+
+
+@patch("nux_fr_handoff.run_command")
+def test_fetch_pull_state_includes_live_review_context(mocked_run):
+    mocked_run.return_value = SimpleNamespace(
+        stdout=json.dumps(
+            {
+                "url": "https://github.com/acme/widgets/pull/42",
+                "title": "Improve widgets",
+                "state": "OPEN",
+                "isDraft": False,
+                "mergedAt": None,
+                "closedAt": None,
+                "assignees": [{"login": "owner"}],
+                "reviewDecision": "REVIEW_REQUIRED",
+                "reviewRequests": [{"login": "reviewer"}],
+            }
+        )
+    )
+    ref = handoff.ArtifactRef(
+        owner="acme",
+        repo="widgets",
+        kind="pull",
+        number=42,
+        url="https://github.com/acme/widgets/pull/42",
+    )
+
+    states = handoff.fetch_artifact_states([ref])
+
+    assert states[0]["review_decision"] == "REVIEW_REQUIRED"
+    assert states[0]["review_requests"] == ["reviewer"]
+    command = mocked_run.call_args.args[0]
+    assert command[:4] == ["gh", "pr", "view", "42"]
 
 
 def test_secret_scan_catches_credentials_not_domain_words():

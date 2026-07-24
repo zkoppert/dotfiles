@@ -361,6 +361,7 @@ def build_copilot_command(
         "-p",
         prompt,
         "--no-ask-user",
+        "--no-custom-instructions",
         "--no-color",
         "--silent",
         "--no-remote",
@@ -446,20 +447,59 @@ def extract_artifact_refs(markdown: str) -> list[ArtifactRef]:
 def fetch_artifact_states(refs: list[ArtifactRef]) -> list[dict[str, Any]]:
     states: list[dict[str, Any]] = []
     for ref in refs:
-        endpoint_kind = "pulls" if ref.kind == "pull" else "issues"
         try:
-            result = run_command(
-                [
-                    "gh",
-                    "api",
-                    f"repos/{ref.owner}/{ref.repo}/{endpoint_kind}/{ref.number}",
-                ]
-            )
+            if ref.kind == "pull":
+                result = run_command(
+                    [
+                        "gh",
+                        "pr",
+                        "view",
+                        str(ref.number),
+                        "--repo",
+                        f"{ref.owner}/{ref.repo}",
+                        "--json",
+                        (
+                            "title,state,isDraft,mergedAt,closedAt,assignees,"
+                            "reviewDecision,reviewRequests,url"
+                        ),
+                    ]
+                )
+            else:
+                result = run_command(
+                    [
+                        "gh",
+                        "api",
+                        f"repos/{ref.owner}/{ref.repo}/issues/{ref.number}",
+                    ]
+                )
         except HandoffError:
             LOGGER.warning("could not refresh linked artifact: %s", ref.url)
             states.append({"url": ref.url, "state": "unknown"})
             continue
         payload = json.loads(result.stdout)
+        if ref.kind == "pull":
+            states.append(
+                {
+                    "url": payload.get("url") or ref.url,
+                    "title": payload.get("title"),
+                    "state": payload.get("state"),
+                    "draft": payload.get("isDraft"),
+                    "merged_at": payload.get("mergedAt"),
+                    "closed_at": payload.get("closedAt"),
+                    "assignees": [
+                        assignee.get("login")
+                        for assignee in payload.get("assignees", [])
+                        if isinstance(assignee, dict)
+                    ],
+                    "review_decision": payload.get("reviewDecision"),
+                    "review_requests": [
+                        request.get("login") or request.get("name")
+                        for request in payload.get("reviewRequests", [])
+                        if isinstance(request, dict)
+                    ],
+                }
+            )
+            continue
         states.append(
             {
                 "url": ref.url,
