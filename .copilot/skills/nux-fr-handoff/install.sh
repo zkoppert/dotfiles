@@ -66,9 +66,15 @@ if $DRY_RUN; then
   echo "+ write $BIN_TARGET"
   echo "+ write $PLIST_TARGET"
 else
+  if [ -e "$BIN_TARGET" ] && [ ! -L "$BIN_TARGET" ] &&
+    ! grep -q "nux-fr-handoff managed wrapper" "$BIN_TARGET"; then
+    echo "$BIN_TARGET exists and is not managed by nux-fr-handoff; refusing to replace it." >&2
+    exit 1
+  fi
   rm -f "$BIN_TARGET"
   cat >"$BIN_TARGET" <<'EOF'
 #!/bin/bash
+# nux-fr-handoff managed wrapper
 set -euo pipefail
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 exec /usr/bin/env python3 \

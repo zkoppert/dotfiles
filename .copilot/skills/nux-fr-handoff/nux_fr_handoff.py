@@ -149,9 +149,12 @@ def run_command(
             f"command timed out after {timeout}s: {format_command_for_log(args)}"
         ) from None
     if result.returncode not in accepted_codes:
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
-        details = "\n".join(part for part in (stdout, stderr) if part)
+        if args and args[0] == "copilot":
+            details = "Copilot output redacted"
+        else:
+            stdout = result.stdout.strip()
+            stderr = result.stderr.strip()
+            details = "\n".join(part for part in (stdout, stderr) if part)
         if len(details) > 4000:
             details = details[:4000] + "\n<truncated>"
         raise HandoffError(
@@ -473,6 +476,22 @@ def validate_artifact_count(refs: list[ArtifactRef]) -> None:
     if len(refs) > MAX_ARTIFACTS:
         raise HandoffError(
             f"draft links {len(refs)} GitHub artifacts; maximum is {MAX_ARTIFACTS}"
+        )
+
+
+def artifact_ref_keys(refs: list[ArtifactRef]) -> set[tuple[str, str, str, int]]:
+    return {(ref.owner, ref.repo, ref.kind, ref.number) for ref in refs}
+
+
+def validate_final_artifacts(
+    markdown: str,
+    refreshed_keys: set[tuple[str, str, str, int]],
+) -> None:
+    final_keys = artifact_ref_keys(extract_artifact_refs(markdown))
+    unrefreshed = final_keys - refreshed_keys
+    if unrefreshed:
+        raise HandoffError(
+            "final draft introduced GitHub artifacts that were not refreshed"
         )
 
 
@@ -964,6 +983,7 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
         ):
             return 0
 
+        refreshed_artifact_keys: set[tuple[str, str, str, int]] | None = None
         if args.draft_file:
             draft = (
                 Path(args.draft_file).expanduser().read_text(encoding="utf-8").strip()
@@ -992,6 +1012,7 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
             validate_content_safety(draft, config)
             refs = extract_artifact_refs(draft)
             validate_artifact_count(refs)
+            refreshed_artifact_keys = artifact_ref_keys(refs)
             states = fetch_artifact_states(refs)
             refresh_response = run_copilot(
                 build_refresh_prompt(draft, states),
@@ -1014,7 +1035,14 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
             ).strip()
             draft_path.write_text(draft.rstrip() + "\n", encoding="utf-8")
             content = validate_draft(draft_path, config)
+        if refreshed_artifact_keys is not None:
+            validate_final_artifacts(content, refreshed_artifact_keys)
         digest = sha256_text(content)
+
+        if args.no_gist:
+            LOGGER.info("validated draft saved to %s", draft_path)
+            return 0
+
         next_state: dict[str, Any] = {
             "status": "draft_validated",
             "issue_url": issue.url,
@@ -1023,15 +1051,11 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
             "session_audit": audit,
             "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
-        if previous_gist_url and not args.no_gist:
+        if previous_gist_url:
             next_state["gist_url"] = previous_gist_url
             next_state["gist_filename"] = previous_gist_filename or draft_path.name
         state[run_key] = next_state
         write_state(state_path, state)
-
-        if args.no_gist:
-            LOGGER.info("validated draft saved to %s", draft_path)
-            return 0
 
         gist_url = persist_secret_gist(
             draft_path,

@@ -91,6 +91,43 @@ def test_installer_rejects_existing_real_skill_directory(tmp_path: Path):
     assert not target.is_symlink()
 
 
+def test_installer_rejects_unmanaged_command(tmp_path: Path):
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for command in ("python3", "copilot", "gh", "terminal-notifier"):
+        script = fake_bin / command
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+    managed_skill = home / ".copilot/skills/nux-fr-handoff"
+    managed_skill.parent.mkdir(parents=True)
+    managed_skill.symlink_to(Path(__file__).resolve().parent)
+    command_path = home / ".local/bin/nux-fr-handoff"
+    command_path.parent.mkdir(parents=True)
+    command_path.write_text("#!/bin/sh\necho user-managed\n", encoding="utf-8")
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "USER": "tester",
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+        }
+    )
+    installer = Path(__file__).resolve().parent / "install.sh"
+
+    result = subprocess.run(
+        ["bash", str(installer)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "not managed by nux-fr-handoff" in result.stderr
+    assert "user-managed" in command_path.read_text(encoding="utf-8")
+
+
 def test_week_bounds_uses_local_monday():
     now = dt.datetime(2026, 7, 24, 12, 0, tzinfo=dt.timezone(dt.timedelta(hours=-7)))
 
@@ -231,13 +268,15 @@ def test_copilot_prompt_is_redacted_from_debug_logging():
 def test_copilot_failure_does_not_expose_prompt():
     with patch("nux_fr_handoff.subprocess.run") as mocked_run:
         mocked_run.return_value.returncode = 1
-        mocked_run.return_value.stdout = ""
-        mocked_run.return_value.stderr = "bad flag"
+        mocked_run.return_value.stdout = "partial private draft"
+        mocked_run.return_value.stderr = "echoed private prompt"
 
         with pytest.raises(handoff.HandoffError) as raised:
             handoff.run_command(["copilot", "-p", "TOP SECRET PROMPT"])
 
     assert "TOP SECRET PROMPT" not in str(raised.value)
+    assert "partial private draft" not in str(raised.value)
+    assert "echoed private prompt" not in str(raised.value)
     assert "<prompt redacted: 17 characters>" in str(raised.value)
 
 
@@ -432,6 +471,19 @@ def test_artifact_count_limit_fails_before_refresh():
 
     with pytest.raises(handoff.HandoffError, match="maximum"):
         handoff.validate_artifact_count(refs)
+
+
+def test_final_draft_cannot_add_unrefreshed_artifacts():
+    refreshed = {
+        ("acme", "widgets", "issues", 1),
+    }
+    markdown = (
+        "[known](https://github.com/acme/widgets/issues/1) "
+        "[new](https://github.com/acme/widgets/issues/2)"
+    )
+
+    with pytest.raises(handoff.HandoffError, match="not refreshed"):
+        handoff.validate_final_artifacts(markdown, refreshed)
 
 
 def test_quiet_week_draft_passes_structural_safety(tmp_path: Path):
@@ -730,7 +782,7 @@ def test_resume_draft_validated_updates_existing_gist(
 @patch("nux_fr_handoff.validate_content_safety")
 @patch("nux_fr_handoff.week_bounds")
 @patch("nux_fr_handoff.resolve_handoff_issue")
-def test_force_no_gist_does_not_carry_previous_gist_into_state(
+def test_force_no_gist_preserves_previous_gist_state_without_uploading(
     mocked_resolve,
     mocked_week_bounds,
     _mocked_safety,
@@ -779,5 +831,5 @@ def test_force_no_gist_does_not_carry_previous_gist_into_state(
     persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))[
         run_key
     ]
-    assert persisted["status"] == "draft_validated"
-    assert "gist_url" not in persisted
+    assert persisted["status"] == "notified"
+    assert persisted["gist_url"] == "https://gist.github.com/octocat/abc"

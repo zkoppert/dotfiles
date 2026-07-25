@@ -19,7 +19,7 @@ The tool never posts the comment. Review the gist, then post it manually.
 
 ## Schedule
 
-`com.zkoppert.nux-fr-handoff.plist` runs at 12:00 local time every Friday.
+`com.${USER}.nux-fr-handoff.plist` runs at 12:00 local time every Friday.
 A same-week wake can catch a missed firing. If the Mac stays asleep into the
 next week, issue discovery intentionally finds no current-week handoff and exits.
 
