@@ -414,6 +414,24 @@ def test_artifact_refresh_fails_closed(mocked_run):
 def test_secret_scan_catches_credentials_not_domain_words():
     assert handoff.scan_secrets("verification token handling remains open") == []
     assert handoff.scan_secrets("github_pat_abcdefghijklmnopqrstuvwxyz123456")
+    assert handoff.scan_secrets("-----BEGIN DSA PRIVATE KEY-----")
+    assert handoff.scan_secrets("-----BEGIN ENCRYPTED PRIVATE KEY-----")
+
+
+def test_artifact_count_limit_fails_before_refresh():
+    refs = [
+        handoff.ArtifactRef(
+            owner="acme",
+            repo="widgets",
+            kind="issues",
+            number=number,
+            url=f"https://github.com/acme/widgets/issues/{number}",
+        )
+        for number in range(handoff.MAX_ARTIFACTS + 1)
+    ]
+
+    with pytest.raises(handoff.HandoffError, match="maximum"):
+        handoff.validate_artifact_count(refs)
 
 
 def test_quiet_week_draft_passes_structural_safety(tmp_path: Path):

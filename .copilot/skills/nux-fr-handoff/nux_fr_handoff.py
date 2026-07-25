@@ -35,6 +35,7 @@ DEFAULT_CONFIG_PATH = (
 )
 PLACEHOLDER_REPO = "example-org/on-call"
 SESSION_TOOL_NAME = "session_store_sql"
+MAX_ARTIFACTS = 50
 GITHUB_ARTIFACT_RE = re.compile(
     r"https://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/"
     r"(?P<kind>pull|issues)/(?P<number>\d+)"
@@ -48,7 +49,7 @@ SECRET_PATTERNS = (
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+    re.compile(r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"),
     re.compile(
         r"(?i)\b(?:api[_-]?key|client[_-]?secret|password)\s*[:=]\s*[\"']?[^\s\"']{8,}"
     ),
@@ -466,6 +467,13 @@ def extract_artifact_refs(markdown: str) -> list[ArtifactRef]:
         )
         refs[(ref.owner, ref.repo, ref.kind, ref.number)] = ref
     return list(refs.values())
+
+
+def validate_artifact_count(refs: list[ArtifactRef]) -> None:
+    if len(refs) > MAX_ARTIFACTS:
+        raise HandoffError(
+            f"draft links {len(refs)} GitHub artifacts; maximum is {MAX_ARTIFACTS}"
+        )
 
 
 def fetch_artifact_states(refs: list[ArtifactRef]) -> list[dict[str, Any]]:
@@ -981,7 +989,10 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
                 use_session_store=True,
             )
             audit, draft = parse_synthesis_response(response)
-            states = fetch_artifact_states(extract_artifact_refs(draft))
+            validate_content_safety(draft, config)
+            refs = extract_artifact_refs(draft)
+            validate_artifact_count(refs)
+            states = fetch_artifact_states(refs)
             refresh_response = run_copilot(
                 build_refresh_prompt(draft, states),
                 config=config,
