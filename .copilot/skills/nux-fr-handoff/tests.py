@@ -613,6 +613,29 @@ def test_artifact_refresh_fails_closed(mocked_run):
     mocked_run.assert_called_once()
 
 
+@patch("nux_fr_handoff.run_command")
+def test_issue_url_for_pull_request_fails_closed(mocked_run):
+    mocked_run.return_value = SimpleNamespace(
+        stdout=json.dumps(
+            {
+                "title": "Pull request",
+                "state": "open",
+                "pull_request": {"url": "https://api.github.com/pulls/42"},
+            }
+        )
+    )
+    ref = handoff.ArtifactRef(
+        owner="acme",
+        repo="widgets",
+        kind="issues",
+        number=42,
+        url="https://github.com/acme/widgets/issues/42",
+    )
+
+    with pytest.raises(handoff.HandoffError, match="use /pull/"):
+        handoff.fetch_artifact_states([ref])
+
+
 def test_secret_scan_catches_credentials_not_domain_words():
     assert handoff.scan_secrets("verification token handling remains open") == []
     assert handoff.scan_secrets("github_pat_abcdefghijklmnopqrstuvwxyz123456")
@@ -942,6 +965,14 @@ def test_write_state_is_atomic_json(tmp_path: Path):
         == "verified"
     )
     assert not state_path.with_suffix(".tmp").exists()
+
+
+def test_non_object_state_fails_closed(tmp_path: Path):
+    state_path = tmp_path / "state.json"
+    state_path.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(handoff.HandoffError, match="JSON object"):
+        handoff.load_state(state_path)
 
 
 def test_notification_group_uses_current_user(monkeypatch):

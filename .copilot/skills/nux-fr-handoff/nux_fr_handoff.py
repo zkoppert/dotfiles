@@ -682,6 +682,10 @@ def fetch_artifact_states(refs: list[ArtifactRef]) -> list[dict[str, Any]]:
                 }
             )
             continue
+        if payload.get("pull_request"):
+            raise HandoffError(
+                f"artifact URL uses /issues/ for a pull request; use /pull/: {ref.url}"
+            )
         states.append(
             {
                 "url": ref.url,
@@ -1037,7 +1041,9 @@ def load_state(path: Path) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         raise HandoffError(f"could not read state file: {exc}") from exc
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        raise HandoffError("state file must contain a JSON object")
+    return payload
 
 
 def write_state(path: Path, state: dict[str, Any]) -> None:
