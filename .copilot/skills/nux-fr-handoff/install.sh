@@ -35,9 +35,8 @@ for command in copilot gh python3; do
 done
 
 if ! command -v terminal-notifier >/dev/null 2>&1; then
-  echo "terminal-notifier is required for the clickable review notification." >&2
+  echo "terminal-notifier is unavailable; notifications will not be clickable." >&2
   echo "Install it with: brew install terminal-notifier" >&2
-  exit 1
 fi
 
 run mkdir -p \

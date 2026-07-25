@@ -260,6 +260,37 @@ def test_installer_rerun_through_skill_symlink_keeps_physical_target(tmp_path: P
     assert skill_target.resolve() == source
 
 
+def test_installer_allows_missing_terminal_notifier(tmp_path: Path):
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for command in ("python3", "copilot", "gh", "plutil", "launchctl"):
+        script = fake_bin / command
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "USER": "tester",
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+        }
+    )
+    installer = Path(__file__).resolve().parent / "install.sh"
+
+    result = subprocess.run(
+        ["bash", str(installer)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "notifications will not be clickable" in result.stderr
+    assert (home / ".local/bin/nux-fr-handoff").exists()
+
+
 def test_week_bounds_uses_local_monday():
     now = dt.datetime(2026, 7, 24, 12, 0, tzinfo=dt.timezone(dt.timedelta(hours=-7)))
 
@@ -917,6 +948,24 @@ def test_notification_group_uses_current_user(monkeypatch):
     monkeypatch.setenv("USER", "first.responder")
 
     assert handoff.notification_group("123") == "com.first.responder.nux-fr-handoff.123"
+
+
+@patch("nux_fr_handoff.run_command")
+@patch("nux_fr_handoff.shutil.which", return_value=None)
+def test_notification_skips_cleanly_without_macos_tools(
+    _mocked_which,
+    mocked_run,
+    caplog,
+):
+    handoff.notify(
+        "Draft ready",
+        "Review it.",
+        "https://gist.github.com/octocat/abc",
+        group="com.user.test",
+    )
+
+    mocked_run.assert_not_called()
+    assert "skipping desktop notification" in caplog.text
 
 
 @patch("nux_fr_handoff.notify")

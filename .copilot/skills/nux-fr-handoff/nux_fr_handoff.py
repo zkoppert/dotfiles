@@ -1005,6 +1005,10 @@ def notify(title: str, message: str, url: str, *, group: str) -> None:
     LOGGER.warning(
         "terminal-notifier is unavailable; review the saved gist URL in the state file"
     )
+    osascript = shutil.which("osascript")
+    if not osascript:
+        LOGGER.warning("osascript is unavailable; skipping desktop notification")
+        return
     escaped_title = title.replace("\\", "\\\\").replace('"', '\\"')
     escaped_message = (
         f"{message} The review link is saved in the NUX FR handoff state file.".replace(
@@ -1013,7 +1017,7 @@ def notify(title: str, message: str, url: str, *, group: str) -> None:
     )
     run_command(
         [
-            "osascript",
+            osascript,
             "-e",
             f'display notification "{escaped_message}" with title "{escaped_title}"',
         ],
