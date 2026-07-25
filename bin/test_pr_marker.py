@@ -300,6 +300,8 @@ def test_run_tests() -> None:
             body = marker.read_text(encoding="utf-8")
             assert "RESULT: passed" in body
             assert "exit 0" in body
+            assert "Test-quality evidence preflight:" in body
+            assert "- evidence: not-applicable" in body
             # The machine-produced result header must be present (the gate keys on it).
             assert pr_marker.TESTS_RESULT_HEADER in body
             assert pr_marker.has_result_header(marker)
@@ -323,6 +325,197 @@ def test_run_tests() -> None:
             _run("git", "commit", "-q", "--allow-empty", "-m", "c2")
             ok, detail, _size, _path = pr_marker.marker_status(tests, "feat/tests")
             assert not ok and detail == "stale", detail
+    finally:
+        os.chdir(restore)
+
+
+def test_test_quality_preflight() -> None:
+    """run-tests blocks source-only diffs, then records tests or a waiver."""
+    restore = Path.cwd()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            _run("git", "init", "-q")
+            _run("git", "config", "user.email", "test@example.com")
+            _run("git", "config", "user.name", "pr-marker test")
+            _run("git", "checkout", "-q", "-b", "main")
+            Path("README.md").write_text("# base\n", encoding="utf-8")
+            _run("git", "add", "README.md")
+            _run("git", "commit", "-q", "-m", "base")
+            _run("git", "checkout", "-q", "-b", "feat/quality")
+
+            Path("tool.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+            _run("git", "add", "tool.py")
+            _run("git", "commit", "-q", "-m", "source")
+            tests = pr_marker.KINDS["tests"]
+            marker = pr_marker.marker_path(tests, branch="feat/quality")
+
+            assert (
+                pr_marker.main(
+                    ["run-tests", "--base-ref", "main", "--cmd", "true"]
+                )
+                == 1
+            )
+            assert not marker.exists()
+
+            Path("test_tool.py").write_text(
+                "from tool import value\n\n"
+                "def test_value():\n"
+                "    assert value() == 1\n",
+                encoding="utf-8",
+            )
+            _run("git", "add", "test_tool.py")
+            _run("git", "commit", "-q", "-m", "test")
+            assert (
+                pr_marker.main(
+                    ["run-tests", "--base-ref", "main", "--cmd", "true"]
+                )
+                == 0
+            )
+            body = marker.read_text(encoding="utf-8")
+            assert "- evidence: present" in body
+            assert "- executable source files changed: 1" in body
+            assert "- test files changed: 1" in body
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            _run("git", "init", "-q")
+            _run("git", "config", "user.email", "test@example.com")
+            _run("git", "config", "user.name", "pr-marker test")
+            _run("git", "checkout", "-q", "-b", "main")
+            _run("git", "commit", "-q", "--allow-empty", "-m", "base")
+            _run("git", "checkout", "-q", "-b", "feat/waiver")
+            Path("tool.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+            _run("git", "add", "tool.py")
+            _run("git", "commit", "-q", "-m", "source")
+            reason = "Generated output is verified by the schema compatibility command."
+
+            assert (
+                pr_marker.main(
+                    [
+                        "run-tests",
+                        "--base-ref",
+                        "main",
+                        "--no-test-change-reason",
+                        reason,
+                        "--cmd",
+                        "true",
+                    ]
+                )
+                == 0
+            )
+            marker = pr_marker.marker_path(
+                pr_marker.KINDS["tests"], branch="feat/waiver"
+            )
+            body = marker.read_text(encoding="utf-8")
+            assert "- evidence: waived" in body
+            assert f"- no-test-change reason: {reason}" in body
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            _run("git", "init", "-q")
+            _run("git", "config", "user.email", "test@example.com")
+            _run("git", "config", "user.name", "pr-marker test")
+            _run("git", "checkout", "-q", "-b", "feature-only")
+            _run("git", "commit", "-q", "--allow-empty", "-m", "c1")
+            _run("git", "commit", "-q", "--allow-empty", "-m", "c2")
+
+            assert pr_marker.main(["run-tests", "--cmd", "true"]) == 1
+            marker = pr_marker.marker_path(
+                pr_marker.KINDS["tests"], branch="feature-only"
+            )
+            assert not marker.exists()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            _run("git", "init", "-q")
+            _run("git", "config", "user.email", "test@example.com")
+            _run("git", "config", "user.name", "pr-marker test")
+            _run("git", "checkout", "-q", "-b", "feat/invalid-base")
+            _run("git", "commit", "-q", "--allow-empty", "-m", "base")
+
+            assert (
+                pr_marker.main(
+                    ["run-tests", "--base-ref", "missing", "--cmd", "true"]
+                )
+                == 1
+            )
+            marker = pr_marker.marker_path(
+                pr_marker.KINDS["tests"], branch="feat/invalid-base"
+            )
+            assert not marker.exists()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            _run("git", "init", "-q")
+            _run("git", "config", "user.email", "test@example.com")
+            _run("git", "config", "user.name", "pr-marker test")
+            _run("git", "checkout", "-q", "-b", "feat/legacy-checker")
+            _run("git", "commit", "-q", "--allow-empty", "-m", "base")
+            original_checker_path = pr_marker.test_quality_checker_path
+            pr_marker.test_quality_checker_path = lambda: Path(tmp) / "missing-check.py"
+            try:
+                assert pr_marker.main(["run-tests", "--cmd", "true"]) == 0
+            finally:
+                pr_marker.test_quality_checker_path = original_checker_path
+            marker = pr_marker.marker_path(
+                pr_marker.KINDS["tests"], branch="feat/legacy-checker"
+            )
+            body = marker.read_text(encoding="utf-8")
+            assert "- status: unavailable" in body
+            assert "- evidence: unavailable" in body
+    finally:
+        os.chdir(restore)
+
+
+def test_run_tests_requires_clean_repo() -> None:
+    """run-tests refuses dirty inputs and commands that dirty the repository."""
+    restore = Path.cwd()
+    try:
+        for dirty_kind in ("unstaged", "staged", "untracked"):
+            with tempfile.TemporaryDirectory() as tmp:
+                os.chdir(tmp)
+                _run("git", "init", "-q")
+                _run("git", "config", "user.email", "test@example.com")
+                _run("git", "config", "user.name", "pr-marker test")
+                _run("git", "checkout", "-q", "-b", f"feat/{dirty_kind}")
+                tracked = Path("tracked.txt")
+                tracked.write_text("base\n", encoding="utf-8")
+                _run("git", "add", "tracked.txt")
+                _run("git", "commit", "-q", "-m", "base")
+
+                if dirty_kind == "unstaged":
+                    tracked.write_text("changed\n", encoding="utf-8")
+                elif dirty_kind == "staged":
+                    tracked.write_text("changed\n", encoding="utf-8")
+                    _run("git", "add", "tracked.txt")
+                else:
+                    Path("untracked.txt").write_text("new\n", encoding="utf-8")
+
+                assert pr_marker.main(["run-tests", "--cmd", "true"]) == 1
+                marker = pr_marker.marker_path(
+                    pr_marker.KINDS["tests"], branch=f"feat/{dirty_kind}"
+                )
+                assert not marker.exists()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            _run("git", "init", "-q")
+            _run("git", "config", "user.email", "test@example.com")
+            _run("git", "config", "user.name", "pr-marker test")
+            _run("git", "checkout", "-q", "-b", "feat/test-dirties")
+            _run("git", "commit", "-q", "--allow-empty", "-m", "base")
+
+            assert (
+                pr_marker.main(
+                    ["run-tests", "--cmd", f"{sys.executable} -c \"open('generated.txt', 'w').write('x')\""]
+                )
+                == 1
+            )
+            marker = pr_marker.marker_path(
+                pr_marker.KINDS["tests"], branch="feat/test-dirties"
+            )
+            assert not marker.exists()
     finally:
         os.chdir(restore)
 
@@ -639,6 +832,8 @@ def main() -> int:
         test_gh_guard_matches_kinds,
         test_pin_roundtrip,
         test_run_tests,
+        test_test_quality_preflight,
+        test_run_tests_requires_clean_repo,
         test_tests_marker_is_machine_only,
         test_parse_models,
         test_models_provenance,

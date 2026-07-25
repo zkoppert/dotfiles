@@ -39,9 +39,11 @@ a lightweight single-pass self-review cannot satisfy a gate meant to require a
 multi-model review. `status`/`check` and gh-guard reject a review marker that
 declares fewer than 3 distinct models. The demo and tests markers are exempt.
 
-The tests marker is machine-produced: `run-tests` executes the given check
-commands, and writes the marker only if every command exits 0, so it records a
-real green run (tests, lint, type-check, build) rather than a self-reported note.
+The tests marker is machine-produced: `run-tests` requires a clean repository,
+runs the test-quality evidence preflight and the given check commands, verifies
+the repository stayed clean, and writes the marker only if every command exits
+0. This records the committed tree that passed tests, lint, type-check, and
+build rather than a self-reported note.
 
 The branch directory name is percent-encoded. The encoding MUST stay identical
 to gh-guard's inline computation:
@@ -59,9 +61,12 @@ Usage:
   pr-marker write <kind> [FILE] [--models a,b,c]
                                    write marker content from FILE (or stdin if
                                    '-'/omitted); review kinds require >=3 --models
-  pr-marker run-tests --cmd '<command>' [--cmd '<command>' ...] [--narrow reason]
-                                   run each check command; write the HEAD-pinned tests
-                                   marker only if every command exits 0
+  pr-marker run-tests --cmd '<command>' [--cmd '<command>' ...]
+                      [--base-ref REF] [--no-test-change-reason REASON]
+                      [--narrow reason]
+                                   run the evidence preflight and each check command;
+                                   write the HEAD-pinned tests marker only if every
+                                   command exits 0 and the repository stays clean
   pr-marker status                 show all five markers and whether each passes
   pr-marker check                  exit 0 only if every marker passes (fresh + over
                                    floor)
@@ -70,6 +75,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -218,6 +224,31 @@ def current_head() -> str | None:
         return _git("rev-parse", "HEAD")
     except subprocess.CalledProcessError:
         return None
+
+
+def dirty_worktree_entries() -> list[str]:
+    """Return staged, unstaged, and untracked non-ignored status entries."""
+    result = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-z"],
+        capture_output=True,
+        check=True,
+    )
+    return [
+        entry.decode("utf-8", errors="replace")
+        for entry in result.stdout.split(b"\0")
+        if entry
+    ]
+
+
+def test_quality_checker_path() -> Path:
+    """Return the checker path beside this dotfiles checkout."""
+    return (
+        Path(__file__).resolve().parent.parent
+        / ".copilot"
+        / "skills"
+        / "test-quality"
+        / "check.py"
+    )
 
 
 def read_reviewed_commit(path: Path) -> str | None:
@@ -410,6 +441,97 @@ def cmd_write(args: argparse.Namespace) -> int:
     return 0
 
 
+def _invalidate_tests_marker(kind: Kind) -> str:
+    """Remove a prior tests marker and return a note for the error message."""
+    stale = marker_path(kind)
+    if not stale.exists():
+        return ""
+    stale.unlink()
+    return " (removed the previous tests marker)"
+
+
+def _run_test_quality_preflight(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
+    """Run the test-evidence checker and return its exit code and JSON result."""
+    checker = test_quality_checker_path()
+    if not checker.is_file():
+        print(
+            f"pr-marker run-tests: WARNING: test-quality checker not found at {checker}; "
+            "continuing for compatibility with an older dotfiles checkout.",
+            file=sys.stderr,
+        )
+        return (
+            0,
+            {
+                "status": "unavailable",
+                "evidence": "unavailable",
+                "base_ref": None,
+                "base_commit": None,
+                "source_files": [],
+                "test_files": [],
+                "warning_count": 1,
+                "waiver": args.no_test_change_reason,
+            },
+        )
+
+    command = [sys.executable, str(checker), "--json"]
+    if args.base_ref:
+        command += ["--base", args.base_ref]
+    if args.no_test_change_reason:
+        command += ["--no-test-change-reason", args.no_test_change_reason]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        print(
+            "pr-marker run-tests: test-quality checker returned invalid JSON.",
+            file=sys.stderr,
+        )
+        if result.stdout:
+            print(result.stdout, file=sys.stderr)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        return (2, {})
+    if not isinstance(payload, dict):
+        print(
+            "pr-marker run-tests: test-quality checker JSON must be an object.",
+            file=sys.stderr,
+        )
+        return (2, {})
+
+    status = payload.get("status", "unknown")
+    evidence = payload.get("evidence", "unknown")
+    warnings = int(payload.get("warning_count", 0))
+    print(
+        f"pr-marker run-tests: test-quality preflight {status} "
+        f"(evidence: {evidence}, warnings: {warnings})",
+        file=sys.stderr,
+    )
+    for finding in payload.get("findings", []):
+        if not isinstance(finding, dict):
+            continue
+        severity = str(finding.get("severity", "warning")).upper()
+        rule = finding.get("rule", "unknown")
+        message = finding.get("message", "")
+        paths = finding.get("paths") or []
+        paths_note = f" [{', '.join(str(path) for path in paths)}]" if paths else ""
+        print(
+            f"pr-marker run-tests: {severity} [{rule}] {message}{paths_note}",
+            file=sys.stderr,
+        )
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+    if result.returncode == 0 and (
+        status != "passed" or evidence == "unavailable"
+    ):
+        print(
+            "pr-marker run-tests: the test-quality preflight did not analyze a "
+            "branch diff; pass --base-ref <ref>.",
+            file=sys.stderr,
+        )
+        return (1, payload)
+    return (result.returncode, payload)
+
+
 def cmd_run_tests(args: argparse.Namespace) -> int:
     """Run the check commands and write the `tests` marker only if all pass.
 
@@ -428,11 +550,37 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         )
         return 1
 
+    dirty_before = dirty_worktree_entries()
+    if dirty_before:
+        removed = _invalidate_tests_marker(kind)
+        print(
+            "pr-marker run-tests: refusing to certify HEAD while the repository has "
+            f"staged, unstaged, or untracked files{removed}:",
+            file=sys.stderr,
+        )
+        for entry in dirty_before:
+            print(f"  {entry}", file=sys.stderr)
+        print(
+            "Commit or remove the changes, then run the full checks again.",
+            file=sys.stderr,
+        )
+        return 1
+
     commands = [c.strip() for c in args.cmd]
     if any(not c for c in commands):
         print(
             "pr-marker run-tests: refusing to run: an empty --cmd was given; "
             "pass the real check commands.",
+            file=sys.stderr,
+        )
+        return 1
+
+    quality_code, quality = _run_test_quality_preflight(args)
+    if quality_code != 0:
+        removed = _invalidate_tests_marker(kind)
+        print(
+            "pr-marker run-tests: test-quality evidence preflight failed; "
+            f"not running checks or writing the tests marker{removed}.",
             file=sys.stderr,
         )
         return 1
@@ -454,12 +602,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
 
     failed = [c for c, code, _ in results if code != 0]
     if failed:
-        # Invalidate any prior passing marker so the latest run must be green.
-        stale = marker_path(kind)
-        removed = ""
-        if stale.exists():
-            stale.unlink()
-            removed = " (removed the previous tests marker)"
+        removed = _invalidate_tests_marker(kind)
         print(
             f"pr-marker run-tests: {len(failed)} of {len(results)} command(s) failed; "
             f"not writing the tests marker{removed}.",
@@ -467,7 +610,27 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         )
         return 1
 
+    dirty_after = dirty_worktree_entries()
+    if dirty_after:
+        removed = _invalidate_tests_marker(kind)
+        print(
+            "pr-marker run-tests: checks changed the repository, so the run cannot "
+            f"certify HEAD{removed}:",
+            file=sys.stderr,
+        )
+        for entry in dirty_after:
+            print(f"  {entry}", file=sys.stderr)
+        print(
+            "Clean or commit the generated changes, then run the full checks again.",
+            file=sys.stderr,
+        )
+        return 1
+
     ran_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    source_files = quality.get("source_files") or []
+    test_files = quality.get("test_files") or []
+    warning_count = int(quality.get("warning_count", 0))
+    waiver = quality.get("waiver") or "none"
     lines = [
         f"{REVIEWED_COMMIT_PREFIX}{head}{REVIEWED_COMMIT_SUFFIX}",
         TESTS_RESULT_HEADER,
@@ -477,6 +640,16 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         f"Codespace: {codespace}",
         f"Ran at: {ran_at}",
         f"Commit: {head}",
+        "",
+        "Test-quality evidence preflight:",
+        f"- status: {quality.get('status', 'unavailable')}",
+        f"- evidence: {quality.get('evidence', 'unavailable')}",
+        f"- base ref: {quality.get('base_ref') or 'unavailable'}",
+        f"- base commit: {quality.get('base_commit') or 'unavailable'}",
+        f"- executable source files changed: {len(source_files)}",
+        f"- test files changed: {len(test_files)}",
+        f"- warnings: {warning_count}",
+        f"- no-test-change reason: {waiver}",
         "",
         "Commands:",
     ]
@@ -631,6 +804,22 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "record an explicit infeasibility narrowing "
             "(genuine infeasibility only, never slowness)"
+        ),
+    )
+    p_run.add_argument(
+        "--base-ref",
+        default=None,
+        help=(
+            "base branch/ref for the test-quality diff "
+            "(defaults to environment/default-branch inference)"
+        ),
+    )
+    p_run.add_argument(
+        "--no-test-change-reason",
+        default=None,
+        help=(
+            "specific reason executable source changed without a committed test "
+            "change; recorded in the tests marker"
         ),
     )
     p_run.set_defaults(func=cmd_run_tests)
