@@ -596,6 +596,28 @@ Untrusted live states JSON:
 """.strip()
 
 
+def refresh_draft_artifacts(
+    draft: str,
+    *,
+    config: Config,
+    current: dt.datetime,
+) -> tuple[str, set[tuple[str, str, str, int]]]:
+    validate_content_safety(draft, config)
+    refs = extract_artifact_refs(draft)
+    validate_artifact_count(refs)
+    refreshed_keys = artifact_ref_keys(refs)
+    if not refs:
+        return draft, refreshed_keys
+    states = fetch_artifact_states(refs)
+    refreshed = run_copilot(
+        build_refresh_prompt(draft, states),
+        config=config,
+        session_name=f"NUX FR handoff refresh {current.date().isoformat()}",
+        use_session_store=False,
+    )
+    return refreshed.strip(), refreshed_keys
+
+
 def validate_content_safety(content: str, config: Config) -> None:
     if len(content.encode("utf-8")) < config.minimum_draft_bytes:
         raise HandoffError("draft is below the configured minimum size")
@@ -994,6 +1016,11 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
                 "all_session_ids": ["provided-draft"],
                 "relevant_session_ids": ["provided-draft"],
             }
+            draft, refreshed_artifact_keys = refresh_draft_artifacts(
+                draft,
+                config=config,
+                current=current,
+            )
         else:
             reference_comment = fetch_reference_comment(config.reference_comment_url)
             prompt = build_synthesis_prompt(
@@ -1009,18 +1036,11 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
                 use_session_store=True,
             )
             audit, draft = parse_synthesis_response(response)
-            validate_content_safety(draft, config)
-            refs = extract_artifact_refs(draft)
-            validate_artifact_count(refs)
-            refreshed_artifact_keys = artifact_ref_keys(refs)
-            states = fetch_artifact_states(refs)
-            refresh_response = run_copilot(
-                build_refresh_prompt(draft, states),
+            draft, refreshed_artifact_keys = refresh_draft_artifacts(
+                draft,
                 config=config,
-                session_name=f"NUX FR handoff refresh {current.date().isoformat()}",
-                use_session_store=False,
+                current=current,
             )
-            draft = refresh_response.strip()
 
         draft_path.write_text(draft.rstrip() + "\n", encoding="utf-8")
         content = draft_path.read_text(encoding="utf-8")

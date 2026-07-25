@@ -486,6 +486,33 @@ def test_final_draft_cannot_add_unrefreshed_artifacts():
         handoff.validate_final_artifacts(markdown, refreshed)
 
 
+@patch("nux_fr_handoff.run_copilot")
+@patch("nux_fr_handoff.fetch_artifact_states")
+def test_supplied_draft_uses_live_artifact_refresh(
+    mocked_fetch,
+    mocked_copilot,
+    tmp_path: Path,
+):
+    draft = (
+        "## Actionable\n\n"
+        "[PR](https://github.com/acme/widgets/pull/42)\n\n"
+        "## Informational\n\nDone.\n"
+    )
+    mocked_fetch.return_value = [{"url": "https://github.com/acme/widgets/pull/42"}]
+    mocked_copilot.return_value = draft
+
+    refreshed, keys = handoff.refresh_draft_artifacts(
+        draft,
+        config=make_config(tmp_path),
+        current=dt.datetime(2026, 7, 24, tzinfo=dt.timezone.utc),
+    )
+
+    assert refreshed == draft.strip()
+    assert keys == {("acme", "widgets", "pull", 42)}
+    mocked_fetch.assert_called_once()
+    mocked_copilot.assert_called_once()
+
+
 def test_quiet_week_draft_passes_structural_safety(tmp_path: Path):
     content = (
         "## Actionable\n\nNo session-backed work needs handoff.\n\n"
