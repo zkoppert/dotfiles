@@ -92,6 +92,25 @@ class TestAnalysis(unittest.TestCase):
             self.assertEqual(result.evidence, "waived")
             self.assertEqual(result.waiver, reason)
 
+    def test_detailed_waiver_can_explain_why_no_tests_are_needed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write("tool.py", "def value():\n    return 1\n")
+            repo.commit("source")
+            reason = (
+                "No tests needed since the generated schema compatibility command "
+                "verifies the exact output and fails on drift."
+            )
+
+            result = check.analyze(
+                cwd=repo.root,
+                base_ref="main",
+                no_test_change_reason=reason,
+            )
+
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.evidence, "waived")
+
     def test_placeholder_waiver_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(tmp)
@@ -108,6 +127,70 @@ class TestAnalysis(unittest.TestCase):
             self.assertIn(
                 "invalid-no-test-waiver", {item.rule for item in result.errors}
             )
+
+    def test_padded_placeholder_waiver_is_rejected(self) -> None:
+        for reason in (
+            "Tests are not needed here because this is simple.",
+            "Not needed here because this is simple.",
+            "Skip because this is simple.",
+        ):
+            with self.subTest(reason=reason):
+                with tempfile.TemporaryDirectory() as tmp:
+                    repo = make_repo(tmp)
+                    repo.write("tool.py", "def value():\n    return 1\n")
+                    repo.commit("source")
+
+                    result = check.analyze(
+                        cwd=repo.root,
+                        base_ref="main",
+                        no_test_change_reason=reason,
+                    )
+
+                    self.assertEqual(result.status, "failed")
+                    self.assertIn(
+                        "invalid-no-test-waiver",
+                        {item.rule for item in result.errors},
+                    )
+
+    def test_past_tense_placeholder_waiver_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write("tool.py", "def value():\n    return 1\n")
+            repo.commit("source")
+
+            result = check.analyze(
+                cwd=repo.root,
+                base_ref="main",
+                no_test_change_reason="No tests were needed here because this is simple.",
+            )
+
+            self.assertEqual(result.status, "failed")
+            self.assertIn(
+                "invalid-no-test-waiver", {item.rule for item in result.errors}
+            )
+
+    def test_singular_past_tense_placeholder_waiver_is_rejected(self) -> None:
+        for reason in (
+            "No test was needed here because this is simple.",
+            "Test was not needed here because this is simple.",
+        ):
+            with self.subTest(reason=reason):
+                with tempfile.TemporaryDirectory() as tmp:
+                    repo = make_repo(tmp)
+                    repo.write("tool.py", "def value():\n    return 1\n")
+                    repo.commit("source")
+
+                    result = check.analyze(
+                        cwd=repo.root,
+                        base_ref="main",
+                        no_test_change_reason=reason,
+                    )
+
+                    self.assertEqual(result.status, "failed")
+                    self.assertIn(
+                        "invalid-no-test-waiver",
+                        {item.rule for item in result.errors},
+                    )
 
     def test_source_and_test_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,6 +314,354 @@ class TestAnalysis(unittest.TestCase):
                 "test-change-without-assertion",
                 {item.rule for item in result.warnings},
             )
+
+    def test_existing_inline_rust_test_edit_counts_as_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write(
+                "src/lib.rs",
+                "pub fn value() -> i32 { 1 }\n\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    use super::value;\n\n"
+                "    #[test]\n"
+                "    fn returns_value() { assert_eq!(value(), 1); }\n"
+                "}\n",
+            )
+            repo.commit("rust baseline")
+            repo.git("checkout", "-q", "main")
+            repo.git("merge", "-q", "--ff-only", "feature")
+            repo.git("checkout", "-q", "-b", "edit-inline-rust-test")
+            repo.write(
+                "src/lib.rs",
+                "pub fn value() -> i32 { 2 }\n\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    use super::value;\n\n"
+                "    #[test]\n"
+                "    fn returns_value() { assert_eq!(value(), 2); }\n"
+                "}\n",
+            )
+            repo.commit("update source and existing inline test")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.evidence, "present")
+            self.assertEqual(result.test_files, ["src/lib.rs"])
+
+    def test_external_rust_test_module_does_not_absorb_production_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write(
+                "src/lib.rs",
+                "#[cfg(test)]\n"
+                "mod tests;\n\n"
+                "pub fn value() -> i32 { 1 }\n",
+            )
+            repo.write("src/tests.rs", "#[test]\nfn smoke() { assert!(true); }\n")
+            repo.commit("rust baseline")
+            repo.git("checkout", "-q", "main")
+            repo.git("merge", "-q", "--ff-only", "feature")
+            repo.git("checkout", "-q", "-b", "source-only-rust-edit")
+            repo.write(
+                "src/lib.rs",
+                "#[cfg(test)]\n"
+                "mod tests;\n\n"
+                "pub fn value() -> i32 { 2 }\n",
+            )
+            repo.commit("source-only change")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.evidence, "missing")
+            self.assertEqual(result.test_files, [])
+
+    def test_same_line_external_rust_module_does_not_absorb_production(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write(
+                "src/lib.rs",
+                "#[cfg(test)] mod tests;\n\n"
+                "pub fn value() -> i32 { 1 }\n",
+            )
+            repo.write("src/tests.rs", "#[test]\nfn smoke() { assert!(true); }\n")
+            repo.commit("rust baseline")
+            repo.git("checkout", "-q", "main")
+            repo.git("merge", "-q", "--ff-only", "feature")
+            repo.git("checkout", "-q", "-b", "same-line-external-rust")
+            repo.write(
+                "src/lib.rs",
+                "#[cfg(test)] mod tests;\n\n"
+                "pub fn value() -> i32 { 2 }\n",
+            )
+            repo.commit("source-only change")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.test_files, [])
+
+    def test_commented_rust_test_attribute_does_not_absorb_production(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write(
+                "src/lib.rs",
+                "/*\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "}\n"
+                "*/\n"
+                "pub fn value() -> i32 { 1 }\n",
+            )
+            repo.commit("rust baseline")
+            repo.git("checkout", "-q", "main")
+            repo.git("merge", "-q", "--ff-only", "feature")
+            repo.git("checkout", "-q", "-b", "commented-rust-test")
+            repo.write(
+                "src/lib.rs",
+                "/*\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "}\n"
+                "*/\n"
+                "pub fn value() -> i32 { 2 }\n",
+            )
+            repo.commit("source-only change")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.test_files, [])
+
+    def test_rust_braces_in_strings_do_not_absorb_production_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write(
+                "src/lib.rs",
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    #[test]\n"
+                '    fn renders_brace() { assert_eq!(format!(\"{{\"), \"{\"); }\n'
+                "}\n\n"
+                "pub fn value() -> i32 { 1 }\n",
+            )
+            repo.commit("rust baseline")
+            repo.git("checkout", "-q", "main")
+            repo.git("merge", "-q", "--ff-only", "feature")
+            repo.git("checkout", "-q", "-b", "source-after-rust-test")
+            repo.write(
+                "src/lib.rs",
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    #[test]\n"
+                '    fn renders_brace() { assert_eq!(format!(\"{{\"), \"{\"); }\n'
+                "}\n\n"
+                "pub fn value() -> i32 { 2 }\n",
+            )
+            repo.commit("source-only change")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.test_files, [])
+
+    def test_deletion_inside_inline_rust_test_counts_as_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write(
+                "src/lib.rs",
+                "pub fn value() -> i32 { 1 }\n\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    use super::value;\n\n"
+                "    #[test]\n"
+                "    fn returns_value() {\n"
+                "        assert_eq!(value(), 1);\n"
+                "        assert_ne!(value(), 0);\n"
+                "    }\n"
+                "}\n",
+            )
+            repo.commit("rust baseline")
+            repo.git("checkout", "-q", "main")
+            repo.git("merge", "-q", "--ff-only", "feature")
+            repo.git("checkout", "-q", "-b", "delete-inline-rust-assertion")
+            repo.write(
+                "src/lib.rs",
+                "pub fn value() -> i32 { 2 }\n\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    use super::value;\n\n"
+                "    #[test]\n"
+                "    fn returns_value() {\n"
+                "        assert_eq!(value(), 1);\n"
+                "    }\n"
+                "}\n",
+            )
+            repo.commit("update source and delete inline assertion")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.evidence, "present")
+            self.assertEqual(result.test_files, ["src/lib.rs"])
+            self.assertIn(
+                "test-change-without-assertion",
+                {item.rule for item in result.warnings},
+            )
+
+    def test_deleted_all_rust_test_assertions_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write(
+                "src/lib.rs",
+                "pub fn value(input: i32) -> i32 {\n"
+                "    debug_assert!(input >= 0);\n"
+                "    input\n"
+                "}\n\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    use super::value;\n\n"
+                "    #[test]\n"
+                "    fn returns_value() {\n"
+                "        assert_eq!(value(1), 1);\n"
+                "    }\n"
+                "}\n",
+            )
+            repo.commit("rust baseline")
+            repo.git("checkout", "-q", "main")
+            repo.git("merge", "-q", "--ff-only", "feature")
+            repo.git("checkout", "-q", "-b", "delete-all-rust-assertions")
+            repo.write(
+                "src/lib.rs",
+                "pub fn value(input: i32) -> i32 {\n"
+                "    debug_assert!(input >= 0);\n"
+                "    input + 1\n"
+                "}\n\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    use super::value;\n\n"
+                "    #[test]\n"
+                "    fn returns_value() {\n"
+                "        let _ = value(1);\n"
+                "    }\n"
+                "}\n",
+            )
+            repo.commit("remove test assertion")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "passed")
+            self.assertIn(
+                "test-change-without-assertion",
+                {item.rule for item in result.warnings},
+            )
+
+    def test_production_rust_assertion_does_not_hide_empty_test(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write(
+                "src/lib.rs",
+                "pub fn value(input: i32) -> i32 { input }\n\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    use super::value;\n\n"
+                "    #[test]\n"
+                "    fn returns_value() { assert_eq!(value(1), 1); }\n"
+                "}\n",
+            )
+            repo.commit("rust baseline")
+            repo.git("checkout", "-q", "main")
+            repo.git("merge", "-q", "--ff-only", "feature")
+            repo.git("checkout", "-q", "-b", "production-rust-assertion")
+            repo.write(
+                "src/lib.rs",
+                "pub fn value(input: i32) -> i32 {\n"
+                "    assert!(input >= 0);\n"
+                "    input + 1\n"
+                "}\n\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    use super::value;\n\n"
+                "    #[test]\n"
+                "    fn returns_value() { let _ = value(1); }\n"
+                "}\n",
+            )
+            repo.commit("move assertion out of test")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "passed")
+            self.assertIn(
+                "test-change-without-assertion",
+                {item.rule for item in result.warnings},
+            )
+
+    def test_fake_rust_test_attributes_do_not_count_as_evidence(self) -> None:
+        for fake_test in (
+            'pub const GENERATED: &str = r#"#[test] fn fake() {}"#;\n',
+            "/* #[test] fn fake() {} */\n",
+        ):
+            with self.subTest(fake_test=fake_test):
+                with tempfile.TemporaryDirectory() as tmp:
+                    repo = make_repo(tmp)
+                    repo.write("src/lib.rs", "pub fn value() -> i32 { 1 }\n")
+                    repo.commit("rust baseline")
+                    repo.git("checkout", "-q", "main")
+                    repo.git("merge", "-q", "--ff-only", "feature")
+                    repo.git("checkout", "-q", "-b", "fake-rust-test")
+                    repo.write(
+                        "src/lib.rs",
+                        fake_test + "pub fn value() -> i32 { 2 }\n",
+                    )
+                    repo.commit("source-only change with fake test text")
+
+                    result = check.analyze(cwd=repo.root, base_ref="main")
+
+                    self.assertEqual(result.status, "failed")
+                    self.assertEqual(result.test_files, [])
+
+    def test_renamed_rust_file_uses_old_inline_test_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write(
+                "src/lib.rs",
+                "pub fn value() -> i32 { 1 }\n\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    use super::value;\n\n"
+                "    #[test]\n"
+                "    fn returns_value() {\n"
+                "        assert_eq!(value(), 1);\n"
+                "        assert_ne!(value(), 0);\n"
+                "    }\n"
+                "}\n",
+            )
+            repo.commit("rust baseline")
+            repo.git("checkout", "-q", "main")
+            repo.git("merge", "-q", "--ff-only", "feature")
+            repo.git("checkout", "-q", "-b", "rename-rust-test")
+            repo.git("mv", "src/lib.rs", "src/core.rs")
+            repo.write(
+                "src/core.rs",
+                "pub fn value() -> i32 { 2 }\n\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    use super::value;\n\n"
+                "    #[test]\n"
+                "    fn returns_value() {\n"
+                "        assert_eq!(value(), 1);\n"
+                "    }\n"
+                "}\n",
+            )
+            repo.commit("rename rust source and delete assertion")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.evidence, "present")
+            self.assertEqual(result.test_files, ["src/core.rs"])
 
     def test_fixture_file_does_not_count_as_test_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -451,6 +882,28 @@ class TestAnalysis(unittest.TestCase):
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.base_ref, "(empty tree)")
             self.assertEqual(result.source_files, ["tool.py"])
+
+    def test_non_root_main_does_not_compare_head_with_itself(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Repo(Path(tmp))
+            repo.git("init", "-q")
+            repo.git("config", "user.email", "test@example.com")
+            repo.git("config", "user.name", "test-quality")
+            repo.git("checkout", "-q", "-b", "main")
+            repo.write("README.md", "# base\n")
+            repo.commit("base")
+            repo.write("tool.py", "def value():\n    return 1\n")
+            repo.commit("source")
+
+            with patch.dict(
+                os.environ,
+                {"TEST_QUALITY_BASE_REF": "", "GITHUB_BASE_REF": ""},
+                clear=False,
+            ):
+                result = check.analyze(cwd=repo.root)
+
+            self.assertEqual(result.status, "skipped")
+            self.assertIn("base-not-inferred", {item.rule for item in result.warnings})
 
     def test_explicit_missing_base_is_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

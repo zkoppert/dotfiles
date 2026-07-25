@@ -58,6 +58,13 @@ PLACEHOLDER_WAIVERS = {
     "test not needed",
     "tests not needed",
 }
+PLACEHOLDER_WAIVER_RE = re.compile(
+    r"^(?:no\s+tests?\s+(?:(?:are|is|was|were)\s+)?(?:needed|required|necessary)|"
+    r"tests?\s+(?:(?:are|is|was|were)\s+)?not\s+(?:needed|required|necessary)|"
+    r"skip(?:ping)?(?:\s+tests?)?|not\s+needed)"
+    r"(?:\s+(?:here|for this change|because this is simple))*[.!]?$",
+    re.IGNORECASE,
+)
 ASSERTION_RE = re.compile(
     r"\b(assert|expect|refute|should|pytest\.raises|assert_raises|raise_error)\b"
     r"|assert(?:_eq|_ne)?!\s*\(|\.to(Have|Equal|Be|Match|Contain)",
@@ -96,6 +103,10 @@ class FileChange:
 @dataclass
 class DiffHunk:
     path: str
+    old_start: int
+    old_count: int
+    new_start: int
+    new_count: int
     added: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
 
@@ -215,7 +226,7 @@ def infer_base(head_commit: str, *, cwd: Path) -> tuple[str, str] | None:
             continue
         seen.add(candidate)
         candidate_commit = resolve_commit(candidate, cwd=cwd)
-        if not candidate_commit:
+        if not candidate_commit or candidate_commit == head_commit:
             continue
         merge_base = git_text(
             ["merge-base", candidate_commit, head_commit],
@@ -368,6 +379,223 @@ def added_lines_by_path(
     return added
 
 
+def file_text(commit: str, path: str, *, cwd: Path) -> str:
+    result = run_git(["show", f"{commit}:{path}"], cwd=cwd, check=False)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def rust_structural_lines(content: str) -> list[str]:
+    output: list[str] = []
+    current: list[str] = []
+    block_depth = 0
+    line_comment = False
+    normal_string = False
+    char_literal = False
+    raw_hashes: int | None = None
+    escaped = False
+    index = 0
+
+    while index < len(content):
+        char = content[index]
+        next_char = content[index + 1] if index + 1 < len(content) else ""
+
+        if char == "\n":
+            output.append("".join(current))
+            current = []
+            line_comment = False
+            if normal_string and escaped:
+                escaped = False
+            index += 1
+            continue
+
+        if line_comment:
+            current.append(" ")
+            index += 1
+            continue
+
+        if block_depth:
+            if char == "/" and next_char == "*":
+                block_depth += 1
+                current.extend((" ", " "))
+                index += 2
+            elif char == "*" and next_char == "/":
+                block_depth -= 1
+                current.extend((" ", " "))
+                index += 2
+            else:
+                current.append(" ")
+                index += 1
+            continue
+
+        if raw_hashes is not None:
+            closing = '"' + ("#" * raw_hashes)
+            if content.startswith(closing, index):
+                current.extend(" " * len(closing))
+                index += len(closing)
+                raw_hashes = None
+            else:
+                current.append(" ")
+                index += 1
+            continue
+
+        if normal_string:
+            current.append(" ")
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                normal_string = False
+            index += 1
+            continue
+
+        if char_literal:
+            current.append(" ")
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == "'":
+                char_literal = False
+            index += 1
+            continue
+
+        if char == "/" and next_char == "/":
+            line_comment = True
+            current.extend((" ", " "))
+            index += 2
+            continue
+        if char == "/" and next_char == "*":
+            block_depth = 1
+            current.extend((" ", " "))
+            index += 2
+            continue
+
+        raw_start = index
+        if content.startswith("br", index):
+            raw_start += 2
+        elif char == "r":
+            raw_start += 1
+        else:
+            raw_start = -1
+        if raw_start >= 0:
+            cursor = raw_start
+            while cursor < len(content) and content[cursor] == "#":
+                cursor += 1
+            if cursor < len(content) and content[cursor] == '"':
+                raw_hashes = cursor - raw_start
+                length = cursor - index + 1
+                current.extend(" " * length)
+                index = cursor + 1
+                continue
+
+        if char == '"':
+            normal_string = True
+            current.append(" ")
+            index += 1
+            continue
+        if (
+            char == "'"
+            and index + 2 < len(content)
+            and content[index + 2] == "'"
+        ):
+            char_literal = True
+            current.append(" ")
+            index += 1
+            continue
+
+        current.append(char)
+        index += 1
+
+    output.append("".join(current))
+    return output
+
+
+def rust_test_lines(content: str) -> set[int]:
+    test_lines: set[int] = set()
+    pending = False
+    depth = 0
+    raw_lines = content.splitlines()
+    structural_lines = rust_structural_lines(content)
+    for line_number, (_raw_line, structural_line) in enumerate(
+        zip(raw_lines, structural_lines),
+        start=1,
+    ):
+        if depth > 0:
+            test_lines.add(line_number)
+            depth += structural_line.count("{") - structural_line.count("}")
+            continue
+        if pending:
+            test_lines.add(line_number)
+            if "{" in structural_line:
+                depth = structural_line.count("{") - structural_line.count("}")
+                pending = False
+            elif ";" in structural_line:
+                pending = False
+            continue
+        if RUST_TEST_RE.search(structural_line):
+            test_lines.add(line_number)
+            if "{" in structural_line:
+                depth = structural_line.count("{") - structural_line.count("}")
+            elif ";" in structural_line:
+                pending = False
+            else:
+                pending = True
+    return test_lines
+
+
+def rust_inline_test_changed(
+    path: str,
+    hunks: list[DiffHunk],
+    *,
+    base_commit: str,
+    head_commit: str,
+    cwd: Path,
+    old_path: str | None = None,
+) -> bool:
+    old_test_lines = rust_test_lines(
+        file_text(base_commit, old_path or path, cwd=cwd)
+    )
+    new_test_lines = rust_test_lines(file_text(head_commit, path, cwd=cwd))
+    return any(
+        hunk.path == path
+        and (
+            (
+                hunk.new_count > 0
+                and new_test_lines.intersection(
+                    range(hunk.new_start, hunk.new_start + hunk.new_count)
+                )
+            )
+            or (
+                hunk.old_count > 0
+                and old_test_lines.intersection(
+                    range(hunk.old_start, hunk.old_start + hunk.old_count)
+                )
+            )
+        )
+        for hunk in hunks
+    )
+
+
+def rust_added_test_lines(
+    path: str,
+    hunks: list[DiffHunk],
+    *,
+    head_commit: str,
+    cwd: Path,
+) -> list[str]:
+    test_lines = rust_test_lines(file_text(head_commit, path, cwd=cwd))
+    return [
+        line
+        for hunk in hunks
+        if hunk.path == path
+        for offset, line in enumerate(hunk.added)
+        if hunk.new_start + offset in test_lines
+    ]
+
+
 def diff_hunks(base_commit: str, head_commit: str, *, cwd: Path) -> list[DiffHunk]:
     patch = git_text(
         ["diff", "--unified=0", "--no-color", base_commit, head_commit, "--"],
@@ -385,7 +613,20 @@ def diff_hunks(base_commit: str, head_commit: str, *, cwd: Path) -> list[DiffHun
         elif line == "+++ /dev/null":
             current_path = old_path
         elif line.startswith("@@") and current_path:
-            current_hunk = DiffHunk(path=current_path)
+            match = re.match(
+                r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
+                line,
+            )
+            if not match:
+                current_hunk = None
+                continue
+            current_hunk = DiffHunk(
+                path=current_path,
+                old_start=int(match.group(1)),
+                old_count=int(match.group(2) or "1"),
+                new_start=int(match.group(3)),
+                new_count=int(match.group(4) or "1"),
+            )
             hunks.append(current_hunk)
         elif current_hunk and line.startswith("+") and not line.startswith("+++"):
             current_hunk.added.append(line[1:])
@@ -421,7 +662,11 @@ def valid_waiver(reason: str | None) -> bool:
     if not reason:
         return False
     normalized = " ".join(reason.split()).strip()
-    return len(normalized) >= 20 and normalized.lower() not in PLACEHOLDER_WAIVERS
+    return bool(
+        len(normalized) >= 20
+        and normalized.lower() not in PLACEHOLDER_WAIVERS
+        and not PLACEHOLDER_WAIVER_RE.search(normalized)
+    )
 
 
 def analyze(
@@ -518,11 +763,24 @@ def analyze(
         if executable_changes[change] and not has_test_path_shape(change.path)
     ]
     added_by_path = added_lines_by_path(base_commit, head_commit, cwd=root)
+    hunks = diff_hunks(base_commit, head_commit, cwd=root)
+    old_paths = {
+        change.path: change.old_path
+        for change in changes
+        if change.status.startswith("R") and change.old_path
+    }
     inline_rust_tests = sorted(
         path
         for path, lines in added_by_path.items()
         if PurePosixPath(path).suffix.lower() == ".rs"
-        and any(RUST_TEST_RE.search(line) for line in lines)
+        and rust_inline_test_changed(
+            path,
+            hunks,
+            base_commit=base_commit,
+            head_commit=head_commit,
+            cwd=root,
+            old_path=old_paths.get(path),
+        )
     )
     test_changes = [
         change
@@ -593,20 +851,30 @@ def analyze(
         )
 
     test_added_lines = {
-        path: lines
+        path: (
+            rust_added_test_lines(
+                path,
+                hunks,
+                head_commit=head_commit,
+                cwd=root,
+            )
+            if path in inline_rust_tests
+            else lines
+        )
         for path, lines in added_by_path.items()
         if path in test_files
     }
-    if test_files and not any(
+    added_assertion = any(
         ASSERTION_RE.search(line) or UNITTEST_ASSERTION_RE.search(line)
         for lines in test_added_lines.values()
         for line in lines
-    ):
+    )
+    if test_files and not added_assertion:
         findings.append(
             Finding(
                 "warning",
                 "test-change-without-assertion",
-                "Test files changed without adding an assertion or expectation. Confirm the change pins observable behavior.",
+                "No assertion or expectation was added in the changed test lines. Confirm retained coverage still pins observable behavior.",
                 test_files,
             )
         )
@@ -641,7 +909,6 @@ def analyze(
             )
         )
 
-    hunks = diff_hunks(base_commit, head_commit, cwd=root)
     coverage_patterns = [
         re.compile(r"cov-fail-under(?:=|\s+)(\d+)", re.IGNORECASE),
         re.compile(r"fail_under\s*=\s*(\d+)", re.IGNORECASE),
