@@ -174,6 +174,24 @@ class TestAnalysis(unittest.TestCase):
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.source_files, ["bin/tool"])
 
+    def test_removing_script_markers_still_counts_as_source_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write("bin/tool", "#!/usr/bin/env bash\necho ok\n", executable=True)
+            repo.commit("add script")
+            repo.git("checkout", "-q", "main")
+            repo.git("merge", "-q", "--ff-only", "feature")
+            repo.git("checkout", "-q", "-b", "remove-script-markers")
+            repo.write("bin/tool", "echo no longer executable\n")
+            (repo.root / "bin/tool").chmod(0o644)
+            repo.commit("remove script markers")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.source_files, ["bin/tool"])
+            self.assertIn("source-without-test", {item.rule for item in result.errors})
+
     def test_modern_javascript_module_extensions_are_source(self) -> None:
         for extension in (".cjs", ".cts", ".mjs", ".mts"):
             with self.subTest(extension=extension):
@@ -234,8 +252,33 @@ class TestAnalysis(unittest.TestCase):
             self.assertEqual(result.evidence, "missing")
             self.assertEqual(result.test_files, [])
             self.assertIn("source-without-test", {item.rule for item in result.errors})
-            self.assertEqual(tree_entry_mock.call_count, 1)
-            self.assertEqual(shebang_mock.call_count, 1)
+            self.assertEqual(tree_entry_mock.call_count, 0)
+            self.assertEqual(shebang_mock.call_count, 0)
+
+    def test_renamed_script_checks_the_original_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            original = "#!/usr/bin/env bash\n" + "".join(
+                f"echo line-{index}\n" for index in range(30)
+            )
+            repo.write("bin/tool", original, executable=True)
+            repo.commit("add script")
+            repo.git("checkout", "-q", "main")
+            repo.git("merge", "-q", "--ff-only", "feature")
+            repo.git("checkout", "-q", "-b", "rename-script")
+            repo.git("mv", "bin/tool", "bin/tool-renamed")
+            renamed = repo.root / "bin/tool-renamed"
+            renamed.write_text(
+                original.removeprefix("#!/usr/bin/env bash\n"),
+                encoding="utf-8",
+            )
+            renamed.chmod(0o644)
+            repo.commit("rename and remove script markers")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.source_files, ["bin/tool-renamed"])
 
     def test_extensionless_executable_in_test_directory_counts_as_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -392,6 +435,22 @@ class TestAnalysis(unittest.TestCase):
 
             self.assertEqual(result.status, "passed")
             self.assertEqual(result.base_ref, "(empty tree)")
+
+    def test_root_commit_on_main_uses_empty_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Repo(Path(tmp))
+            repo.git("init", "-q")
+            repo.git("config", "user.email", "test@example.com")
+            repo.git("config", "user.name", "test-quality")
+            repo.git("checkout", "-q", "-b", "main")
+            repo.write("tool.py", "def value():\n    return 1\n")
+            repo.commit("root source")
+
+            result = check.analyze(cwd=repo.root)
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.base_ref, "(empty tree)")
+            self.assertEqual(result.source_files, ["tool.py"])
 
     def test_explicit_missing_base_is_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

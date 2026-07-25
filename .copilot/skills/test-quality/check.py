@@ -190,6 +190,9 @@ def is_root_commit(commit: str, *, cwd: Path) -> bool:
 
 
 def infer_base(head_commit: str, *, cwd: Path) -> tuple[str, str] | None:
+    if is_root_commit(head_commit, cwd=cwd):
+        return "(empty tree)", empty_tree(cwd)
+
     env_ref = os.environ.get("TEST_QUALITY_BASE_REF") or os.environ.get(
         "GITHUB_BASE_REF"
     )
@@ -222,8 +225,6 @@ def infer_base(head_commit: str, *, cwd: Path) -> tuple[str, str] | None:
         if merge_base:
             return candidate, merge_base
 
-    if is_root_commit(head_commit, cwd=cwd):
-        return "(empty tree)", empty_tree(cwd)
     return None
 
 
@@ -304,6 +305,15 @@ def has_shebang(commit: str, path: str, *, cwd: Path) -> bool:
     return first_line.startswith(b"#!")
 
 
+def is_executable_at(commit: str, path: str, *, cwd: Path) -> bool:
+    if PurePosixPath(path).suffix.lower() in SOURCE_EXTENSIONS:
+        return True
+    entry = tree_entry(commit, path, cwd=cwd)
+    if entry and entry[0] in {"100755", "100775"}:
+        return True
+    return has_shebang(commit, path, cwd=cwd)
+
+
 def is_executable_code_change(
     change: FileChange,
     *,
@@ -311,16 +321,31 @@ def is_executable_code_change(
     head_commit: str,
     cwd: Path,
 ) -> bool:
-    path = PurePosixPath(change.path)
-    if path.suffix.lower() in SOURCE_EXTENSIONS:
+    if change.status.startswith("D"):
+        candidates = [(base_commit, change.old_path or change.path)]
+    elif change.status.startswith("A"):
+        candidates = [(head_commit, change.path)]
+    elif change.status.startswith("R"):
+        candidates = [
+            (base_commit, change.old_path or change.path),
+            (head_commit, change.path),
+        ]
+    else:
+        candidates = [
+            (base_commit, change.path),
+            (head_commit, change.path),
+        ]
+    if any(
+        PurePosixPath(path).suffix.lower() in SOURCE_EXTENSIONS
+        for _commit, path in candidates
+    ):
         return True
-
-    commit = base_commit if change.status.startswith("D") else head_commit
-    target = change.old_path if change.status.startswith("D") and change.old_path else change.path
-    entry = tree_entry(commit, target, cwd=cwd)
-    if entry and entry[0] in {"100755", "100775"}:
-        return True
-    return has_shebang(commit, target, cwd=cwd)
+    if all(PurePosixPath(path).suffix for _commit, path in candidates):
+        return False
+    return any(
+        is_executable_at(commit, path, cwd=cwd)
+        for commit, path in candidates
+    )
 
 
 def added_lines_by_path(

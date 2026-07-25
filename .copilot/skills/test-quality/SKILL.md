@@ -19,6 +19,8 @@ Coverage reports show which code ran. They do not prove that tests asserted the 
 
 ## Run the deterministic preflight
 
+The checker compares a base commit with committed `HEAD`. Commit the drafted tree before using the checker as a review or PR-readiness gate. While authoring, use the behavior matrix and no-op questions against the working diff, then run the deterministic preflight after committing.
+
 From the repository root:
 
 ```bash
