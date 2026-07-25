@@ -17,8 +17,10 @@ from typing import Any
 SOURCE_EXTENSIONS = {
     ".bash",
     ".c",
+    ".cjs",
     ".cc",
     ".cpp",
+    ".cts",
     ".go",
     ".h",
     ".hpp",
@@ -27,6 +29,8 @@ SOURCE_EXTENSIONS = {
     ".jsx",
     ".kt",
     ".kts",
+    ".mjs",
+    ".mts",
     ".py",
     ".rb",
     ".rs",
@@ -56,7 +60,7 @@ PLACEHOLDER_WAIVERS = {
 }
 ASSERTION_RE = re.compile(
     r"\b(assert|expect|refute|should|pytest\.raises|assert_raises|raise_error)\b"
-    r"|\.to(Have|Equal|Be|Match|Contain)",
+    r"|assert(?:_eq|_ne)?!\s*\(|\.to(Have|Equal|Be|Match|Contain)",
     re.IGNORECASE,
 )
 UNITTEST_ASSERTION_RE = re.compile(r"\bassert[A-Z]\w*\s*\(")
@@ -64,7 +68,7 @@ WEAK_ASSERTION_RE = re.compile(
     r"\b(assertIsNotNone|assert_not_nil|assert_respond_to|assert_kind_of|"
     r"assertIsInstance|toBeDefined|toBeTruthy)\b|"
     r"\bassertTrue\s*\(|\bassert\s+isinstance\s*\(|"
-    r"\bassert\s+.+\s+is\s+not\s+None\b",
+    r"\bassert\s+.+\s+is\s+not\s+None\b|\bassert\s+True\b",
     re.IGNORECASE,
 )
 COVERAGE_LANGUAGE_RE = re.compile(
@@ -76,6 +80,9 @@ SUPPRESSION_RE = re.compile(
     r"pragma:\s*no cover|:nocov:|pylint:\s*disable|eslint-disable|"
     r"rubocop:\s*disable|#\s*noqa\b",
     re.IGNORECASE,
+)
+RUST_TEST_RE = re.compile(
+    r"^\s*#\s*\[\s*(?:cfg\s*\(\s*test\s*\)|test)\s*\]",
 )
 
 
@@ -483,12 +490,21 @@ def analyze(
             cwd=root,
         )
     ]
+    added_by_path = added_lines_by_path(base_commit, head_commit, cwd=root)
+    inline_rust_tests = sorted(
+        path
+        for path, lines in added_by_path.items()
+        if PurePosixPath(path).suffix.lower() == ".rs"
+        and any(RUST_TEST_RE.search(line) for line in lines)
+    )
     test_changes = [change for change in changes if is_test_path(change.path)]
     active_test_changes = [
         change for change in test_changes if not change.status.startswith("D")
     ]
     source_files = sorted({change.path for change in source_changes})
-    test_files = sorted({change.path for change in active_test_changes})
+    test_files = sorted(
+        {change.path for change in active_test_changes} | set(inline_rust_tests)
+    )
     findings: list[Finding] = []
     waiver = " ".join(no_test_change_reason.split()).strip() if no_test_change_reason else None
 
@@ -545,9 +561,10 @@ def analyze(
             )
         )
 
-    added_by_path = added_lines_by_path(base_commit, head_commit, cwd=root)
     test_added_lines = {
-        path: lines for path, lines in added_by_path.items() if is_test_path(path)
+        path: lines
+        for path, lines in added_by_path.items()
+        if is_test_path(path) or path in inline_rust_tests
     }
     if test_files and not any(
         ASSERTION_RE.search(line) or UNITTEST_ASSERTION_RE.search(line)

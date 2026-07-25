@@ -174,6 +174,46 @@ class TestAnalysis(unittest.TestCase):
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.source_files, ["bin/tool"])
 
+    def test_modern_javascript_module_extensions_are_source(self) -> None:
+        for extension in (".cjs", ".cts", ".mjs", ".mts"):
+            with self.subTest(extension=extension):
+                with tempfile.TemporaryDirectory() as tmp:
+                    repo = make_repo(tmp)
+                    path = f"tool{extension}"
+                    repo.write(path, "export const value = 1\n")
+                    repo.commit("module source")
+
+                    result = check.analyze(cwd=repo.root, base_ref="main")
+
+                    self.assertEqual(result.status, "failed")
+                    self.assertEqual(result.source_files, [path])
+
+    def test_inline_rust_tests_count_as_test_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write(
+                "src/lib.rs",
+                "pub fn value() -> i32 { 1 }\n\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    use super::value;\n\n"
+                "    #[test]\n"
+                "    fn returns_one() { assert_eq!(value(), 1); }\n"
+                "}\n",
+            )
+            repo.commit("rust source and inline test")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.evidence, "present")
+            self.assertEqual(result.source_files, ["src/lib.rs"])
+            self.assertEqual(result.test_files, ["src/lib.rs"])
+            self.assertNotIn(
+                "test-change-without-assertion",
+                {item.rule for item in result.warnings},
+            )
+
     def test_new_catch_all_test_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(tmp)
@@ -259,6 +299,17 @@ class TestAnalysis(unittest.TestCase):
 
             self.assertIn("coverage-shaped-test", rules)
             self.assertIn("weak-assertion", rules)
+
+    def test_assert_true_warns_as_weak(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write("tool.py", "def value():\n    return 1\n")
+            repo.write("test_tool.py", "def test_value():\n    assert True\n")
+            repo.commit("shallow test")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertIn("weak-assertion", {item.rule for item in result.warnings})
 
     def test_no_inferred_base_skips(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
