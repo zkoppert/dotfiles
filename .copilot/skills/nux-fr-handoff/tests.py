@@ -128,6 +128,47 @@ def test_installer_rejects_unmanaged_command(tmp_path: Path):
     assert "user-managed" in command_path.read_text(encoding="utf-8")
 
 
+def test_installer_rerun_through_skill_symlink_keeps_physical_target(tmp_path: Path):
+    home = tmp_path / "home"
+    source = Path(__file__).resolve().parent
+    skill_target = home / ".copilot/skills/nux-fr-handoff"
+    skill_target.parent.mkdir(parents=True)
+    skill_target.symlink_to(source)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for command in (
+        "python3",
+        "copilot",
+        "gh",
+        "terminal-notifier",
+        "plutil",
+        "launchctl",
+    ):
+        script = fake_bin / command
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "USER": "tester",
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(skill_target / "install.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert skill_target.is_symlink()
+    assert skill_target.resolve() == source
+
+
 def test_week_bounds_uses_local_monday():
     now = dt.datetime(2026, 7, 24, 12, 0, tzinfo=dt.timezone(dt.timedelta(hours=-7)))
 

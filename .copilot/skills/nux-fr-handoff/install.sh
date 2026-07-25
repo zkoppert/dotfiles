@@ -9,7 +9,7 @@ elif [ "$#" -gt 0 ]; then
   exit 2
 fi
 
-SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
+SOURCE_DIR="$(cd -P "$(dirname "$0")" && pwd)"
 SKILL_TARGET="$HOME/.copilot/skills/nux-fr-handoff"
 BIN_TARGET="$HOME/.local/bin/nux-fr-handoff"
 LABEL="com.${USER}.nux-fr-handoff"
