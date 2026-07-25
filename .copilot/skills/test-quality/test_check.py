@@ -126,6 +126,32 @@ class TestAnalysis(unittest.TestCase):
             self.assertEqual(result.source_files, ["tool.py"])
             self.assertEqual(result.test_files, ["test_tool.py"])
 
+    def test_module_level_tests_py_and_unittest_assertion_are_recognized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write("tool.py", "def value():\n    return 1\n")
+            repo.write(
+                "tests.py",
+                "import unittest\n\n"
+                "class ToolTest(unittest.TestCase):\n"
+                "    def test_value(self):\n"
+                "        self.assertEqual(value(), 1)\n",
+            )
+            repo.commit("source and module test")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.test_files, ["tests.py"])
+            self.assertNotIn(
+                "test-change-without-assertion",
+                {item.rule for item in result.warnings},
+            )
+            self.assertIsNone(check.UNITTEST_ASSERTION_RE.search("# assertion later"))
+            self.assertIsNotNone(
+                check.UNITTEST_ASSERTION_RE.search("self.assertEqual(value(), 1)")
+            )
+
     def test_docs_only_is_not_applicable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(tmp)
@@ -188,6 +214,10 @@ class TestAnalysis(unittest.TestCase):
                 "Makefile",
                 "test:\n\tpytest --cov-fail-under=90\nmax-module-lines=500\n",
             )
+            repo.write(
+                "ci.mk",
+                "test:\n\tpytest --cov-fail-under=70\nmax-module-lines=1000\n",
+            )
             repo.commit("threshold base")
             repo.git("checkout", "-q", "main")
             repo.git("merge", "-q", "--ff-only", "feature")
@@ -196,12 +226,21 @@ class TestAnalysis(unittest.TestCase):
                 "Makefile",
                 "test:\n\tpytest --cov-fail-under=80\nmax-module-lines=700\n",
             )
+            repo.write(
+                "ci.mk",
+                "test:\n\tpytest --cov-fail-under=95\nmax-module-lines=800\n",
+            )
             repo.commit("loosen thresholds")
 
             result = check.analyze(cwd=repo.root, base_ref="main")
             rules = {item.rule for item in result.warnings}
 
-            self.assertIn("coverage-threshold-lowered", rules)
+            coverage_finding = next(
+                item
+                for item in result.warnings
+                if item.rule == "coverage-threshold-lowered"
+            )
+            self.assertEqual(coverage_finding.paths, ["Makefile"])
             self.assertIn("module-size-threshold-raised", rules)
 
     def test_coverage_prose_and_weak_assertions_warn(self) -> None:
@@ -293,6 +332,34 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(payload["status"], "passed")
             self.assertEqual(payload["evidence"], "not-applicable")
             self.assertEqual(payload["error_count"], 0)
+
+    def test_skipped_analysis_exits_nonzero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Repo(Path(tmp))
+            repo.git("init", "-q")
+            repo.git("config", "user.email", "test@example.com")
+            repo.git("config", "user.name", "test-quality")
+            repo.git("checkout", "-q", "-b", "feature")
+            repo.write("README.md", "# one\n")
+            repo.commit("one")
+            repo.write("README.md", "# two\n")
+            repo.commit("two")
+            env = dict(os.environ)
+            env.pop("TEST_QUALITY_BASE_REF", None)
+            env.pop("GITHUB_BASE_REF", None)
+
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH), "--json"],
+                cwd=repo.root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            payload = json.loads(result.stdout)
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(payload["status"], "skipped")
 
 
 if __name__ == "__main__":

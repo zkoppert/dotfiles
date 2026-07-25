@@ -59,6 +59,7 @@ ASSERTION_RE = re.compile(
     r"|\.to(Have|Equal|Be|Match|Contain)",
     re.IGNORECASE,
 )
+UNITTEST_ASSERTION_RE = re.compile(r"\bassert[A-Z]\w*\s*\(")
 WEAK_ASSERTION_RE = re.compile(
     r"\b(assertIsNotNone|assert_not_nil|assert_respond_to|assert_kind_of|"
     r"assertIsInstance|toBeDefined|toBeTruthy)\b|"
@@ -83,6 +84,13 @@ class FileChange:
     status: str
     path: str
     old_path: str | None = None
+
+
+@dataclass
+class DiffHunk:
+    path: str
+    added: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -257,7 +265,8 @@ def is_test_path(path: str) -> bool:
     name = pure.name.lower()
     stem = pure.stem.lower()
     return bool(
-        stem.startswith("test_")
+        stem in {"test", "tests"}
+        or stem.startswith("test_")
         or stem.endswith(("_test", "_spec"))
         or ".test." in name
         or ".spec." in name
@@ -329,31 +338,53 @@ def added_lines_by_path(
     return added
 
 
-def threshold_values(lines: list[str], pattern: re.Pattern[str]) -> list[int]:
-    values: list[int] = []
-    for line in lines:
-        match = pattern.search(line)
-        if match:
-            values.append(int(match.group(1)))
-    return values
-
-
-def diff_lines(base_commit: str, head_commit: str, *, cwd: Path) -> tuple[list[str], list[str]]:
+def diff_hunks(base_commit: str, head_commit: str, *, cwd: Path) -> list[DiffHunk]:
     patch = git_text(
         ["diff", "--unified=0", "--no-color", base_commit, head_commit, "--"],
         cwd=cwd,
     )
-    added = [
-        line[1:]
-        for line in patch.splitlines()
-        if line.startswith("+") and not line.startswith("+++")
-    ]
-    removed = [
-        line[1:]
-        for line in patch.splitlines()
-        if line.startswith("-") and not line.startswith("---")
-    ]
-    return added, removed
+    hunks: list[DiffHunk] = []
+    old_path: str | None = None
+    current_path: str | None = None
+    current_hunk: DiffHunk | None = None
+    for line in patch.splitlines():
+        if line.startswith("--- a/"):
+            old_path = line[6:]
+        elif line.startswith("+++ b/"):
+            current_path = line[6:]
+        elif line == "+++ /dev/null":
+            current_path = old_path
+        elif line.startswith("@@") and current_path:
+            current_hunk = DiffHunk(path=current_path)
+            hunks.append(current_hunk)
+        elif current_hunk and line.startswith("+") and not line.startswith("+++"):
+            current_hunk.added.append(line[1:])
+        elif current_hunk and line.startswith("-") and not line.startswith("---"):
+            current_hunk.removed.append(line[1:])
+    return hunks
+
+
+def paired_threshold_changes(
+    hunks: list[DiffHunk],
+    pattern: re.Pattern[str],
+) -> list[tuple[str, int, int]]:
+    changes: list[tuple[str, int, int]] = []
+    for hunk in hunks:
+        old_values = [
+            int(match.group(1))
+            for line in hunk.removed
+            if (match := pattern.search(line))
+        ]
+        new_values = [
+            int(match.group(1))
+            for line in hunk.added
+            if (match := pattern.search(line))
+        ]
+        changes.extend(
+            (hunk.path, old_value, new_value)
+            for old_value, new_value in zip(old_values, new_values)
+        )
+    return changes
 
 
 def valid_waiver(reason: str | None) -> bool:
@@ -519,7 +550,7 @@ def analyze(
         path: lines for path, lines in added_by_path.items() if is_test_path(path)
     }
     if test_files and not any(
-        ASSERTION_RE.search(line)
+        ASSERTION_RE.search(line) or UNITTEST_ASSERTION_RE.search(line)
         for lines in test_added_lines.values()
         for line in lines
     ):
@@ -562,38 +593,50 @@ def analyze(
             )
         )
 
-    added_lines, removed_lines = diff_lines(base_commit, head_commit, cwd=root)
+    hunks = diff_hunks(base_commit, head_commit, cwd=root)
     coverage_patterns = [
         re.compile(r"cov-fail-under(?:=|\s+)(\d+)", re.IGNORECASE),
         re.compile(r"fail_under\s*=\s*(\d+)", re.IGNORECASE),
         re.compile(r"minimum_coverage(?:\s+\w+:)?\s*(\d+)", re.IGNORECASE),
     ]
+    coverage_decreases: list[tuple[str, int, int]] = []
     for pattern in coverage_patterns:
-        old_values = threshold_values(removed_lines, pattern)
-        new_values = threshold_values(added_lines, pattern)
-        if old_values and new_values and min(new_values) < min(old_values):
-            findings.append(
-                Finding(
-                    "warning",
-                    "coverage-threshold-lowered",
-                    f"Coverage threshold decreased from {min(old_values)} to {min(new_values)}. Verify this is an intentional policy change.",
-                )
+        coverage_decreases.extend(
+            change
+            for change in paired_threshold_changes(hunks, pattern)
+            if change[2] < change[1]
+        )
+    if coverage_decreases:
+        details = ", ".join(
+            f"{path}: {old} to {new}"
+            for path, old, new in coverage_decreases
+        )
+        findings.append(
+            Finding(
+                "warning",
+                "coverage-threshold-lowered",
+                f"Coverage threshold decreased ({details}). Verify this is an intentional policy change.",
+                sorted({path for path, _old, _new in coverage_decreases}),
             )
-            break
+        )
 
     module_pattern = re.compile(r"max-module-lines[^0-9]*(\d+)", re.IGNORECASE)
-    old_module_values = threshold_values(removed_lines, module_pattern)
-    new_module_values = threshold_values(added_lines, module_pattern)
-    if (
-        old_module_values
-        and new_module_values
-        and max(new_module_values) > max(old_module_values)
-    ):
+    module_increases = [
+        change
+        for change in paired_threshold_changes(hunks, module_pattern)
+        if change[2] > change[1]
+    ]
+    if module_increases:
+        details = ", ".join(
+            f"{path}: {old} to {new}"
+            for path, old, new in module_increases
+        )
         findings.append(
             Finding(
                 "warning",
                 "module-size-threshold-raised",
-                f"Module-size threshold increased from {max(old_module_values)} to {max(new_module_values)}. Prefer splitting the file when practical.",
+                f"Module-size threshold increased ({details}). Prefer splitting the file when practical.",
+                sorted({path for path, _old, _new in module_increases}),
             )
         )
 
@@ -698,7 +741,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print_text(analysis)
 
-    if analysis.status == "failed":
+    if analysis.status in {"failed", "skipped"}:
         return 1
     if analysis.status == "error":
         return 2
