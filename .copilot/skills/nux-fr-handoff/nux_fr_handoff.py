@@ -23,7 +23,17 @@ import yaml
 
 LOGGER = logging.getLogger("nux-fr-handoff")
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_CONFIG_PATH = SCRIPT_DIR / "config.yml"
+BUNDLED_CONFIG_PATH = SCRIPT_DIR / "config.yml"
+USER_CONFIG_PATH = Path(
+    os.environ.get(
+        "NUX_FR_HANDOFF_CONFIG",
+        "~/.config/nux-fr-handoff/config.yml",
+    )
+).expanduser()
+DEFAULT_CONFIG_PATH = (
+    USER_CONFIG_PATH if USER_CONFIG_PATH.exists() else BUNDLED_CONFIG_PATH
+)
+PLACEHOLDER_REPO = "example-org/on-call"
 GITHUB_ARTIFACT_RE = re.compile(
     r"https://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/"
     r"(?P<kind>pull|issues)/(?P<number>\d+)"
@@ -97,6 +107,13 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
     missing = required - set(data or {})
     if missing:
         raise HandoffError(f"missing config keys: {', '.join(sorted(missing))}")
+    if str(data["repo"]) == PLACEHOLDER_REPO or "example-org" in str(
+        data["reference_comment_url"]
+    ):
+        raise HandoffError(
+            "configure ~/.config/nux-fr-handoff/config.yml with the private "
+            "handoff repository and reference comment before running"
+        )
     return Config(
         repo=str(data["repo"]),
         title_pattern=str(data["title_pattern"]),
@@ -114,6 +131,7 @@ def run_command(
     *,
     timeout: int = 60,
     env: dict[str, str] | None = None,
+    input_text: str | None = None,
     accepted_codes: tuple[int, ...] = (0,),
 ) -> subprocess.CompletedProcess[str]:
     LOGGER.debug("running command: %s", format_command_for_log(args))
@@ -124,6 +142,7 @@ def run_command(
             text=True,
             timeout=timeout,
             env=env,
+            input=input_text,
             check=False,
         )
     except subprocess.TimeoutExpired:
@@ -652,6 +671,48 @@ def create_secret_gist(draft_path: Path, description: str) -> str:
     return match.group(0)
 
 
+def update_secret_gist(
+    url: str,
+    draft_path: Path,
+    *,
+    previous_filename: str,
+) -> str:
+    gist_id = gist_id_from_url(url)
+    payload = {
+        "files": {
+            previous_filename: {
+                "content": draft_path.read_text(encoding="utf-8"),
+            }
+        }
+    }
+    run_command(
+        ["gh", "api", "--method", "PATCH", f"gists/{gist_id}", "--input", "-"],
+        timeout=120,
+        input_text=json.dumps(payload),
+    )
+    return url
+
+
+def persist_secret_gist(
+    draft_path: Path,
+    *,
+    issue_number: int,
+    force: bool,
+    previous_gist_url: str | None,
+    previous_filename: str,
+) -> str:
+    if force and previous_gist_url:
+        return update_secret_gist(
+            previous_gist_url,
+            draft_path,
+            previous_filename=previous_filename,
+        )
+    return create_secret_gist(
+        draft_path,
+        f"NUX FR handoff draft for issue #{issue_number}",
+    )
+
+
 def gist_id_from_url(url: str) -> str:
     parsed = urlparse(url)
     if parsed.netloc != "gist.github.com":
@@ -662,12 +723,19 @@ def gist_id_from_url(url: str) -> str:
     return gist_id
 
 
-def verify_gist(url: str, draft_path: Path, expected: str) -> None:
+def verify_gist(
+    url: str,
+    draft_path: Path,
+    expected: str,
+    *,
+    gist_filename: str | None = None,
+) -> None:
     gist_id = gist_id_from_url(url)
     result = run_command(["gh", "api", f"gists/{gist_id}"], timeout=60)
     payload = json.loads(result.stdout)
     files = payload.get("files") if isinstance(payload, dict) else None
-    file_data = files.get(draft_path.name) if isinstance(files, dict) else None
+    filename = gist_filename or draft_path.name
+    file_data = files.get(filename) if isinstance(files, dict) else None
     actual = file_data.get("content") if isinstance(file_data, dict) else None
     if actual != expected:
         raise HandoffError("gist readback did not match the local draft")
@@ -712,6 +780,11 @@ def notify(title: str, message: str, url: str, *, group: str) -> None:
     )
 
 
+def notification_group(suffix: str) -> str:
+    user = re.sub(r"[^A-Za-z0-9.-]", "-", os.environ.get("USER", "user"))
+    return f"com.{user}.nux-fr-handoff.{suffix}"
+
+
 def load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -746,15 +819,15 @@ def resume_existing_run(
 ) -> bool:
     status = existing.get("status")
     gist_url = existing.get("gist_url")
-    if status not in {"gist_created", "verified", "notified"} or not isinstance(
-        gist_url, str
-    ):
+    if status not in {"draft_validated", "gist_created", "verified", "notified"}:
+        return False
+    if not isinstance(gist_url, str):
         return False
 
-    if status == "gist_created":
+    if status in {"draft_validated", "gist_created"}:
         draft_path_value = existing.get("draft_path")
         if not isinstance(draft_path_value, str):
-            raise HandoffError("partial run has no draft path for gist verification")
+            raise HandoffError("partial run has no draft path")
         draft_path = Path(draft_path_value)
         if not draft_path.exists():
             raise HandoffError("partial run draft no longer exists")
@@ -762,7 +835,25 @@ def resume_existing_run(
         expected_digest = existing.get("draft_sha256")
         if expected_digest != sha256_text(content):
             raise HandoffError("partial run draft hash no longer matches state")
-        verify_gist(gist_url, draft_path, content)
+        if status == "draft_validated":
+            previous_filename = existing.get("gist_filename")
+            if not isinstance(previous_filename, str):
+                previous_filename = draft_path.name
+            update_secret_gist(
+                gist_url,
+                draft_path,
+                previous_filename=previous_filename,
+            )
+            state[run_key]["status"] = "gist_created"
+            state[run_key]["gist_filename"] = previous_filename
+            write_state(state_path, state)
+        gist_filename = existing.get("gist_filename")
+        verify_gist(
+            gist_url,
+            draft_path,
+            content,
+            gist_filename=gist_filename if isinstance(gist_filename, str) else None,
+        )
         state[run_key]["status"] = "verified"
         write_state(state_path, state)
 
@@ -772,7 +863,7 @@ def resume_existing_run(
             "NUX FR handoff draft ready",
             f"Review the comment for issue #{issue.number}, then post it when ready.",
             gist_url,
-            group=f"com.zkoppert.nux-fr-handoff.{issue.number}",
+            group=notification_group(str(issue.number)),
         )
     state[run_key]["status"] = "notified"
     state[run_key]["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -795,7 +886,7 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
             "NUX FR handoff notification test",
             "Review the draft comment and post it when ready.",
             args.notify_test,
-            group="com.zkoppert.nux-fr-handoff.test",
+            group=notification_group("test"),
         )
         return 0
 
@@ -843,6 +934,21 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
         state_path = config.state_dir / "state.json"
         state = load_state(state_path)
         existing = state.get(run_key) if isinstance(state.get(run_key), dict) else {}
+        previous_gist_url = (
+            existing.get("gist_url")
+            if isinstance(existing.get("gist_url"), str)
+            else None
+        )
+        previous_draft_path = (
+            Path(existing["draft_path"])
+            if isinstance(existing.get("draft_path"), str)
+            else None
+        )
+        previous_gist_filename = (
+            existing.get("gist_filename")
+            if isinstance(existing.get("gist_filename"), str)
+            else (previous_draft_path.name if previous_draft_path is not None else None)
+        )
 
         if not args.force and resume_existing_run(
             existing=existing,
@@ -902,7 +1008,7 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
             draft_path.write_text(draft.rstrip() + "\n", encoding="utf-8")
             content = validate_draft(draft_path, config)
         digest = sha256_text(content)
-        state[run_key] = {
+        next_state: dict[str, Any] = {
             "status": "draft_validated",
             "issue_url": issue.url,
             "draft_path": str(draft_path),
@@ -910,19 +1016,42 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
             "session_audit": audit,
             "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
+        if previous_gist_url and not args.no_gist:
+            next_state["gist_url"] = previous_gist_url
+            next_state["gist_filename"] = previous_gist_filename or draft_path.name
+        state[run_key] = next_state
         write_state(state_path, state)
 
         if args.no_gist:
             LOGGER.info("validated draft saved to %s", draft_path)
             return 0
 
-        gist_url = create_secret_gist(
+        gist_url = persist_secret_gist(
             draft_path,
-            f"NUX FR handoff draft for issue #{issue.number}",
+            issue_number=issue.number,
+            force=args.force,
+            previous_gist_url=previous_gist_url,
+            previous_filename=previous_gist_filename or draft_path.name,
         )
-        state[run_key].update({"status": "gist_created", "gist_url": gist_url})
+        gist_filename = (
+            previous_gist_filename
+            if args.force and previous_gist_url and previous_gist_filename
+            else draft_path.name
+        )
+        state[run_key].update(
+            {
+                "status": "gist_created",
+                "gist_url": gist_url,
+                "gist_filename": gist_filename,
+            }
+        )
         write_state(state_path, state)
-        verify_gist(gist_url, draft_path, content)
+        verify_gist(
+            gist_url,
+            draft_path,
+            content,
+            gist_filename=gist_filename,
+        )
         state[run_key]["status"] = "verified"
         write_state(state_path, state)
 
@@ -931,7 +1060,7 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
                 "NUX FR handoff draft ready",
                 f"Review the comment for issue #{issue.number}, then post it when ready.",
                 gist_url,
-                group=f"com.zkoppert.nux-fr-handoff.{issue.number}",
+                group=notification_group(str(issue.number)),
             )
         state[run_key]["status"] = "notified"
         state[run_key]["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()

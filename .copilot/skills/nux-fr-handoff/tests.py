@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,11 +21,10 @@ import nux_fr_handoff as handoff
 
 def make_config(tmp_path: Path) -> handoff.Config:
     return handoff.Config(
-        repo="github/new-user-experience",
+        repo="acme/on-call",
         title_pattern=r"^On-call handoff\b",
         reference_comment_url=(
-            "https://github.com/github/new-user-experience/"
-            "issues/2092#issuecomment-4712657361"
+            "https://github.com/acme/on-call/" "issues/120#issuecomment-456"
         ),
         state_dir=tmp_path,
         copilot_timeout_seconds=60,
@@ -31,6 +32,65 @@ def make_config(tmp_path: Path) -> handoff.Config:
         maximum_gist_characters=60000,
         session_tool_name="session_store_sql",
     )
+
+
+def test_committed_placeholder_config_requires_user_override(tmp_path: Path):
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "repo: example-org/on-call",
+                'title_pattern: "^On-call handoff\\\\b"',
+                (
+                    "reference_comment_url: "
+                    "https://github.com/example-org/on-call/issues/120#issuecomment-456"
+                ),
+                f'state_dir: "{tmp_path}"',
+                "copilot_timeout_seconds: 60",
+                "minimum_draft_bytes: 50",
+                "maximum_gist_characters: 60000",
+                "session_tool_name: session_store_sql",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(handoff.HandoffError, match="configure"):
+        handoff.load_config(config_path)
+
+
+def test_installer_rejects_existing_real_skill_directory(tmp_path: Path):
+    home = tmp_path / "home"
+    target = home / ".copilot/skills/nux-fr-handoff"
+    target.mkdir(parents=True)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for command in ("python3", "copilot", "gh", "terminal-notifier"):
+        script = fake_bin / command
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "USER": "tester",
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+        }
+    )
+    installer = Path(__file__).resolve().parent / "install.sh"
+
+    result = subprocess.run(
+        ["bash", str(installer), "--dry-run"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "exists and is not a symlink" in result.stderr
+    assert target.is_dir()
+    assert not target.is_symlink()
 
 
 def test_week_bounds_uses_local_monday():
@@ -53,20 +113,20 @@ def test_find_handoff_issue_filters_to_current_week(
         {
             "number": 100,
             "title": "On-call handoff July 17th",
-            "url": "https://github.com/github/new-user-experience/issues/100",
+            "url": "https://github.com/acme/on-call/issues/100",
             "createdAt": "2026-07-17T18:00:00Z",
         },
         {
             "number": 101,
             "title": "On-call handoff July 24th",
-            "url": "https://github.com/github/new-user-experience/issues/101",
+            "url": "https://github.com/acme/on-call/issues/101",
             "createdAt": "2026-07-24T17:00:00Z",
         },
     ]
     expected = handoff.Issue(
         number=101,
         title="On-call handoff July 24th",
-        url="https://github.com/github/new-user-experience/issues/101",
+        url="https://github.com/acme/on-call/issues/101",
         body="",
         created_at=dt.datetime(2026, 7, 24, 17, tzinfo=dt.timezone.utc),
     )
@@ -85,7 +145,7 @@ def test_find_handoff_issue_fails_closed_on_ambiguity(list_issues, tmp_path: Pat
         {
             "number": number,
             "title": f"On-call handoff July {number}th",
-            "url": f"https://github.com/github/new-user-experience/issues/{number}",
+            "url": f"https://github.com/acme/on-call/issues/{number}",
             "createdAt": "2026-07-24T17:00:00Z",
         }
         for number in (24, 25)
@@ -133,9 +193,9 @@ def test_untrusted_text_escapes_closing_tags():
 
 def test_synthesis_prompt_requires_reference_structure_and_latest_outcome():
     issue = handoff.Issue(
-        number=2160,
+        number=123,
         title="On-call handoff July 24th",
-        url="https://github.com/github/new-user-experience/issues/2160",
+        url="https://github.com/acme/on-call/issues/123",
         body="handoff body",
         created_at=dt.datetime.now(dt.timezone.utc),
     )
@@ -287,9 +347,9 @@ One completed item.
 
 def test_extract_artifact_refs_deduplicates():
     markdown = """
-[one](https://github.com/github/github/pull/42)
-[again](https://github.com/github/github/pull/42)
-[issue](https://github.com/github/new-user-experience/issues/9)
+[one](https://github.com/acme/widgets/pull/42)
+[again](https://github.com/acme/widgets/pull/42)
+[issue](https://github.com/acme/on-call/issues/9)
 """
 
     refs = handoff.extract_artifact_refs(markdown)
@@ -347,10 +407,61 @@ def test_quiet_week_draft_passes_structural_safety(tmp_path: Path):
 def test_gist_id_from_url():
     assert (
         handoff.gist_id_from_url(
-            "https://gist.github.com/zkoppert/d9dc38d0d178a7efa090870b20602187"
+            "https://gist.github.com/octocat/d9dc38d0d178a7efa090870b20602187"
         )
         == "d9dc38d0d178a7efa090870b20602187"
     )
+
+
+@patch("nux_fr_handoff.run_command")
+def test_update_secret_gist_reuses_existing_id(mocked_run, tmp_path: Path):
+    draft_path = tmp_path / "new-name.md"
+    draft_path.write_text("updated content", encoding="utf-8")
+
+    url = handoff.update_secret_gist(
+        "https://gist.github.com/octocat/abc123",
+        draft_path,
+        previous_filename="old-name.md",
+    )
+
+    assert url == "https://gist.github.com/octocat/abc123"
+    command = mocked_run.call_args.args[0]
+    payload = json.loads(mocked_run.call_args.kwargs["input_text"])
+    assert command == [
+        "gh",
+        "api",
+        "--method",
+        "PATCH",
+        "gists/abc123",
+        "--input",
+        "-",
+    ]
+    assert payload["files"]["old-name.md"]["content"] == "updated content"
+
+
+@patch("nux_fr_handoff.create_secret_gist")
+@patch("nux_fr_handoff.update_secret_gist")
+def test_force_persists_by_updating_existing_gist(
+    mocked_update, mocked_create, tmp_path
+):
+    draft_path = tmp_path / "draft.md"
+    mocked_update.return_value = "https://gist.github.com/octocat/abc123"
+
+    result = handoff.persist_secret_gist(
+        draft_path,
+        issue_number=123,
+        force=True,
+        previous_gist_url="https://gist.github.com/octocat/abc123",
+        previous_filename="old.md",
+    )
+
+    assert result == "https://gist.github.com/octocat/abc123"
+    mocked_update.assert_called_once_with(
+        "https://gist.github.com/octocat/abc123",
+        draft_path,
+        previous_filename="old.md",
+    )
+    mocked_create.assert_not_called()
 
 
 def test_write_state_is_atomic_json(tmp_path: Path):
@@ -363,6 +474,12 @@ def test_write_state_is_atomic_json(tmp_path: Path):
         == "verified"
     )
     assert not state_path.with_suffix(".tmp").exists()
+
+
+def test_notification_group_uses_current_user(monkeypatch):
+    monkeypatch.setenv("USER", "first.responder")
+
+    assert handoff.notification_group("123") == "com.first.responder.nux-fr-handoff.123"
 
 
 @patch("nux_fr_handoff.notify")
@@ -379,9 +496,9 @@ def test_dry_run_does_not_notify_existing_gist(
     monday = dt.datetime(2026, 7, 20, tzinfo=dt.timezone.utc)
     current = dt.datetime(2026, 7, 24, 19, tzinfo=dt.timezone.utc)
     issue = handoff.Issue(
-        number=2160,
+        number=123,
         title="On-call handoff July 24th",
-        url="https://github.com/github/new-user-experience/issues/2160",
+        url="https://github.com/acme/on-call/issues/123",
         body="",
         created_at=current,
     )
@@ -392,9 +509,9 @@ def test_dry_run_does_not_notify_existing_gist(
     handoff.write_state(
         state_path,
         {
-            "2026-07-20-issue-2160": {
+            "2026-07-20-issue-123": {
                 "status": "notified",
-                "gist_url": "https://gist.github.com/zkoppert/abc",
+                "gist_url": "https://gist.github.com/octocat/abc",
             }
         },
     )
@@ -416,9 +533,9 @@ def test_dry_run_does_not_notify_existing_gist(
 @patch("nux_fr_handoff.get_login")
 def test_explicit_issue_url_skips_user_lookup(mocked_get_login, mocked_fetch_issue):
     expected = handoff.Issue(
-        number=2160,
+        number=123,
         title="On-call handoff July 24th",
-        url="https://github.com/github/new-user-experience/issues/2160",
+        url="https://github.com/acme/on-call/issues/123",
         body="",
         created_at=dt.datetime.now(dt.timezone.utc),
     )
@@ -444,9 +561,9 @@ def test_dry_run_ignores_corrupt_state_and_creates_no_run_directory(
     monday = dt.datetime(2026, 7, 20, tzinfo=dt.timezone.utc)
     current = dt.datetime(2026, 7, 24, 19, tzinfo=dt.timezone.utc)
     issue = handoff.Issue(
-        number=2160,
+        number=123,
         title="On-call handoff July 24th",
-        url="https://github.com/github/new-user-experience/issues/2160",
+        url="https://github.com/acme/on-call/issues/123",
         body="",
         created_at=current,
     )
@@ -471,18 +588,18 @@ def test_dry_run_ignores_corrupt_state_and_creates_no_run_directory(
 @patch("nux_fr_handoff.notify")
 def test_resume_verified_run_reuses_gist(mocked_notify, tmp_path: Path):
     issue = handoff.Issue(
-        number=2160,
+        number=123,
         title="On-call handoff July 24th",
-        url="https://github.com/github/new-user-experience/issues/2160",
+        url="https://github.com/acme/on-call/issues/123",
         body="",
         created_at=dt.datetime.now(dt.timezone.utc),
     )
     state_path = tmp_path / "state.json"
-    run_key = "2026-07-20-issue-2160"
+    run_key = "2026-07-20-issue-123"
     state = {
         run_key: {
             "status": "verified",
-            "gist_url": "https://gist.github.com/zkoppert/abc",
+            "gist_url": "https://gist.github.com/octocat/abc",
         }
     }
 
@@ -501,3 +618,117 @@ def test_resume_verified_run_reuses_gist(mocked_notify, tmp_path: Path):
         json.loads(state_path.read_text(encoding="utf-8"))[run_key]["status"]
         == "notified"
     )
+
+
+@patch("nux_fr_handoff.notify")
+@patch("nux_fr_handoff.verify_gist")
+@patch("nux_fr_handoff.update_secret_gist")
+def test_resume_draft_validated_updates_existing_gist(
+    mocked_update,
+    mocked_verify,
+    mocked_notify,
+    tmp_path: Path,
+):
+    issue = handoff.Issue(
+        number=123,
+        title="On-call handoff July 24th",
+        url="https://github.com/acme/on-call/issues/123",
+        body="",
+        created_at=dt.datetime.now(dt.timezone.utc),
+    )
+    draft_path = tmp_path / "new-name.md"
+    draft_path.write_text("updated content", encoding="utf-8")
+    run_key = "2026-07-20-issue-123"
+    state_path = tmp_path / "state.json"
+    state = {
+        run_key: {
+            "status": "draft_validated",
+            "gist_url": "https://gist.github.com/octocat/abc",
+            "gist_filename": "old-name.md",
+            "draft_path": str(draft_path),
+            "draft_sha256": handoff.sha256_text("updated content"),
+        }
+    }
+
+    resumed = handoff.resume_existing_run(
+        existing=state[run_key],
+        issue=issue,
+        state=state,
+        state_path=state_path,
+        run_key=run_key,
+        no_notify=False,
+    )
+
+    assert resumed is True
+    mocked_update.assert_called_once_with(
+        "https://gist.github.com/octocat/abc",
+        draft_path,
+        previous_filename="old-name.md",
+    )
+    mocked_verify.assert_called_once_with(
+        "https://gist.github.com/octocat/abc",
+        draft_path,
+        "updated content",
+        gist_filename="old-name.md",
+    )
+    mocked_notify.assert_called_once()
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))[run_key]
+    assert persisted["status"] == "notified"
+    assert persisted["gist_filename"] == "old-name.md"
+
+
+@patch("nux_fr_handoff.collect_draft_check_findings", return_value=[])
+@patch("nux_fr_handoff.validate_content_safety")
+@patch("nux_fr_handoff.week_bounds")
+@patch("nux_fr_handoff.resolve_handoff_issue")
+def test_force_no_gist_does_not_carry_previous_gist_into_state(
+    mocked_resolve,
+    mocked_week_bounds,
+    _mocked_safety,
+    _mocked_findings,
+    tmp_path: Path,
+):
+    monday = dt.datetime(2026, 7, 20, tzinfo=dt.timezone.utc)
+    current = dt.datetime(2026, 7, 24, 19, tzinfo=dt.timezone.utc)
+    issue = handoff.Issue(
+        number=123,
+        title="On-call handoff July 24th",
+        url="https://github.com/acme/on-call/issues/123",
+        body="",
+        created_at=current,
+    )
+    mocked_resolve.return_value = ("tester", issue)
+    mocked_week_bounds.return_value = (monday, current)
+    run_key = "2026-07-20-issue-123"
+    handoff.write_state(
+        tmp_path / "state.json",
+        {
+            run_key: {
+                "status": "notified",
+                "gist_url": "https://gist.github.com/octocat/abc",
+                "gist_filename": "old.md",
+                "draft_path": str(tmp_path / "old.md"),
+            }
+        },
+    )
+    provided_draft = tmp_path / "provided.md"
+    provided_draft.write_text(
+        "## Actionable\n\nNothing.\n\n## Informational\n\nDone.\n",
+        encoding="utf-8",
+    )
+    args = SimpleNamespace(
+        notify_test=None,
+        issue_url=None,
+        dry_run=False,
+        force=True,
+        draft_file=str(provided_draft),
+        no_gist=True,
+        no_notify=True,
+    )
+
+    assert handoff.run_workflow(args, make_config(tmp_path)) == 0
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))[
+        run_key
+    ]
+    assert persisted["status"] == "draft_validated"
+    assert "gist_url" not in persisted

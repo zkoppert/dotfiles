@@ -49,7 +49,7 @@ nux-fr-handoff --force
 
 # Validate an existing draft through the gist and notification path
 nux-fr-handoff \
-  --issue-url https://github.com/github/new-user-experience/issues/2160 \
+  --issue-url https://github.com/acme/on-call/issues/123 \
   --draft-file /path/to/draft.md \
   --force
 
@@ -67,7 +67,12 @@ Friday launchd job.
 brew install terminal-notifier
 git clone https://github.com/zkoppert/dotfiles.git ~/repos/zkoppert-dotfiles
 ~/repos/zkoppert-dotfiles/.copilot/skills/nux-fr-handoff/install.sh
+$EDITOR ~/.config/nux-fr-handoff/config.yml
 ```
+
+Replace the fictitious repository and reference-comment URL in the user config
+with your private handoff targets. The committed config intentionally contains
+only public placeholders.
 
 Preview the assigned-issue discovery before the first scheduled run:
 

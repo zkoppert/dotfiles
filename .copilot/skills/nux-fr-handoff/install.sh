@@ -15,6 +15,7 @@ BIN_TARGET="$HOME/.local/bin/nux-fr-handoff"
 LABEL="com.${USER}.nux-fr-handoff"
 PLIST_TARGET="$HOME/Library/LaunchAgents/${LABEL}.plist"
 LOG_PATH="$HOME/Library/Logs/nux-fr-handoff.log"
+CONFIG_TARGET="$HOME/.config/nux-fr-handoff/config.yml"
 
 run() {
   if $DRY_RUN; then
@@ -46,10 +47,20 @@ fi
 
 run mkdir -p \
   "$HOME/.copilot/skills" \
+  "$HOME/.config/nux-fr-handoff" \
   "$HOME/.local/bin" \
   "$HOME/Library/LaunchAgents" \
   "$HOME/Library/Logs"
+
+if [ -e "$SKILL_TARGET" ] && [ ! -L "$SKILL_TARGET" ]; then
+  echo "$SKILL_TARGET exists and is not a symlink; move or remove it before installing." >&2
+  exit 1
+fi
+
 run ln -sfn "$SOURCE_DIR" "$SKILL_TARGET"
+if [ ! -e "$CONFIG_TARGET" ]; then
+  run cp "$SOURCE_DIR/config.yml" "$CONFIG_TARGET"
+fi
 
 if $DRY_RUN; then
   echo "+ write $BIN_TARGET"
@@ -107,4 +118,5 @@ EOF
 fi
 
 echo "Installed nux-fr-handoff."
+echo "Configure private targets in: $CONFIG_TARGET"
 echo "Preview with: nux-fr-handoff --dry-run --verbose"

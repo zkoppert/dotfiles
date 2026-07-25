@@ -1,6 +1,6 @@
-repo: github/new-user-experience
+repo: example-org/on-call
 title_pattern: "^On-call handoff\\b"
-reference_comment_url: https://github.com/github/new-user-experience/issues/2092#issuecomment-4712657361
+reference_comment_url: https://github.com/example-org/on-call/issues/120#issuecomment-456
 state_dir: "~/Library/Application Support/nux-fr-handoff"
 copilot_timeout_seconds: 1800
 minimum_draft_bytes: 50
