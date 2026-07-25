@@ -214,6 +214,46 @@ class TestAnalysis(unittest.TestCase):
                 {item.rule for item in result.warnings},
             )
 
+    def test_fixture_file_does_not_count_as_test_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write("tool.py", "def value():\n    return 1\n")
+            repo.write("tests/fixture.json", '{"value": 1}\n')
+            repo.commit("source and fixture")
+
+            original_tree_entry = check.tree_entry
+            original_has_shebang = check.has_shebang
+            with patch.object(
+                check, "tree_entry", wraps=original_tree_entry
+            ) as tree_entry_mock, patch.object(
+                check, "has_shebang", wraps=original_has_shebang
+            ) as shebang_mock:
+                result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.evidence, "missing")
+            self.assertEqual(result.test_files, [])
+            self.assertIn("source-without-test", {item.rule for item in result.errors})
+            self.assertEqual(tree_entry_mock.call_count, 1)
+            self.assertEqual(shebang_mock.call_count, 1)
+
+    def test_extensionless_executable_in_test_directory_counts_as_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write("tool.py", "def value():\n    return 1\n")
+            repo.write(
+                "tests/check-tool",
+                "#!/usr/bin/env bash\npython3 -c 'from tool import value; assert value() == 1'\n",
+                executable=True,
+            )
+            repo.commit("source and executable test")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.evidence, "present")
+            self.assertEqual(result.test_files, ["tests/check-tool"])
+
     def test_new_catch_all_test_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(tmp)

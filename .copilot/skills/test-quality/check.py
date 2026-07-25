@@ -264,7 +264,7 @@ def changed_files(base_commit: str, head_commit: str, *, cwd: Path) -> list[File
     return parse_name_status(result.stdout)
 
 
-def is_test_path(path: str) -> bool:
+def has_test_path_shape(path: str) -> bool:
     pure = PurePosixPath(path)
     parts = {part.lower() for part in pure.parts[:-1]}
     if parts & TEST_DIRECTORIES:
@@ -304,15 +304,13 @@ def has_shebang(commit: str, path: str, *, cwd: Path) -> bool:
     return first_line.startswith(b"#!")
 
 
-def is_source_path(
+def is_executable_code_change(
     change: FileChange,
     *,
     base_commit: str,
     head_commit: str,
     cwd: Path,
 ) -> bool:
-    if is_test_path(change.path):
-        return False
     path = PurePosixPath(change.path)
     if path.suffix.lower() in SOURCE_EXTENSIONS:
         return True
@@ -480,15 +478,19 @@ def analyze(
         resolved_base_ref, base_commit = inferred
 
     changes = changed_files(base_commit, head_commit, cwd=root)
-    source_changes = [
-        change
-        for change in changes
-        if is_source_path(
+    executable_changes = {
+        change: is_executable_code_change(
             change,
             base_commit=base_commit,
             head_commit=head_commit,
             cwd=root,
         )
+        for change in changes
+    }
+    source_changes = [
+        change
+        for change in changes
+        if executable_changes[change] and not has_test_path_shape(change.path)
     ]
     added_by_path = added_lines_by_path(base_commit, head_commit, cwd=root)
     inline_rust_tests = sorted(
@@ -497,7 +499,11 @@ def analyze(
         if PurePosixPath(path).suffix.lower() == ".rs"
         and any(RUST_TEST_RE.search(line) for line in lines)
     )
-    test_changes = [change for change in changes if is_test_path(change.path)]
+    test_changes = [
+        change
+        for change in changes
+        if executable_changes[change] and has_test_path_shape(change.path)
+    ]
     active_test_changes = [
         change for change in test_changes if not change.status.startswith("D")
     ]
@@ -564,7 +570,7 @@ def analyze(
     test_added_lines = {
         path: lines
         for path, lines in added_by_path.items()
-        if is_test_path(path) or path in inline_rust_tests
+        if path in test_files
     }
     if test_files and not any(
         ASSERTION_RE.search(line) or UNITTEST_ASSERTION_RE.search(line)
