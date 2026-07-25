@@ -563,6 +563,24 @@ def test_quiet_week_draft_passes_structural_safety(tmp_path: Path):
     handoff.validate_content_safety(content, make_config(tmp_path))
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "## Actionable items\n\nNothing.\n\n## Informational\n\nDone.\n",
+        " ## Actionable\n\nNothing.\n\n## Informational\n\nDone.\n",
+        "## Actionable\n\nNothing.\n\n## Informational   \n\nDone.\n",
+        ("## Actionable\n\nNothing.\n\n```markdown\n" "## Informational\n```\n"),
+        ("## Actionable\n\n````markdown\n```\n" "## Informational\n````\n"),
+    ],
+)
+def test_malformed_or_fenced_headings_fail_structural_safety(
+    content: str,
+    tmp_path: Path,
+):
+    with pytest.raises(handoff.HandoffError):
+        handoff.validate_content_safety(content, make_config(tmp_path))
+
+
 def test_gist_id_from_url():
     assert (
         handoff.gist_id_from_url(

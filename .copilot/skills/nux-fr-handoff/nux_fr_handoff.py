@@ -596,6 +596,31 @@ Untrusted live states JSON:
 """.strip()
 
 
+def has_exact_h2(content: str, heading: str) -> bool:
+    fence_character: str | None = None
+    fence_length = 0
+    expected = f"## {heading}"
+    for line in content.splitlines():
+        if fence_character is not None:
+            closing = re.fullmatch(r"\s{0,3}(`{3,}|~{3,})\s*", line)
+            if (
+                closing
+                and closing.group(1)[0] == fence_character
+                and len(closing.group(1)) >= fence_length
+            ):
+                fence_character = None
+                fence_length = 0
+            continue
+        opening = re.match(r"\s{0,3}(`{3,}|~{3,})", line)
+        if opening:
+            fence_character = opening.group(1)[0]
+            fence_length = len(opening.group(1))
+            continue
+        if line == expected:
+            return True
+    return False
+
+
 def refresh_draft_artifacts(
     draft: str,
     *,
@@ -623,9 +648,9 @@ def validate_content_safety(content: str, config: Config) -> None:
         raise HandoffError("draft is below the configured minimum size")
     if len(content) > config.maximum_gist_characters:
         raise HandoffError("draft exceeds the configured gist size limit")
-    if not content.startswith("## Actionable"):
+    if not content.splitlines() or content.splitlines()[0] != "## Actionable":
         raise HandoffError("draft must start with ## Actionable")
-    if "## Informational" not in content:
+    if not has_exact_h2(content, "Informational"):
         raise HandoffError("draft is missing ## Informational")
     findings = scan_secrets(content)
     if findings:
