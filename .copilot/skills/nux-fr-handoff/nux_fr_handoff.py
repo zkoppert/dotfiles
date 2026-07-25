@@ -34,6 +34,7 @@ DEFAULT_CONFIG_PATH = (
     USER_CONFIG_PATH if USER_CONFIG_PATH.exists() else BUNDLED_CONFIG_PATH
 )
 PLACEHOLDER_REPO = "example-org/on-call"
+SESSION_TOOL_NAME = "session_store_sql"
 GITHUB_ARTIFACT_RE = re.compile(
     r"https://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/"
     r"(?P<kind>pull|issues)/(?P<number>\d+)"
@@ -71,7 +72,6 @@ class Config:
     copilot_timeout_seconds: int
     minimum_draft_bytes: int
     maximum_gist_characters: int
-    session_tool_name: str
 
 
 @dataclass(frozen=True)
@@ -102,7 +102,6 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
         "copilot_timeout_seconds",
         "minimum_draft_bytes",
         "maximum_gist_characters",
-        "session_tool_name",
     }
     missing = required - set(data or {})
     if missing:
@@ -122,7 +121,6 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
         copilot_timeout_seconds=int(data["copilot_timeout_seconds"]),
         minimum_draft_bytes=int(data["minimum_draft_bytes"]),
         maximum_gist_characters=int(data["maximum_gist_characters"]),
-        session_tool_name=str(data["session_tool_name"]),
     )
 
 
@@ -410,7 +408,7 @@ def run_copilot(
 ) -> str:
     command = build_copilot_command(
         prompt,
-        tool_name=config.session_tool_name if use_session_store else None,
+        tool_name=SESSION_TOOL_NAME if use_session_store else None,
         session_name=session_name,
     )
     result = run_command(command, timeout=config.copilot_timeout_seconds)
@@ -881,15 +879,6 @@ def resolve_handoff_issue(
 
 
 def run_workflow(args: argparse.Namespace, config: Config) -> int:
-    if args.notify_test:
-        notify(
-            "NUX FR handoff notification test",
-            "Review the draft comment and post it when ready.",
-            args.notify_test,
-            group=notification_group("test"),
-        )
-        return 0
-
     if args.dry_run:
         login, issue = resolve_handoff_issue(args, config)
         if issue is None:
@@ -1092,6 +1081,14 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     try:
+        if args.notify_test:
+            notify(
+                "NUX FR handoff notification test",
+                "Review the draft comment and post it when ready.",
+                args.notify_test,
+                group=notification_group("test"),
+            )
+            return 0
         return run_workflow(args, load_config(args.config))
     except (
         HandoffError,

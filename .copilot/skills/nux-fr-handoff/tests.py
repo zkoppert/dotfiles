@@ -30,7 +30,6 @@ def make_config(tmp_path: Path) -> handoff.Config:
         copilot_timeout_seconds=60,
         minimum_draft_bytes=50,
         maximum_gist_characters=60000,
-        session_tool_name="session_store_sql",
     )
 
 
@@ -49,7 +48,6 @@ def test_committed_placeholder_config_requires_user_override(tmp_path: Path):
                 "copilot_timeout_seconds: 60",
                 "minimum_draft_bytes: 50",
                 "maximum_gist_characters: 60000",
-                "session_tool_name: session_store_sql",
             ]
         ),
         encoding="utf-8",
@@ -171,6 +169,10 @@ def test_build_copilot_command_exposes_only_session_store():
     assert "--allow-all-tools" not in command
     assert "--allow-all" not in command
     assert "--yolo" not in command
+
+
+def test_session_tool_name_is_not_user_configurable():
+    assert handoff.SESSION_TOOL_NAME == "session_store_sql"
 
 
 def test_build_copilot_command_can_disable_all_tools():
@@ -502,6 +504,7 @@ def test_dry_run_does_not_notify_existing_gist(
         body="",
         created_at=current,
     )
+
     mocked_week_bounds.return_value = (monday, current)
     mocked_get_login.return_value = "zkoppert"
     mocked_find_issue.return_value = issue
@@ -527,6 +530,15 @@ def test_dry_run_does_not_notify_existing_gist(
 
     assert handoff.run_workflow(args, make_config(tmp_path)) == 0
     mocked_notify.assert_not_called()
+
+
+@patch("nux_fr_handoff.load_config", side_effect=AssertionError("config loaded"))
+@patch("nux_fr_handoff.notify")
+def test_notification_test_skips_workflow_config(mocked_notify, _mocked_load):
+    result = handoff.main(["--notify-test", "https://gist.github.com/octocat/abc123"])
+
+    assert result == 0
+    mocked_notify.assert_called_once()
 
 
 @patch("nux_fr_handoff.fetch_issue")

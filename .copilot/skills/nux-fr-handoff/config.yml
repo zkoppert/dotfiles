@@ -5,4 +5,3 @@ state_dir: "~/Library/Application Support/nux-fr-handoff"
 copilot_timeout_seconds: 1800
 minimum_draft_bytes: 50
 maximum_gist_characters: 60000
-session_tool_name: session_store_sql
