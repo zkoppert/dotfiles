@@ -81,8 +81,10 @@ Preview the assigned-issue discovery before the first scheduled run:
 nux-fr-handoff --dry-run --verbose
 ```
 
-The installer also requires GitHub CLI, Copilot CLI, Python 3, and PyYAML. It
-prints the exact missing dependency when setup cannot continue.
+The installer also requires GitHub CLI, Copilot CLI, and Python 3. The runner
+creates an isolated environment under `~/.local/share/nux-fr-handoff/` and
+installs the pinned packages from `requirements.txt` when an upgrade adds a
+missing dependency.
 
 Secret gists are unlisted, not access-controlled. The runner blocks common
 credential and private-key patterns before upload, but the generated draft
@@ -92,5 +94,7 @@ should still contain only the operational context needed for the handoff.
 
 ```bash
 cd ~/.copilot/skills/nux-fr-handoff
-python3 -m pytest -q tests.py
+python3 -m venv .venv-test
+.venv-test/bin/pip install -r requirements-test.txt
+.venv-test/bin/python -m pytest -q tests.py
 ```

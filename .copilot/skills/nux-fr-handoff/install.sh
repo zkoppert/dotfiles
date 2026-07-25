@@ -34,11 +34,6 @@ for command in copilot gh python3; do
   fi
 done
 
-if ! python3 -c 'import yaml' >/dev/null 2>&1; then
-  echo "PyYAML is required. Install it with: python3 -m pip install --user PyYAML" >&2
-  exit 1
-fi
-
 if ! command -v terminal-notifier >/dev/null 2>&1; then
   echo "terminal-notifier is required for the clickable review notification." >&2
   echo "Install it with: brew install terminal-notifier" >&2

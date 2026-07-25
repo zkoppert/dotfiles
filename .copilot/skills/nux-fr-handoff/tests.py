@@ -59,6 +59,95 @@ def test_committed_placeholder_config_requires_user_override(tmp_path: Path):
         handoff.load_config(config_path)
 
 
+@patch("nux_fr_handoff.os.execv")
+@patch("nux_fr_handoff.subprocess.run")
+def test_dependency_bootstrap_uses_isolated_environment(
+    mocked_run,
+    mocked_exec,
+    monkeypatch,
+    tmp_path: Path,
+):
+    venv_dir = tmp_path / "venv"
+    venv_python = venv_dir / "bin/python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.touch()
+    monkeypatch.setattr(handoff, "MANAGED_VENV_DIR", venv_dir)
+    monkeypatch.setattr(handoff, "MANAGED_VENV_PYTHON", venv_python)
+
+    handoff.bootstrap_dependencies()
+
+    assert mocked_run.call_args_list[0].args[0] == [
+        str(venv_python),
+        "-m",
+        "pip",
+        "install",
+        "--quiet",
+        "--disable-pip-version-check",
+        "-r",
+        str(handoff.SCRIPT_DIR / "requirements.txt"),
+    ]
+    mocked_exec.assert_called_once()
+
+
+def test_managed_venv_detection_uses_prefix_not_python_symlink(
+    monkeypatch,
+    tmp_path: Path,
+):
+    venv_dir = tmp_path / "venv"
+    monkeypatch.setattr(handoff, "MANAGED_VENV_DIR", venv_dir)
+    monkeypatch.setattr(sys, "prefix", str(venv_dir))
+    monkeypatch.setattr(sys, "base_prefix", "/base/python")
+    monkeypatch.setattr(sys, "executable", "/base/python/bin/python3")
+
+    assert handoff.running_in_managed_venv() is True
+
+    monkeypatch.setattr(sys, "prefix", "/base/python")
+    assert handoff.running_in_managed_venv() is False
+
+
+@patch("nux_fr_handoff.os.execv", side_effect=OSError("permission denied"))
+@patch("nux_fr_handoff.subprocess.run")
+def test_dependency_bootstrap_handles_exec_failure(
+    _mocked_run,
+    _mocked_exec,
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+):
+    monkeypatch.setattr(handoff, "MANAGED_VENV_DIR", tmp_path / "venv")
+    monkeypatch.setattr(
+        handoff,
+        "MANAGED_VENV_PYTHON",
+        tmp_path / "venv/bin/python",
+    )
+    handoff.MANAGED_VENV_PYTHON.parent.mkdir(parents=True)
+    handoff.MANAGED_VENV_PYTHON.touch()
+
+    with pytest.raises(SystemExit):
+        handoff.bootstrap_dependencies()
+
+    assert "could not install dependencies" in capsys.readouterr().err
+
+
+def test_dependency_bootstrap_handles_missing_requirements(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+):
+    monkeypatch.setattr(handoff, "SCRIPT_DIR", tmp_path / "missing")
+    monkeypatch.setattr(handoff, "MANAGED_VENV_DIR", tmp_path / "venv")
+    monkeypatch.setattr(
+        handoff,
+        "MANAGED_VENV_PYTHON",
+        tmp_path / "venv/bin/python",
+    )
+
+    with pytest.raises(SystemExit):
+        handoff.bootstrap_dependencies()
+
+    assert "could not install dependencies" in capsys.readouterr().err
+
+
 def test_installer_rejects_existing_real_skill_directory(tmp_path: Path):
     home = tmp_path / "home"
     target = home / ".copilot/skills/nux-fr-handoff"
@@ -595,6 +684,111 @@ def test_malformed_or_fenced_headings_fail_structural_safety(
     tmp_path: Path,
 ):
     with pytest.raises(handoff.HandoffError):
+        handoff.validate_content_safety(content, make_config(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "artifact_reference",
+    [
+        "#123",
+        "acme/widgets#123",
+    ],
+)
+def test_noncanonical_github_autolinks_fail_safety(
+    artifact_reference: str,
+    tmp_path: Path,
+):
+    content = (
+        f"## Actionable\n\nSee {artifact_reference}.\n\n" "## Informational\n\nDone.\n"
+    )
+
+    with pytest.raises(handoff.HandoffError, match="noncanonical"):
+        handoff.validate_content_safety(content, make_config(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "[PR #42](https://github.com/acme/widgets/pull/42)",
+        "[acme/widgets#42](https://github.com/acme/widgets/issues/42)",
+        "[PR #42][pr]\n\n[pr]: https://github.com/acme/widgets/pull/42",
+        "[PR #42]\n\n[PR #42]: https://github.com/acme/widgets/pull/42",
+        "[context](https://github.com/acme/widgets#42)",
+        "`#42`",
+        "`` `#42` ``",
+    ],
+)
+def test_canonical_links_and_code_are_not_treated_as_bare_autolinks(
+    reference: str,
+    tmp_path: Path,
+):
+    content = f"## Actionable\n\nSee {reference}.\n\n" "## Informational\n\nDone.\n"
+
+    handoff.validate_content_safety(content, make_config(tmp_path))
+
+
+def test_fenced_autolink_text_is_ignored(tmp_path: Path):
+    content = "## Actionable\n\n```\n#42\n```\n\n" "## Informational\n\nDone.\n"
+
+    handoff.validate_content_safety(content, make_config(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "code_block",
+    [
+        "    #42",
+        "\tacme/widgets#42",
+        "> ```\n> #42\n> ```",
+    ],
+)
+def test_indented_and_blockquoted_code_autolinks_are_ignored(
+    code_block: str,
+    tmp_path: Path,
+):
+    content = (
+        f"## Actionable\n\n{code_block}\n\n"
+        "## Informational\n\nMore context is complete.\n"
+    )
+
+    handoff.validate_content_safety(content, make_config(tmp_path))
+
+
+def test_blockquoted_bare_autolink_still_fails(tmp_path: Path):
+    content = (
+        "## Actionable\n\n> #42\n\n" "## Informational\n\nMore context is complete.\n"
+    )
+
+    with pytest.raises(handoff.HandoffError, match="noncanonical"):
+        handoff.validate_content_safety(content, make_config(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<code>#42</code>",
+        '<a href="https://github.com/acme/widgets/pull/42">#42</a>',
+        "<kbd>open and tracked in #42",
+        "<code>#42</a> and then #123",
+        "<div>\nTracked in #42\n</div>",
+    ],
+)
+def test_raw_html_autolink_text_fails_closed(html: str, tmp_path: Path):
+    content = (
+        f"## Actionable\n\n{html}\n\n" "## Informational\n\nMore context is complete.\n"
+    )
+
+    with pytest.raises(handoff.HandoffError, match="noncanonical"):
+        handoff.validate_content_safety(content, make_config(tmp_path))
+
+
+def test_unclosed_code_span_does_not_hide_later_bare_autolink(tmp_path: Path):
+    content = (
+        "## Actionable\n\nWe need to fix `some_function.\n\n"
+        "Tracked in #42 before `canonical_name`.\n\n"
+        "## Informational\n\nDone.\n"
+    )
+
+    with pytest.raises(handoff.HandoffError, match="noncanonical"):
         handoff.validate_content_safety(content, make_config(tmp_path))
 
 

@@ -19,10 +19,86 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 
-import yaml
+SCRIPT_DIR = Path(__file__).resolve().parent
+MANAGED_VENV_DIR = Path.home() / ".local/share/nux-fr-handoff/venv"
+MANAGED_VENV_PYTHON = MANAGED_VENV_DIR / "bin/python"
+
+
+def running_in_managed_venv() -> bool:
+    return (
+        sys.prefix != sys.base_prefix
+        and Path(sys.prefix).resolve() == MANAGED_VENV_DIR.resolve()
+    )
+
+
+def bootstrap_dependencies(*, force: bool = False) -> None:
+    requirements = SCRIPT_DIR / "requirements.txt"
+    bootstrap_dir = MANAGED_VENV_DIR.parent
+    lock_path = bootstrap_dir / "bootstrap.lock"
+    stamp_path = MANAGED_VENV_DIR / ".requirements.sha256"
+    try:
+        requirements_hash = hashlib.sha256(requirements.read_bytes()).hexdigest()
+        bootstrap_dir.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("w", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if not MANAGED_VENV_PYTHON.exists():
+                subprocess.run(
+                    [sys.executable, "-m", "venv", str(MANAGED_VENV_DIR)],
+                    check=True,
+                )
+            installed_hash = (
+                stamp_path.read_text(encoding="utf-8").strip()
+                if stamp_path.exists()
+                else ""
+            )
+            if force or installed_hash != requirements_hash:
+                subprocess.run(
+                    [
+                        str(MANAGED_VENV_PYTHON),
+                        "-m",
+                        "pip",
+                        "install",
+                        "--quiet",
+                        "--disable-pip-version-check",
+                        "-r",
+                        str(requirements),
+                    ],
+                    check=True,
+                )
+                stamp_path.write_text(requirements_hash + "\n", encoding="utf-8")
+        os.execv(
+            str(MANAGED_VENV_PYTHON),
+            [
+                str(MANAGED_VENV_PYTHON),
+                str(Path(__file__).resolve()),
+                *sys.argv[1:],
+            ],
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(
+            f"nux-fr-handoff: could not install dependencies from "
+            f"{requirements}: {exc}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from exc
+
+
+if __name__ == "__main__" and not running_in_managed_venv():
+    bootstrap_dependencies()
+
+
+try:
+    import yaml
+    from markdown_it import MarkdownIt
+except ModuleNotFoundError:
+    if __name__ == "__main__":
+        bootstrap_dependencies(force=True)
+    raise ModuleNotFoundError(
+        "nux-fr-handoff dependencies are missing; install requirements-test.txt "
+        "before importing the module"
+    ) from None
 
 LOGGER = logging.getLogger("nux-fr-handoff")
-SCRIPT_DIR = Path(__file__).resolve().parent
 BUNDLED_CONFIG_PATH = SCRIPT_DIR / "config.yml"
 USER_CONFIG_PATH = Path(
     os.environ.get(
@@ -36,9 +112,14 @@ DEFAULT_CONFIG_PATH = (
 PLACEHOLDER_REPO = "example-org/on-call"
 SESSION_TOOL_NAME = "session_store_sql"
 MAX_ARTIFACTS = 50
+MARKDOWN_PARSER = MarkdownIt("commonmark")
 GITHUB_ARTIFACT_RE = re.compile(
     r"https://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/"
     r"(?P<kind>pull|issues)/(?P<number>\d+)"
+)
+NONCANONICAL_ARTIFACT_PATTERNS = (
+    re.compile(r"(?<![\w/])#\d+\b"),
+    re.compile(r"\b[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+\b"),
 )
 SYNTHESIS_RE = re.compile(
     r"<session-audit>\s*(?P<audit>\{.*?\})\s*</session-audit>.*?"
@@ -384,6 +465,8 @@ The draft must:
 - read turns chronologically and let the latest verified outcome win, especially
   when a monitoring schedule, rollout watch, review, or deployment later completed;
 - distinguish work I authored from work I shepherded;
+- use canonical `https://github.com/owner/repo/issues/N` or `/pull/N` URLs for
+  every GitHub artifact; never use `#N` or `owner/repo#N` autolinks;
 - use first-person narrative and real first names instead of bare handles;
 - never claim an incident, root cause, metric, or outcome without session evidence;
 - never post anything;
@@ -669,6 +752,29 @@ def has_exact_h2(content: str, heading: str) -> bool:
     return False
 
 
+def prose_for_autolink_validation(content: str) -> str:
+    prose: list[str] = []
+    for token in MARKDOWN_PARSER.parse(content):
+        if token.type == "html_block":
+            prose.append(re.sub(r"<[^>]*>", " ", token.content))
+            prose.append("\n")
+            continue
+        if token.type != "inline" or not token.children:
+            continue
+        link_depth = 0
+        for child in token.children:
+            if child.type == "link_open":
+                link_depth += 1
+            elif child.type == "link_close":
+                link_depth = max(0, link_depth - 1)
+            elif child.type == "text" and link_depth == 0:
+                prose.append(child.content)
+            elif child.type in {"softbreak", "hardbreak"} and link_depth == 0:
+                prose.append("\n")
+        prose.append("\n")
+    return re.sub(r"https?://\S+", "", "".join(prose))
+
+
 def refresh_draft_artifacts(
     draft: str,
     *,
@@ -701,6 +807,13 @@ def validate_content_safety(content: str, config: Config) -> None:
         raise HandoffError("draft must start with ## Actionable")
     if not has_exact_h2(content, "Informational"):
         raise HandoffError("draft is missing ## Informational")
+    autolink_prose = prose_for_autolink_validation(content)
+    if any(
+        pattern.search(autolink_prose) for pattern in NONCANONICAL_ARTIFACT_PATTERNS
+    ):
+        raise HandoffError(
+            "draft contains noncanonical GitHub autolinks; use full artifact URLs"
+        )
     findings = scan_secrets(content)
     if findings:
         raise HandoffError(
