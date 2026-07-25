@@ -207,10 +207,24 @@ def infer_base(head_commit: str, *, cwd: Path) -> tuple[str, str] | None:
     env_ref = os.environ.get("TEST_QUALITY_BASE_REF") or os.environ.get(
         "GITHUB_BASE_REF"
     )
-    candidates: list[str] = []
     if env_ref:
-        candidates.append(env_ref)
+        env_candidates = [env_ref]
+        if not env_ref.startswith("origin/"):
+            env_candidates.append(f"origin/{env_ref}")
+        for candidate in env_candidates:
+            candidate_commit = resolve_commit(candidate, cwd=cwd)
+            if not candidate_commit or candidate_commit == head_commit:
+                continue
+            merge_base = git_text(
+                ["merge-base", candidate_commit, head_commit],
+                cwd=cwd,
+                check=False,
+            )
+            if merge_base:
+                return candidate, merge_base
+        return None
 
+    candidates: list[str] = []
     origin_head = git_text(
         ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
         cwd=cwd,
@@ -291,6 +305,14 @@ def has_test_path_shape(path: str) -> bool:
         or ".spec." in name
         or name.endswith(("_test.go", "_test.rb", "_spec.rb"))
     )
+
+
+def test_file_stem(path: str) -> str:
+    name = PurePosixPath(path).name.lower()
+    for separator in (".test.", ".spec."):
+        if separator in name:
+            return name.split(separator, maxsplit=1)[0]
+    return PurePosixPath(path).stem.lower()
 
 
 def tree_entry(commit: str, path: str, *, cwd: Path) -> tuple[str, str] | None:
@@ -822,7 +844,7 @@ def analyze(
             change.path
             for change in active_test_changes
             if change.status.startswith(("A", "C", "R"))
-            and PurePosixPath(change.path).stem.lower() in CATCH_ALL_TEST_STEMS
+            and test_file_stem(change.path) in CATCH_ALL_TEST_STEMS
         }
     )
     if new_catch_all:

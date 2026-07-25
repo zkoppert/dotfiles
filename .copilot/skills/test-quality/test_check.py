@@ -729,19 +729,20 @@ class TestAnalysis(unittest.TestCase):
             self.assertEqual(result.test_files, ["tests/check-tool"])
 
     def test_new_catch_all_test_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = make_repo(tmp)
-            repo.write("tool.py", "def value():\n    return 1\n")
-            repo.write(
-                "test_coverage_additions.py",
-                "def test_value():\n    assert True\n",
-            )
-            repo.commit("coverage file")
+        for path in ("test_coverage_additions.py", "test_misc.test.ts"):
+            with self.subTest(path=path):
+                with tempfile.TemporaryDirectory() as tmp:
+                    repo = make_repo(tmp)
+                    repo.write("tool.py", "def value():\n    return 1\n")
+                    repo.write(path, "def test_value():\n    assert True\n")
+                    repo.commit("coverage file")
 
-            result = check.analyze(cwd=repo.root, base_ref="main")
+                    result = check.analyze(cwd=repo.root, base_ref="main")
 
-            self.assertEqual(result.status, "failed")
-            self.assertIn("new-catch-all-test", {item.rule for item in result.errors})
+                    self.assertEqual(result.status, "failed")
+                    self.assertIn(
+                        "new-catch-all-test", {item.rule for item in result.errors}
+                    )
 
     def test_deleted_tests_warn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -846,6 +847,41 @@ class TestAnalysis(unittest.TestCase):
 
             self.assertEqual(result.status, "skipped")
             self.assertEqual(result.evidence, "unavailable")
+
+    def test_environment_base_uses_remote_tracking_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            main_commit = repo.git("rev-parse", "main")
+            repo.git("update-ref", "refs/remotes/origin/release", main_commit)
+            repo.write("tool.py", "def value():\n    return 1\n")
+            repo.commit("source")
+
+            with patch.dict(
+                os.environ,
+                {"GITHUB_BASE_REF": "release", "TEST_QUALITY_BASE_REF": ""},
+                clear=False,
+            ):
+                result = check.analyze(cwd=repo.root)
+
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(result.base_ref, "origin/release")
+            self.assertEqual(result.source_files, ["tool.py"])
+
+    def test_missing_environment_base_does_not_fall_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write("tool.py", "def value():\n    return 1\n")
+            repo.commit("source")
+
+            with patch.dict(
+                os.environ,
+                {"GITHUB_BASE_REF": "release", "TEST_QUALITY_BASE_REF": ""},
+                clear=False,
+            ):
+                result = check.analyze(cwd=repo.root)
+
+            self.assertEqual(result.status, "skipped")
+            self.assertIsNone(result.base_ref)
 
     def test_root_commit_uses_empty_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
