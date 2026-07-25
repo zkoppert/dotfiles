@@ -71,8 +71,9 @@ $EDITOR ~/.config/nux-fr-handoff/config.yml
 ```
 
 Replace the fictitious repository and reference-comment URL in the user config
-with your private handoff targets. The committed config intentionally contains
-only public placeholders.
+with your private handoff targets. Set `allowed_owners` to the GitHub owners whose
+linked issues and pull requests the refresh step may read. The committed config
+intentionally contains only public placeholders.
 
 Preview the assigned-issue discovery before the first scheduled run:
 

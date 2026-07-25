@@ -69,6 +69,7 @@ class Config:
     repo: str
     title_pattern: str
     reference_comment_url: str
+    allowed_owners: tuple[str, ...]
     state_dir: Path
     copilot_timeout_seconds: int
     minimum_draft_bytes: int
@@ -99,6 +100,7 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
         "repo",
         "title_pattern",
         "reference_comment_url",
+        "allowed_owners",
         "state_dir",
         "copilot_timeout_seconds",
         "minimum_draft_bytes",
@@ -114,10 +116,18 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> Config:
             "configure ~/.config/nux-fr-handoff/config.yml with the private "
             "handoff repository and reference comment before running"
         )
+    allowed_owners = data["allowed_owners"]
+    if (
+        not isinstance(allowed_owners, list)
+        or not allowed_owners
+        or not all(isinstance(owner, str) and owner for owner in allowed_owners)
+    ):
+        raise HandoffError("allowed_owners must be a non-empty list of GitHub owners")
     return Config(
         repo=str(data["repo"]),
         title_pattern=str(data["title_pattern"]),
         reference_comment_url=str(data["reference_comment_url"]),
+        allowed_owners=tuple(owner.lower() for owner in allowed_owners),
         state_dir=Path(str(data["state_dir"])).expanduser(),
         copilot_timeout_seconds=int(data["copilot_timeout_seconds"]),
         minimum_draft_bytes=int(data["minimum_draft_bytes"]),
@@ -479,6 +489,20 @@ def validate_artifact_count(refs: list[ArtifactRef]) -> None:
         )
 
 
+def validate_artifact_owners(refs: list[ArtifactRef], config: Config) -> None:
+    disallowed = sorted(
+        {
+            ref.owner
+            for ref in refs
+            if ref.owner.lower() not in set(config.allowed_owners)
+        }
+    )
+    if disallowed:
+        raise HandoffError(
+            "draft links GitHub owners outside allowed_owners: " + ", ".join(disallowed)
+        )
+
+
 def artifact_ref_keys(refs: list[ArtifactRef]) -> set[tuple[str, str, str, int]]:
     return {(ref.owner, ref.repo, ref.kind, ref.number) for ref in refs}
 
@@ -630,6 +654,7 @@ def refresh_draft_artifacts(
     validate_content_safety(draft, config)
     refs = extract_artifact_refs(draft)
     validate_artifact_count(refs)
+    validate_artifact_owners(refs, config)
     refreshed_keys = artifact_ref_keys(refs)
     if not refs:
         return draft, refreshed_keys

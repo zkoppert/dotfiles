@@ -26,6 +26,7 @@ def make_config(tmp_path: Path) -> handoff.Config:
         reference_comment_url=(
             "https://github.com/acme/on-call/" "issues/120#issuecomment-456"
         ),
+        allowed_owners=("acme",),
         state_dir=tmp_path,
         copilot_timeout_seconds=60,
         minimum_draft_bytes=50,
@@ -44,6 +45,7 @@ def test_committed_placeholder_config_requires_user_override(tmp_path: Path):
                     "reference_comment_url: "
                     "https://github.com/example-org/on-call/issues/120#issuecomment-456"
                 ),
+                "allowed_owners: [example-org]",
                 f'state_dir: "{tmp_path}"',
                 "copilot_timeout_seconds: 60",
                 "minimum_draft_bytes: 50",
@@ -512,6 +514,21 @@ def test_artifact_count_limit_fails_before_refresh():
 
     with pytest.raises(handoff.HandoffError, match="maximum"):
         handoff.validate_artifact_count(refs)
+
+
+def test_artifact_owner_allowlist_fails_closed(tmp_path: Path):
+    refs = [
+        handoff.ArtifactRef(
+            owner="other-org",
+            repo="private",
+            kind="issues",
+            number=1,
+            url="https://github.com/other-org/private/issues/1",
+        )
+    ]
+
+    with pytest.raises(handoff.HandoffError, match="outside allowed_owners"):
+        handoff.validate_artifact_owners(refs, make_config(tmp_path))
 
 
 def test_final_draft_cannot_add_unrefreshed_artifacts():
