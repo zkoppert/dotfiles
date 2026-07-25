@@ -607,6 +607,55 @@ def test_gist_id_from_url():
     )
 
 
+def test_issue_run_key_namespaces_same_number_by_repository():
+    monday = dt.datetime(2026, 7, 20, tzinfo=dt.timezone.utc)
+    first = handoff.Issue(
+        number=123,
+        title="First",
+        url="https://github.com/acme/on-call/issues/123",
+        body="",
+        created_at=monday,
+    )
+    second = handoff.Issue(
+        number=123,
+        title="Second",
+        url="https://github.com/acme/operations/issues/123",
+        body="",
+        created_at=monday,
+    )
+
+    assert handoff.issue_run_key(monday, first) != handoff.issue_run_key(monday, second)
+    assert handoff.notification_group(
+        handoff.issue_run_key(monday, first)
+    ) != handoff.notification_group(handoff.issue_run_key(monday, second))
+
+
+def test_legacy_state_migrates_only_for_matching_issue_url():
+    monday = dt.datetime(2026, 7, 20, tzinfo=dt.timezone.utc)
+    issue = handoff.Issue(
+        number=123,
+        title="Handoff",
+        url="https://github.com/acme/on-call/issues/123",
+        body="",
+        created_at=monday,
+    )
+    legacy_key = "2026-07-20-issue-123"
+    state = {legacy_key: {"issue_url": issue.url, "status": "notified"}}
+
+    assert handoff.migrate_legacy_state(state, monday, issue) is True
+    assert legacy_key not in state
+    assert handoff.issue_run_key(monday, issue) in state
+
+    collision = {
+        legacy_key: {
+            "issue_url": "https://github.com/acme/operations/issues/123",
+            "status": "notified",
+        }
+    }
+    assert handoff.migrate_legacy_state(collision, monday, issue) is False
+    assert legacy_key in collision
+
+
 @patch("nux_fr_handoff.run_command")
 def test_update_secret_gist_reuses_existing_id(mocked_run, tmp_path: Path):
     draft_path = tmp_path / "new-name.md"
@@ -704,7 +753,7 @@ def test_dry_run_does_not_notify_existing_gist(
     handoff.write_state(
         state_path,
         {
-            "2026-07-20-issue-123": {
+            handoff.issue_run_key(monday, issue): {
                 "status": "notified",
                 "gist_url": "https://gist.github.com/octocat/abc",
             }
@@ -799,7 +848,10 @@ def test_resume_verified_run_reuses_gist(mocked_notify, tmp_path: Path):
         created_at=dt.datetime.now(dt.timezone.utc),
     )
     state_path = tmp_path / "state.json"
-    run_key = "2026-07-20-issue-123"
+    run_key = handoff.issue_run_key(
+        dt.datetime(2026, 7, 20, tzinfo=dt.timezone.utc),
+        issue,
+    )
     state = {
         run_key: {
             "status": "verified",
@@ -842,7 +894,10 @@ def test_resume_draft_validated_updates_existing_gist(
     )
     draft_path = tmp_path / "new-name.md"
     draft_path.write_text("updated content", encoding="utf-8")
-    run_key = "2026-07-20-issue-123"
+    run_key = handoff.issue_run_key(
+        dt.datetime(2026, 7, 20, tzinfo=dt.timezone.utc),
+        issue,
+    )
     state_path = tmp_path / "state.json"
     state = {
         run_key: {
@@ -903,7 +958,7 @@ def test_force_no_gist_preserves_previous_gist_state_without_uploading(
     )
     mocked_resolve.return_value = ("tester", issue)
     mocked_week_bounds.return_value = (monday, current)
-    run_key = "2026-07-20-issue-123"
+    run_key = handoff.issue_run_key(monday, issue)
     handoff.write_state(
         tmp_path / "state.json",
         {

@@ -17,7 +17,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import yaml
 
@@ -269,6 +269,30 @@ def parse_issue_url(url: str) -> tuple[str, str, int]:
     if not match:
         raise HandoffError(f"unsupported issue URL: {url}")
     return match["owner"], match["repo"], int(match["number"])
+
+
+def issue_run_key(monday: dt.datetime, issue: Issue) -> str:
+    owner, repo, number = parse_issue_url(issue.url)
+    repository_key = quote(f"{owner}/{repo}", safe="")
+    return f"{monday.date().isoformat()}-{repository_key}-issue-{number}"
+
+
+def migrate_legacy_state(
+    state: dict[str, Any],
+    monday: dt.datetime,
+    issue: Issue,
+) -> bool:
+    run_key = issue_run_key(monday, issue)
+    legacy_run_key = f"{monday.date().isoformat()}-issue-{issue.number}"
+    legacy_state = state.get(legacy_run_key)
+    if (
+        run_key not in state
+        and isinstance(legacy_state, dict)
+        and legacy_state.get("issue_url") == issue.url
+    ):
+        state[run_key] = state.pop(legacy_run_key)
+        return True
+    return False
 
 
 def fetch_issue(url: str) -> Issue:
@@ -967,7 +991,7 @@ def resume_existing_run(
             "NUX FR handoff draft ready",
             f"Review the comment for issue #{issue.number}, then post it when ready.",
             gist_url,
-            group=notification_group(str(issue.number)),
+            group=notification_group(run_key),
         )
     state[run_key]["status"] = "notified"
     state[run_key]["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -991,7 +1015,7 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
             LOGGER.info("no current on-call handoff issue assigned to %s", login)
             return 0
         monday, current = week_bounds()
-        run_key = f"{monday.date().isoformat()}-issue-{issue.number}"
+        run_key = issue_run_key(monday, issue)
         draft_path = (
             config.state_dir
             / "runs"
@@ -1021,13 +1045,15 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
             return 0
 
         monday, current = week_bounds()
-        run_key = f"{monday.date().isoformat()}-issue-{issue.number}"
+        run_key = issue_run_key(monday, issue)
         run_dir = config.state_dir / "runs" / run_key
         draft_path = run_dir / f"nux-fr-handoff-{current.date().isoformat()}.md"
 
         run_dir.mkdir(parents=True, exist_ok=True)
         state_path = config.state_dir / "state.json"
         state = load_state(state_path)
+        if migrate_legacy_state(state, monday, issue):
+            write_state(state_path, state)
         existing = state.get(run_key) if isinstance(state.get(run_key), dict) else {}
         previous_gist_url = (
             existing.get("gist_url")
@@ -1161,7 +1187,7 @@ def run_workflow(args: argparse.Namespace, config: Config) -> int:
                 "NUX FR handoff draft ready",
                 f"Review the comment for issue #{issue.number}, then post it when ready.",
                 gist_url,
-                group=notification_group(str(issue.number)),
+                group=notification_group(run_key),
             )
         state[run_key]["status"] = "notified"
         state[run_key]["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
