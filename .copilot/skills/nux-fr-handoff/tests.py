@@ -214,6 +214,9 @@ def test_synthesis_prompt_requires_reference_structure_and_latest_outcome():
     assert "start with `## Actionable`" in prompt
     assert "let the latest verified outcome win" in prompt
     assert "lives outside the NUX repository" in prompt
+    assert "exclude any session named `NUX FR handoff ...`" in prompt
+    assert "Update the draft handoff comment using the live GitHub" in prompt
+    assert "Repair the draft so it passes the exact automated findings" in prompt
 
 
 def test_copilot_prompt_is_redacted_from_debug_logging():
@@ -390,6 +393,22 @@ def test_fetch_pull_state_includes_live_review_context(mocked_run):
     assert states[0]["review_requests"] == ["reviewer"]
     command = mocked_run.call_args.args[0]
     assert command[:4] == ["gh", "pr", "view", "42"]
+
+
+@patch("nux_fr_handoff.run_command", side_effect=handoff.HandoffError("not found"))
+def test_artifact_refresh_fails_closed(mocked_run):
+    ref = handoff.ArtifactRef(
+        owner="acme",
+        repo="widgets",
+        kind="pull",
+        number=404,
+        url="https://github.com/acme/widgets/pull/404",
+    )
+
+    with pytest.raises(handoff.HandoffError, match="refusing stale handoff"):
+        handoff.fetch_artifact_states([ref])
+
+    mocked_run.assert_called_once()
 
 
 def test_secret_scan_catches_credentials_not_domain_words():

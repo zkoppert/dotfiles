@@ -324,6 +324,13 @@ First query every session with turn activity inside that window. Include session
 created before Monday when they had turns during the window. Inspect every session's
 user messages and assistant outcomes before deciding whether it relates to serving
 as the NUX first responder. Do not rely only on session creation time or summary.
+Keep sessions created by this automation in `all_session_ids` for the audit, but
+exclude any session named `NUX FR handoff ...` or whose first prompt is this
+automation from `relevant_session_ids` and from draft evidence. The automation
+first-prompt prefixes are:
+- `Generate a draft NUX first-responder on-call handoff comment`
+- `Update the draft handoff comment using the live GitHub artifact states`
+- `Repair the draft so it passes the exact automated findings`
 
 The draft must:
 - start with `## Actionable`; do not add a title or introductory preamble;
@@ -490,9 +497,9 @@ def fetch_artifact_states(refs: list[ArtifactRef]) -> list[dict[str, Any]]:
                     ]
                 )
         except HandoffError:
-            LOGGER.warning("could not refresh linked artifact: %s", ref.url)
-            states.append({"url": ref.url, "state": "unknown"})
-            continue
+            raise HandoffError(
+                f"could not refresh linked artifact; refusing stale handoff: {ref.url}"
+            ) from None
         payload = json.loads(result.stdout)
         if ref.kind == "pull":
             states.append(
