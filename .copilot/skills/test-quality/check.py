@@ -196,8 +196,12 @@ def empty_tree(cwd: Path) -> str:
 
 
 def is_root_commit(commit: str, *, cwd: Path) -> bool:
-    parents = git_text(["rev-list", "--parents", "-n", "1", commit], cwd=cwd)
-    return len(parents.split()) == 1
+    commit_object = git_text(["cat-file", "-p", commit], cwd=cwd)
+    headers = commit_object.partition("\n\n")[0]
+    return not any(
+        line.startswith("parent ")
+        for line in headers.splitlines()
+    )
 
 
 def infer_base(head_commit: str, *, cwd: Path) -> tuple[str, str] | None:

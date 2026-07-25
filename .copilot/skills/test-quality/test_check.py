@@ -911,7 +911,7 @@ class TestAnalysis(unittest.TestCase):
             repo.git("config", "user.name", "test-quality")
             repo.git("checkout", "-q", "-b", "main")
             repo.write("tool.py", "def value():\n    return 1\n")
-            repo.commit("root source")
+            repo.commit("parent false-positive body")
 
             result = check.analyze(cwd=repo.root)
 
@@ -940,6 +940,49 @@ class TestAnalysis(unittest.TestCase):
 
             self.assertEqual(result.status, "skipped")
             self.assertIn("base-not-inferred", {item.rule for item in result.warnings})
+
+    def test_shallow_clone_does_not_treat_boundary_as_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            origin = Repo(Path(tmp) / "origin")
+            origin.root.mkdir()
+            origin.git("init", "-q")
+            origin.git("config", "user.email", "test@example.com")
+            origin.git("config", "user.name", "test-quality")
+            origin.git("checkout", "-q", "-b", "main")
+            origin.write(
+                "test_tool.py",
+                "def test_existing():\n    assert True\n",
+            )
+            origin.commit("existing test")
+            origin.write("tool.py", "def value():\n    return 1\n")
+            origin.commit("source-only change")
+
+            clone_path = Path(tmp) / "clone"
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--quiet",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    "main",
+                    f"file://{origin.root}",
+                    str(clone_path),
+                ],
+                check=True,
+            )
+            with patch.dict(
+                os.environ,
+                {"TEST_QUALITY_BASE_REF": "", "GITHUB_BASE_REF": ""},
+                clear=False,
+            ):
+                result = check.analyze(cwd=clone_path)
+
+            self.assertEqual(result.status, "skipped")
+            self.assertEqual(result.evidence, "unavailable")
+            self.assertEqual(result.source_files, [])
+            self.assertEqual(result.test_files, [])
 
     def test_explicit_missing_base_is_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
