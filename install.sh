@@ -76,6 +76,10 @@ fi
 # The wrapper itself goes in ~/.local/bin so it stays on PATH for ad-hoc runs,
 # and the plist gets symlinked into ~/Library/LaunchAgents so launchctl can
 # pick it up on a cron-like schedule (every 2h, 08:00-18:00, Mon-Fri).
+if [ "$(uname)" = "Darwin" ] && ! command -v terminal-notifier >/dev/null 2>&1; then
+  echo "⚠ terminal-notifier is missing - run 'brew install terminal-notifier' to enable clickable triage alerts"
+fi
+
 TRIAGE_WRAPPER="$DOTFILES_DIR/bin/notification-triage"
 TRIAGE_PLIST="$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"
 if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ]; then

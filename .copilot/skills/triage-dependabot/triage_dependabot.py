@@ -43,7 +43,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import yaml
 from ruamel.yaml import YAML
@@ -293,6 +293,17 @@ class TodoMutations:
 
     flags: list[FlagTodoDelta] = field(default_factory=list)
     prunes: list[PruneTodoDelta] = field(default_factory=list)
+
+
+class AppliedTodoMutations(TypedDict):
+    """Results from applying Dependabot todo deltas."""
+
+    added_flags: int
+    already_tracked: int
+    stale_removed: int
+    changed: bool
+    added_pr_urls: list[str]
+    added_entries: list[dict[str, Any]]
 
 
 # ---------------------------------------------------------------------------
@@ -1629,7 +1640,7 @@ def _entry_exists(data: dict[str, Any], entry: dict[str, Any]) -> bool:
 def apply_todo_mutations(
     data: dict[str, Any],
     mutations: TodoMutations,
-) -> dict[str, int | bool | list[str]]:
+) -> AppliedTodoMutations:
     """Apply precomputed todo.yml deltas to a freshly loaded document."""
     if data.get("inbox") is None:
         data["inbox"] = []
@@ -1641,32 +1652,35 @@ def apply_todo_mutations(
         data["done"] = []
 
     added_pr_urls: list[str] = []
+    added_entries: list[dict[str, Any]] = []
     changed = False
-    applied: dict[str, int | bool | list[str]] = {
+    applied: AppliedTodoMutations = {
         "added_flags": 0,
         "already_tracked": 0,
         "stale_removed": 0,
         "changed": False,
         "added_pr_urls": added_pr_urls,
+        "added_entries": added_entries,
     }
 
-    for delta in mutations.prunes:
+    for prune_delta in mutations.prunes:
         removed = remove_stale_entries(
             data,
-            thread_id=delta.thread_id,
-            pr_url=delta.pr_url,
+            thread_id=prune_delta.thread_id,
+            pr_url=prune_delta.pr_url,
         )
         if removed:
             applied["stale_removed"] = int(applied["stale_removed"]) + removed
             changed = True
 
-    for delta in mutations.flags:
-        if _entry_exists(data, delta.entry):
+    for flag_delta in mutations.flags:
+        if _entry_exists(data, flag_delta.entry):
             applied["already_tracked"] = int(applied["already_tracked"]) + 1
             continue
-        data["prioritized"]["q1_do_first"].append(delta.entry)
-        applied["added_flags"] = int(applied["added_flags"]) + 1
-        added_pr_urls.append(delta.pr_url)
+        data["prioritized"]["q1_do_first"].append(flag_delta.entry)
+        applied["added_flags"] += 1
+        added_pr_urls.append(flag_delta.pr_url)
+        added_entries.append(flag_delta.entry)
         changed = True
 
     applied["changed"] = changed
@@ -1686,7 +1700,9 @@ def _todo_write_lock(path: Path):
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def apply_todo_mutations_with_lock(path: Path, mutations: TodoMutations) -> dict[str, int | bool | list[str]]:
+def apply_todo_mutations_with_lock(
+    path: Path, mutations: TodoMutations
+) -> AppliedTodoMutations:
     """Re-read todo.yml under an exclusive lock, apply deltas, and write."""
     with _todo_write_lock(path):
         data = load_todo(path)
@@ -1851,20 +1867,37 @@ def get_my_login() -> str:
     return login
 
 
-def macos_notify(title: str, message: str) -> None:
+def macos_notify(title: str, message: str, url: str) -> None:
+    """Send a clickable macOS notification through terminal-notifier."""
+    if not url:
+        logger.warning("macos_notify skipped because the destination URL is empty")
+        return
     try:
-        script = (
-            f'display notification "{message}" '
-            f'with title "{title}" sound name "default"'
-        )
-        subprocess.run(
-            ["osascript", "-e", script],
+        result = subprocess.run(
+            [
+                "terminal-notifier",
+                "-title",
+                title,
+                "-message",
+                message,
+                "-open",
+                url,
+                "-sound",
+                "default",
+            ],
             check=False,
             capture_output=True,
+            text=True,
             timeout=5,
         )
+        if result.returncode != 0:
+            logger.warning(
+                "macos_notify failed with exit %d: %s",
+                result.returncode,
+                result.stderr.strip(),
+            )
     except (subprocess.SubprocessError, FileNotFoundError) as exc:
-        logger.debug("macos_notify failed: %s", exc)
+        logger.warning("macos_notify failed: %s", exc)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1911,7 +1944,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-notify",
         action="store_true",
-        help="Skip the macOS digest notification.",
+        help="Skip clickable macOS alerts for PRs that need human attention.",
     )
     parser.add_argument(
         "--verbose",
@@ -2022,6 +2055,7 @@ def run(args: argparse.Namespace) -> TriageStats:
     state = load_state(args.state_file)
     now = datetime.datetime.now(datetime.timezone.utc).timestamp()
     mutations = TodoMutations()
+    added_flag_entries: list[dict[str, Any]] = []
     use_copilot = not args.no_copilot_subagent
     allowed = set(args.allowed_repo)
     coverage_cache: dict[str, int | None] = {}
@@ -2360,6 +2394,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         stats.flagged = int(applied["added_flags"])
         stats.already_tracked += int(applied["already_tracked"])
         stats.stale_removed = int(applied["stale_removed"])
+        added_flag_entries = applied["added_entries"]
         for added_pr_url in applied["added_pr_urls"]:
             if added_pr_url and state.get(added_pr_url, 0) <= now:
                 state[added_pr_url] = now
@@ -2384,19 +2419,16 @@ def run(args: argparse.Namespace) -> TriageStats:
     if not args.dry_run:
         save_state(args.state_file, state)
 
-    if not args.no_notify and (
-        stats.merged
-        or stats.labeled_and_merged
-        or stats.flagged
-        or stats.closed_prerelease
-    ):
-        message = (
-            f"merged={stats.merged} labeled={stats.labeled_and_merged} "
-            f"rebased={stats.rebased} flagged={stats.flagged} "
-            f"closed_prerelease={stats.closed_prerelease} "
-            f"stale_removed={stats.stale_removed}"
-        )
-        macos_notify("Dependabot triage", message)
+    if not args.no_notify and not args.dry_run:
+        for entry in added_flag_entries:
+            notif_meta = entry.get("notification")
+            if not isinstance(notif_meta, dict):
+                continue
+            macos_notify(
+                "Dependabot PR needs attention",
+                str(entry.get("title") or "Dependabot PR needs human review"),
+                str(notif_meta.get("url") or ""),
+            )
 
     return stats
 

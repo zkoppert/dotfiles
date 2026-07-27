@@ -123,7 +123,10 @@ conservative default.
   `~/repos/zkoppert-todo/todo.yml` under
   `prioritized.q1_do_first`, with `source: dependabot-triage`,
   `notification.thread_id` for dedup, the PR url, and the reason in
-  `description`.
+  `description`. Each newly added flag also sends one macOS notification
+  through `terminal-notifier`. Selecting the notification opens the PR in
+  the default browser. Routine merges, rebases, labels, prerelease closes,
+  already tracked flags, and no-op runs stay silent.
 
 ## Per-PR cooldown
 
@@ -208,6 +211,8 @@ python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py 
   failure, so the `--no-copilot-subagent` flag is for explicit opt-out
   rather than failure recovery.
 - Python 3.11+ with `ruamel.yaml` and `pyyaml`.
+- `terminal-notifier` on `PATH` for clickable macOS alerts. Install it
+  with `brew install terminal-notifier`.
 
 ## Privacy
 

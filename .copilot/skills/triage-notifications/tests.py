@@ -99,6 +99,7 @@ def test_classify_mention_goes_to_q1():
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q2
+    assert c.direct_mention is True
 
 
 def test_classify_assign_goes_to_q1():
@@ -152,6 +153,7 @@ def test_classify_mention_on_my_own_pr_goes_to_inbox():
     )
     assert c.bucket == triage.BUCKET_INBOX
     assert "authored" in c.reason
+    assert c.direct_mention is True
 
 
 def test_classify_security_alert_on_my_own_pr_still_goes_to_q1():
@@ -293,6 +295,7 @@ def test_comment_with_mention_goes_to_q1():
         comment_fetcher=lambda _: ("teammate", "hey @zkoppert can you look?"),
     )
     assert c.bucket == triage.BUCKET_Q2
+    assert c.direct_mention is True
 
 
 def test_super_linter_without_mention_drops():
@@ -379,9 +382,62 @@ def test_unknown_reason_drops():
 
 def test_mentions_me_case_insensitive():
     assert triage.mentions_me("hey @ZKoppert", "zkoppert") is True
+    assert triage.mentions_me("hey @ZKoppert, can you look?", "zkoppert") is True
+    assert triage.mentions_me("hey @zkoppert-todo", "zkoppert") is False
+    assert triage.mentions_me("hey @zkoppertson", "zkoppert") is False
+    assert triage.mentions_me("email@zkoppert.com", "zkoppert") is False
     assert triage.mentions_me("nothing here", "zkoppert") is False
     assert triage.mentions_me("", "zkoppert") is False
     assert triage.mentions_me(None, "zkoppert") is False
+
+
+def test_macos_notify_uses_clickable_terminal_notifier() -> None:
+    result = subprocess.CompletedProcess(
+        ["terminal-notifier"],
+        0,
+        stdout="",
+        stderr="",
+    )
+    with patch("triage.subprocess.run", return_value=result) as run_mock:
+        triage.macos_notify(
+            "GitHub mention",
+            "Sample PR",
+            "https://github.com/zkoppert/example/pull/42",
+        )
+
+    run_mock.assert_called_once_with(
+        [
+            "terminal-notifier",
+            "-title",
+            "GitHub mention",
+            "-message",
+            "Sample PR",
+            "-open",
+            "https://github.com/zkoppert/example/pull/42",
+            "-sound",
+            "default",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+
+def test_macos_notify_logs_missing_notifier(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with patch(
+        "triage.subprocess.run",
+        side_effect=FileNotFoundError("terminal-notifier"),
+    ):
+        triage.macos_notify(
+            "GitHub mention",
+            "Sample PR",
+            "https://github.com/zkoppert/example/pull/42",
+        )
+
+    assert "macos_notify failed" in caplog.text
 
 
 def test_is_super_linter_by_author():
@@ -632,6 +688,7 @@ def test_apply_todo_mutations_with_lock_preserves_concurrent_manual_edit(tmp_pat
     applied = triage.apply_todo_mutations_with_lock(todo_path, mutations)
 
     assert applied["changed"] is True
+    assert [entry["id"] for entry in applied["added_entries"]] == ["notif-added"]
     reloaded = yaml.safe_load(todo_path.read_text())
     assert [item["id"] for item in reloaded["inbox"]] == ["manual-added"]
     assert [item["id"] for item in reloaded["prioritized"]["q2_schedule"]] == [
@@ -1106,11 +1163,14 @@ def test_run_dedupes_already_tracked(todo_file):
         "/user": json.dumps({"login": "zkoppert"}),
         "/notifications?all=true": json.dumps([_notif("mention")]),
     }
-    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
-        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
     assert stats.already_tracked == 1
     assert stats.added_q2 == 0
+    notify_mock.assert_not_called()
 
 
 def test_run_drops_inbox_notification_when_url_is_prioritized_artifact(todo_file):
@@ -1229,14 +1289,90 @@ def test_run_adds_q2_for_mention(todo_file):
         "/user": json.dumps({"login": "zkoppert"}),
         "/notifications?all=true": json.dumps([_notif("mention")]),
     }
-    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
-        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
     assert stats.added_q2 == 1
+    notify_mock.assert_called_once_with(
+        "GitHub mention",
+        "Sample PR (zkoppert/example)",
+        "https://github.com/zkoppert/example/pull/42",
+    )
     data = yaml.safe_load(todo_file.read_text())
     q2 = data["prioritized"]["q2_schedule"]
     assert len(q2) == 1
     assert q2[0]["quadrant"] == "q2_schedule"
+
+
+def test_run_does_not_notify_for_assignment(todo_file):
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([_notif("assign")]),
+    }
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
+    assert stats.added_q2 == 1
+    notify_mock.assert_not_called()
+
+
+def test_run_notifies_for_direct_mention_in_comment(todo_file):
+    notif = _notif("comment")
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+        "/repos/zkoppert/example/pulls/42": json.dumps({"state": "open"}),
+        "/repos/zkoppert/example/issues/comments/9": json.dumps(
+            {
+                "user": {"login": "teammate"},
+                "body": "Can you take a look, @zkoppert?",
+            }
+        ),
+    }
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
+    assert stats.added_q2 == 1
+    notify_mock.assert_called_once_with(
+        "GitHub mention",
+        "Sample PR (zkoppert/example)",
+        "https://github.com/zkoppert/example/pull/42",
+    )
+
+
+def test_run_notifies_commit_mention_with_commit_url(todo_file):
+    notif = _notif(
+        "mention",
+        subject={
+            "title": "Commit abc123",
+            "url": "https://api.github.com/repos/zkoppert/example/commits/abc123",
+            "type": "Commit",
+        },
+    )
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+    }
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
+    assert stats.added_q2 == 1
+    notify_mock.assert_called_once_with(
+        "GitHub mention",
+        "Commit abc123 (zkoppert/example)",
+        "https://github.com/zkoppert/example/commit/abc123",
+    )
 
 
 def test_run_drops_ci_activity_and_marks_done(todo_file):
@@ -1275,13 +1411,14 @@ def test_run_dry_run_does_not_write(todo_file):
         "/user": json.dumps({"login": "zkoppert"}),
         "/notifications?all=true": json.dumps([_notif("mention")]),
     }
-    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
-        args = triage.parse_args(
-            ["--todo-file", str(todo_file), "--dry-run", "--no-notify"]
-        )
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file), "--dry-run"])
         stats = triage.run(args)
     assert stats.added_q2 == 1
     assert todo_file.read_text() == before
+    notify_mock.assert_not_called()
 
 
 def test_run_marks_done_on_completed(todo_file):
