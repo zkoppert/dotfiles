@@ -14,7 +14,7 @@ unread), this tool:
 4. Scans active todos for items in `done` status with a recorded
    notification thread_id and marks those notifications done on GitHub
    (the "mark-done-on-completed" loop).
-5. Triggers a macOS notification if any new actionable items were added.
+5. Triggers a clickable macOS notification for each newly added direct mention.
 
 Designed to be safe to re-run (consistent: a second run produces no
 duplicate todos and no spurious mark-dones).
@@ -372,6 +372,7 @@ class Classification:
 
     bucket: str
     reason: str  # Human-readable justification for the bucket choice.
+    direct_mention: bool = False
     # When BUCKET_DROP fires on a closed/merged PR I authored, also append
     # an entry to todo.yml's `done` section so the work shows up in
     # biannual reflections.
@@ -444,6 +445,7 @@ class AppliedTodoMutations(TypedDict):
     pruned: int
     pruned_by_reason: dict[str, int]
     url_deduped: list[dict[str, str]]
+    added_entries: list[dict[str, Any]]
     changed: bool
 
 
@@ -659,11 +661,11 @@ def is_super_linter(author: str | None, body: str | None) -> bool:
 
 
 def mentions_me(body: str | None, my_login: str) -> bool:
-    """Return True if `body` contains an @-mention of `my_login` or `me`."""
+    """Return True if `body` contains an exact @-mention of `my_login`."""
     if not body:
         return False
-    needle = f"@{my_login.lower()}"
-    return needle in body.lower()
+    pattern = rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
+    return re.search(pattern, body, re.IGNORECASE) is not None
 
 
 def classify(
@@ -812,8 +814,13 @@ def _classify_internal(
                     return Classification(
                         BUCKET_INBOX,
                         f"{reason} on PR I authored - status update only",
+                        direct_mention=reason == "mention",
                     )
-        return Classification(BUCKET_Q2, f"{reason} → Q2")
+        return Classification(
+            BUCKET_Q2,
+            f"{reason} → Q2",
+            direct_mention=reason == "mention",
+        )
 
     if reason == "author":
         # A PR/issue I opened that is still open (closed/merged ones drop
@@ -830,7 +837,11 @@ def _classify_internal(
             return Classification(BUCKET_DROP, f"comment on {state} {subject_type}")
         author, body = comment_fetcher(notif)
         if mentions_me(body, my_login):
-            return Classification(BUCKET_Q2, f"@mention in comment by @{author}")
+            return Classification(
+                BUCKET_Q2,
+                f"@mention in comment by @{author}",
+                direct_mention=True,
+            )
         if is_super_linter(author, body):
             return Classification(BUCKET_DROP, "super-linter comment without @mention")
         return Classification(BUCKET_DROP, "comment without a direct @mention")
@@ -873,8 +884,10 @@ def web_url(notif: dict[str, Any]) -> str:
     url = subject.get("url") or ""
     # /repos/owner/repo/pulls/123 → /owner/repo/pull/123
     # /repos/owner/repo/issues/45 → /owner/repo/issues/45
+    # /repos/owner/repo/commits/sha → /owner/repo/commit/sha
     web = url.replace("https://api.github.com/repos/", "https://github.com/")
     web = web.replace("/pulls/", "/pull/")
+    web = web.replace("/commits/", "/commit/")
     return web or ((notif.get("repository") or {}).get("html_url", ""))
 
 
@@ -1172,6 +1185,7 @@ def apply_todo_mutations(
     _ensure_todo_sections(data)
     changed = False
     pruned_by_reason: dict[str, int] = {}
+    added_entries: list[dict[str, Any]] = []
     applied: AppliedTodoMutations = {
         "added_q2": 0,
         "added_inbox": 0,
@@ -1181,25 +1195,28 @@ def apply_todo_mutations(
         "pruned": 0,
         "pruned_by_reason": pruned_by_reason,
         "url_deduped": [],
+        "added_entries": added_entries,
         "changed": False,
     }
 
-    for delta in mutations.prune:
-        removed = _remove_pruned_entry(data, delta)
+    for prune_delta in mutations.prune:
+        removed = _remove_pruned_entry(data, prune_delta)
         if removed:
             applied["pruned"] += removed
-            pruned_by_reason[delta.stale_reason] = (
-                pruned_by_reason.get(delta.stale_reason, 0) + removed
+            pruned_by_reason[prune_delta.stale_reason] = (
+                pruned_by_reason.get(prune_delta.stale_reason, 0) + removed
             )
             changed = True
-        if removed and delta.archive_entry and _append_unique(
-            data, data["done"], delta.archive_entry
+        if (
+            removed
+            and prune_delta.archive_entry
+            and _append_unique(data, data["done"], prune_delta.archive_entry)
         ):
             applied["added_done"] += 1
             changed = True
 
-    for delta in mutations.mark_done:
-        if _mark_local_notification_done(data, delta):
+    for mark_done_delta in mutations.mark_done:
+        if _mark_local_notification_done(data, mark_done_delta):
             applied["marked_done"] += 1
             changed = True
 
@@ -1213,6 +1230,7 @@ def apply_todo_mutations(
     for entry in mutations.add_q2:
         if _append_unique(data, data["prioritized"]["q2_schedule"], entry):
             applied["added_q2"] += 1
+            added_entries.append(entry)
             changed = True
         else:
             applied["already_tracked"] += 1
@@ -1238,6 +1256,7 @@ def apply_todo_mutations(
             continue
         if _append_unique(data, data["inbox"], entry):
             applied["added_inbox"] += 1
+            added_entries.append(entry)
             changed = True
         else:
             applied["already_tracked"] += 1
@@ -1519,21 +1538,37 @@ def mark_thread_done(thread_id: str) -> None:
     run_gh(["api", "-X", "DELETE", f"/notifications/threads/{thread_id}"], timeout=20)
 
 
-def macos_notify(title: str, message: str) -> None:
-    """Best-effort macOS notification via osascript. Silent on failure."""
+def macos_notify(title: str, message: str, url: str) -> None:
+    """Send a clickable macOS notification through terminal-notifier."""
+    if not url:
+        logger.warning("macos_notify skipped because the destination URL is empty")
+        return
     try:
-        script = (
-            f'display notification "{message}" '
-            f'with title "{title}" sound name "default"'
-        )
-        subprocess.run(
-            ["osascript", "-e", script],
+        result = subprocess.run(
+            [
+                "terminal-notifier",
+                "-title",
+                title,
+                "-message",
+                message,
+                "-open",
+                url,
+                "-sound",
+                "default",
+            ],
             check=False,
             capture_output=True,
+            text=True,
             timeout=5,
         )
+        if result.returncode != 0:
+            logger.warning(
+                "macos_notify failed with exit %d: %s",
+                result.returncode,
+                result.stderr.strip(),
+            )
     except (subprocess.SubprocessError, FileNotFoundError) as exc:
-        logger.debug("macos_notify failed: %s", exc)
+        logger.warning("macos_notify failed: %s", exc)
 
 
 def get_my_login() -> str:
@@ -1819,7 +1854,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-notify",
         action="store_true",
-        help="Skip the macOS notification even if actionable items were added.",
+        help="Skip clickable macOS alerts for new direct mentions.",
     )
     parser.add_argument(
         "--no-prune",
@@ -1908,6 +1943,7 @@ def run(args: argparse.Namespace) -> TriageStats:
 
     seen_ids = existing_thread_ids(data)
     mutations = TodoMutations()
+    direct_mention_thread_ids: set[str] = set()
 
     for notif in notifications:
         thread_id = str(notif.get("id") or "")
@@ -1946,6 +1982,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
             continue
         entry = build_todo_entry(notif, classification)
+        if classification.direct_mention and thread_id:
+            direct_mention_thread_ids.add(thread_id)
         if classification.bucket == BUCKET_Q2:
             mutations.add_q2.append(entry)
             stats.added_q2 += 1
@@ -1993,6 +2031,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         or mutations.mark_done
         or mutations.prune
     )
+    added_entries: list[dict[str, Any]] = []
     if has_todo_mutations:
         if args.dry_run:
             try:
@@ -2025,15 +2064,22 @@ def run(args: argparse.Namespace) -> TriageStats:
             # during the commit's pull/rebase cannot orphan a notification.
             clear_url_deduped_threads(args.todo_file, applied["url_deduped"], stats)
         reconcile_stats_from_applied(stats, applied)
+        if not args.dry_run:
+            added_entries = applied["added_entries"]
 
-    new_actionable = stats.added_q2 + stats.added_inbox
-    if new_actionable and not args.no_notify:
-        title = "Notification triage"
-        message = (
-            f"{stats.added_q2} new Q2, {stats.added_inbox} to inbox "
-            f"({stats.dropped} dropped)"
-        )
-        macos_notify(title, message)
+    if not args.no_notify and not args.dry_run:
+        for entry in added_entries:
+            notif_meta = entry.get("notification")
+            if not isinstance(notif_meta, dict):
+                continue
+            thread_id = str(notif_meta.get("thread_id") or "")
+            if thread_id not in direct_mention_thread_ids:
+                continue
+            macos_notify(
+                "GitHub mention",
+                str(entry.get("title") or "You were mentioned on GitHub"),
+                str(notif_meta.get("url") or ""),
+            )
 
     return stats
 

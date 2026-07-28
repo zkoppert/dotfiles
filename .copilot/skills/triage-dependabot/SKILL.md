@@ -50,6 +50,9 @@ upgrades or seeing a backlog of dependabot notifications.
 7. Writes `todo.yml` through an exclusive `todo.yml.lock`, fresh re-read,
    delta apply, and atomic replace. Any resulting change is committed in
    the todo repo, followed by a best-effort pull and push.
+8. Sends one clickable macOS notification for each newly added
+   `flag-for-review` entry. Selecting it opens the PR URL. Routine actions,
+   already tracked flags, no-op runs, and dry runs stay silent.
 
 A launchd job (`com.zkoppert.triage-dependabot.plist`) runs this every
 hour on weekdays from 08:00 through 18:00. This skill is for ad-hoc runs
@@ -57,8 +60,9 @@ in between.
 
 ## How to run
 
-Default run (writes to `~/repos/zkoppert-todo/todo.yml`, calls
-mutating gh endpoints, sends a macOS digest notification):
+Default run writes to `~/repos/zkoppert-todo/todo.yml`, calls mutating
+GitHub endpoints, and sends clickable alerts only for PRs that need human
+attention:
 
 ```bash
 python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py

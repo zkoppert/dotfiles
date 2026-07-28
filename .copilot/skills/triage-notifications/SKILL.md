@@ -57,6 +57,9 @@ dropped and cleared from GitHub, and only personal-action items survive.
    have moved to `status: done` and marks those notifications done.
 6. Commits any resulting `todo.yml` change in the todo repo, then tries
    a best-effort pull and push. Git failures are logged as warnings.
+7. Sends one clickable macOS notification for each newly added direct
+   mention. Selecting it opens the GitHub subject URL. Other actionable
+   reasons, already tracked items, no-op runs, and dry runs stay silent.
 
 A launchd job (`com.zkoppert.notification-triage.plist`) runs this every
 two hours on weekdays at 8/10/12/14/16/18. This skill is for ad-hoc
@@ -64,8 +67,8 @@ runs in between.
 
 ## How to run
 
-Default (writes to `~/repos/zkoppert-todo/todo.yml`, sends a macOS
-notification if anything actionable was added):
+Default writes to `~/repos/zkoppert-todo/todo.yml` and sends clickable
+macOS alerts only for newly added direct mentions:
 
 ```bash
 python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py
