@@ -247,6 +247,11 @@ def test_gh_guard_matches_kinds() -> None:
     match = re.search(r"^MIN_REVIEW_MODELS=(\d+)$", gh, re.MULTILINE)
     assert match, "gh-guard missing constant MIN_REVIEW_MODELS"
     assert int(match.group(1)) == pr_marker.MIN_MODELS, "MIN_MODELS drift"
+    assert pr_marker.MIN_REVIEW_ROUNDS == 1
+    assert pr_marker.MAX_REVIEW_ROUNDS == 3
+    assert (
+        r"rounds: \([1-3]\)" in gh and r'=~ ^[1-3]$' in gh
+    ), "gh-guard convergence range drift"
 
     # The tests-result header gh-guard greps for must match pr-marker's literal,
     # and use whole-line (-x) matching so it agrees with has_result_header.
@@ -751,6 +756,68 @@ def test_convergence_parsing_parity() -> None:
             assert bash_convergence_rounds(str(marker)) == expected
 
 
+def test_code_review_marker_rewrite() -> None:
+    """Rewriting an existing marker replaces generated headers instead of duplicating."""
+    restore = Path.cwd()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            _run("git", "init", "-q")
+            _run("git", "config", "user.email", "test@example.com")
+            _run("git", "config", "user.name", "pr-marker test")
+            _run("git", "checkout", "-q", "-b", "feat/rewrite")
+            _run("git", "commit", "-q", "--allow-empty", "-m", "c1")
+            body = Path(tmp) / "body.md"
+            body.write_text("code review synthesis. " * 12, encoding="utf-8")
+            args = [
+                "write",
+                "code-review",
+                str(body),
+                "--models",
+                "a,b,c",
+                "--convergence-rounds",
+                "2",
+            ]
+            assert pr_marker.main(args) == 0
+            marker = pr_marker.marker_path(
+                pr_marker.KINDS["code-review"], branch="feat/rewrite"
+            )
+            rewrite_args = [
+                "write",
+                "code-review",
+                str(marker),
+                "--models",
+                "d,e,f",
+                "--convergence-rounds",
+                "3",
+            ]
+            assert pr_marker.main(rewrite_args) == 0
+            lines = marker.read_text(encoding="utf-8").splitlines()
+            assert (
+                sum(
+                    line.startswith(pr_marker.REVIEWED_COMMIT_PREFIX)
+                    for line in lines
+                )
+                == 1
+            )
+            assert (
+                sum(
+                    line.startswith(pr_marker.REVIEWED_MODELS_PREFIX)
+                    for line in lines
+                )
+                == 1
+            )
+            assert sum(line.startswith("<!-- review-convergence:") for line in lines) == 1
+            assert pr_marker.read_reviewed_models(marker) == ["d", "e", "f"]
+            assert pr_marker.read_convergence_rounds(marker) == 3
+            ok, detail, _size, _path = pr_marker.marker_status(
+                pr_marker.KINDS["code-review"], "feat/rewrite"
+            )
+            assert ok and detail == "ok", detail
+    finally:
+        os.chdir(restore)
+
+
 def test_models_argv_order() -> None:
     """--models parses in either position, incl. the `--models a,b,c -` form."""
     # Optional-before-positional (the natural / gh-guard-suggested order).
@@ -987,6 +1054,7 @@ def main() -> int:
         test_parse_models,
         test_models_provenance,
         test_convergence_parsing_parity,
+        test_code_review_marker_rewrite,
         test_models_argv_order,
         test_gh_guard_gate,
     ]
