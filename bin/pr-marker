@@ -521,9 +521,9 @@ def cmd_write(args: argparse.Namespace) -> int:
     return 0
 
 
-def _invalidate_tests_marker(kind: Kind) -> str:
+def _invalidate_tests_marker(kind: Kind, branch: str) -> str:
     """Remove a prior tests marker and return a note for the error message."""
-    stale = marker_path(kind)
+    stale = marker_path(kind, branch)
     if not stale.exists():
         return ""
     stale.unlink()
@@ -621,6 +621,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
     non-zero, so the gate stays blocked until a real green run exists.
     """
     kind = KINDS["tests"]
+    branch = current_branch()
     head = current_head()
     if head is None:
         print(
@@ -632,7 +633,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
 
     dirty_before = dirty_worktree_entries()
     if dirty_before:
-        removed = _invalidate_tests_marker(kind)
+        removed = _invalidate_tests_marker(kind, branch)
         print(
             "pr-marker run-tests: refusing to certify HEAD while the repository has "
             f"staged, unstaged, or untracked files{removed}:",
@@ -657,7 +658,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
 
     quality_code, quality = _run_test_quality_preflight(args)
     if quality_code != 0:
-        removed = _invalidate_tests_marker(kind)
+        removed = _invalidate_tests_marker(kind, branch)
         print(
             "pr-marker run-tests: test-quality evidence preflight failed; "
             f"not running checks or writing the tests marker{removed}.",
@@ -682,7 +683,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
 
     failed = [c for c, code, _ in results if code != 0]
     if failed:
-        removed = _invalidate_tests_marker(kind)
+        removed = _invalidate_tests_marker(kind, branch)
         print(
             f"pr-marker run-tests: {len(failed)} of {len(results)} command(s) failed; "
             f"not writing the tests marker{removed}.",
@@ -692,7 +693,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
 
     dirty_after = dirty_worktree_entries()
     if dirty_after:
-        removed = _invalidate_tests_marker(kind)
+        removed = _invalidate_tests_marker(kind, branch)
         print(
             "pr-marker run-tests: checks changed the repository, so the run cannot "
             f"certify HEAD{removed}:",
@@ -702,6 +703,26 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
             print(f"  {entry}", file=sys.stderr)
         print(
             "Clean or commit the generated changes, then run the full checks again.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        final_branch = current_branch()
+    except RuntimeError:
+        final_branch = None
+    final_head = current_head()
+    if final_branch != branch or final_head != head:
+        removed = _invalidate_tests_marker(kind, branch)
+        print(
+            "pr-marker run-tests: checks changed the branch or HEAD, so the run "
+            f"cannot certify the starting commit{removed}:",
+            file=sys.stderr,
+        )
+        print(f"  branch: {branch} -> {final_branch or 'detached'}", file=sys.stderr)
+        print(f"  HEAD: {head} -> {final_head or 'unavailable'}", file=sys.stderr)
+        print(
+            "Restore the starting branch and commit, then run the full checks again.",
             file=sys.stderr,
         )
         return 1
@@ -737,7 +758,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
     lines += ["", f"Narrowing: {args.narrow or 'none (full suite)'}"]
     content = "\n".join(lines) + "\n"
 
-    path = marker_path(kind)
+    path = marker_path(kind, branch)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     size = len(content.encode("utf-8"))

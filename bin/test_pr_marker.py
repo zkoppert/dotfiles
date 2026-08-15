@@ -556,6 +556,31 @@ def test_run_tests_requires_clean_repo() -> None:
         os.chdir(restore)
 
 
+def test_run_tests_rejects_git_state_changes() -> None:
+    """run-tests refuses commands that move HEAD or switch branches."""
+    restore = Path.cwd()
+    try:
+        cases = [
+            ("feat/head-move", "git commit -q --allow-empty -m c2"),
+            ("feat/branch-move", "git checkout -q -b other"),
+            ("feat/detach", "git checkout -q --detach"),
+        ]
+        for branch, command in cases:
+            with tempfile.TemporaryDirectory() as tmp:
+                os.chdir(tmp)
+                _run("git", "init", "-q")
+                _run("git", "config", "user.email", "test@example.com")
+                _run("git", "config", "user.name", "pr-marker test")
+                _run("git", "checkout", "-q", "-b", branch)
+                _run("git", "commit", "-q", "--allow-empty", "-m", "c1")
+                marker = pr_marker.marker_path(pr_marker.KINDS["tests"], branch=branch)
+
+                assert pr_marker.main(["run-tests", "--cmd", command]) == 1
+                assert not marker.exists()
+    finally:
+        os.chdir(restore)
+
+
 def test_tests_marker_is_machine_only() -> None:
     """`write tests` is rejected, and a hand-forged marker lacks the result header."""
     restore = Path.cwd()
@@ -1050,6 +1075,7 @@ def main() -> int:
         test_run_tests,
         test_test_quality_preflight,
         test_run_tests_requires_clean_repo,
+        test_run_tests_rejects_git_state_changes,
         test_tests_marker_is_machine_only,
         test_parse_models,
         test_models_provenance,
