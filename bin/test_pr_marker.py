@@ -73,6 +73,29 @@ def bash_count_models(path: str) -> int:
     return int(result.stdout.strip() or "0")
 
 
+def bash_convergence_rounds(path: str) -> int:
+    """Read convergence metadata with gh-guard's exact shell rules."""
+    script = (
+        "set -euo pipefail\n"
+        "count=\"$(grep -c '^<!-- review-convergence:' \"$1\" 2>/dev/null || true)\"\n"
+        "rounds=\"$(sed -n "
+        "'s/^<!-- review-convergence: clean; rounds: \\([1-3]\\) -->$/\\1/p' "
+        "\"$1\" 2>/dev/null)\"\n"
+        'if [ "${count:-0}" = "1" ] && [[ "$rounds" =~ ^[1-3]$ ]]; then\n'
+        '  printf "%s" "$rounds"\n'
+        "else\n"
+        '  printf "0"\n'
+        "fi\n"
+    )
+    result = subprocess.run(
+        ["bash", "-c", script, "bash", path],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(result.stdout.strip() or "0")
+
+
 def _gh_guard_create(repo: Path, fake_bin: Path) -> subprocess.CompletedProcess:
     """Run the real gh-guard `pr create` in repo with fake gh on PATH, confirmed."""
     env = dict(os.environ)
@@ -697,6 +720,37 @@ def test_models_provenance() -> None:
         os.chdir(restore)
 
 
+def test_convergence_parsing_parity() -> None:
+    """Python and gh-guard accept only one canonical clean-round header."""
+    with tempfile.TemporaryDirectory() as tmp:
+        marker = Path(tmp) / "code-review.md"
+        cases = [
+            (["<!-- review-convergence: clean; rounds: 2 -->"], 2),
+            (["<!-- review-convergence: clean; rounds:  2 -->"], 0),
+            (["<!-- review-convergence: clean; rounds: two -->"], 0),
+            (["<!-- review-convergence: clean; rounds: 4 -->"], 0),
+            (["<!-- review-convergence: clean; rounds: 999999999999999999 -->"], 0),
+            (
+                [
+                    "<!-- review-convergence: clean; rounds: two -->",
+                    "<!-- review-convergence: clean; rounds: 2 -->",
+                ],
+                0,
+            ),
+            (
+                [
+                    "<!-- review-convergence: clean; rounds: 2 -->",
+                    "<!-- review-convergence: clean; rounds: 2 -->",
+                ],
+                0,
+            ),
+        ]
+        for headers, expected in cases:
+            marker.write_text("\n".join(headers) + "\n", encoding="utf-8")
+            assert (pr_marker.read_convergence_rounds(marker) or 0) == expected
+            assert bash_convergence_rounds(str(marker)) == expected
+
+
 def test_models_argv_order() -> None:
     """--models parses in either position, incl. the `--models a,b,c -` form."""
     # Optional-before-positional (the natural / gh-guard-suggested order).
@@ -788,14 +842,34 @@ def test_gh_guard_gate() -> None:
                 for line in crpath.read_text(encoding="utf-8").splitlines()
                 if not line.startswith(pr_marker.REVIEW_CONVERGENCE_PREFIX)
             ]
-            crpath.write_text(
-                "\n".join(without_convergence) + "\n", encoding="utf-8"
-            )
-            res = _gh_guard_create(repo, fake_bin)
-            out = res.stdout + res.stderr
-            assert res.returncode == 1, out
-            assert "NO-CONVERGENCE" in out, out
-            assert "FAKE-GH-EXECUTED" not in out, out
+            invalid_headers = [
+                [],
+                ["<!-- review-convergence: clean; rounds:  2 -->"],
+                ["<!-- review-convergence: clean; rounds: 999999999999999999 -->"],
+                [
+                    "<!-- review-convergence: clean; rounds: two -->",
+                    "<!-- review-convergence: clean; rounds: 2 -->",
+                ],
+                [
+                    "<!-- review-convergence: clean; rounds: 2 -->",
+                    "<!-- review-convergence: clean; rounds: 2 -->",
+                ],
+            ]
+            for headers in invalid_headers:
+                crpath.write_text(
+                    "\n".join([*without_convergence[:2], *headers, *without_convergence[2:]])
+                    + "\n",
+                    encoding="utf-8",
+                )
+                ok, detail, _size, _path = pr_marker.marker_status(
+                    pr_marker.KINDS["code-review"], "feat/gate"
+                )
+                assert not ok and detail == "needs convergence", (headers, detail)
+                res = _gh_guard_create(repo, fake_bin)
+                out = res.stdout + res.stderr
+                assert res.returncode == 1, (headers, out)
+                assert "NO-CONVERGENCE" in out, (headers, out)
+                assert "FAKE-GH-EXECUTED" not in out, (headers, out)
             assert (
                 pr_marker.main(
                     [
@@ -912,6 +986,7 @@ def main() -> int:
         test_tests_marker_is_machine_only,
         test_parse_models,
         test_models_provenance,
+        test_convergence_parsing_parity,
         test_models_argv_order,
         test_gh_guard_gate,
     ]

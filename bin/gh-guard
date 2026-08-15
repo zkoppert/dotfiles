@@ -291,8 +291,6 @@ TESTS_MIN_BYTES=120
 # bin/pr-marker's MIN_MODELS so the writer and the gate agree. The demo marker
 # is exempt (it is not a multi-model review).
 MIN_REVIEW_MODELS=3
-MIN_REVIEW_ROUNDS=1
-MAX_REVIEW_ROUNDS=3
 
 # count_review_models <path>
 # Echo the number of distinct (case-insensitive) models declared in the marker's
@@ -378,9 +376,10 @@ eval_marker() {
     fi
   fi
   if [ "$requires_convergence" = "1" ]; then
-    local rounds
-    rounds="$(sed -n 's/^<!-- review-convergence: clean; rounds: \([0-9][0-9]*\) -->$/\1/p' "$path" 2>/dev/null | head -n1)"
-    if [ -z "$rounds" ] || [ "$rounds" -lt "$MIN_REVIEW_ROUNDS" ] || [ "$rounds" -gt "$MAX_REVIEW_ROUNDS" ]; then
+    local convergence_lines rounds
+    convergence_lines="$(grep -c '^<!-- review-convergence:' "$path" 2>/dev/null || true)"
+    rounds="$(sed -n 's/^<!-- review-convergence: clean; rounds: \([1-3]\) -->$/\1/p' "$path" 2>/dev/null)"
+    if [ "${convergence_lines:-0}" != "1" ] || ! [[ "$rounds" =~ ^[1-3]$ ]]; then
       marker_all_ok=0
       status_lines="${status_lines}  [ NO-CONVERGENCE ] ${label} -> ${path} (missing valid final-clean-round metadata; rewrite with pr-marker --convergence-rounds 1, 2, or 3)"$'\n'
       return
