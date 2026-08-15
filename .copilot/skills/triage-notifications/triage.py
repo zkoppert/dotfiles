@@ -10,11 +10,11 @@ unread), this tool:
    - INBOX           (actionable but needs human triage)
 2. For DROP items: marks the thread done on GitHub (deletes from inbox).
 3. For Q1/INBOX items: adds an entry to ~/repos/zkoppert-todo/todo.yml
-   (deduped by notification thread_id).
+   (deduped by notification thread_id and tracked PR/issue URLs).
 4. Scans active todos for items in `done` status with a recorded
    notification thread_id and marks those notifications done on GitHub
    (the "mark-done-on-completed" loop).
-5. Triggers a macOS notification if any new actionable items were added.
+5. Triggers a clickable macOS notification for each newly added direct mention.
 
 Designed to be safe to re-run (consistent: a second run produces no
 duplicate todos and no spurious mark-dones).
@@ -30,6 +30,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import fcntl
 import json
@@ -371,6 +372,7 @@ class Classification:
 
     bucket: str
     reason: str  # Human-readable justification for the bucket choice.
+    direct_mention: bool = False
     # When BUCKET_DROP fires on a closed/merged PR I authored, also append
     # an entry to todo.yml's `done` section so the work shows up in
     # biannual reflections.
@@ -442,6 +444,8 @@ class AppliedTodoMutations(TypedDict):
     marked_done: int
     pruned: int
     pruned_by_reason: dict[str, int]
+    url_deduped: list[dict[str, str]]
+    added_entries: list[dict[str, Any]]
     changed: bool
 
 
@@ -657,11 +661,11 @@ def is_super_linter(author: str | None, body: str | None) -> bool:
 
 
 def mentions_me(body: str | None, my_login: str) -> bool:
-    """Return True if `body` contains an @-mention of `my_login` or `me`."""
+    """Return True if `body` contains an exact @-mention of `my_login`."""
     if not body:
         return False
-    needle = f"@{my_login.lower()}"
-    return needle in body.lower()
+    pattern = rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
+    return re.search(pattern, body, re.IGNORECASE) is not None
 
 
 def classify(
@@ -810,8 +814,13 @@ def _classify_internal(
                     return Classification(
                         BUCKET_INBOX,
                         f"{reason} on PR I authored - status update only",
+                        direct_mention=reason == "mention",
                     )
-        return Classification(BUCKET_Q2, f"{reason} → Q2")
+        return Classification(
+            BUCKET_Q2,
+            f"{reason} → Q2",
+            direct_mention=reason == "mention",
+        )
 
     if reason == "author":
         # A PR/issue I opened that is still open (closed/merged ones drop
@@ -828,7 +837,11 @@ def _classify_internal(
             return Classification(BUCKET_DROP, f"comment on {state} {subject_type}")
         author, body = comment_fetcher(notif)
         if mentions_me(body, my_login):
-            return Classification(BUCKET_Q2, f"@mention in comment by @{author}")
+            return Classification(
+                BUCKET_Q2,
+                f"@mention in comment by @{author}",
+                direct_mention=True,
+            )
         if is_super_linter(author, body):
             return Classification(BUCKET_DROP, "super-linter comment without @mention")
         return Classification(BUCKET_DROP, "comment without a direct @mention")
@@ -871,8 +884,10 @@ def web_url(notif: dict[str, Any]) -> str:
     url = subject.get("url") or ""
     # /repos/owner/repo/pulls/123 → /owner/repo/pull/123
     # /repos/owner/repo/issues/45 → /owner/repo/issues/45
+    # /repos/owner/repo/commits/sha → /owner/repo/commit/sha
     web = url.replace("https://api.github.com/repos/", "https://github.com/")
     web = web.replace("/pulls/", "/pull/")
+    web = web.replace("/commits/", "/commit/")
     return web or ((notif.get("repository") or {}).get("html_url", ""))
 
 
@@ -1170,6 +1185,7 @@ def apply_todo_mutations(
     _ensure_todo_sections(data)
     changed = False
     pruned_by_reason: dict[str, int] = {}
+    added_entries: list[dict[str, Any]] = []
     applied: AppliedTodoMutations = {
         "added_q2": 0,
         "added_inbox": 0,
@@ -1178,25 +1194,29 @@ def apply_todo_mutations(
         "marked_done": 0,
         "pruned": 0,
         "pruned_by_reason": pruned_by_reason,
+        "url_deduped": [],
+        "added_entries": added_entries,
         "changed": False,
     }
 
-    for delta in mutations.prune:
-        removed = _remove_pruned_entry(data, delta)
+    for prune_delta in mutations.prune:
+        removed = _remove_pruned_entry(data, prune_delta)
         if removed:
             applied["pruned"] += removed
-            pruned_by_reason[delta.stale_reason] = (
-                pruned_by_reason.get(delta.stale_reason, 0) + removed
+            pruned_by_reason[prune_delta.stale_reason] = (
+                pruned_by_reason.get(prune_delta.stale_reason, 0) + removed
             )
             changed = True
-        if removed and delta.archive_entry and _append_unique(
-            data, data["done"], delta.archive_entry
+        if (
+            removed
+            and prune_delta.archive_entry
+            and _append_unique(data, data["done"], prune_delta.archive_entry)
         ):
             applied["added_done"] += 1
             changed = True
 
-    for delta in mutations.mark_done:
-        if _mark_local_notification_done(data, delta):
+    for mark_done_delta in mutations.mark_done:
+        if _mark_local_notification_done(data, mark_done_delta):
             applied["marked_done"] += 1
             changed = True
 
@@ -1210,13 +1230,33 @@ def apply_todo_mutations(
     for entry in mutations.add_q2:
         if _append_unique(data, data["prioritized"]["q2_schedule"], entry):
             applied["added_q2"] += 1
+            added_entries.append(entry)
             changed = True
         else:
             applied["already_tracked"] += 1
 
     for entry in mutations.add_inbox:
+        notification = entry.get("notification") if isinstance(entry, dict) else None
+        notif_url = notification.get("url") if isinstance(notification, dict) else None
+        notif_thread_id = (
+            notification.get("thread_id") if isinstance(notification, dict) else None
+        )
+        # Dedupe against the freshly loaded document (under the caller's lock)
+        # so a concurrent edit cannot make this decision stale. The URL is
+        # revalidated again after commit, before the notification is cleared.
+        if notif_url and _tracked_pr_issue_url_exists_elsewhere(
+            data,
+            notif_url,
+            exclude_thread_id=str(notif_thread_id) if notif_thread_id else None,
+        ):
+            if notif_thread_id:
+                applied["url_deduped"].append(
+                    {"thread_id": str(notif_thread_id), "url": notif_url}
+                )
+            continue
         if _append_unique(data, data["inbox"], entry):
             applied["added_inbox"] += 1
+            added_entries.append(entry)
             changed = True
         else:
             applied["already_tracked"] += 1
@@ -1225,22 +1265,29 @@ def apply_todo_mutations(
     return applied
 
 
-def apply_todo_mutations_with_lock(
-    path: Path, mutations: TodoMutations
-) -> AppliedTodoMutations:
-    """Re-read todo.yml under an exclusive lock, apply deltas, and write."""
+@contextlib.contextmanager
+def _todo_write_lock(path: Path):
+    """Hold the exclusive todo.yml lock shared by all todo writers."""
     lock_path = path.with_name(f"{path.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            data = load_todo(path)
-            applied = apply_todo_mutations(data, mutations)
-            if applied["changed"]:
-                write_todo_atomic(path, data)
-            return applied
+            yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def apply_todo_mutations_with_lock(
+    path: Path, mutations: TodoMutations
+) -> AppliedTodoMutations:
+    """Re-read todo.yml under an exclusive lock, apply deltas, and write."""
+    with _todo_write_lock(path):
+        data = load_todo(path)
+        applied = apply_todo_mutations(data, mutations)
+        if applied["changed"]:
+            write_todo_atomic(path, data)
+        return applied
 
 
 def preview_todo_mutations(path: Path, mutations: TodoMutations) -> AppliedTodoMutations:
@@ -1256,6 +1303,9 @@ def reconcile_stats_from_applied(
     stats.added_q2 = applied["added_q2"]
     stats.added_inbox = applied["added_inbox"]
     stats.already_tracked += applied["already_tracked"]
+    url_deduped = len(applied["url_deduped"])
+    stats.dropped += url_deduped
+    stats.already_tracked += url_deduped
     stats.marked_done = applied["marked_done"]
     stats.pruned_stale = applied["pruned"]
     stats.pruned_by_reason = dict(applied["pruned_by_reason"])
@@ -1292,62 +1342,71 @@ def _log_git_warning(action: str, exc: BaseException) -> None:
 
 
 def commit_todo_changes(path: Path, message: str) -> bool:
-    """Commit todo.yml changes locally, then try to pull and push."""
+    """Commit todo.yml changes locally, then try to pull and push.
+
+    Every git operation that can rewrite the working tree runs under the
+    shared todo lock. Git does not honor the advisory flock on its own, so
+    each todo writer must take this lock around its git operations; that
+    way a concurrent writer's ``git pull --rebase`` cannot rewrite todo.yml
+    mid-sequence or between another holder's check and its notification
+    clear.
+    """
     repo = _git_repo_for_todo(path)
     if not _git_metadata_exists(repo):
         logger.debug("todo repo %s has no git metadata; skipping commit", repo)
         return False
-    try:
-        _run_git(repo, ["add", "--", path.name])
-        diff = _run_git(repo, ["diff", "--cached", "--quiet", "--", path.name], check=False)
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        _log_git_warning("add", exc)
-        return False
-
-    if diff.returncode == 0:
-        logger.info("todo.yml unchanged after staging; skipping commit")
-        return False
-    if diff.returncode != 1:
-        logger.warning("git diff --cached failed: %s", (diff.stderr or "").strip())
-        return False
-
-    try:
-        _run_git(
-            repo,
-            [
-                "commit",
-                "--signoff",
-                "-m",
-                message,
-                "-m",
-                COPILOT_COAUTHOR_TRAILER,
-                "--",
-                path.name,
-            ],
-        )
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        _log_git_warning("commit", exc)
-        return False
-
-    try:
-        _run_git(repo, ["pull", "--rebase", "--autostash"])
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        _log_git_warning("pull --rebase", exc)
-        # A conflicting rebase leaves the repo mid-rebase with conflict
-        # markers written into todo.yml, which would break every later run
-        # (load_todo would raise). Abort it best-effort so the worktree is
-        # left clean on the local commit.
+    with _todo_write_lock(path):
         try:
-            _run_git(repo, ["rebase", "--abort"], check=False)
-        except (FileNotFoundError, subprocess.SubprocessError) as abort_exc:
-            _log_git_warning("rebase --abort", abort_exc)
-        return True
+            _run_git(repo, ["add", "--", path.name])
+            diff = _run_git(repo, ["diff", "--cached", "--quiet", "--", path.name], check=False)
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            _log_git_warning("add", exc)
+            return False
 
-    try:
-        _run_git(repo, ["push"])
-    except (FileNotFoundError, subprocess.SubprocessError) as exc:
-        _log_git_warning("push", exc)
-    return True
+        if diff.returncode == 0:
+            logger.info("todo.yml unchanged after staging; skipping commit")
+            return False
+        if diff.returncode != 1:
+            logger.warning("git diff --cached failed: %s", (diff.stderr or "").strip())
+            return False
+
+        try:
+            _run_git(
+                repo,
+                [
+                    "commit",
+                    "--signoff",
+                    "-m",
+                    message,
+                    "-m",
+                    COPILOT_COAUTHOR_TRAILER,
+                    "--",
+                    path.name,
+                ],
+            )
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            _log_git_warning("commit", exc)
+            return False
+
+        try:
+            _run_git(repo, ["pull", "--rebase", "--autostash"])
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            _log_git_warning("pull --rebase", exc)
+            # A conflicting rebase leaves the repo mid-rebase with conflict
+            # markers written into todo.yml, which would break every later run
+            # (load_todo would raise). Abort it best-effort so the worktree is
+            # left clean on the local commit.
+            try:
+                _run_git(repo, ["rebase", "--abort"], check=False)
+            except (FileNotFoundError, subprocess.SubprocessError) as abort_exc:
+                _log_git_warning("rebase --abort", abort_exc)
+            return True
+
+        try:
+            _run_git(repo, ["push"])
+        except (FileNotFoundError, subprocess.SubprocessError) as exc:
+            _log_git_warning("push", exc)
+        return True
 
 
 def existing_thread_ids(data: dict[str, Any]) -> set[str]:
@@ -1379,6 +1438,56 @@ def existing_thread_ids(data: dict[str, Any]) -> set[str]:
     for items in prioritized.values():
         collect(items)
     return ids
+
+
+def _canonical_pr_issue_url_key(url: Any) -> tuple[str, str, str, int] | None:
+    parsed = parse_github_url(url) if isinstance(url, str) else None
+    if parsed is None or parsed["kind"] not in {"pr", "issue"}:
+        return None
+    return (
+        parsed["owner"].lower(),
+        parsed["repo"].lower(),
+        "issue_or_pr",
+        parsed["number"],
+    )
+
+
+def _item_reference_urls(item: Any) -> list[str]:
+    if not isinstance(item, dict):
+        return []
+    urls: list[str] = []
+    link = item.get("link")
+    if isinstance(link, str):
+        urls.append(link)
+    artifacts = item.get("artifacts")
+    if isinstance(artifacts, list):
+        for artifact in artifacts:
+            if isinstance(artifact, str):
+                urls.append(artifact)
+            elif isinstance(artifact, dict):
+                for key in ("link", "url"):
+                    value = artifact.get(key)
+                    if isinstance(value, str):
+                        urls.append(value)
+    return urls
+
+
+def _tracked_pr_issue_url_exists_elsewhere(
+    data: dict[str, Any],
+    url: str,
+    *,
+    exclude_thread_id: str | None = None,
+) -> bool:
+    target = _canonical_pr_issue_url_key(url)
+    if target is None:
+        return False
+    for item in _iter_todo_items(data):
+        if exclude_thread_id and _item_thread_id(item) == exclude_thread_id:
+            continue
+        for reference_url in _item_reference_urls(item):
+            if _canonical_pr_issue_url_key(reference_url) == target:
+                return True
+    return False
 
 
 def items_to_mark_done(data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1429,21 +1538,37 @@ def mark_thread_done(thread_id: str) -> None:
     run_gh(["api", "-X", "DELETE", f"/notifications/threads/{thread_id}"], timeout=20)
 
 
-def macos_notify(title: str, message: str) -> None:
-    """Best-effort macOS notification via osascript. Silent on failure."""
+def macos_notify(title: str, message: str, url: str) -> None:
+    """Send a clickable macOS notification through terminal-notifier."""
+    if not url:
+        logger.warning("macos_notify skipped because the destination URL is empty")
+        return
     try:
-        script = (
-            f'display notification "{message}" '
-            f'with title "{title}" sound name "default"'
-        )
-        subprocess.run(
-            ["osascript", "-e", script],
+        result = subprocess.run(
+            [
+                "terminal-notifier",
+                "-title",
+                title,
+                "-message",
+                message,
+                "-open",
+                url,
+                "-sound",
+                "default",
+            ],
             check=False,
             capture_output=True,
+            text=True,
             timeout=5,
         )
+        if result.returncode != 0:
+            logger.warning(
+                "macos_notify failed with exit %d: %s",
+                result.returncode,
+                result.stderr.strip(),
+            )
     except (subprocess.SubprocessError, FileNotFoundError) as exc:
-        logger.debug("macos_notify failed: %s", exc)
+        logger.warning("macos_notify failed: %s", exc)
 
 
 def get_my_login() -> str:
@@ -1454,7 +1579,7 @@ def get_my_login() -> str:
 
 _GH_PATH_RE = re.compile(
     r"^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/"
-    r"(?P<kind>pull|issues|discussions)/(?P<number>\d+)"
+    r"(?P<kind>pull|issues|discussions)/(?P<number>\d+)(?=/|$|\.(?:diff|patch)$)"
 )
 
 
@@ -1471,7 +1596,9 @@ def parse_github_url(url: str) -> dict[str, Any] | None:
         parsed = urlparse(url)
     except ValueError:
         return None
-    if parsed.netloc not in ("github.com", "www.github.com"):
+    if parsed.scheme.lower() not in ("http", "https"):
+        return None
+    if parsed.netloc.lower() not in ("github.com", "www.github.com"):
         return None
     match = _GH_PATH_RE.match(parsed.path)
     if not match:
@@ -1727,7 +1854,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-notify",
         action="store_true",
-        help="Skip the macOS notification even if actionable items were added.",
+        help="Skip clickable macOS alerts for new direct mentions.",
     )
     parser.add_argument(
         "--no-prune",
@@ -1740,6 +1867,52 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Enable debug logging.",
     )
     return parser.parse_args(argv)
+
+
+def clear_url_deduped_threads(
+    path: Path,
+    deduped: list[dict[str, str]],
+    stats: TriageStats,
+) -> None:
+    """Clear GitHub threads for URL-deduped inbox entries.
+
+    The dedupe decision was made under the write lock, but the lock is
+    released (and ``commit_todo_changes`` may ``git pull --rebase``) before
+    this runs. Reacquire the same exclusive lock and serialize the reload,
+    the URL revalidation, and the notification clear so no todo writer can
+    remove the tracking item between the check and the DELETE: if the URL is
+    no longer tracked, leave the thread unread so the next run re-surfaces
+    it. The clear (a network call) is held under the lock deliberately, so a
+    concurrent removal cannot orphan the notification.
+    """
+    if not deduped:
+        return
+    with _todo_write_lock(path):
+        try:
+            current = load_todo(path)
+        except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+            stats.errors.append(
+                f"failed to reload todo before clearing deduped threads: {exc}"
+            )
+            return
+        for record in deduped:
+            thread_id = record.get("thread_id") or ""
+            url = record.get("url") or ""
+            if not thread_id:
+                continue
+            if not _tracked_pr_issue_url_exists_elsewhere(
+                current, url, exclude_thread_id=thread_id
+            ):
+                continue
+            try:
+                mark_thread_done(thread_id)
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+            ) as exc:
+                stats.errors.append(
+                    f"mark-done failed for thread {thread_id}: {exc}"
+                )
 
 
 def run(args: argparse.Namespace) -> TriageStats:
@@ -1770,6 +1943,7 @@ def run(args: argparse.Namespace) -> TriageStats:
 
     seen_ids = existing_thread_ids(data)
     mutations = TodoMutations()
+    direct_mention_thread_ids: set[str] = set()
 
     for notif in notifications:
         thread_id = str(notif.get("id") or "")
@@ -1808,6 +1982,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
             continue
         entry = build_todo_entry(notif, classification)
+        if classification.direct_mention and thread_id:
+            direct_mention_thread_ids.add(thread_id)
         if classification.bucket == BUCKET_Q2:
             mutations.add_q2.append(entry)
             stats.added_q2 += 1
@@ -1855,6 +2031,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         or mutations.mark_done
         or mutations.prune
     )
+    added_entries: list[dict[str, Any]] = []
     if has_todo_mutations:
         if args.dry_run:
             try:
@@ -1882,16 +2059,27 @@ def run(args: argparse.Namespace) -> TriageStats:
                 commit_todo_changes(
                     args.todo_file, "Record notification triage todo updates"
                 )
+            # Clear GitHub threads for URL-deduped inbox entries, revalidating
+            # each URL against the post-commit document so a concurrent removal
+            # during the commit's pull/rebase cannot orphan a notification.
+            clear_url_deduped_threads(args.todo_file, applied["url_deduped"], stats)
         reconcile_stats_from_applied(stats, applied)
+        if not args.dry_run:
+            added_entries = applied["added_entries"]
 
-    new_actionable = stats.added_q2 + stats.added_inbox
-    if new_actionable and not args.no_notify:
-        title = "Notification triage"
-        message = (
-            f"{stats.added_q2} new Q2, {stats.added_inbox} to inbox "
-            f"({stats.dropped} dropped)"
-        )
-        macos_notify(title, message)
+    if not args.no_notify and not args.dry_run:
+        for entry in added_entries:
+            notif_meta = entry.get("notification")
+            if not isinstance(notif_meta, dict):
+                continue
+            thread_id = str(notif_meta.get("thread_id") or "")
+            if thread_id not in direct_mention_thread_ids:
+                continue
+            macos_notify(
+                "GitHub mention",
+                str(entry.get("title") or "You were mentioned on GitHub"),
+                str(notif_meta.get("url") or ""),
+            )
 
     return stats
 

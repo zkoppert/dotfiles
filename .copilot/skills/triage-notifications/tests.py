@@ -99,6 +99,7 @@ def test_classify_mention_goes_to_q1():
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q2
+    assert c.direct_mention is True
 
 
 def test_classify_assign_goes_to_q1():
@@ -152,6 +153,7 @@ def test_classify_mention_on_my_own_pr_goes_to_inbox():
     )
     assert c.bucket == triage.BUCKET_INBOX
     assert "authored" in c.reason
+    assert c.direct_mention is True
 
 
 def test_classify_security_alert_on_my_own_pr_still_goes_to_q1():
@@ -293,6 +295,7 @@ def test_comment_with_mention_goes_to_q1():
         comment_fetcher=lambda _: ("teammate", "hey @zkoppert can you look?"),
     )
     assert c.bucket == triage.BUCKET_Q2
+    assert c.direct_mention is True
 
 
 def test_super_linter_without_mention_drops():
@@ -379,9 +382,62 @@ def test_unknown_reason_drops():
 
 def test_mentions_me_case_insensitive():
     assert triage.mentions_me("hey @ZKoppert", "zkoppert") is True
+    assert triage.mentions_me("hey @ZKoppert, can you look?", "zkoppert") is True
+    assert triage.mentions_me("hey @zkoppert-todo", "zkoppert") is False
+    assert triage.mentions_me("hey @zkoppertson", "zkoppert") is False
+    assert triage.mentions_me("email@zkoppert.com", "zkoppert") is False
     assert triage.mentions_me("nothing here", "zkoppert") is False
     assert triage.mentions_me("", "zkoppert") is False
     assert triage.mentions_me(None, "zkoppert") is False
+
+
+def test_macos_notify_uses_clickable_terminal_notifier() -> None:
+    result = subprocess.CompletedProcess(
+        ["terminal-notifier"],
+        0,
+        stdout="",
+        stderr="",
+    )
+    with patch("triage.subprocess.run", return_value=result) as run_mock:
+        triage.macos_notify(
+            "GitHub mention",
+            "Sample PR",
+            "https://github.com/zkoppert/example/pull/42",
+        )
+
+    run_mock.assert_called_once_with(
+        [
+            "terminal-notifier",
+            "-title",
+            "GitHub mention",
+            "-message",
+            "Sample PR",
+            "-open",
+            "https://github.com/zkoppert/example/pull/42",
+            "-sound",
+            "default",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+
+def test_macos_notify_logs_missing_notifier(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with patch(
+        "triage.subprocess.run",
+        side_effect=FileNotFoundError("terminal-notifier"),
+    ):
+        triage.macos_notify(
+            "GitHub mention",
+            "Sample PR",
+            "https://github.com/zkoppert/example/pull/42",
+        )
+
+    assert "macos_notify failed" in caplog.text
 
 
 def test_is_super_linter_by_author():
@@ -632,6 +688,7 @@ def test_apply_todo_mutations_with_lock_preserves_concurrent_manual_edit(tmp_pat
     applied = triage.apply_todo_mutations_with_lock(todo_path, mutations)
 
     assert applied["changed"] is True
+    assert [entry["id"] for entry in applied["added_entries"]] == ["notif-added"]
     reloaded = yaml.safe_load(todo_path.read_text())
     assert [item["id"] for item in reloaded["inbox"]] == ["manual-added"]
     assert [item["id"] for item in reloaded["prioritized"]["q2_schedule"]] == [
@@ -654,6 +711,174 @@ def test_apply_todo_mutations_with_lock_acquires_file_lock(tmp_path):
 
     assert flock_mock.call_args_list[0].args[1] == triage.fcntl.LOCK_EX
     assert flock_mock.call_args_list[-1].args[1] == triage.fcntl.LOCK_UN
+
+
+def test_apply_todo_mutations_with_lock_dedupes_url_against_fresh_document(tmp_path):
+    todo_path = tmp_path / "todo.yml"
+    # Snapshot state: the PR is not yet tracked anywhere.
+    todo_path.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first: []\n  q2_schedule: []\ndone: []\n",
+        encoding="utf-8",
+    )
+    _stale_snapshot = triage.load_todo(todo_path)
+    # Concurrent edit: another writer records the PR as a Q1 artifact after the
+    # snapshot was taken but before this locked write runs.
+    todo_path.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: tracked-pr\n"
+        "      title: Already tracked PR\n"
+        "      artifacts:\n"
+        "        - https://github.com/octocat/Hello-World/pull/99\n"
+        "  q2_schedule: []\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+    mutations = triage.TodoMutations(
+        add_inbox=[
+            {
+                "id": "notif-inbox",
+                "title": "Assigned on tracked PR",
+                "notification": {
+                    "thread_id": "2001",
+                    "url": "https://github.com/octocat/Hello-World/pull/99",
+                },
+            }
+        ]
+    )
+
+    applied = triage.apply_todo_mutations_with_lock(todo_path, mutations)
+
+    # Deduped against the fresh locked document, not the stale snapshot.
+    assert applied["added_inbox"] == 0
+    assert applied["url_deduped"] == [
+        {
+            "thread_id": "2001",
+            "url": "https://github.com/octocat/Hello-World/pull/99",
+        }
+    ]
+    reloaded = yaml.safe_load(todo_path.read_text())
+    assert reloaded["inbox"] == []
+
+
+def test_apply_todo_mutations_keeps_untracked_inbox_url(tmp_path):
+    todo_path = tmp_path / "todo.yml"
+    todo_path.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first: []\n  q2_schedule: []\ndone: []\n",
+        encoding="utf-8",
+    )
+    mutations = triage.TodoMutations(
+        add_inbox=[
+            {
+                "id": "notif-inbox",
+                "title": "Assigned on untracked PR",
+                "notification": {
+                    "thread_id": "2002",
+                    "url": "https://github.com/octocat/Hello-World/pull/123",
+                },
+            }
+        ]
+    )
+
+    applied = triage.apply_todo_mutations_with_lock(todo_path, mutations)
+
+    assert applied["added_inbox"] == 1
+    assert applied["url_deduped"] == []
+    reloaded = yaml.safe_load(todo_path.read_text())
+    assert [item["id"] for item in reloaded["inbox"]] == ["notif-inbox"]
+
+
+def test_clear_url_deduped_threads_clears_when_still_tracked(tmp_path):
+    todo_path = tmp_path / "todo.yml"
+    todo_path.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: tracked-pr\n"
+        "      artifacts:\n"
+        "        - https://github.com/octocat/Hello-World/pull/99\n"
+        "  q2_schedule: []\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+    deduped = [
+        {
+            "thread_id": "2001",
+            "url": "https://github.com/octocat/Hello-World/pull/99",
+        }
+    ]
+    stats = triage.TriageStats()
+
+    with patch("triage.mark_thread_done") as mark_done:
+        triage.clear_url_deduped_threads(todo_path, deduped, stats)
+
+    mark_done.assert_called_once_with("2001")
+    assert stats.errors == []
+
+
+def test_clear_url_deduped_threads_skips_when_untracked_after_commit(tmp_path):
+    # Simulates a concurrent removal during the commit's pull/rebase: the
+    # tracking item is gone by the time we would clear, so the thread must be
+    # left unread for the next run to re-surface.
+    todo_path = tmp_path / "todo.yml"
+    todo_path.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first: []\n  q2_schedule: []\ndone: []\n",
+        encoding="utf-8",
+    )
+    deduped = [
+        {
+            "thread_id": "2001",
+            "url": "https://github.com/octocat/Hello-World/pull/99",
+        }
+    ]
+    stats = triage.TriageStats()
+
+    with patch("triage.mark_thread_done") as mark_done:
+        triage.clear_url_deduped_threads(todo_path, deduped, stats)
+
+    mark_done.assert_not_called()
+    assert stats.errors == []
+
+
+def test_clear_url_deduped_threads_serializes_clear_under_lock(tmp_path):
+    # The reload, URL check, and DELETE must all happen while the exclusive
+    # todo lock is held so a concurrent writer cannot remove the item between
+    # the check and the clear.
+    todo_path = tmp_path / "todo.yml"
+    todo_path.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: tracked-pr\n"
+        "      artifacts:\n"
+        "        - https://github.com/octocat/Hello-World/pull/99\n"
+        "  q2_schedule: []\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+    deduped = [
+        {
+            "thread_id": "2001",
+            "url": "https://github.com/octocat/Hello-World/pull/99",
+        }
+    ]
+    stats = triage.TriageStats()
+    events: list[str] = []
+
+    def record_flock(_fileno, op):
+        if op == triage.fcntl.LOCK_EX:
+            events.append("lock")
+        elif op == triage.fcntl.LOCK_UN:
+            events.append("unlock")
+
+    with patch("triage.fcntl.flock", side_effect=record_flock), patch(
+        "triage.mark_thread_done", side_effect=lambda tid: events.append("clear")
+    ):
+        triage.clear_url_deduped_threads(todo_path, deduped, stats)
+
+    # The clear happens between acquiring and releasing the lock.
+    assert events == ["lock", "clear", "unlock"]
 
 
 def test_commit_todo_changes_skips_commit_when_nothing_staged(tmp_path):
@@ -769,6 +994,37 @@ def test_commit_todo_changes_commit_failure_returns_false(tmp_path):
     assert result is False
 
 
+def test_commit_todo_changes_runs_git_ops_under_lock(tmp_path):
+    # Git does not honor the advisory flock, so commit_todo_changes must run
+    # its worktree-changing git operations while holding the shared lock.
+    repo = tmp_path
+    (repo / ".git").mkdir()
+    todo_path = repo / "todo.yml"
+    todo_path.write_text("inbox: []\n", encoding="utf-8")
+    events: list[str] = []
+
+    def record_flock(_fileno, op):
+        events.append("lock" if op == triage.fcntl.LOCK_EX else "unlock")
+
+    def fake_run(cmd, *args, **kwargs):
+        sub = cmd[3] if len(cmd) > 3 else ""
+        events.append("git:" + sub)
+        rc = 1 if sub == "diff" else 0
+        return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
+
+    with patch("triage.fcntl.flock", side_effect=record_flock), patch(
+        "triage.subprocess.run", side_effect=fake_run
+    ):
+        result = triage.commit_todo_changes(todo_path, "msg")
+
+    assert result is True
+    assert events[0] == "lock"
+    assert events[-1] == "unlock"
+    git_idxs = [i for i, e in enumerate(events) if e.startswith("git:")]
+    assert git_idxs
+    assert all(0 < i < len(events) - 1 for i in git_idxs)
+
+
 def test_write_todo_atomic_cleans_up_on_failure(tmp_path):
     todo_path = tmp_path / "todo.yml"
     todo_path.write_text("inbox: []\n", encoding="utf-8")
@@ -842,6 +1098,57 @@ def _gh_returns(responses: dict[str, str]):
     return fake_run
 
 
+def _assign_notif_for_tracked_url(
+    *, thread_id: str = "2001", number: int = 99
+) -> dict:
+    return {
+        "id": thread_id,
+        "reason": "assign",
+        "subject": {
+            "title": "Tracked PR",
+            "url": f"https://api.github.com/repos/octocat/Hello-World/pulls/{number}",
+            "type": "PullRequest",
+        },
+        "repository": {
+            "full_name": "octocat/Hello-World",
+            "html_url": "https://github.com/octocat/Hello-World",
+        },
+    }
+
+
+def _run_with_assign_notification(todo_file: Path, notif: dict):
+    delete_calls: list[tuple] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        joined = " ".join(cmd)
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(tuple(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if "/user" in joined:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps({"login": "zkoppert"}), stderr=""
+            )
+        if "/notifications" in joined and "/threads" not in joined:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps([notif]), stderr=""
+            )
+        if "/repos/octocat/Hello-World/pulls/99" in joined:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps(
+                    {"state": "open", "user": {"login": "zkoppert"}}
+                ),
+                stderr="",
+            )
+        raise AssertionError(f"unexpected gh call: {cmd}")
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        stats = triage.run(args)
+    return stats, delete_calls, yaml.safe_load(todo_file.read_text())
+
+
 def test_run_dedupes_already_tracked(todo_file):
     existing = {
         "inbox": [
@@ -856,11 +1163,125 @@ def test_run_dedupes_already_tracked(todo_file):
         "/user": json.dumps({"login": "zkoppert"}),
         "/notifications?all=true": json.dumps([_notif("mention")]),
     }
-    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
-        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
     assert stats.already_tracked == 1
     assert stats.added_q2 == 0
+    notify_mock.assert_not_called()
+
+
+def test_run_drops_inbox_notification_when_url_is_prioritized_artifact(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {
+                    "q1_do_first": [
+                        {
+                            "id": "tracked-pr",
+                            "title": "Already tracked PR",
+                            "artifacts": [
+                                "https://github.com/octocat/Hello-World/pull/99"
+                            ],
+                        },
+                    ],
+                },
+                "done": [],
+            }
+        )
+    )
+
+    stats, delete_calls, data = _run_with_assign_notification(
+        todo_file, _assign_notif_for_tracked_url()
+    )
+
+    assert stats.dropped == 1
+    assert stats.added_inbox == 0
+    assert stats.already_tracked == 1
+    assert any("/notifications/threads/2001" in " ".join(c) for c in delete_calls)
+    assert data["inbox"] == []
+
+
+def test_run_drops_inbox_notification_when_url_is_done_link(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": []},
+                "done": [
+                    {
+                        "id": "done-pr",
+                        "title": "Shipped PR",
+                        "completed": "2026-07-01",
+                        "link": "https://github.com/octocat/Hello-World/pull/99",
+                    },
+                ],
+            }
+        )
+    )
+
+    stats, delete_calls, data = _run_with_assign_notification(
+        todo_file, _assign_notif_for_tracked_url()
+    )
+
+    assert stats.dropped == 1
+    assert stats.added_inbox == 0
+    assert stats.already_tracked == 1
+    assert any("/notifications/threads/2001" in " ".join(c) for c in delete_calls)
+    assert data["inbox"] == []
+
+
+def test_run_keeps_new_inbox_notification_when_url_is_untracked(todo_file):
+    stats, delete_calls, data = _run_with_assign_notification(
+        todo_file, _assign_notif_for_tracked_url()
+    )
+
+    assert stats.dropped == 0
+    assert stats.added_inbox == 1
+    assert stats.already_tracked == 0
+    assert delete_calls == []
+    assert data["inbox"][0]["notification"]["url"] == (
+        "https://github.com/octocat/Hello-World/pull/99"
+    )
+
+
+def test_run_tracked_url_dedup_normalizes_artifact_url(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {
+                    "q1_do_first": [
+                        {
+                            "id": "tracked-pr",
+                            "title": "Already tracked PR",
+                            "artifacts": [
+                                {
+                                    "url": (
+                                        "https://GITHUB.com/octocat/Hello-World/"
+                                        "issues/99/?foo=bar#discussion_r1"
+                                    )
+                                }
+                            ],
+                        },
+                    ],
+                },
+                "done": [],
+            }
+        )
+    )
+
+    stats, delete_calls, data = _run_with_assign_notification(
+        todo_file, _assign_notif_for_tracked_url()
+    )
+
+    assert stats.dropped == 1
+    assert stats.added_inbox == 0
+    assert any("/notifications/threads/2001" in " ".join(c) for c in delete_calls)
+    assert data["inbox"] == []
 
 
 def test_run_adds_q2_for_mention(todo_file):
@@ -868,14 +1289,90 @@ def test_run_adds_q2_for_mention(todo_file):
         "/user": json.dumps({"login": "zkoppert"}),
         "/notifications?all=true": json.dumps([_notif("mention")]),
     }
-    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
-        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
     assert stats.added_q2 == 1
+    notify_mock.assert_called_once_with(
+        "GitHub mention",
+        "Sample PR (zkoppert/example)",
+        "https://github.com/zkoppert/example/pull/42",
+    )
     data = yaml.safe_load(todo_file.read_text())
     q2 = data["prioritized"]["q2_schedule"]
     assert len(q2) == 1
     assert q2[0]["quadrant"] == "q2_schedule"
+
+
+def test_run_does_not_notify_for_assignment(todo_file):
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([_notif("assign")]),
+    }
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
+    assert stats.added_q2 == 1
+    notify_mock.assert_not_called()
+
+
+def test_run_notifies_for_direct_mention_in_comment(todo_file):
+    notif = _notif("comment")
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+        "/repos/zkoppert/example/pulls/42": json.dumps({"state": "open"}),
+        "/repos/zkoppert/example/issues/comments/9": json.dumps(
+            {
+                "user": {"login": "teammate"},
+                "body": "Can you take a look, @zkoppert?",
+            }
+        ),
+    }
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
+    assert stats.added_q2 == 1
+    notify_mock.assert_called_once_with(
+        "GitHub mention",
+        "Sample PR (zkoppert/example)",
+        "https://github.com/zkoppert/example/pull/42",
+    )
+
+
+def test_run_notifies_commit_mention_with_commit_url(todo_file):
+    notif = _notif(
+        "mention",
+        subject={
+            "title": "Commit abc123",
+            "url": "https://api.github.com/repos/zkoppert/example/commits/abc123",
+            "type": "Commit",
+        },
+    )
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+    }
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
+    assert stats.added_q2 == 1
+    notify_mock.assert_called_once_with(
+        "GitHub mention",
+        "Commit abc123 (zkoppert/example)",
+        "https://github.com/zkoppert/example/commit/abc123",
+    )
 
 
 def test_run_drops_ci_activity_and_marks_done(todo_file):
@@ -914,13 +1411,14 @@ def test_run_dry_run_does_not_write(todo_file):
         "/user": json.dumps({"login": "zkoppert"}),
         "/notifications?all=true": json.dumps([_notif("mention")]),
     }
-    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
-        args = triage.parse_args(
-            ["--todo-file", str(todo_file), "--dry-run", "--no-notify"]
-        )
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file), "--dry-run"])
         stats = triage.run(args)
     assert stats.added_q2 == 1
     assert todo_file.read_text() == before
+    notify_mock.assert_not_called()
 
 
 def test_run_marks_done_on_completed(todo_file):
@@ -1046,6 +1544,18 @@ def test_main_returns_zero_on_success(todo_file):
             "https://www.github.com/octocat/Hello-World/pull/1",
             {"owner": "octocat", "repo": "Hello-World", "kind": "pr", "number": 1},
         ),
+        (
+            "https://github.com/octocat/Hello-World/pull/99/files",
+            {"owner": "octocat", "repo": "Hello-World", "kind": "pr", "number": 99},
+        ),
+        (
+            "https://github.com/octocat/Hello-World/pull/99.diff",
+            {"owner": "octocat", "repo": "Hello-World", "kind": "pr", "number": 99},
+        ),
+        (
+            "https://github.com/octocat/Hello-World/pull/99.patch",
+            {"owner": "octocat", "repo": "Hello-World", "kind": "pr", "number": 99},
+        ),
     ],
 )
 def test_parse_github_url_supported(url, expected):
@@ -1063,6 +1573,11 @@ def test_parse_github_url_supported(url, expected):
         "https://github.com/octocat/Hello-World/actions/runs/123",
         "https://example.com/octocat/Hello-World/pull/123",
         "not a url",
+        "https://github.com/octocat/Hello-World/issues/99-notes",
+        "https://github.com/octocat/Hello-World/pull/99x",
+        "ftp://github.com/octocat/Hello-World/pull/1",
+        "https://github.com/octocat/Hello-World/pull/99.json",
+        "https://github.com/octocat/Hello-World/pull/99.diffx",
     ],
 )
 def test_parse_github_url_unsupported(url):

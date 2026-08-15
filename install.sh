@@ -76,6 +76,10 @@ fi
 # The wrapper itself goes in ~/.local/bin so it stays on PATH for ad-hoc runs,
 # and the plist gets symlinked into ~/Library/LaunchAgents so launchctl can
 # pick it up on a cron-like schedule (every 2h, 08:00-18:00, Mon-Fri).
+if [ "$(uname)" = "Darwin" ] && ! command -v terminal-notifier >/dev/null 2>&1; then
+  echo "⚠ terminal-notifier is missing - run 'brew install terminal-notifier' to enable clickable triage alerts"
+fi
+
 TRIAGE_WRAPPER="$DOTFILES_DIR/bin/notification-triage"
 TRIAGE_PLIST="$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"
 if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ]; then
@@ -104,6 +108,26 @@ if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ]; then
     else
       echo "⚠ $PLIST_TARGET exists and is not a symlink - skipping (delete it manually if you want the dotfiles version)"
     fi
+  fi
+fi
+
+# Install the Friday NUX first-responder handoff generator.
+NUX_HANDOFF_WRAPPER="$DOTFILES_DIR/bin/nux-fr-handoff"
+NUX_HANDOFF_INSTALLER="$DOTFILES_DIR/.copilot/skills/nux-fr-handoff/install.sh"
+if [ -x "$NUX_HANDOFF_WRAPPER" ]; then
+  mkdir -p "$HOME/.local/bin"
+  NUX_HANDOFF_BIN_TARGET="$HOME/.local/bin/nux-fr-handoff"
+  if [ -L "$NUX_HANDOFF_BIN_TARGET" ] || [ ! -e "$NUX_HANDOFF_BIN_TARGET" ]; then
+    ln -sfn "$NUX_HANDOFF_WRAPPER" "$NUX_HANDOFF_BIN_TARGET"
+    echo "✓ Linked nux-fr-handoff → ~/.local/bin/nux-fr-handoff"
+  else
+    echo "⚠ $NUX_HANDOFF_BIN_TARGET exists and is not a symlink - skipping"
+  fi
+fi
+
+if [ -x "$NUX_HANDOFF_INSTALLER" ] && [ "$(uname)" = "Darwin" ]; then
+  if ! "$NUX_HANDOFF_INSTALLER"; then
+    echo "⚠ NUX FR handoff scheduling was skipped; run $NUX_HANDOFF_INSTALLER after installing its prerequisites"
   fi
 fi
 

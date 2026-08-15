@@ -1,0 +1,13 @@
+#!/bin/bash
+# Wrapper for launchd: ensures PATH is set so `gh` is findable, then
+# execs the babysit-prs script. Logs are routed via the plist.
+set -euo pipefail
+
+# Brew prepends /opt/homebrew/bin in interactive shells; replicate here
+# so `gh`, `python3`, and (optionally) `terminal-notifier` are on PATH
+# when launchd invokes us directly.
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH"
+
+exec /usr/bin/env python3 \
+  "$HOME/repos/babysit-prs/babysit_prs.py" \
+  "$@"

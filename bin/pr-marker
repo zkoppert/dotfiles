@@ -15,7 +15,8 @@ Marker kinds (filename inside `<git-dir>/copilot-pr-review/<encoded-branch>/`,
 minimum size in bytes, whether HEAD-pinned, and whether a multi-model review):
 
   code-review  code-review.md   200   multi-model review of the code diff
-                                      (pinned, requires >=3 models)
+                                      (pinned, requires >=3 models and a final
+                                      clean convergence round from 1 through 3)
   plan         plan.md          120   multi-model review of the plan
                                       (requires >=3 models)
   demo         demo.md          120   demo video + before/after images
@@ -38,10 +39,15 @@ models, and records them in a `<!-- reviewed-by-models: a, b, c -->` header, so
 a lightweight single-pass self-review cannot satisfy a gate meant to require a
 multi-model review. `status`/`check` and gh-guard reject a review marker that
 declares fewer than 3 distinct models. The demo and tests markers are exempt.
+The code-review marker also requires `--convergence-rounds N`, where N is the
+final panel round that found no new verified findings. `status`/`check` and
+gh-guard accept only the workflow's range of 1 through 3.
 
-The tests marker is machine-produced: `run-tests` executes the given check
-commands, and writes the marker only if every command exits 0, so it records a
-real green run (tests, lint, type-check, build) rather than a self-reported note.
+The tests marker is machine-produced: `run-tests` requires a clean repository,
+runs the test-quality evidence preflight and the given check commands, verifies
+the repository stayed clean, and writes the marker only if every command exits
+0. This records the committed tree that passed tests, lint, type-check, and
+build rather than a self-reported note.
 
 The branch directory name is percent-encoded. The encoding MUST stay identical
 to gh-guard's inline computation:
@@ -56,12 +62,16 @@ branch `x.plan`'s code-review marker.
 Usage:
   pr-marker path <kind>            print the marker file path for the current branch
   pr-marker artifacts-dir <kind>   print the sibling artifacts directory path
-  pr-marker write <kind> [FILE] [--models a,b,c]
+  pr-marker write <kind> [FILE] [--models a,b,c] [--convergence-rounds N]
                                    write marker content from FILE (or stdin if
-                                   '-'/omitted); review kinds require >=3 --models
-  pr-marker run-tests --cmd '<command>' [--cmd '<command>' ...] [--narrow reason]
-                                   run each check command; write the HEAD-pinned tests
-                                   marker only if every command exits 0
+                                   '-'/omitted); review kinds require >=3 --models,
+                                   and code-review requires a clean round number
+  pr-marker run-tests --cmd '<command>' [--cmd '<command>' ...]
+                      [--base-ref REF] [--no-test-change-reason REASON]
+                      [--narrow reason]
+                                   run the evidence preflight and each check command;
+                                   write the HEAD-pinned tests marker only if every
+                                   command exits 0 and the repository stays clean
   pr-marker status                 show all five markers and whether each passes
   pr-marker check                  exit 0 only if every marker passes (fresh + over
                                    floor)
@@ -70,6 +80,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -81,7 +92,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Kind:
-    """A marker kind: filename, min size, pin/model/result flags."""
+    """A marker kind and the validation rules enforced for it."""
 
     name: str
     filename: str
@@ -90,6 +101,7 @@ class Kind:
     pinned: bool = False
     requires_models: bool = False
     requires_result: bool = False
+    requires_convergence: bool = False
 
 
 KINDS: dict[str, Kind] = {
@@ -100,6 +112,7 @@ KINDS: dict[str, Kind] = {
         "multi-model review of the code diff",
         pinned=True,
         requires_models=True,
+        requires_convergence=True,
     ),
     "plan": Kind(
         "plan",
@@ -150,6 +163,14 @@ REVIEWED_COMMIT_SUFFIX = " -->"
 REVIEWED_MODELS_PREFIX = "<!-- reviewed-by-models: "
 REVIEWED_MODELS_SUFFIX = " -->"
 MIN_MODELS = 3
+
+# A code-review marker must record that its final review round was clean and
+# how many rounds were needed. Both pr-marker and gh-guard enforce the exact
+# header and the workflow's 3-round cap.
+REVIEW_CONVERGENCE_PREFIX = "<!-- review-convergence: clean; rounds: "
+REVIEW_CONVERGENCE_SUFFIX = " -->"
+MIN_REVIEW_ROUNDS = 1
+MAX_REVIEW_ROUNDS = 3
 
 # A machine-produced marker (tests) must carry this exact header, written only
 # by `run-tests` after every check command exits 0. `status`/`check` and gh-guard
@@ -220,6 +241,31 @@ def current_head() -> str | None:
         return None
 
 
+def dirty_worktree_entries() -> list[str]:
+    """Return staged, unstaged, and untracked non-ignored status entries."""
+    result = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-z"],
+        capture_output=True,
+        check=True,
+    )
+    return [
+        entry.decode("utf-8", errors="replace")
+        for entry in result.stdout.split(b"\0")
+        if entry
+    ]
+
+
+def test_quality_checker_path() -> Path:
+    """Return the checker path beside this dotfiles checkout."""
+    return (
+        Path(__file__).resolve().parent.parent
+        / ".copilot"
+        / "skills"
+        / "test-quality"
+        / "check.py"
+    )
+
+
 def read_reviewed_commit(path: Path) -> str | None:
     """Return the reviewed-commit SHA recorded on a marker's first line, if any."""
     try:
@@ -280,6 +326,30 @@ def read_reviewed_models(path: Path) -> list[str]:
             )
             return parse_models(inner)
     return []
+
+
+def read_convergence_rounds(path: Path) -> int | None:
+    """Return the validated clean convergence round count, if declared."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if not line.startswith(REVIEW_CONVERGENCE_PREFIX) or not line.endswith(
+            REVIEW_CONVERGENCE_SUFFIX
+        ):
+            continue
+        raw_rounds = line.removeprefix(REVIEW_CONVERGENCE_PREFIX).removesuffix(
+            REVIEW_CONVERGENCE_SUFFIX
+        )
+        try:
+            rounds = int(raw_rounds)
+        except ValueError:
+            return None
+        if MIN_REVIEW_ROUNDS <= rounds <= MAX_REVIEW_ROUNDS:
+            return rounds
+        return None
+    return None
 
 
 def has_result_header(path: Path) -> bool:
@@ -382,6 +452,17 @@ def cmd_write(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+    convergence_rounds: int | None = None
+    if kind.requires_convergence:
+        convergence_rounds = args.convergence_rounds
+        if convergence_rounds is None:
+            print(
+                f"pr-marker: refusing to write {kind.name} marker: "
+                "the code-review gate requires a final clean convergence round. "
+                "Pass --convergence-rounds 1, 2, or 3.",
+                file=sys.stderr,
+            )
+            return 1
 
     headers = ""
     pinned_sha: str | None = None
@@ -399,6 +480,11 @@ def cmd_write(args: argparse.Namespace) -> int:
     if models:
         joined = ", ".join(models)
         headers += f"{REVIEWED_MODELS_PREFIX}{joined}{REVIEWED_MODELS_SUFFIX}\n"
+    if convergence_rounds is not None:
+        headers += (
+            f"{REVIEW_CONVERGENCE_PREFIX}{convergence_rounds}"
+            f"{REVIEW_CONVERGENCE_SUFFIX}\n"
+        )
     content = headers + content
 
     path = marker_path(kind)
@@ -406,8 +492,107 @@ def cmd_write(args: argparse.Namespace) -> int:
     path.write_text(content, encoding="utf-8")
     note = f" (pinned to {pinned_sha[:12]})" if pinned_sha else ""
     models_note = f" [models: {', '.join(models)}]" if models else ""
-    print(f"pr-marker: wrote {size} bytes to {path}{note}{models_note}")
+    convergence_note = (
+        f" [clean convergence: round {convergence_rounds}]"
+        if convergence_rounds is not None
+        else ""
+    )
+    print(
+        f"pr-marker: wrote {size} bytes to {path}{note}{models_note}"
+        f"{convergence_note}"
+    )
     return 0
+
+
+def _invalidate_tests_marker(kind: Kind) -> str:
+    """Remove a prior tests marker and return a note for the error message."""
+    stale = marker_path(kind)
+    if not stale.exists():
+        return ""
+    stale.unlink()
+    return " (removed the previous tests marker)"
+
+
+def _run_test_quality_preflight(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
+    """Run the test-evidence checker and return its exit code and JSON result."""
+    checker = test_quality_checker_path()
+    if not checker.is_file():
+        print(
+            f"pr-marker run-tests: WARNING: test-quality checker not found at {checker}; "
+            "continuing for compatibility with an older dotfiles checkout.",
+            file=sys.stderr,
+        )
+        return (
+            0,
+            {
+                "status": "unavailable",
+                "evidence": "unavailable",
+                "base_ref": None,
+                "base_commit": None,
+                "source_files": [],
+                "test_files": [],
+                "warning_count": 1,
+                "waiver": args.no_test_change_reason,
+            },
+        )
+
+    command = [sys.executable, str(checker), "--json"]
+    if args.base_ref:
+        command += ["--base", args.base_ref]
+    if args.no_test_change_reason:
+        command += ["--no-test-change-reason", args.no_test_change_reason]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        print(
+            "pr-marker run-tests: test-quality checker returned invalid JSON.",
+            file=sys.stderr,
+        )
+        if result.stdout:
+            print(result.stdout, file=sys.stderr)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        return (2, {})
+    if not isinstance(payload, dict):
+        print(
+            "pr-marker run-tests: test-quality checker JSON must be an object.",
+            file=sys.stderr,
+        )
+        return (2, {})
+
+    status = payload.get("status", "unknown")
+    evidence = payload.get("evidence", "unknown")
+    warnings = int(payload.get("warning_count", 0))
+    print(
+        f"pr-marker run-tests: test-quality preflight {status} "
+        f"(evidence: {evidence}, warnings: {warnings})",
+        file=sys.stderr,
+    )
+    for finding in payload.get("findings", []):
+        if not isinstance(finding, dict):
+            continue
+        severity = str(finding.get("severity", "warning")).upper()
+        rule = finding.get("rule", "unknown")
+        message = finding.get("message", "")
+        paths = finding.get("paths") or []
+        paths_note = f" [{', '.join(str(path) for path in paths)}]" if paths else ""
+        print(
+            f"pr-marker run-tests: {severity} [{rule}] {message}{paths_note}",
+            file=sys.stderr,
+        )
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+    if result.returncode == 0 and (
+        status != "passed" or evidence == "unavailable"
+    ):
+        print(
+            "pr-marker run-tests: the test-quality preflight did not analyze a "
+            "branch diff; pass --base-ref <ref>.",
+            file=sys.stderr,
+        )
+        return (1, payload)
+    return (result.returncode, payload)
 
 
 def cmd_run_tests(args: argparse.Namespace) -> int:
@@ -428,11 +613,37 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         )
         return 1
 
+    dirty_before = dirty_worktree_entries()
+    if dirty_before:
+        removed = _invalidate_tests_marker(kind)
+        print(
+            "pr-marker run-tests: refusing to certify HEAD while the repository has "
+            f"staged, unstaged, or untracked files{removed}:",
+            file=sys.stderr,
+        )
+        for entry in dirty_before:
+            print(f"  {entry}", file=sys.stderr)
+        print(
+            "Commit or remove the changes, then run the full checks again.",
+            file=sys.stderr,
+        )
+        return 1
+
     commands = [c.strip() for c in args.cmd]
     if any(not c for c in commands):
         print(
             "pr-marker run-tests: refusing to run: an empty --cmd was given; "
             "pass the real check commands.",
+            file=sys.stderr,
+        )
+        return 1
+
+    quality_code, quality = _run_test_quality_preflight(args)
+    if quality_code != 0:
+        removed = _invalidate_tests_marker(kind)
+        print(
+            "pr-marker run-tests: test-quality evidence preflight failed; "
+            f"not running checks or writing the tests marker{removed}.",
             file=sys.stderr,
         )
         return 1
@@ -454,12 +665,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
 
     failed = [c for c, code, _ in results if code != 0]
     if failed:
-        # Invalidate any prior passing marker so the latest run must be green.
-        stale = marker_path(kind)
-        removed = ""
-        if stale.exists():
-            stale.unlink()
-            removed = " (removed the previous tests marker)"
+        removed = _invalidate_tests_marker(kind)
         print(
             f"pr-marker run-tests: {len(failed)} of {len(results)} command(s) failed; "
             f"not writing the tests marker{removed}.",
@@ -467,7 +673,27 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         )
         return 1
 
+    dirty_after = dirty_worktree_entries()
+    if dirty_after:
+        removed = _invalidate_tests_marker(kind)
+        print(
+            "pr-marker run-tests: checks changed the repository, so the run cannot "
+            f"certify HEAD{removed}:",
+            file=sys.stderr,
+        )
+        for entry in dirty_after:
+            print(f"  {entry}", file=sys.stderr)
+        print(
+            "Clean or commit the generated changes, then run the full checks again.",
+            file=sys.stderr,
+        )
+        return 1
+
     ran_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    source_files = quality.get("source_files") or []
+    test_files = quality.get("test_files") or []
+    warning_count = int(quality.get("warning_count", 0))
+    waiver = quality.get("waiver") or "none"
     lines = [
         f"{REVIEWED_COMMIT_PREFIX}{head}{REVIEWED_COMMIT_SUFFIX}",
         TESTS_RESULT_HEADER,
@@ -477,6 +703,16 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         f"Codespace: {codespace}",
         f"Ran at: {ran_at}",
         f"Commit: {head}",
+        "",
+        "Test-quality evidence preflight:",
+        f"- status: {quality.get('status', 'unavailable')}",
+        f"- evidence: {quality.get('evidence', 'unavailable')}",
+        f"- base ref: {quality.get('base_ref') or 'unavailable'}",
+        f"- base commit: {quality.get('base_commit') or 'unavailable'}",
+        f"- executable source files changed: {len(source_files)}",
+        f"- test files changed: {len(test_files)}",
+        f"- warnings: {warning_count}",
+        f"- no-test-change reason: {waiver}",
         "",
         "Commands:",
     ]
@@ -500,7 +736,8 @@ def marker_status(kind: Kind, branch: str) -> tuple[bool, str, int, Path]:
 
     detail is one of: "ok", "missing", "too small", "stale" (pinned marker whose
     reviewed-commit no longer equals HEAD), "needs models" (fewer than MIN_MODELS
-    declared), or "no result" (a requires_result marker missing the machine header).
+    declared), "needs convergence" (no valid final-clean-round metadata), or
+    "no result" (a requires_result marker missing the machine header).
     """
     path = marker_path(kind, branch)
     if not path.is_file():
@@ -515,6 +752,8 @@ def marker_status(kind: Kind, branch: str) -> tuple[bool, str, int, Path]:
             return (False, "stale", size, path)
     if kind.requires_models and len(read_reviewed_models(path)) < MIN_MODELS:
         return (False, "needs models", size, path)
+    if kind.requires_convergence and read_convergence_rounds(path) is None:
+        return (False, "needs convergence", size, path)
     if kind.requires_result and not has_result_header(path):
         return (False, "no result", size, path)
     return (True, "ok", size, path)
@@ -598,6 +837,16 @@ def build_parser() -> argparse.ArgumentParser:
             "opus-4.8,sonnet-4.6,gpt-5.5"
         ),
     )
+    p_write.add_argument(
+        "--convergence-rounds",
+        type=int,
+        choices=range(MIN_REVIEW_ROUNDS, MAX_REVIEW_ROUNDS + 1),
+        default=None,
+        help=(
+            "round number whose multi-model code review found no new verified "
+            "findings; required for code-review"
+        ),
+    )
     p_write.set_defaults(func=cmd_write)
 
     p_status = sub.add_parser("status", help="show all markers and whether each passes")
@@ -633,41 +882,56 @@ def build_parser() -> argparse.ArgumentParser:
             "(genuine infeasibility only, never slowness)"
         ),
     )
+    p_run.add_argument(
+        "--base-ref",
+        default=None,
+        help=(
+            "base branch/ref for the test-quality diff "
+            "(defaults to environment/default-branch inference)"
+        ),
+    )
+    p_run.add_argument(
+        "--no-test-change-reason",
+        default=None,
+        help=(
+            "specific reason executable source changed without a committed test "
+            "change; recorded in the tests marker"
+        ),
+    )
     p_run.set_defaults(func=cmd_run_tests)
 
     return parser
 
 
 def _reorder_write_argv(argv: list[str]) -> list[str]:
-    """Move `--models` (and its value) after the positionals for `write`.
+    """Move write options after the positionals so argparse binds FILE.
 
     argparse mis-handles a `nargs='?'` positional that follows an optional inside
     a subparser: `write pr-review --models a,b,c -` fails to bind the trailing
     `-` to `file`. Normalizing so the optional trails the positionals (the order
     argparse does handle) lets callers pass `--models` in the natural place,
-    including the `--models a,b,c -` form the gh-guard help suggests. Only the
-    `write` subcommand takes `--models`, so other commands pass through untouched.
+    including the `--models a,b,c -` form the gh-guard help suggests.     Other commands pass through untouched.
     """
     if not argv or argv[0] != "write":
         return argv
     rest = argv[1:]
-    models_tokens: list[str] = []
+    option_tokens: list[str] = []
     others: list[str] = []
     i = 0
     while i < len(rest):
         arg = rest[i]
-        if arg == "--models":
-            models_tokens.append(arg)
+        if arg in ("--models", "--convergence-rounds"):
+            option_tokens.append(arg)
             if i + 1 < len(rest):
-                models_tokens.append(rest[i + 1])
+                option_tokens.append(rest[i + 1])
                 i += 2
                 continue
-        elif arg.startswith("--models="):
-            models_tokens.append(arg)
+        elif arg.startswith("--models=") or arg.startswith("--convergence-rounds="):
+            option_tokens.append(arg)
         else:
             others.append(arg)
         i += 1
-    return ["write", *others, *models_tokens]
+    return ["write", *others, *option_tokens]
 
 
 def main(argv: list[str] | None = None) -> int:

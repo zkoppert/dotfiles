@@ -1,0 +1,20 @@
+#!/bin/bash
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+SCRIPT_PATH="$0"
+while [ -L "$SCRIPT_PATH" ]; do
+  SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+  LINK_TARGET="$(readlink "$SCRIPT_PATH")"
+  if [[ "$LINK_TARGET" != /* ]]; then
+    LINK_TARGET="$SCRIPT_DIR/$LINK_TARGET"
+  fi
+  SCRIPT_PATH="$LINK_TARGET"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+DOTFILES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+exec /usr/bin/env python3 \
+  "$DOTFILES_DIR/.copilot/skills/nux-fr-handoff/nux_fr_handoff.py" \
+  "$@"

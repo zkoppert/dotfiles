@@ -1043,6 +1043,7 @@ def test_apply_todo_mutations_with_lock_preserves_concurrent_manual_edit(
     applied = td.apply_todo_mutations_with_lock(path, mutations)
 
     assert applied["changed"] is True
+    assert [item["id"] for item in applied["added_entries"]] == ["dependabot-r-pr-7"]
     reloaded = td.load_todo(path)
     assert [item["id"] for item in reloaded["inbox"]] == ["manual-added"]
     assert [item["id"] for item in reloaded["prioritized"]["q1_do_first"]] == [
@@ -1195,6 +1196,37 @@ def test_commit_todo_changes_commit_failure_returns_false(
         result = td.commit_todo_changes(todo_path, "msg")
 
     assert result is False
+
+
+def test_commit_todo_changes_runs_git_ops_under_lock(tmp_path: Path) -> None:
+    # Git does not honor the advisory flock, so commit_todo_changes must run
+    # its worktree-changing git operations while holding the shared lock.
+    repo = tmp_path
+    (repo / ".git").mkdir()
+    todo_path = repo / "todo.yml"
+    todo_path.write_text("inbox: []\n", encoding="utf-8")
+    events: list[str] = []
+
+    def record_flock(_fileno, op):
+        events.append("lock" if op == td.fcntl.LOCK_EX else "unlock")
+
+    def fake_run(cmd, *args, **kwargs):
+        sub = cmd[3] if len(cmd) > 3 else ""
+        events.append("git:" + sub)
+        rc = 1 if sub == "diff" else 0
+        return td.subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
+
+    with mock.patch.object(
+        td.fcntl, "flock", side_effect=record_flock
+    ), mock.patch.object(td.subprocess, "run", side_effect=fake_run):
+        result = td.commit_todo_changes(todo_path, "msg")
+
+    assert result is True
+    assert events[0] == "lock"
+    assert events[-1] == "unlock"
+    git_idxs = [i for i, e in enumerate(events) if e.startswith("git:")]
+    assert git_idxs
+    assert all(0 < i < len(events) - 1 for i in git_idxs)
 
 
 # ---------------------------------------------------------------------------
@@ -1536,7 +1568,7 @@ def test_run_end_to_end_merges_and_flags(tmp_path: Path) -> None:
     def fake_fetch_pr(repo: str, number: int) -> dict[str, Any]:
         return pr_merge if number == 1 else pr_flag
 
-    args = _make_args(tmp_path)
+    args = _make_args(tmp_path, no_notify=False)
 
     with mock.patch.object(
         td, "get_my_login", return_value="zkoppert"
@@ -1550,7 +1582,9 @@ def test_run_end_to_end_merges_and_flags(tmp_path: Path) -> None:
         td, "do_merge"
     ) as do_merge_mock, mock.patch.object(
         td, "mark_thread_done"
-    ) as mark_done_mock:
+    ) as mark_done_mock, mock.patch.object(
+        td, "macos_notify"
+    ) as notify_mock:
         stats = td.run(args)
 
     assert stats.fetched == 2
@@ -1561,6 +1595,11 @@ def test_run_end_to_end_merges_and_flags(tmp_path: Path) -> None:
         "o/r1", 1, dry_run=False, my_login="zkoppert", head_sha=None
     )
     mark_done_mock.assert_called_once_with("thread-merge", dry_run=False)
+    notify_mock.assert_called_once_with(
+        "Dependabot PR needs attention",
+        "Bump foo from 1.0.0 to 2.0.0 (o/r2)",
+        "https://github.com/o/r2/pull/2",
+    )
 
     reloaded = td.load_todo(args.todo_file)
     flags = reloaded["prioritized"]["q1_do_first"]
@@ -1772,7 +1811,7 @@ def test_run_skips_already_tracked_thread(tmp_path: Path) -> None:
     }
     pr = _base_pr(number=9, title="Bump foo from 1 to 2")
 
-    args = _make_args(tmp_path)
+    args = _make_args(tmp_path, no_notify=False)
     args.todo_file.write_text(
         "inbox: []\n"
         "prioritized:\n"
@@ -1792,11 +1831,14 @@ def test_run_skips_already_tracked_thread(tmp_path: Path) -> None:
         td, "fetch_pr", return_value=pr
     ), mock.patch.object(
         td, "detect_repo_coverage", return_value=None
-    ):
+    ), mock.patch.object(
+        td, "macos_notify"
+    ) as notify_mock:
         stats = td.run(args)
 
     assert stats.already_tracked == 1
     assert stats.flagged == 0
+    notify_mock.assert_not_called()
 
 
 def test_run_dry_run_dedupes_flag_against_already_tracked(tmp_path: Path) -> None:
@@ -2258,7 +2300,7 @@ def test_run_records_error_when_notifications_fetch_times_out(tmp_path: Path) ->
     assert stats.errors
 
 
-def test_run_dry_run_does_not_mutate(tmp_path: Path) -> None:
+def test_run_dry_run_does_not_mutate_or_notify(tmp_path: Path) -> None:
     notif = {
         "id": "t",
         "subject": {
@@ -2267,7 +2309,7 @@ def test_run_dry_run_does_not_mutate(tmp_path: Path) -> None:
         },
     }
     pr = _base_pr()
-    args = _make_args(tmp_path, dry_run=True)
+    args = _make_args(tmp_path, dry_run=True, no_notify=False)
     original = args.todo_file.read_text(encoding="utf-8")
 
     with mock.patch.object(
@@ -2278,12 +2320,15 @@ def test_run_dry_run_does_not_mutate(tmp_path: Path) -> None:
         td, "fetch_pr", return_value=pr
     ), mock.patch.object(
         td, "detect_repo_coverage", return_value=99
-    ):
+    ), mock.patch.object(
+        td, "macos_notify"
+    ) as notify_mock:
         stats = td.run(args)
 
     assert stats.merged == 1
     assert args.todo_file.read_text(encoding="utf-8") == original
     assert not args.state_file.exists()
+    notify_mock.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -2336,9 +2381,42 @@ def test_main_returns_one_when_errors(tmp_path: Path) -> None:
 
 def test_macos_notify_swallows_errors() -> None:
     with mock.patch.object(
-        td.subprocess, "run", side_effect=FileNotFoundError("osascript")
+        td.subprocess, "run", side_effect=FileNotFoundError("terminal-notifier")
     ):
-        td.macos_notify("title", "msg")  # should not raise
+        td.macos_notify("title", "msg", "https://github.com/o/r/pull/1")
+
+
+def test_macos_notify_uses_clickable_terminal_notifier() -> None:
+    result = subprocess.CompletedProcess(
+        ["terminal-notifier"],
+        0,
+        stdout="",
+        stderr="",
+    )
+    with mock.patch.object(td.subprocess, "run", return_value=result) as run_mock:
+        td.macos_notify(
+            "Dependabot PR needs attention",
+            "Bump foo from 1 to 2",
+            "https://github.com/o/r/pull/1",
+        )
+
+    run_mock.assert_called_once_with(
+        [
+            "terminal-notifier",
+            "-title",
+            "Dependabot PR needs attention",
+            "-message",
+            "Bump foo from 1 to 2",
+            "-open",
+            "https://github.com/o/r/pull/1",
+            "-sound",
+            "default",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
 
 
 def _run_skipped_super_linter_with_reason(

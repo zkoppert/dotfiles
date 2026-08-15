@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zkoppert.babysit-prs</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/zkoppert/repos/dotfiles/bin/babysit-prs</string>
+        <!-- Limit to my owned owners (the tool now defaults to all my PRs). -->
+        <string>--owner</string>
+        <string>github</string>
+        <string>--owner</string>
+        <string>github-community-projects</string>
+        <string>--owner</string>
+        <string>zkoppert</string>
+        <!-- Never touch the behind-base validation fixture. -->
+        <string>--skip-repo</string>
+        <string>zkoppert/inbox-outdated-branch-check</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Every 15 minutes, 24/7. Watches my recently-active open PRs so a
+         red required check, a stale branch, a new review comment, or a
+         green ready-to-merge PR reaches me quickly. De-duping in the
+         script means I am only pinged when a PR's state actually changes. -->
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/zkoppert/Library/Logs/babysit-prs.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/zkoppert/Library/Logs/babysit-prs.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/zkoppert</string>
+    </dict>
+</dict>
+</plist>

@@ -22,6 +22,14 @@ viewed on github.com (marked read) but never deleted. Without that,
 PRs I'd already clicked on would sit in the inbox forever even after
 they merged; the cron would never see them again to clean them up.
 
+Each newly added direct mention sends one macOS notification through
+`terminal-notifier`. Selecting the notification opens the PR, issue, or
+discussion in the default browser. A direct mention includes GitHub's
+`mention` reason and comment notifications whose body contains an exact,
+case-insensitive mention of my login. Assignments, review requests, security
+alerts, author updates, already tracked items, dropped noise, and no-op runs
+stay silent.
+
 ## How it classifies
 
 The core policy is **KEEP_REASONS default-drop**: only directed,
@@ -216,6 +224,8 @@ Runtime dependencies (all installed via `pip`):
 GitHub access:
 
 - `gh` CLI authenticated as you (`gh auth status` should show your login).
+- `terminal-notifier` on `PATH` for clickable macOS alerts. Install it
+  with `brew install terminal-notifier`.
 
 ## Privacy
 

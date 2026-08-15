@@ -21,3 +21,5 @@ jobs:
           python-version: '3.9'
       - name: Run pr-marker / gh-guard gate tests
         run: python3 bin/test_pr_marker.py
+      - name: Run test-quality checker tests
+        run: python3 .copilot/skills/test-quality/test_check.py

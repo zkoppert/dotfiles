@@ -1,0 +1,9 @@
+repo: example-org/on-call
+title_pattern: "^On-call handoff\\b"
+reference_comment_url: https://github.com/example-org/on-call/issues/120#issuecomment-456
+allowed_owners:
+  - example-org
+state_dir: "~/Library/Application Support/nux-fr-handoff"
+copilot_timeout_seconds: 1800
+minimum_draft_bytes: 50
+maximum_gist_characters: 60000
