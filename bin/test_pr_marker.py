@@ -73,6 +73,29 @@ def bash_count_models(path: str) -> int:
     return int(result.stdout.strip() or "0")
 
 
+def bash_convergence_rounds(path: str) -> int:
+    """Read convergence metadata with gh-guard's exact shell rules."""
+    script = (
+        "set -euo pipefail\n"
+        "count=\"$(grep -c '^<!-- review-convergence:' \"$1\" 2>/dev/null || true)\"\n"
+        "rounds=\"$(sed -n "
+        "'s/^<!-- review-convergence: clean; rounds: \\([1-3]\\) -->$/\\1/p' "
+        "\"$1\" 2>/dev/null)\"\n"
+        'if [ "${count:-0}" = "1" ] && [[ "$rounds" =~ ^[1-3]$ ]]; then\n'
+        '  printf "%s" "$rounds"\n'
+        "else\n"
+        '  printf "0"\n'
+        "fi\n"
+    )
+    result = subprocess.run(
+        ["bash", "-c", script, "bash", path],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(result.stdout.strip() or "0")
+
+
 def _gh_guard_create(repo: Path, fake_bin: Path) -> subprocess.CompletedProcess:
     """Run the real gh-guard `pr create` in repo with fake gh on PATH, confirmed."""
     env = dict(os.environ)
@@ -138,6 +161,9 @@ def test_kinds_and_thresholds() -> None:
         assert pr_marker.KINDS[name].requires_models, name
     assert not pr_marker.KINDS["demo"].requires_models
     assert not pr_marker.KINDS["tests"].requires_models
+    assert pr_marker.KINDS["code-review"].requires_convergence
+    for name in ("plan", "demo", "pr-review", "tests"):
+        assert not pr_marker.KINDS[name].requires_convergence, name
     # code-review and tests are HEAD-pinned; the others are not.
     for name in ("code-review", "tests"):
         assert pr_marker.KINDS[name].pinned, name
@@ -198,8 +224,7 @@ def test_gh_guard_matches_kinds() -> None:
         assert int(match.group(1)) == kind.min_bytes, const
 
         # The eval_marker line for this kind must reference that constant and end
-        # with the pin flag, the requires-models flag, then the requires-result
-        # flag (each 1 or 0).
+        # with the pin, model, result, and convergence flags (each 1 or 0).
         line = next(
             ln
             for ln in gh.splitlines()
@@ -207,18 +232,26 @@ def test_gh_guard_matches_kinds() -> None:
         )
         assert f'"${const}"' in line, f"{kind.name} eval_marker uses wrong floor"
         fields = line.split()
-        assert fields[-3] == str(int(kind.pinned)), f"{kind.name} pin flag drift"
-        assert fields[-2] == str(
+        assert fields[-4] == str(int(kind.pinned)), f"{kind.name} pin flag drift"
+        assert fields[-3] == str(
             int(kind.requires_models)
         ), f"{kind.name} requires-models flag drift"
-        assert fields[-1] == str(
+        assert fields[-2] == str(
             int(kind.requires_result)
         ), f"{kind.name} requires-result flag drift"
+        assert fields[-1] == str(
+            int(kind.requires_convergence)
+        ), f"{kind.name} requires-convergence flag drift"
 
     # The minimum-model threshold must agree between the two implementations.
     match = re.search(r"^MIN_REVIEW_MODELS=(\d+)$", gh, re.MULTILINE)
     assert match, "gh-guard missing constant MIN_REVIEW_MODELS"
     assert int(match.group(1)) == pr_marker.MIN_MODELS, "MIN_MODELS drift"
+    assert pr_marker.MIN_REVIEW_ROUNDS == 1
+    assert pr_marker.MAX_REVIEW_ROUNDS == 3
+    assert (
+        r"rounds: \([1-3]\)" in gh and r'=~ ^[1-3]$' in gh
+    ), "gh-guard convergence range drift"
 
     # The tests-result header gh-guard greps for must match pr-marker's literal,
     # and use whole-line (-x) matching so it agrees with has_result_header.
@@ -252,6 +285,8 @@ def test_pin_roundtrip() -> None:
                         str(payload),
                         "--models",
                         "opus-4.8,sonnet-4.6,gpt-5.5",
+                        "--convergence-rounds",
+                        "2",
                     ]
                 )
                 == 0
@@ -260,6 +295,7 @@ def test_pin_roundtrip() -> None:
             head1 = pr_marker.current_head()
             marker = pr_marker.marker_path(code, branch="feat/pin")
             assert pr_marker.read_reviewed_commit(marker) == head1
+            assert pr_marker.read_convergence_rounds(marker) == 2
             ok, detail, _size, _path = pr_marker.marker_status(code, "feat/pin")
             assert ok and detail == "ok"
 
@@ -520,6 +556,31 @@ def test_run_tests_requires_clean_repo() -> None:
         os.chdir(restore)
 
 
+def test_run_tests_rejects_git_state_changes() -> None:
+    """run-tests refuses commands that move HEAD or switch branches."""
+    restore = Path.cwd()
+    try:
+        cases = [
+            ("feat/head-move", "git commit -q --allow-empty -m c2"),
+            ("feat/branch-move", "git checkout -q -b other"),
+            ("feat/detach", "git checkout -q --detach"),
+        ]
+        for branch, command in cases:
+            with tempfile.TemporaryDirectory() as tmp:
+                os.chdir(tmp)
+                _run("git", "init", "-q")
+                _run("git", "config", "user.email", "test@example.com")
+                _run("git", "config", "user.name", "pr-marker test")
+                _run("git", "checkout", "-q", "-b", branch)
+                _run("git", "commit", "-q", "--allow-empty", "-m", "c1")
+                marker = pr_marker.marker_path(pr_marker.KINDS["tests"], branch=branch)
+
+                assert pr_marker.main(["run-tests", "--cmd", command]) == 1
+                assert not marker.exists()
+    finally:
+        os.chdir(restore)
+
+
 def test_tests_marker_is_machine_only() -> None:
     """`write tests` is rejected, and a hand-forged marker lacks the result header."""
     restore = Path.cwd()
@@ -650,6 +711,20 @@ def test_models_provenance() -> None:
                         "opus-4.8,sonnet-4.6,gpt-5.5",
                     ]
                 )
+                == 1
+            )
+            assert (
+                pr_marker.main(
+                    [
+                        "write",
+                        "code-review",
+                        str(crbody),
+                        "--models",
+                        "opus-4.8,sonnet-4.6,gpt-5.5",
+                        "--convergence-rounds",
+                        "3",
+                    ]
+                )
                 == 0
             )
             crpath = pr_marker.marker_path(cr, branch="feat/models")
@@ -660,6 +735,7 @@ def test_models_provenance() -> None:
                 "sonnet-4.6",
                 "gpt-5.5",
             ]
+            assert pr_marker.read_convergence_rounds(crpath) == 3
             ok, detail, _s, _p = pr_marker.marker_status(cr, "feat/models")
             assert ok and detail == "ok", detail
 
@@ -674,6 +750,99 @@ def test_models_provenance() -> None:
         os.chdir(restore)
 
 
+def test_convergence_parsing_parity() -> None:
+    """Python and gh-guard accept only one canonical clean-round header."""
+    with tempfile.TemporaryDirectory() as tmp:
+        marker = Path(tmp) / "code-review.md"
+        cases = [
+            (["<!-- review-convergence: clean; rounds: 2 -->"], 2),
+            (["<!-- review-convergence: clean; rounds:  2 -->"], 0),
+            (["<!-- review-convergence: clean; rounds: two -->"], 0),
+            (["<!-- review-convergence: clean; rounds: 4 -->"], 0),
+            (["<!-- review-convergence: clean; rounds: 999999999999999999 -->"], 0),
+            (
+                [
+                    "<!-- review-convergence: clean; rounds: two -->",
+                    "<!-- review-convergence: clean; rounds: 2 -->",
+                ],
+                0,
+            ),
+            (
+                [
+                    "<!-- review-convergence: clean; rounds: 2 -->",
+                    "<!-- review-convergence: clean; rounds: 2 -->",
+                ],
+                0,
+            ),
+        ]
+        for headers, expected in cases:
+            marker.write_text("\n".join(headers) + "\n", encoding="utf-8")
+            assert (pr_marker.read_convergence_rounds(marker) or 0) == expected
+            assert bash_convergence_rounds(str(marker)) == expected
+
+
+def test_code_review_marker_rewrite() -> None:
+    """Rewriting an existing marker replaces generated headers instead of duplicating."""
+    restore = Path.cwd()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            _run("git", "init", "-q")
+            _run("git", "config", "user.email", "test@example.com")
+            _run("git", "config", "user.name", "pr-marker test")
+            _run("git", "checkout", "-q", "-b", "feat/rewrite")
+            _run("git", "commit", "-q", "--allow-empty", "-m", "c1")
+            body = Path(tmp) / "body.md"
+            body.write_text("code review synthesis. " * 12, encoding="utf-8")
+            args = [
+                "write",
+                "code-review",
+                str(body),
+                "--models",
+                "a,b,c",
+                "--convergence-rounds",
+                "2",
+            ]
+            assert pr_marker.main(args) == 0
+            marker = pr_marker.marker_path(
+                pr_marker.KINDS["code-review"], branch="feat/rewrite"
+            )
+            rewrite_args = [
+                "write",
+                "code-review",
+                str(marker),
+                "--models",
+                "d,e,f",
+                "--convergence-rounds",
+                "3",
+            ]
+            assert pr_marker.main(rewrite_args) == 0
+            lines = marker.read_text(encoding="utf-8").splitlines()
+            assert (
+                sum(
+                    line.startswith(pr_marker.REVIEWED_COMMIT_PREFIX)
+                    for line in lines
+                )
+                == 1
+            )
+            assert (
+                sum(
+                    line.startswith(pr_marker.REVIEWED_MODELS_PREFIX)
+                    for line in lines
+                )
+                == 1
+            )
+            assert sum(line.startswith("<!-- review-convergence:") for line in lines) == 1
+            assert pr_marker.read_reviewed_models(marker) == ["d", "e", "f"]
+            assert pr_marker.read_convergence_rounds(marker) == 3
+            ok, detail, _size, _path = pr_marker.marker_status(
+                pr_marker.KINDS["code-review"], "feat/rewrite"
+            )
+            assert ok and detail == "ok", detail
+    finally:
+        os.chdir(restore)
+
+
 def test_models_argv_order() -> None:
     """--models parses in either position, incl. the `--models a,b,c -` form."""
     # Optional-before-positional (the natural / gh-guard-suggested order).
@@ -682,8 +851,22 @@ def test_models_argv_order() -> None:
     ) == ["write", "pr-review", "-", "--models", "a,b,c"]
     # --models=VALUE form, also before the positional.
     assert pr_marker._reorder_write_argv(
-        ["write", "code-review", "--models=a,b", "body.md"]
-    ) == ["write", "code-review", "body.md", "--models=a,b"]
+        [
+            "write",
+            "code-review",
+            "--models=a,b,c",
+            "--convergence-rounds",
+            "2",
+            "body.md",
+        ]
+    ) == [
+        "write",
+        "code-review",
+        "body.md",
+        "--models=a,b,c",
+        "--convergence-rounds",
+        "2",
+    ]
     # Already-trailing optional is left in a working order.
     assert pr_marker._reorder_write_argv(
         ["write", "plan", "-", "--models", "a,b,c"]
@@ -731,7 +914,65 @@ def test_gh_guard_gate() -> None:
             assert pr_marker.main(["write", "demo", str(demobody)]) == 0
             assert (
                 pr_marker.main(
-                    ["write", "code-review", str(crbody), "--models", "a,b,c"]
+                    [
+                        "write",
+                        "code-review",
+                        str(crbody),
+                        "--models",
+                        "a,b,c",
+                        "--convergence-rounds",
+                        "2",
+                    ]
+                )
+                == 0
+            )
+            crpath = pr_marker.marker_path(
+                pr_marker.KINDS["code-review"], branch="feat/gate"
+            )
+            without_convergence = [
+                line
+                for line in crpath.read_text(encoding="utf-8").splitlines()
+                if not line.startswith(pr_marker.REVIEW_CONVERGENCE_PREFIX)
+            ]
+            invalid_headers = [
+                [],
+                ["<!-- review-convergence: clean; rounds:  2 -->"],
+                ["<!-- review-convergence: clean; rounds: 999999999999999999 -->"],
+                [
+                    "<!-- review-convergence: clean; rounds: two -->",
+                    "<!-- review-convergence: clean; rounds: 2 -->",
+                ],
+                [
+                    "<!-- review-convergence: clean; rounds: 2 -->",
+                    "<!-- review-convergence: clean; rounds: 2 -->",
+                ],
+            ]
+            for headers in invalid_headers:
+                crpath.write_text(
+                    "\n".join([*without_convergence[:2], *headers, *without_convergence[2:]])
+                    + "\n",
+                    encoding="utf-8",
+                )
+                ok, detail, _size, _path = pr_marker.marker_status(
+                    pr_marker.KINDS["code-review"], "feat/gate"
+                )
+                assert not ok and detail == "needs convergence", (headers, detail)
+                res = _gh_guard_create(repo, fake_bin)
+                out = res.stdout + res.stderr
+                assert res.returncode == 1, (headers, out)
+                assert "NO-CONVERGENCE" in out, (headers, out)
+                assert "FAKE-GH-EXECUTED" not in out, (headers, out)
+            assert (
+                pr_marker.main(
+                    [
+                        "write",
+                        "code-review",
+                        str(crbody),
+                        "--models",
+                        "a,b,c",
+                        "--convergence-rounds",
+                        "2",
+                    ]
                 )
                 == 0
             )
@@ -834,9 +1075,12 @@ def main() -> int:
         test_run_tests,
         test_test_quality_preflight,
         test_run_tests_requires_clean_repo,
+        test_run_tests_rejects_git_state_changes,
         test_tests_marker_is_machine_only,
         test_parse_models,
         test_models_provenance,
+        test_convergence_parsing_parity,
+        test_code_review_marker_rewrite,
         test_models_argv_order,
         test_gh_guard_gate,
     ]

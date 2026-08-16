@@ -9,7 +9,7 @@
 #      per-branch directory <git-dir>/copilot-pr-review/<encoded-branch>/:
 #        - plan review          plan.md         (>=120 bytes, >=3 models)
 #        - code review          code-review.md  (>=200 bytes, HEAD-pinned,
-#                                                >=3 models)
+#                                                >=3 models, clean convergence)
 #        - demo/before-after     demo.md         (>=120 bytes)
 #        - PR-description review pr-review.md    (>=120 bytes, >=3 models)
 #        - full test suite       tests.md        (>=120 bytes, HEAD-pinned,
@@ -17,8 +17,9 @@
 #      Write them with the bin/pr-marker helper. The code-review and tests
 #      markers are HEAD-pinned: they record the reviewed/tested commit and are
 #      rejected as STALE once HEAD moves past it, so late commits force a
-#      re-review and a re-run. The three review
-#      markers must also declare >=3 distinct models in a reviewed-by-models
+#      re-review and a re-run. The code-review marker must record a final clean
+#      convergence round from 1 through 3. The three review markers must also
+#      declare >=3 distinct models in a reviewed-by-models
 #      header (pr-marker `--models a,b,c`), so a single-pass self-review cannot
 #      satisfy a gate meant to require a multi-model review. Additionally, the
 #      PR body is piped through the `validate-style` lint skill and the create is
@@ -332,7 +333,7 @@ check_marker() {
   [ "${size:-0}" -ge "$min" ]
 }
 
-# eval_marker <label> <path> <min_bytes> <pinned:0|1> <requires_models:0|1> <requires_result:0|1>
+# eval_marker <label> <path> <min_bytes> <pinned:0|1> <requires_models:0|1> <requires_result:0|1> <requires_convergence:0|1>
 # Appends a status line and clears marker_all_ok (both globals) when a marker
 # fails. Takes separate positional args rather than a delimiter-packed spec so a
 # branch name or path containing any character, including `|`, parses correctly.
@@ -343,12 +344,15 @@ check_marker() {
 # its reviewed-by-models header, so a single-pass self-review cannot pass a gate
 # meant to require a multi-model review. A requires_result marker (the tests
 # marker) must carry the machine-produced `<!-- tests-result: passed -->` header,
-# which pr-marker writes only after every check command exits 0, so a hand-written
-# note cannot pass a gate meant to require a real green run. The reviewed-commit,
+# which pr-marker writes only after every check command exits 0, so a bare touch
+# or a forgot-to-run note cannot pass a gate meant to require a real green run. A
+# deliberate hand-forge of the literal is out of scope: the gate guards against
+# accidental shortcuts, not self-forgery. The reviewed-commit,
 # reviewed-by-models, and tests-result formats MUST match bin/pr-marker's
-# REVIEWED_COMMIT_PREFIX, REVIEWED_MODELS_PREFIX, and TESTS_RESULT_HEADER.
+# REVIEWED_COMMIT_PREFIX, REVIEWED_MODELS_PREFIX, REVIEW_CONVERGENCE_PREFIX,
+# and TESTS_RESULT_HEADER.
 eval_marker() {
-  local label="$1" path="$2" min="$3" pinned="$4" requires_models="${5:-0}" requires_result="${6:-0}"
+  local label="$1" path="$2" min="$3" pinned="$4" requires_models="${5:-0}" requires_result="${6:-0}" requires_convergence="${7:-0}"
   if ! check_marker "$path" "$min"; then
     marker_all_ok=0
     status_lines="${status_lines}  [ MISSING ] ${label} -> ${path} (>= ${min} bytes)"$'\n'
@@ -370,6 +374,16 @@ eval_marker() {
     if [ "${models_count:-0}" -lt "$MIN_REVIEW_MODELS" ]; then
       marker_all_ok=0
       status_lines="${status_lines}  [ FEW-MODELS ] ${label} -> ${path} (declares ${models_count:-0} of >= ${MIN_REVIEW_MODELS} models; re-run a multi-model review and rewrite with pr-marker --models a,b,c)"$'\n'
+      return
+    fi
+  fi
+  if [ "$requires_convergence" = "1" ]; then
+    local convergence_lines rounds
+    convergence_lines="$(grep -c '^<!-- review-convergence:' "$path" 2>/dev/null || true)"
+    rounds="$(sed -n 's/^<!-- review-convergence: clean; rounds: \([1-3]\) -->$/\1/p' "$path" 2>/dev/null)"
+    if [ "${convergence_lines:-0}" != "1" ] || ! [[ "$rounds" =~ ^[1-3]$ ]]; then
+      marker_all_ok=0
+      status_lines="${status_lines}  [ NO-CONVERGENCE ] ${label} -> ${path} (missing valid final-clean-round metadata; rewrite with pr-marker --convergence-rounds 1, 2, or 3)"$'\n'
       return
     fi
   fi
@@ -463,11 +477,11 @@ if [ "$is_pr_create" = "1" ]; then
     # runs before the TTY/non-TTY split, so it feeds both the soft prompt and the
     # non-TTY hard gate.
     marker_all_ok=1
-    eval_marker "plan review"          "$marker_base/plan.md"        "$PLAN_MIN_BYTES"        0 1 0
-    eval_marker "code review"          "$marker_base/code-review.md" "$CODE_REVIEW_MIN_BYTES" 1 1 0
-    eval_marker "demo/before-after"    "$marker_base/demo.md"        "$DEMO_MIN_BYTES"        0 0 0
-    eval_marker "PR-description review" "$marker_base/pr-review.md"  "$PR_REVIEW_MIN_BYTES"   0 1 0
-    eval_marker "full test suite"      "$marker_base/tests.md"       "$TESTS_MIN_BYTES"       1 0 1
+    eval_marker "plan review"          "$marker_base/plan.md"        "$PLAN_MIN_BYTES"        0 1 0 0
+    eval_marker "code review"          "$marker_base/code-review.md" "$CODE_REVIEW_MIN_BYTES" 1 1 0 1
+    eval_marker "demo/before-after"    "$marker_base/demo.md"        "$DEMO_MIN_BYTES"        0 0 0 0
+    eval_marker "PR-description review" "$marker_base/pr-review.md"  "$PR_REVIEW_MIN_BYTES"   0 1 0 0
+    eval_marker "full test suite"      "$marker_base/tests.md"       "$TESTS_MIN_BYTES"       1 0 1 0
   fi
 
   if [ -t 0 ] && [ -t 1 ]; then
@@ -520,7 +534,7 @@ Fill each missing marker by piping the synthesized content through pr-marker
 the correct per-branch path:
 
   <synthesized plan review>        | pr-marker write plan --models a,b,c -
-  <synthesized code review>        | pr-marker write code-review --models a,b,c -
+  <synthesized code review>        | pr-marker write code-review --models a,b,c --convergence-rounds N -
   <demo summary + image/video paths, or N/A justification> | pr-marker write demo -
   <synthesized PR-description review> | pr-marker write pr-review --models a,b,c -
   pr-marker run-tests --cmd '<full test/lint/type/build command>' [--cmd ...]
@@ -529,6 +543,8 @@ The plan, code-review, and PR-description markers each require a multi-model
 review: pass >=3 distinct models via --models (e.g. --models
 opus-4.8,sonnet-4.6,gpt-5.5). A "1-MODEL" status above means the marker declares
 fewer than 3 models; re-run the review across different models and rewrite it.
+The code-review marker also requires --convergence-rounds N, where N is 1, 2,
+or 3 and identifies the final panel round that found no new verified findings.
 
 For the demo marker, use the record-demo skill (codespace + playwright,
 before/after images). If the change has no visual surface, the demo marker may
@@ -536,8 +552,10 @@ record an explicit "N/A - no visual surface" justification plus an alternative
 visual aid (table / mermaid / terminal output).
 
 The tests marker is machine-produced: \`pr-marker run-tests\` runs the check
-commands in a Codespace and writes it only if every command exits 0, so it
-proves a green run. Slowness is never a reason to narrow the suite; only genuine
+commands in a Codespace and writes it only if every command exits 0, so a bare
+touch or a self-reported note does not pass. A deliberate hand-forge of the
+header is out of scope: the gate guards against accidental shortcuts, not
+self-forgery. Slowness is never a reason to narrow the suite; only genuine
 infeasibility, recorded via --narrow.
 
 A STALE code-review or tests marker means HEAD moved since it was written (the

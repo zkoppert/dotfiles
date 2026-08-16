@@ -10,8 +10,9 @@ this skill never re-derives the per-branch path encoding. Three subcommands:
   na REASON     write an "N/A - no visual surface" demo marker directly, with a
                 required alternative-visual-aid line (--alt).
   check         verify the demo marker exists and, for a visual demo, that the
-                artifacts directory holds at least one non-empty image; for an
-                N/A marker, that it records an alternative visual aid.
+                artifacts directory holds at least one non-empty image (and warn
+                when the preferred before/after video is missing); for an N/A
+                marker, that it records an alternative visual aid.
 
 Run from inside the git checkout whose branch you are demoing.
 """
@@ -89,7 +90,7 @@ TEMPLATE = """# Demo: {branch}
 
 ## Walkthrough
 
-<optional: {rel}/demo.webm, or "no video recorded">
+<preferred: a before/after screen recording at {rel}/demo.webm; if you did not record one, state why here>
 
 ## Impact
 
@@ -118,8 +119,9 @@ def cmd_init(_args: argparse.Namespace) -> int:
     sys.stderr.write(f"scaffold: artifacts dir ready at {artifacts}\n")
     sys.stderr.write(f"scaffold: demo marker path is {marker}\n")
     sys.stderr.write(
-        "scaffold: save before-*/after-* images (and optional demo.webm) into the "
-        "artifacts dir,\n         then edit and write the marker:\n"
+        "scaffold: record a before/after demo video (demo.webm, preferred) and save it "
+        "with the before-*/after-* stills into the\n         artifacts dir, then edit and "
+        "write the marker:\n"
         "           python3 scaffold.py init > /tmp/demo-marker.md\n"
         "           # edit /tmp/demo-marker.md\n"
         "           pr-marker write demo /tmp/demo-marker.md\n"
@@ -211,8 +213,14 @@ def cmd_check(_args: argparse.Namespace) -> int:
     print(f"scaffold check: ok ({len(images)} image(s) in {artifacts.name})")
     for img in images:
         print(f"  - {img.name} ({img.stat().st_size} bytes)")
-    if not _has_video(artifacts):
-        print("scaffold check: note - no video walkthrough recorded (optional).")
+    if _has_video(artifacts):
+        print("scaffold check: ok (before/after video walkthrough present)")
+    else:
+        sys.stderr.write(
+            "scaffold check: WARNING - no video walkthrough recorded. A before/after "
+            "video is the preferred demo deliverable; record one unless there is a "
+            "specific reason a recording is not feasible.\n"
+        )
     return 0
 
 

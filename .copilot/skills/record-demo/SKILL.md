@@ -1,6 +1,6 @@
 ---
 name: record-demo
-description: This skill should be used AFTER code changes have been reviewed and tested in a Codespace, and BEFORE drafting the PR, to record a demo of the change and capture before/after images. It drives Playwright against a Codespace-forwarded app to screenshot the baseline branch and the feature branch, optionally records a video walkthrough, saves artifacts in a standard per-branch layout, and writes the `demo` marker that gh-guard's `gh pr create` gate requires. Also triggered when the user asks to "record a demo", "capture before/after", "make a demo video", or "screenshot the change in a codespace".
+description: This skill should be used AFTER code changes have been reviewed and tested in a Codespace, and BEFORE drafting the PR, to record a demo of the change and capture before/after images. It drives Playwright against a Codespace-forwarded app to screenshot the baseline branch and the feature branch, records a before/after video walkthrough (preferred), saves artifacts in a standard per-branch layout, and writes the `demo` marker that gh-guard's `gh pr create` gate requires. Also triggered when the user asks to "record a demo", "capture before/after", "make a demo video", or "screenshot the change in a codespace".
 ---
 
 # record-demo: capture a before/after demo before opening a PR
@@ -21,7 +21,8 @@ Run this once the change is reviewed and verified in a Codespace, before writing
 the PR description. Two paths:
 
 - **Visual surface** (UI, a rendered report, a CLI with meaningful output): record
-  a real before/after and, where useful, a short video walkthrough.
+  a before/after **video walkthrough** (preferred), plus matching before/after
+  stills for the PR table.
 - **No visual surface** (pure backend, config, workflow, or refactor with no
   user-visible output): record an explicit `N/A` justification plus an alternative
   visual aid (a before/after table, a mermaid diagram, or captured terminal
@@ -51,7 +52,7 @@ committed into the working tree.
 Suggested filenames inside that directory:
 
 - `before-<view>.png`, `after-<view>.png` (one pair per view you are changing)
-- `demo.webm` (optional recorded walkthrough)
+- `demo.webm` (before/after screen recording, **preferred**)
 
 ## Step 2: bring up the app in a Codespace and forward the port
 
@@ -83,11 +84,14 @@ identical across before and after:
 Repeat for each meaningful view. Look at each screenshot before moving on, following
 the "use vision for visual work" rule; do not assume the capture is correct.
 
-### Optional: a recorded video walkthrough
+### Preferred: a recorded before/after video walkthrough
 
-The browser MCP captures stills. For a short recorded walkthrough, run a Playwright
-script with `record_video_dir` set to the artifacts directory, either locally
-against the forwarded URL or inside the Codespace:
+A before/after video is the preferred demo deliverable, so record one whenever the
+change has a visual surface. The browser MCP captures stills, so record the
+walkthrough with a Playwright script with `record_video_dir` set to the artifacts
+directory, either locally against the forwarded URL or inside the Codespace.
+Capture the before state (base branch) and the after state (feature branch) in the
+same flow, or record one pass per branch and keep both:
 
 ```python
 # playwright install chromium  (once)
@@ -142,9 +146,10 @@ python3 ~/.copilot/skills/record-demo/scaffold.py check
 ```
 
 `check` confirms the demo marker exists and, for a visual demo, that the artifacts
-directory holds at least one non-empty image. For an `N/A` marker it confirms the
-justification records an alternative visual aid. Fix any gap it reports before
-moving on to the PR description.
+directory holds at least one non-empty image. It also warns when a visual demo has
+no before/after video, since a recording is the preferred deliverable. For an `N/A`
+marker it confirms the justification records an alternative visual aid. Fix any gap
+it reports before moving on to the PR description.
 
 ## After this skill
 
