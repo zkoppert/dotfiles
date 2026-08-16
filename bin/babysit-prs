@@ -8,6 +8,45 @@ set -euo pipefail
 # when launchd invokes us directly.
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH"
 
-exec /usr/bin/env python3 \
-  "$HOME/repos/babysit-prs/babysit_prs.py" \
-  "$@"
+review_env_args=()
+review_env_config="${BABYSIT_PRS_REVIEW_ENV_CONFIG:-$HOME/.config/babysit-prs/review-environments}"
+companion="$HOME/repos/babysit-prs/babysit_prs.py"
+if [ -f "$review_env_config" ] &&
+  companion_help=$(/usr/bin/env python3 "$companion" --help 2>/dev/null) &&
+  printf '%s\n' "$companion_help" | grep -q -- '--review-lab-repo' &&
+  printf '%s\n' "$companion_help" | grep -q -- '--preview-repo'; then
+  while read -r target repo extra || [ -n "${target:-}" ]; do
+    if [ -z "${target:-}" ] || [[ "$target" == \#* ]]; then
+      continue
+    fi
+    if [ -n "${extra:-}" ] || [[ ! "${repo:-}" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+      echo "Invalid review environment config entry: $target ${repo:-} ${extra:-}" >&2
+      exit 2
+    fi
+    case "$target" in
+      review-lab)
+        review_env_args+=(--review-lab-repo "$repo")
+        ;;
+      preview)
+        review_env_args+=(--preview-repo "$repo")
+        ;;
+      *)
+        echo "Unsupported review environment target in $review_env_config: $target" >&2
+        exit 2
+        ;;
+    esac
+  done < "$review_env_config"
+elif [ -f "$review_env_config" ]; then
+  echo "Skipping review environment config until the companion supports both target flags" >&2
+fi
+
+if [ ${#review_env_args[@]} -gt 0 ]; then
+  exec /usr/bin/env python3 \
+    "$companion" \
+    "${review_env_args[@]}" \
+    "$@"
+else
+  exec /usr/bin/env python3 \
+    "$companion" \
+    "$@"
+fi
