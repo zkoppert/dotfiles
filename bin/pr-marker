@@ -46,8 +46,11 @@ gh-guard accept only the workflow's range of 1 through 3.
 The tests marker is machine-produced: `run-tests` requires a clean repository,
 runs the test-quality evidence preflight and the given check commands, verifies
 the repository stayed clean, and writes the marker only if every command exits
-0. This records the committed tree that passed tests, lint, type-check, and
-build rather than a self-reported note.
+0. This makes the marker a byproduct of a real green run rather than a
+self-reported note, so a bare `touch` or a note that forgot to run the checks
+cannot satisfy the gate. Because the gate only checks for the result header
+literal, a deliberate hand-forge of that literal still passes: the gate guards
+against my own accidental shortcuts, not against self-forgery by the repo owner.
 
 The branch directory name is percent-encoded. The encoding MUST stay identical
 to gh-guard's inline computation:
@@ -174,7 +177,9 @@ MAX_REVIEW_ROUNDS = 3
 
 # A machine-produced marker (tests) must carry this exact header, written only
 # by `run-tests` after every check command exits 0. `status`/`check` and gh-guard
-# require it, so a hand-written note or bare `touch` cannot satisfy the gate.
+# require it, so a bare `touch` or a note that forgot to run the checks cannot
+# satisfy the gate. A deliberate hand-forge of this literal is out of scope: the
+# gate guards against accidental shortcuts, not self-forgery by the repo owner.
 # Keep this literal in sync with gh-guard's grep.
 TESTS_RESULT_HEADER = "<!-- tests-result: passed -->"
 
@@ -350,8 +355,10 @@ def has_result_header(path: Path) -> bool:
     """Return True if the marker carries the machine-produced tests-result header.
 
     The header is written only by `run-tests` after every check command exits 0,
-    so requiring it prevents a hand-written or bare-touch file from satisfying the
-    tests gate. gh-guard greps for the identical literal.
+    so requiring it stops a bare-touch or forgot-to-run file from satisfying the
+    tests gate. A deliberate hand-forge of the literal still passes; the gate
+    guards against accidental shortcuts by the repo owner, not self-forgery.
+    gh-guard greps for the identical literal.
     """
     try:
         lines = path.read_text(encoding="utf-8").splitlines()

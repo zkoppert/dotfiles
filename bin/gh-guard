@@ -344,8 +344,10 @@ check_marker() {
 # its reviewed-by-models header, so a single-pass self-review cannot pass a gate
 # meant to require a multi-model review. A requires_result marker (the tests
 # marker) must carry the machine-produced `<!-- tests-result: passed -->` header,
-# which pr-marker writes only after every check command exits 0, so a hand-written
-# note cannot pass a gate meant to require a real green run. The reviewed-commit,
+# which pr-marker writes only after every check command exits 0, so a bare touch
+# or a forgot-to-run note cannot pass a gate meant to require a real green run. A
+# deliberate hand-forge of the literal is out of scope: the gate guards against
+# accidental shortcuts, not self-forgery. The reviewed-commit,
 # reviewed-by-models, and tests-result formats MUST match bin/pr-marker's
 # REVIEWED_COMMIT_PREFIX, REVIEWED_MODELS_PREFIX, REVIEW_CONVERGENCE_PREFIX,
 # and TESTS_RESULT_HEADER.
@@ -550,8 +552,10 @@ record an explicit "N/A - no visual surface" justification plus an alternative
 visual aid (table / mermaid / terminal output).
 
 The tests marker is machine-produced: \`pr-marker run-tests\` runs the check
-commands in a Codespace and writes it only if every command exits 0, so it
-proves a green run. Slowness is never a reason to narrow the suite; only genuine
+commands in a Codespace and writes it only if every command exits 0, so a bare
+touch or a self-reported note does not pass. A deliberate hand-forge of the
+header is out of scope: the gate guards against accidental shortcuts, not
+self-forgery. Slowness is never a reason to narrow the suite; only genuine
 infeasibility, recorded via --narrow.
 
 A STALE code-review or tests marker means HEAD moved since it was written (the
