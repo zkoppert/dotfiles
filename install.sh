@@ -58,6 +58,22 @@ if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
   done
 fi
 
+# Add the local-only review environment shortcut on macOS.
+if [ "$(uname)" = "Darwin" ]; then
+  DEPLOY_ALIAS="alias deploy='gh review-lab deploy'  # dotfiles: review lab"
+  for shell_rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
+    rc_short="${shell_rc/#$HOME/~}"
+    if [ -f "$shell_rc" ] && grep -q "dotfiles: review lab" "$shell_rc"; then
+      echo "✓ Review lab alias already in $rc_short"
+    elif [ -f "$shell_rc" ] && grep -Eq '^[[:space:]]*(alias[[:space:]]+((['\''"]deploy['\''"][[:space:]]*=)|(['\''"]?deploy=))|deploy[[:space:]]*\(\)|function[[:space:]]+deploy([[:space:]]|\(|$))' "$shell_rc"; then
+      echo "⚠ $rc_short already defines deploy - skipping review lab alias"
+    else
+      printf '\n%s\n' "$DEPLOY_ALIAS" >> "$shell_rc"
+      echo "✓ Added review lab alias to $rc_short"
+    fi
+  done
+fi
+
 # Install pr-marker helper as a PATH shim at ~/.local/bin/pr-marker.
 # Writes the per-branch plan/code/demo/PR-description/tests markers that the
 # gh-guard `gh pr create` gate checks, keeping the path encoding in one place.
@@ -69,6 +85,36 @@ if [ -x "$DOTFILES_DIR/bin/pr-marker" ]; then
     echo "✓ Linked pr-marker → ~/.local/bin/pr-marker"
   else
     echo "⚠ $PR_MARKER_TARGET exists and is not a symlink - skipping"
+  fi
+fi
+
+# Install and reload the babysit-prs launchd agent so plist argument changes
+# take effect immediately.
+BABYSIT_PLIST="$DOTFILES_DIR/LaunchAgents/com.zkoppert.babysit-prs.plist"
+BABYSIT_SCRIPT="$HOME/repos/babysit-prs/babysit_prs.py"
+EXPECTED_DOTFILES_DIR="$HOME/repos/dotfiles"
+if [ -f "$BABYSIT_PLIST" ] && [ "$(uname)" = "Darwin" ]; then
+  if [ "$DOTFILES_DIR" != "$EXPECTED_DOTFILES_DIR" ] || [ ! -f "$BABYSIT_SCRIPT" ]; then
+    echo "⚠ Skipping babysit-prs launchd agent: expected dotfiles at $EXPECTED_DOTFILES_DIR and companion script at $BABYSIT_SCRIPT"
+  elif [ ! -x "$DOTFILES_DIR/bin/babysit-prs" ]; then
+    echo "⚠ Skipping babysit-prs launchd agent: $DOTFILES_DIR/bin/babysit-prs is not executable"
+  elif ! /usr/bin/env python3 "$BABYSIT_SCRIPT" --help 2>/dev/null | grep -q -- '--review-lab-repo' ||
+    ! /usr/bin/env python3 "$BABYSIT_SCRIPT" --help 2>/dev/null | grep -q -- '--preview-repo'; then
+    echo "⚠ Skipping babysit-prs launchd agent: update $BABYSIT_SCRIPT before enabling review-lab deployment"
+  else
+    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+    BABYSIT_PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.babysit-prs.plist"
+    if [ -L "$BABYSIT_PLIST_TARGET" ] || [ ! -e "$BABYSIT_PLIST_TARGET" ]; then
+      launchctl unload "$BABYSIT_PLIST_TARGET" >/dev/null 2>&1 || true
+      ln -sfn "$BABYSIT_PLIST" "$BABYSIT_PLIST_TARGET"
+      if launchctl load "$BABYSIT_PLIST_TARGET" 2>/dev/null; then
+        echo "✓ Loaded launchd agent com.zkoppert.babysit-prs"
+      else
+        echo "⚠ launchctl load failed for $BABYSIT_PLIST_TARGET - check ~/Library/Logs/babysit-prs.log"
+      fi
+    else
+      echo "⚠ $BABYSIT_PLIST_TARGET exists and is not a symlink - skipping"
+    fi
   fi
 fi
 

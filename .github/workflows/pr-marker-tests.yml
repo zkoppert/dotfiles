@@ -23,3 +23,7 @@ jobs:
         run: python3 bin/test_pr_marker.py
       - name: Run test-quality checker tests
         run: python3 .copilot/skills/test-quality/test_check.py
+      - name: Run install script tests
+        run: python3 test_install.py
+      - name: Run babysit-prs wrapper tests
+        run: python3 test_babysit_prs_wrapper.py
