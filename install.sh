@@ -29,6 +29,41 @@ if [ -d "$DOTFILES_DIR/.copilot/skills" ]; then
   done
 fi
 
+# Install private catalog tools only when the source is supplied outside this
+# public repository.
+CATALOG_REPO="${COPILOT_SKILL_CATALOG_REPO:-}"
+CATALOG_SKILLS="validate-pr-with-codespace session-portability cleanup-worktrees remediate-accessibility-audit"
+if [ -z "$CATALOG_REPO" ]; then
+  echo "⚠ COPILOT_SKILL_CATALOG_REPO is not set - skipping private catalog tools"
+else
+  if command -v gh >/dev/null 2>&1; then
+    for skill_name in $CATALOG_SKILLS; do
+      skill_target="$HOME/.copilot/skills/$skill_name/SKILL.md"
+      if [ -f "$skill_target" ]; then
+        echo "✓ Copilot skill $skill_name is already installed"
+      elif gh skill install "$CATALOG_REPO" "skills/$skill_name" --agent github-copilot --scope user </dev/null; then
+        echo "✓ Installed Copilot skill $skill_name"
+      else
+        echo "⚠ Failed to install Copilot skill $skill_name - continuing dotfiles setup"
+      fi
+    done
+  else
+    echo "⚠ gh is missing - skipping private catalog skills"
+  fi
+
+  if command -v copilot >/dev/null 2>&1; then
+    if copilot plugin list 2>/dev/null | grep -q 'gho11y@'; then
+      echo "✓ Copilot plugin gho11y is already installed"
+    elif copilot plugin install "$CATALOG_REPO:plugins/gho11y" </dev/null; then
+      echo "✓ Installed Copilot plugin gho11y"
+    else
+      echo "⚠ Failed to install Copilot plugin gho11y - continuing dotfiles setup"
+    fi
+  else
+    echo "⚠ copilot is missing - skipping Copilot plugin gho11y"
+  fi
+fi
+
 # Install gh guard wrapper as a PATH shim at ~/.local/bin/gh.
 # Guards both `gh pr ready` and `gh pr create` against accidental/unreviewed runs.
 if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
