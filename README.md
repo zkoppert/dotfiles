@@ -32,8 +32,8 @@ The installer skips tools that are already present. Missing CLIs, authentication
 The install-once checks do not update existing tools. Refresh them explicitly:
 
 ```bash
-gh skill update --all
-copilot plugin update --all
+gh skill update validate-pr-with-codespace session-portability cleanup-worktrees remediate-accessibility-audit
+copilot plugin update gho11y
 ```
 
 To retry a failed or interrupted setup, confirm that `gh auth status` and `copilot --version` succeed, set `COPILOT_SKILL_CATALOG_REPO`, and run `./install.sh` again.

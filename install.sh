@@ -52,7 +52,7 @@ else
   fi
 
   if command -v copilot >/dev/null 2>&1; then
-    if copilot plugin list 2>/dev/null | grep -q 'gho11y@'; then
+    if copilot plugin list 2>/dev/null | grep -Eq '(^|[[:space:]])gho11y([[:space:](]|$)'; then
       echo "✓ Copilot plugin gho11y is already installed"
     elif copilot plugin install "$CATALOG_REPO:plugins/gho11y" </dev/null; then
       echo "✓ Installed Copilot plugin gho11y"

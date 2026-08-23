@@ -53,7 +53,7 @@ class InstallScriptTest(unittest.TestCase):
             "#!/bin/sh\n"
             "printf '%s\\n' \"$*\" >> \"$HOME/copilot.log\"\n"
             "if [ \"$1\" = plugin ] && [ \"$2\" = list ]; then\n"
-            "  [ -f \"$HOME/.copilot/gho11y-installed\" ] && printf 'gho11y@catalog\\n'\n"
+            "  [ -f \"$HOME/.copilot/gho11y-installed\" ] && printf '  \\342\\200\\242 gho11y (v1.0.0)\\n'\n"
             "elif [ \"$1\" = plugin ] && [ \"$2\" = install ]; then\n"
             "  [ \"${FAKE_COPILOT_FAIL:-0}\" = 1 ] && exit 1\n"
             "  mkdir -p \"$HOME/.copilot\"\n"
@@ -104,8 +104,15 @@ class InstallScriptTest(unittest.TestCase):
                 "--agent github-copilot --scope user"
             )
             self.assertEqual(gh_calls.count(expected_call), 1)
-            self.assertTrue(
-                (self.home / ".copilot" / "skills" / skill_name / "SKILL.md").is_file()
+            self.assertEqual(
+                (
+                    self.home
+                    / ".copilot"
+                    / "skills"
+                    / skill_name
+                    / "SKILL.md"
+                ).read_text(encoding="utf-8"),
+                "# installed\n",
             )
             self.assertIn(
                 f"Copilot skill {skill_name} is already installed",
