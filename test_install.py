@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -146,7 +147,11 @@ class InstallScriptTest(unittest.TestCase):
     def test_missing_catalog_commands_are_nonfatal(self) -> None:
         (self.fake_bin / "gh").unlink()
         (self.fake_bin / "copilot").unlink()
-        self.env["PATH"] = f"{self.fake_bin}{os.pathsep}/usr/bin{os.pathsep}/bin"
+        dirname = shutil.which("dirname")
+        if dirname is None:
+            self.fail("dirname is required to exercise install.sh")
+        (self.fake_bin / "dirname").symlink_to(dirname)
+        self.env["PATH"] = str(self.fake_bin)
 
         result = self.run_installer()
 
