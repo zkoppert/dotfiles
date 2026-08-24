@@ -187,6 +187,32 @@ def issue_assignees(repo: str, number: int) -> set[str]:
     }
 
 
+def rollback_issue_assignment(repo: str, number: int, assignee: str) -> None:
+    """Remove a tentative assignment or raise a durable-recovery error."""
+    try:
+        rollback = run_command(
+            [
+                "gh",
+                "issue",
+                "edit",
+                str(number),
+                "--repo",
+                repo,
+                "--remove-assignee",
+                assignee,
+            ],
+            check=False,
+        )
+    except CommandError as exc:
+        raise ClaimRollbackError(
+            f"could not roll back assignment for {repo}#{number}"
+        ) from exc
+    if rollback.returncode != 0:
+        raise ClaimRollbackError(
+            f"could not roll back assignment for {repo}#{number}"
+        )
+
+
 def claim_issue(repo: str, number: int, assignee: str) -> bool:
     """Claim an issue only when it remains open and unassigned."""
     if issue_assignees(repo, number):
@@ -205,45 +231,13 @@ def claim_issue(repo: str, number: int, assignee: str) -> bool:
     )
     try:
         assignees = issue_assignees(repo, number)
-    except CommandError as exc:
-        rollback = run_command(
-            [
-                "gh",
-                "issue",
-                "edit",
-                str(number),
-                "--repo",
-                repo,
-                "--remove-assignee",
-                assignee,
-            ],
-            check=False,
-        )
-        if rollback.returncode != 0:
-            raise ClaimRollbackError(
-                f"could not roll back assignment for {repo}#{number}"
-            ) from exc
+    except CommandError:
+        rollback_issue_assignment(repo, number, assignee)
         raise
     if assignees == {assignee}:
         return True
     if assignees != {assignee}:
-        try:
-            run_command(
-                [
-                    "gh",
-                    "issue",
-                    "edit",
-                    str(number),
-                    "--repo",
-                    repo,
-                    "--remove-assignee",
-                    assignee,
-                ]
-            )
-        except CommandError as exc:
-            raise ClaimRollbackError(
-                f"could not roll back assignment for {repo}#{number}"
-            ) from exc
+        rollback_issue_assignment(repo, number, assignee)
     LOGGER.warning(
         "Skipped %s#%s because another assignee claimed it concurrently",
         repo,

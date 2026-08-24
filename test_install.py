@@ -390,6 +390,46 @@ class InstallScriptTest(unittest.TestCase):
         )
         self.assertFalse(plist_target.exists())
 
+    def test_accessibility_picker_unloads_existing_job_without_private_config(
+        self,
+    ) -> None:
+        launch_agents = self.repo / "LaunchAgents"
+        launch_agents.mkdir()
+        source_plist = (
+            launch_agents / "com.zkoppert.accessibility-issue-picker.plist"
+        )
+        source_plist.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
+        bin_dir = self.repo / "bin"
+        bin_dir.mkdir()
+        for command in (
+            "accessibility-issue-picker",
+            "resume-accessibility-session",
+        ):
+            wrapper = bin_dir / command
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+        plist_target = (
+            self.home
+            / "Library"
+            / "LaunchAgents"
+            / "com.zkoppert.accessibility-issue-picker.plist"
+        )
+        plist_target.parent.mkdir(parents=True)
+        plist_target.symlink_to(source_plist)
+        launchctl = self.fake_bin / "launchctl"
+        launchctl.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/launchctl.log\"\n",
+            encoding="utf-8",
+        )
+        launchctl.chmod(0o755)
+
+        result = self.run_installer()
+
+        self.assertFalse(plist_target.exists())
+        calls = (self.home / "launchctl.log").read_text(encoding="utf-8")
+        self.assertIn(f"unload {plist_target}", calls)
+        self.assertIn("Unloaded accessibility issue picker", result.stdout)
+
     def test_accessibility_picker_skips_nonstandard_checkout(self) -> None:
         relocated = self.root / "relocated"
         (relocated / "LaunchAgents").mkdir(parents=True)

@@ -136,7 +136,11 @@ def test_claim_issue_yields_when_assignment_races() -> None:
             "issue_assignees",
             side_effect=[set(), {"zkoppert", "someone"}],
         ),
-        mock.patch.object(picker, "run_command") as run_command,
+        mock.patch.object(
+            picker,
+            "run_command",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as run_command,
     ):
         assert not picker.claim_issue("o/r", 42, "zkoppert")
 
@@ -151,7 +155,11 @@ def test_claim_issue_rolls_back_when_issue_closes_during_claim() -> None:
             "issue_assignees",
             side_effect=[set(), {"<closed>"}],
         ),
-        mock.patch.object(picker, "run_command") as run_command,
+        mock.patch.object(
+            picker,
+            "run_command",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as run_command,
     ):
         assert not picker.claim_issue("o/r", 42, "zkoppert")
 
@@ -166,7 +174,11 @@ def test_claim_issue_rolls_back_when_verification_fails() -> None:
             "issue_assignees",
             side_effect=[set(), picker.CommandError("verify failed")],
         ),
-        mock.patch.object(picker, "run_command") as run_command,
+        mock.patch.object(
+            picker,
+            "run_command",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as run_command,
     ):
         try:
             picker.claim_issue("o/r", 42, "zkoppert")
@@ -501,6 +513,23 @@ def test_claim_issue_reports_failed_assignment_rollback() -> None:
             picker,
             "run_command",
             side_effect=[mock.DEFAULT, cleanup_failure],
+        ),
+        pytest.raises(picker.ClaimRollbackError, match="could not roll back"),
+    ):
+        picker.claim_issue(TEST_REPO, 42, "zkoppert")
+
+
+def test_claim_issue_reports_rollback_command_exception() -> None:
+    with (
+        mock.patch.object(
+            picker,
+            "issue_assignees",
+            side_effect=[set(), picker.CommandError("verification failed")],
+        ),
+        mock.patch.object(
+            picker,
+            "run_command",
+            side_effect=[mock.DEFAULT, picker.CommandError("rollback timed out")],
         ),
         pytest.raises(picker.ClaimRollbackError, match="could not roll back"),
     ):

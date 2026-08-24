@@ -215,10 +215,15 @@ if [ -x "$ACCESSIBILITY_WRAPPER" ] &&
     fi
   done
 
+  ACCESSIBILITY_PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.accessibility-issue-picker.plist"
   if [ ! -f "$ACCESSIBILITY_CONFIG" ]; then
+    if [ -L "$ACCESSIBILITY_PLIST_TARGET" ]; then
+      launchctl unload "$ACCESSIBILITY_PLIST_TARGET" >/dev/null 2>&1 || true
+      rm "$ACCESSIBILITY_PLIST_TARGET"
+      echo "✓ Unloaded accessibility issue picker because $ACCESSIBILITY_CONFIG is absent"
+    fi
     echo "⚠ Skipping accessibility issue picker launchd agent: create $ACCESSIBILITY_CONFIG first"
   else
-    ACCESSIBILITY_PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.accessibility-issue-picker.plist"
     if [ -L "$ACCESSIBILITY_PLIST_TARGET" ] || [ ! -e "$ACCESSIBILITY_PLIST_TARGET" ]; then
       launchctl unload "$ACCESSIBILITY_PLIST_TARGET" >/dev/null 2>&1 || true
       ln -sfn "$ACCESSIBILITY_PLIST" "$ACCESSIBILITY_PLIST_TARGET"
