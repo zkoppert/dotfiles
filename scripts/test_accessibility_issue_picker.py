@@ -35,6 +35,12 @@ def issue(
     }
 
 
+def make_checkout(path: Path) -> None:
+    """Create the minimum local checkout marker required by the picker."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / ".git").mkdir()
+
+
 def test_list_candidates_deduplicates_and_prioritizes_formal_audits() -> None:
     first = [
         issue(
@@ -62,6 +68,34 @@ def test_list_candidates_deduplicates_and_prioritizes_formal_audits() -> None:
         )
 
     assert [candidate["number"] for candidate in candidates] == [1, 3]
+
+
+def test_list_candidates_includes_pending_assignment_rollback(
+    tmp_path: Path,
+) -> None:
+    tracked = issue(
+        42,
+        created_at="2026-01-01T00:00:00Z",
+        assignees=[{"login": "zkoppert"}, {"login": "someone"}],
+    )
+    picker.write_claim_state(
+        tmp_path,
+        tracked,
+        [],
+        "rollback_pending",
+        SESSION_ID,
+        tmp_path,
+    )
+    with mock.patch.object(picker, "run_gh_json", return_value=[tracked]):
+        candidates = picker.list_candidates(
+            TEST_REPO,
+            ["a11y"],
+            "zkoppert",
+            TEST_AUDIT_REPO,
+            tmp_path,
+        )
+
+    assert [candidate["number"] for candidate in candidates] == [42]
 
 
 def test_claim_issue_rechecks_and_verifies_assignee() -> None:
@@ -226,6 +260,7 @@ def test_dry_run_does_not_claim_or_start_copilot(tmp_path: Path) -> None:
 
 def test_run_claims_one_issue_and_persists_handoff(tmp_path: Path) -> None:
     tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    make_checkout(tmp_path)
     args = argparse.Namespace(
         repo="o/r",
         audit_repo=TEST_AUDIT_REPO,
@@ -254,6 +289,7 @@ def test_run_claims_one_issue_and_persists_handoff(tmp_path: Path) -> None:
 
 def test_run_persists_copilot_start_failure(tmp_path: Path) -> None:
     tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    make_checkout(tmp_path / "work")
     args = argparse.Namespace(
         repo="o/r",
         audit_repo=TEST_AUDIT_REPO,
@@ -289,6 +325,10 @@ def test_run_copilot_restricts_paths_and_publish_commands(tmp_path: Path) -> Non
         ["gh"], returncode=0, stdout="secret-token\n", stderr=""
     )
     with (
+        mock.patch.dict(
+            picker.os.environ,
+            {"AWS_SECRET_ACCESS_KEY": "do-not-copy"},
+        ),
         mock.patch.object(picker.shutil, "which", return_value="/usr/bin/sandbox-exec"),
         mock.patch.object(picker, "prepare_copilot_home"),
         mock.patch.object(picker, "run_command", return_value=token_result),
@@ -310,9 +350,10 @@ def test_run_copilot_restricts_paths_and_publish_commands(tmp_path: Path) -> Non
     assert "shell(gh pr create)" in command
     assert "shell(gh pr merge)" in command
     assert "--add-github-mcp-tool" in command
-    assert "get_issue" in command
+    assert "issue_read" in command
     assert environment["COPILOT_HOME"] == str(tmp_path / "copilot-home")
     assert environment["COPILOT_GITHUB_TOKEN"] == "secret-token"
+    assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert "secret-token" not in command
 
 
@@ -355,6 +396,36 @@ def test_run_copilot_fails_closed_without_command_sandbox(tmp_path: Path) -> Non
     popen.assert_not_called()
 
 
+def test_run_copilot_tolerates_process_exit_before_timeout_cleanup(
+    tmp_path: Path,
+) -> None:
+    process = mock.Mock()
+    process.pid = 123
+    process.communicate.side_effect = [
+        subprocess.TimeoutExpired(["copilot"], 10),
+        ("", ""),
+    ]
+    token_result = subprocess.CompletedProcess(
+        ["gh"], returncode=0, stdout="secret-token\n", stderr=""
+    )
+    with (
+        mock.patch.object(picker.shutil, "which", return_value="/usr/bin/sandbox-exec"),
+        mock.patch.object(picker, "prepare_copilot_home"),
+        mock.patch.object(picker, "run_command", return_value=token_result),
+        mock.patch.object(picker.subprocess, "Popen", return_value=process),
+        mock.patch.object(
+            picker.os,
+            "killpg",
+            side_effect=ProcessLookupError,
+        ),
+    ):
+        result = picker.run_copilot(
+            "prompt", tmp_path, 10, SESSION_ID, tmp_path / "copilot-home"
+        )
+
+    assert result.returncode == 124
+
+
 def test_prepare_copilot_home_disables_credentials_and_bypass(
     tmp_path: Path,
 ) -> None:
@@ -373,6 +444,8 @@ def test_prepare_copilot_home_disables_credentials_and_bypass(
     assert '"git": false' in settings
     assert '"gh": false' in settings
     assert '"keychainAccess": false' in settings
+    assert '"allowOutbound": false' in settings
+    assert '"sandboxMcpServers": false' in settings
     assert (copilot_home / "skills/remediate-accessibility-audit/SKILL.md").is_file()
 
 
@@ -389,8 +462,76 @@ def test_resumable_claim_requires_unfinished_state(tmp_path: Path) -> None:
     assert not picker.resumable_claim(tmp_path, 42, tracked["url"])
 
 
+def test_state_files_are_private(tmp_path: Path) -> None:
+    tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    path = picker.write_claim_state(
+        tmp_path / "state",
+        tracked,
+        [],
+        "in_progress",
+        SESSION_ID,
+        tmp_path,
+    )
+
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_validate_workdir_rejects_empty_directory(tmp_path: Path) -> None:
+    with pytest.raises(picker.CommandError, match="contains no Git checkout"):
+        picker.validate_workdir(tmp_path)
+
+
+def test_claim_issue_reports_failed_assignment_rollback() -> None:
+    cleanup_failure = picker.CommandError("cleanup failed")
+    with (
+        mock.patch.object(
+            picker,
+            "issue_assignees",
+            side_effect=[set(), {"zkoppert", "someone"}],
+        ),
+        mock.patch.object(
+            picker,
+            "run_command",
+            side_effect=[mock.DEFAULT, cleanup_failure],
+        ),
+        pytest.raises(picker.ClaimRollbackError, match="could not roll back"),
+    ):
+        picker.claim_issue(TEST_REPO, 42, "zkoppert")
+
+
+def test_run_persists_assignment_rollback_for_retry(tmp_path: Path) -> None:
+    tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    make_checkout(tmp_path / "work")
+    args = argparse.Namespace(
+        repo=TEST_REPO,
+        audit_repo=TEST_AUDIT_REPO,
+        labels=["a11y"],
+        assignee="zkoppert",
+        workdir=tmp_path / "work",
+        state_dir=tmp_path / "state",
+        timeout=10,
+        dry_run=False,
+    )
+    with (
+        mock.patch.object(picker, "list_candidates", return_value=[tracked]),
+        mock.patch.object(picker, "issue_assignees", return_value=set()),
+        mock.patch.object(
+            picker,
+            "claim_issue",
+            side_effect=picker.ClaimRollbackError("cleanup failed"),
+        ),
+        mock.patch.object(picker, "notify"),
+    ):
+        assert picker.run(args) == 0
+
+    state = picker.read_state(args.state_dir, 42)
+    assert state["status"] == "rollback_pending"
+
+
 def test_completion_notification_prepares_resume_command(tmp_path: Path) -> None:
     tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    make_checkout(tmp_path / "work")
     args = argparse.Namespace(
         repo="o/r",
         audit_repo=TEST_AUDIT_REPO,

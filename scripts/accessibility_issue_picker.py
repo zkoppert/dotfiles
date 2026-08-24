@@ -27,6 +27,10 @@ class CommandError(RuntimeError):
     """Raised when an external command fails."""
 
 
+class ClaimRollbackError(CommandError):
+    """Raised when the picker cannot remove its assignment after a failed claim."""
+
+
 def run_command(
     command: Sequence[str], *, timeout: int = 120, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
@@ -86,6 +90,19 @@ def read_state(state_dir: Path, issue_number: int) -> dict[str, Any]:
         return {}
 
 
+def rollback_pending(
+    state_dir: Path,
+    issue_number: int,
+    issue_url: str,
+) -> bool:
+    """Return whether a failed assignment cleanup still needs recovery."""
+    state = read_state(state_dir, issue_number)
+    return (
+        state.get("issue") == issue_url
+        and state.get("status") == "rollback_pending"
+    )
+
+
 def list_candidates(
     repo: str,
     labels: Sequence[str],
@@ -120,21 +137,24 @@ def list_candidates(
                 for item in issue.get("assignees", [])
                 if item.get("login")
             }
-            if not assignees or (
-                assignees == {assignee}
-                and resumable_claim(
-                    state_dir,
-                    int(issue["number"]),
-                    issue["url"],
+            issue_number = int(issue["number"])
+            if (
+                not assignees
+                or (
+                    assignees == {assignee}
+                    and resumable_claim(state_dir, issue_number, issue["url"])
+                )
+                or (
+                    assignee in assignees
+                    and rollback_pending(state_dir, issue_number, issue["url"])
                 )
             ):
-                number = int(issue["number"])
-                existing = candidates.get(number)
+                existing = candidates.get(issue_number)
                 if existing is None or (
                     not audit_pattern.search(existing.get("body") or "")
                     and audit_pattern.search(issue.get("body") or "")
                 ):
-                    candidates[number] = issue
+                    candidates[issue_number] = issue
     return sorted(
         candidates.values(),
         key=lambda issue: (
@@ -185,8 +205,8 @@ def claim_issue(repo: str, number: int, assignee: str) -> bool:
     )
     try:
         assignees = issue_assignees(repo, number)
-    except CommandError:
-        run_command(
+    except CommandError as exc:
+        rollback = run_command(
             [
                 "gh",
                 "issue",
@@ -199,22 +219,31 @@ def claim_issue(repo: str, number: int, assignee: str) -> bool:
             ],
             check=False,
         )
+        if rollback.returncode != 0:
+            raise ClaimRollbackError(
+                f"could not roll back assignment for {repo}#{number}"
+            ) from exc
         raise
     if assignees == {assignee}:
         return True
     if assignees != {assignee}:
-        run_command(
-            [
-                "gh",
-                "issue",
-                "edit",
-                str(number),
-                "--repo",
-                repo,
-                "--remove-assignee",
-                assignee,
-            ]
-        )
+        try:
+            run_command(
+                [
+                    "gh",
+                    "issue",
+                    "edit",
+                    str(number),
+                    "--repo",
+                    repo,
+                    "--remove-assignee",
+                    assignee,
+                ]
+            )
+        except CommandError as exc:
+            raise ClaimRollbackError(
+                f"could not roll back assignment for {repo}#{number}"
+            ) from exc
     LOGGER.warning(
         "Skipped %s#%s because another assignee claimed it concurrently",
         repo,
@@ -301,7 +330,7 @@ def run_copilot(
         "--add-github-mcp-tool",
         "get_file_contents",
         "--add-github-mcp-tool",
-        "get_issue",
+        "issue_read",
         "--add-github-mcp-tool",
         "search_code",
         "--deny-tool",
@@ -342,9 +371,21 @@ def run_copilot(
         "--no-color",
         "--silent",
     ]
-    environment = dict(os.environ)
-    environment.pop("GH_TOKEN", None)
-    environment.pop("GITHUB_TOKEN", None)
+    safe_environment_names = (
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LOGNAME",
+        "PATH",
+        "SHELL",
+        "TMPDIR",
+        "USER",
+    )
+    environment = {
+        name: os.environ[name]
+        for name in safe_environment_names
+        if name in os.environ
+    }
     environment["COPILOT_HOME"] = str(copilot_home)
     environment["COPILOT_GITHUB_TOKEN"] = token
 
@@ -362,11 +403,17 @@ def run_copilot(
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         try:
             stdout, stderr = process.communicate(timeout=10)
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             stdout, stderr = process.communicate()
         timeout_message = f"command timed out after {timeout}s: {' '.join(command)}"
         stderr = f"{stderr.rstrip()}\n{timeout_message}".lstrip()
@@ -405,11 +452,11 @@ def prepare_copilot_home(copilot_home: Path) -> None:
             "allowDevToolAccess": False,
             "allowBypass": False,
             "auth": {"git": False, "gh": False},
-            "sandboxMcpServers": True,
+            "sandboxMcpServers": False,
             "sandboxLspServers": True,
             "userPolicy": {
                 "network": {
-                    "allowOutbound": True,
+                    "allowOutbound": False,
                     "allowLocalNetwork": False,
                 },
                 "seatbelt": {"keychainAccess": False},
@@ -424,7 +471,10 @@ def prepare_copilot_home(copilot_home: Path) -> None:
         },
     }
     settings_path = copilot_home / "settings.json"
+    copilot_home.chmod(0o700)
     temporary = settings_path.with_suffix(".tmp")
+    temporary.touch(mode=0o600)
+    temporary.chmod(0o600)
     temporary.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     temporary.replace(settings_path)
 
@@ -438,9 +488,12 @@ def write_claim_state(
     workdir: Path,
 ) -> Path:
     """Persist claim progress so interrupted work can resume."""
-    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state_dir.chmod(0o700)
     path = state_path(state_dir, int(issue["number"]))
     temporary = path.with_suffix(".tmp")
+    temporary.touch(mode=0o600)
+    temporary.chmod(0o600)
     payload = {
         "issue": issue["url"],
         "audit_urls": list(audits),
@@ -463,9 +516,12 @@ def write_result(
     workdir: Path,
 ) -> Path:
     """Persist the agent handoff so a launchd run never loses its outcome."""
-    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state_dir.chmod(0o700)
     path = state_path(state_dir, int(issue["number"]))
     temporary = path.with_suffix(".tmp")
+    temporary.touch(mode=0o600)
+    temporary.chmod(0o600)
     payload = {
         "issue": issue["url"],
         "audit_urls": list(audits),
@@ -519,7 +575,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workdir",
         type=Path,
-        default=Path.home() / "repos/accessibility-remediation",
+        default=Path(
+            os.environ.get("ACCESSIBILITY_WORKDIR")
+            or Path.home() / "repos/accessibility-remediation"
+        ),
     )
     parser.add_argument(
         "--state-dir",
@@ -553,12 +612,30 @@ def validate_args(args: argparse.Namespace) -> None:
     args.labels = labels
 
 
+def validate_workdir(workdir: Path) -> None:
+    """Require a local checkout before an issue can be claimed."""
+    if not workdir.is_dir():
+        raise CommandError(f"Remediation workdir does not exist: {workdir}")
+    if (workdir / ".git").exists():
+        return
+    try:
+        has_checkout = any((child / ".git").exists() for child in workdir.iterdir())
+    except OSError as exc:
+        raise CommandError(f"Cannot inspect remediation workdir {workdir}: {exc}") from exc
+    if not has_checkout:
+        raise CommandError(
+            f"Remediation workdir contains no Git checkout: {workdir}"
+        )
+
+
 def run(args: argparse.Namespace) -> int:
     """Claim the newest eligible issue and start its remediation."""
     validate_args(args)
     labels = args.labels
-    args.state_dir.mkdir(parents=True, exist_ok=True)
-    args.workdir.mkdir(parents=True, exist_ok=True)
+    args.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    args.state_dir.chmod(0o700)
+    if not args.dry_run:
+        validate_workdir(args.workdir)
     lock_path = args.state_dir / "picker.lock"
     with lock_path.open("w", encoding="utf-8") as lock_file:
         try:
@@ -588,6 +665,45 @@ def run(args: argparse.Namespace) -> int:
                     len(audits),
                 )
                 return 0
+            saved_state = read_state(args.state_dir, issue_number)
+            if saved_state.get("status") == "rollback_pending":
+                try:
+                    run_command(
+                        [
+                            "gh",
+                            "issue",
+                            "edit",
+                            str(issue_number),
+                            "--repo",
+                            args.repo,
+                            "--remove-assignee",
+                            args.assignee,
+                        ]
+                    )
+                    current_assignees = issue_assignees(args.repo, issue_number)
+                except CommandError as exc:
+                    LOGGER.error(
+                        "Assignment rollback is still pending for %s: %s",
+                        issue["url"],
+                        exc,
+                    )
+                    continue
+                if current_assignees:
+                    abandoned = subprocess.CompletedProcess(
+                        ["gh", "issue", "edit"],
+                        returncode=1,
+                        stdout="",
+                        stderr="assignment rollback completed; another assignee owns the issue",
+                    )
+                    write_result(
+                        args.state_dir,
+                        issue,
+                        audits,
+                        abandoned,
+                        str(saved_state.get("session_id") or uuid.uuid4()),
+                        args.workdir,
+                    )
+                    continue
             current_assignees = issue_assignees(args.repo, issue_number)
             if not current_assignees:
                 session_id = str(uuid.uuid4())
@@ -601,6 +717,22 @@ def run(args: argparse.Namespace) -> int:
                 )
                 try:
                     claimed = claim_issue(args.repo, issue_number, args.assignee)
+                except ClaimRollbackError as exc:
+                    write_claim_state(
+                        args.state_dir,
+                        issue,
+                        audits,
+                        "rollback_pending",
+                        session_id,
+                        args.workdir,
+                    )
+                    notify(
+                        "Accessibility remediation",
+                        f"Issue #{issue['number']} needs assignment rollback",
+                        url=issue["url"],
+                    )
+                    LOGGER.error("%s", exc)
+                    continue
                 except CommandError as exc:
                     failed = subprocess.CompletedProcess(
                         ["gh", "issue", "edit"],
