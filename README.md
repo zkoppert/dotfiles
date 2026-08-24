@@ -37,3 +37,18 @@ copilot plugin update gho11y
 ```
 
 To retry a failed or interrupted setup, confirm that `gh auth status` and `copilot --version` succeed, set `COPILOT_SKILL_CATALOG_REPO`, and run `./install.sh` again.
+
+## How does the accessibility issue picker work?
+
+The macOS installer can schedule one accessibility remediation attempt each hour. The picker claims one eligible unassigned issue, starts a credential-restricted Copilot session in the local command sandbox, saves the handoff, and sends a notification that can prepare the saved session in iTerm without executing it.
+
+Keep private repository names and labels outside this public repository in `~/.config/accessibility-issue-picker.env`:
+
+```bash
+ACCESSIBILITY_ISSUE_REPO="OWNER/REPOSITORY"
+ACCESSIBILITY_AUDIT_REPO="OWNER/AUDIT-REPOSITORY"
+ACCESSIBILITY_LABELS="accessibility,label-two"
+ACCESSIBILITY_ASSIGNEE="YOUR-LOGIN"
+```
+
+Run `./install.sh` after creating the file. Use `accessibility-issue-picker --dry-run` to verify discovery without claiming an issue or starting Copilot. Remove `~/Library/LaunchAgents/com.zkoppert.accessibility-issue-picker.plist` and unload the agent to stop the hourly schedule.

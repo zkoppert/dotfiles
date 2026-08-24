@@ -1,0 +1,58 @@
+"""Tests for resume_accessibility_session."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+import resume_accessibility_session as resume
+
+
+def write_state(state_dir: Path, state: dict[str, object]) -> None:
+    """Write representative picker state."""
+    state_dir.mkdir(exist_ok=True)
+    (state_dir / "issue-42.json").write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    state_dir = tmp_path / "state"
+    copilot_home = state_dir / "copilot-home"
+    copilot_home.mkdir(parents=True)
+    (copilot_home / "settings.json").write_text("{}\n", encoding="utf-8")
+    session_id = "e6877215-fb9f-432e-acd8-7c06a902d3a5"
+    write_state(
+        state_dir,
+        {"session_id": session_id, "workdir": str(workdir)},
+    )
+
+    state = resume.load_resume_state(state_dir, 42)
+
+    command = resume.resume_command(state)
+    assert f"COPILOT_HOME={copilot_home}" in command
+    assert 'COPILOT_GITHUB_TOKEN="$(gh auth token)"' in command
+    assert f"copilot --experimental -C {workdir} --session-id {session_id}" in command
+
+
+def test_load_resume_state_rejects_invalid_session_id(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    write_state(
+        state_dir,
+        {"session_id": "$(touch /tmp/injected)", "workdir": str(tmp_path)},
+    )
+
+    with pytest.raises(resume.ResumeError, match="valid Copilot session ID"):
+        resume.load_resume_state(state_dir, 42)
+
+
+def test_open_iterm_inserts_without_executing() -> None:
+    with mock.patch.object(resume.subprocess, "run") as run:
+        resume.open_iterm("copilot --resume=abc")
+
+    command = run.call_args.args[0]
+    assert command[-1] == "copilot --resume=abc"
+    assert "newline NO" in command[2]

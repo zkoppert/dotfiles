@@ -310,6 +310,123 @@ class InstallScriptTest(unittest.TestCase):
 
         self.assertIn("Skipping babysit-prs launchd agent", result.stdout)
 
+    def test_accessibility_picker_is_linked_and_loaded_with_private_config(
+        self,
+    ) -> None:
+        launch_agents = self.repo / "LaunchAgents"
+        launch_agents.mkdir()
+        source_plist = (
+            launch_agents / "com.zkoppert.accessibility-issue-picker.plist"
+        )
+        source_plist.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
+        bin_dir = self.repo / "bin"
+        bin_dir.mkdir()
+        for command in (
+            "accessibility-issue-picker",
+            "resume-accessibility-session",
+        ):
+            wrapper = bin_dir / command
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+        config = self.home / ".config" / "accessibility-issue-picker.env"
+        config.parent.mkdir()
+        config.write_text("ACCESSIBILITY_ISSUE_REPO=example/project\n", encoding="utf-8")
+        launchctl = self.fake_bin / "launchctl"
+        launchctl.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/launchctl.log\"\n",
+            encoding="utf-8",
+        )
+        launchctl.chmod(0o755)
+
+        self.run_installer()
+
+        for command in (
+            "accessibility-issue-picker",
+            "resume-accessibility-session",
+        ):
+            target = self.home / ".local" / "bin" / command
+            self.assertTrue(target.is_symlink())
+            self.assertEqual(target.resolve(), (bin_dir / command).resolve())
+        plist_target = (
+            self.home
+            / "Library"
+            / "LaunchAgents"
+            / "com.zkoppert.accessibility-issue-picker.plist"
+        )
+        self.assertTrue(plist_target.is_symlink())
+        self.assertEqual(plist_target.resolve(), source_plist.resolve())
+        calls = (self.home / "launchctl.log").read_text(encoding="utf-8")
+        self.assertIn(f"unload {plist_target}", calls)
+        self.assertIn(f"load {plist_target}", calls)
+
+    def test_accessibility_picker_does_not_load_without_private_config(
+        self,
+    ) -> None:
+        launch_agents = self.repo / "LaunchAgents"
+        launch_agents.mkdir()
+        (launch_agents / "com.zkoppert.accessibility-issue-picker.plist").write_text(
+            "<plist version=\"1.0\"></plist>\n",
+            encoding="utf-8",
+        )
+        bin_dir = self.repo / "bin"
+        bin_dir.mkdir()
+        for command in (
+            "accessibility-issue-picker",
+            "resume-accessibility-session",
+        ):
+            wrapper = bin_dir / command
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+
+        result = self.run_installer()
+
+        self.assertIn("create", result.stdout)
+        self.assertIn("accessibility-issue-picker.env", result.stdout)
+        plist_target = (
+            self.home
+            / "Library"
+            / "LaunchAgents"
+            / "com.zkoppert.accessibility-issue-picker.plist"
+        )
+        self.assertFalse(plist_target.exists())
+
+    def test_accessibility_picker_skips_nonstandard_checkout(self) -> None:
+        relocated = self.root / "relocated"
+        (relocated / "LaunchAgents").mkdir(parents=True)
+        (
+            relocated
+            / "LaunchAgents"
+            / "com.zkoppert.accessibility-issue-picker.plist"
+        ).write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
+        (relocated / "bin").mkdir()
+        for command in (
+            "accessibility-issue-picker",
+            "resume-accessibility-session",
+        ):
+            wrapper = relocated / "bin" / command
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+        relocated_installer = relocated / "install.sh"
+        relocated_installer.write_bytes(self.installer.read_bytes())
+        relocated_installer.chmod(0o755)
+
+        result = subprocess.run(
+            [str(relocated_installer)],
+            cwd=relocated,
+            env=self.env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertIn(
+            "Skipping accessibility issue picker launchd agent",
+            result.stdout,
+        )
+        self.assertFalse(
+            (self.home / ".local/bin/accessibility-issue-picker").exists()
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
