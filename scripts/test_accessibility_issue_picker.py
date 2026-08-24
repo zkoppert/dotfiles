@@ -98,6 +98,41 @@ def test_list_candidates_includes_pending_assignment_rollback(
     assert [candidate["number"] for candidate in candidates] == [42]
 
 
+def test_list_candidates_prioritizes_pending_rollback(tmp_path: Path) -> None:
+    pending = issue(
+        42,
+        created_at="2026-01-01T00:00:00Z",
+        assignees=[{"login": "zkoppert"}],
+    )
+    newer_audit = issue(
+        43,
+        created_at="2026-08-01T00:00:00Z",
+        body=f"https://github.com/{TEST_AUDIT_REPO}/issues/123",
+    )
+    picker.write_claim_state(
+        tmp_path,
+        pending,
+        [],
+        "rollback_pending",
+        SESSION_ID,
+        tmp_path,
+    )
+    with mock.patch.object(
+        picker,
+        "run_gh_json",
+        return_value=[newer_audit, pending],
+    ):
+        candidates = picker.list_candidates(
+            TEST_REPO,
+            ["a11y"],
+            "zkoppert",
+            TEST_AUDIT_REPO,
+            tmp_path,
+        )
+
+    assert [candidate["number"] for candidate in candidates] == [42, 43]
+
+
 def test_claim_issue_rechecks_and_verifies_assignee() -> None:
     with (
         mock.patch.object(picker, "issue_assignees", side_effect=[set(), {"zkoppert"}]),
@@ -536,8 +571,28 @@ def test_claim_issue_reports_rollback_command_exception() -> None:
         picker.claim_issue(TEST_REPO, 42, "zkoppert")
 
 
+def test_claim_issue_rolls_back_uncertain_assignment_command() -> None:
+    with (
+        mock.patch.object(picker, "issue_assignees", return_value=set()),
+        mock.patch.object(
+            picker,
+            "run_command",
+            side_effect=[
+                picker.CommandError("assignment timed out"),
+                picker.CommandError("rollback timed out"),
+            ],
+        ) as run_command,
+        pytest.raises(picker.ClaimRollbackError, match="could not roll back"),
+    ):
+        picker.claim_issue(TEST_REPO, 42, "zkoppert")
+
+    assert "--add-assignee" in run_command.call_args_list[0].args[0]
+    assert "--remove-assignee" in run_command.call_args_list[1].args[0]
+
+
 def test_run_persists_assignment_rollback_for_retry(tmp_path: Path) -> None:
     tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    next_issue = issue(43, created_at="2025-01-01T00:00:00Z")
     make_checkout(tmp_path / "work")
     args = argparse.Namespace(
         repo=TEST_REPO,
@@ -550,17 +605,25 @@ def test_run_persists_assignment_rollback_for_retry(tmp_path: Path) -> None:
         dry_run=False,
     )
     with (
-        mock.patch.object(picker, "list_candidates", return_value=[tracked]),
+        mock.patch.object(
+            picker,
+            "list_candidates",
+            return_value=[tracked, next_issue],
+        ),
         mock.patch.object(picker, "issue_assignees", return_value=set()),
         mock.patch.object(
             picker,
             "claim_issue",
-            side_effect=picker.ClaimRollbackError("cleanup failed"),
-        ),
+            side_effect=[
+                picker.ClaimRollbackError("cleanup failed"),
+                True,
+            ],
+        ) as claim_issue,
         mock.patch.object(picker, "notify"),
     ):
         assert picker.run(args) == 0
 
+    assert claim_issue.call_count == 1
     state = picker.read_state(args.state_dir, 42)
     assert state["status"] == "rollback_pending"
 
@@ -569,6 +632,7 @@ def test_run_keeps_rollback_pending_while_self_assignment_remains(
     tmp_path: Path,
 ) -> None:
     tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    next_issue = issue(43, created_at="2025-01-01T00:00:00Z")
     make_checkout(tmp_path / "work")
     state_dir = tmp_path / "state"
     picker.write_claim_state(
@@ -590,12 +654,16 @@ def test_run_keeps_rollback_pending_while_self_assignment_remains(
         dry_run=False,
     )
     with (
-        mock.patch.object(picker, "list_candidates", return_value=[tracked]),
+        mock.patch.object(
+            picker,
+            "list_candidates",
+            return_value=[tracked, next_issue],
+        ),
         mock.patch.object(picker, "run_command") as run_command,
         mock.patch.object(
             picker,
             "issue_assignees",
-            return_value={"zkoppert"},
+            side_effect=[{"zkoppert"}, set()],
         ),
         mock.patch.object(picker, "claim_issue") as claim_issue,
     ):
@@ -610,6 +678,7 @@ def test_run_keeps_rollback_pending_when_assignment_inspection_fails(
     tmp_path: Path,
 ) -> None:
     tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    next_issue = issue(43, created_at="2025-01-01T00:00:00Z")
     workdir = tmp_path / "work"
     make_checkout(workdir)
     state_dir = tmp_path / "state"
@@ -632,11 +701,18 @@ def test_run_keeps_rollback_pending_when_assignment_inspection_fails(
         dry_run=False,
     )
     with (
-        mock.patch.object(picker, "list_candidates", return_value=[tracked]),
+        mock.patch.object(
+            picker,
+            "list_candidates",
+            return_value=[tracked, next_issue],
+        ),
         mock.patch.object(
             picker,
             "issue_assignees",
-            side_effect=picker.CommandError("inspection timed out"),
+            side_effect=[
+                picker.CommandError("inspection timed out"),
+                set(),
+            ],
         ),
         mock.patch.object(picker, "claim_issue") as claim_issue,
     ):

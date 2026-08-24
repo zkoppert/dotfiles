@@ -157,6 +157,11 @@ def list_candidates(
     return sorted(
         candidates.values(),
         key=lambda issue: (
+            rollback_pending(
+                state_dir,
+                int(issue["number"]),
+                issue["url"],
+            ),
             bool(audit_pattern.search(issue.get("body") or "")),
             issue.get("createdAt") or "",
         ),
@@ -216,19 +221,19 @@ def claim_issue(repo: str, number: int, assignee: str) -> bool:
     """Claim an issue only when it remains open and unassigned."""
     if issue_assignees(repo, number):
         return False
-    run_command(
-        [
-            "gh",
-            "issue",
-            "edit",
-            str(number),
-            "--repo",
-            repo,
-            "--add-assignee",
-            assignee,
-        ]
-    )
     try:
+        run_command(
+            [
+                "gh",
+                "issue",
+                "edit",
+                str(number),
+                "--repo",
+                repo,
+                "--add-assignee",
+                assignee,
+            ]
+        )
         assignees = issue_assignees(repo, number)
     except CommandError:
         rollback_issue_assignment(repo, number, assignee)
@@ -679,13 +684,13 @@ def run(args: argparse.Namespace) -> int:
                         issue["url"],
                         exc,
                     )
-                    continue
+                    return 0
                 if args.assignee in current_assignees:
                     LOGGER.error(
                         "Assignment rollback needs manual recovery for %s",
                         issue["url"],
                     )
-                    continue
+                    return 0
                 if current_assignees:
                     abandoned = subprocess.CompletedProcess(
                         ["gh", "issue", "edit"],
@@ -730,7 +735,7 @@ def run(args: argparse.Namespace) -> int:
                         url=issue["url"],
                     )
                     LOGGER.error("%s", exc)
-                    continue
+                    return 0
                 except CommandError as exc:
                     failed = subprocess.CompletedProcess(
                         ["gh", "issue", "edit"],
