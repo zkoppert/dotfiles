@@ -90,19 +90,6 @@ def read_state(state_dir: Path, issue_number: int) -> dict[str, Any]:
         return {}
 
 
-def rollback_pending(
-    state_dir: Path,
-    issue_number: int,
-    issue_url: str,
-) -> bool:
-    """Return whether a failed assignment cleanup still needs recovery."""
-    state = read_state(state_dir, issue_number)
-    return (
-        state.get("issue") == issue_url
-        and state.get("status") == "rollback_pending"
-    )
-
-
 def list_candidates(
     repo: str,
     labels: Sequence[str],
@@ -110,7 +97,7 @@ def list_candidates(
     audit_repo: str,
     state_dir: Path,
 ) -> list[dict[str, Any]]:
-    """Return unassigned issues plus this automation's interrupted claims."""
+    """Return unassigned issues plus this automation's resumable claims."""
     candidates: dict[int, dict[str, Any]] = {}
     audit_pattern = audit_url_pattern(audit_repo)
     fields = "number,title,url,labels,assignees,body,createdAt"
@@ -144,9 +131,6 @@ def list_candidates(
                     assignees == {assignee}
                     and resumable_claim(state_dir, issue_number, issue["url"])
                 )
-                or (
-                    rollback_pending(state_dir, issue_number, issue["url"])
-                )
             ):
                 existing = candidates.get(issue_number)
                 if existing is None or (
@@ -157,11 +141,6 @@ def list_candidates(
     return sorted(
         candidates.values(),
         key=lambda issue: (
-            rollback_pending(
-                state_dir,
-                int(issue["number"]),
-                issue["url"],
-            ),
             bool(audit_pattern.search(issue.get("body") or "")),
             issue.get("createdAt") or "",
         ),
@@ -182,13 +161,92 @@ def issue_assignees(repo: str, number: int) -> set[str]:
             "assignees,state",
         ]
     )
-    if issue.get("state") != "OPEN":
-        return {"<closed>"}
-    return {
+    assignees = {
         assignee["login"]
         for assignee in issue.get("assignees", [])
         if assignee.get("login")
     }
+    if issue.get("state") != "OPEN":
+        assignees.add("<closed>")
+    return assignees
+
+
+def pending_rollback_states(
+    state_dir: Path,
+    repo: str,
+) -> list[tuple[int, dict[str, Any]]]:
+    """Read valid pending rollback records independently of issue discovery."""
+    pending: list[tuple[int, dict[str, Any]]] = []
+    for path in state_dir.glob("issue-*.json"):
+        match = re.fullmatch(r"issue-(\d+)\.json", path.name)
+        if match is None:
+            continue
+        issue_number = int(match.group(1))
+        state = read_state(state_dir, issue_number)
+        if state.get("status") != "rollback_pending":
+            continue
+        issue_url = state.get("issue")
+        expected_url = f"https://github.com/{repo}/issues/{issue_number}"
+        if (
+            not isinstance(issue_url, str)
+            or issue_url.casefold() != expected_url.casefold()
+        ):
+            raise CommandError(
+                f"pending rollback state has an invalid issue URL: {path}"
+            )
+        pending.append((issue_number, state))
+    return sorted(pending)
+
+
+def reconcile_pending_rollbacks(args: argparse.Namespace) -> bool:
+    """Resolve safe rollback outcomes before discovering any new work."""
+    try:
+        pending = pending_rollback_states(args.state_dir, args.repo)
+    except CommandError as exc:
+        LOGGER.error("%s", exc)
+        return False
+    for issue_number, state in pending:
+        issue_url = str(state["issue"])
+        try:
+            current_assignees = issue_assignees(args.repo, issue_number)
+        except CommandError as exc:
+            LOGGER.error(
+                "Could not inspect pending assignment rollback for %s: %s",
+                issue_url,
+                exc,
+            )
+            return False
+        if args.assignee in current_assignees:
+            LOGGER.error(
+                "Assignment rollback needs manual recovery for %s",
+                issue_url,
+            )
+            return False
+
+        if "<closed>" in current_assignees:
+            reason = "the issue closed after rollback recovery"
+        elif current_assignees:
+            reason = "another assignee owns the issue after rollback recovery"
+        else:
+            reason = "the assignment rollback completed; fresh discovery is required"
+        audits = state.get("audit_urls")
+        write_result(
+            args.state_dir,
+            {"number": issue_number, "url": issue_url},
+            audits
+            if isinstance(audits, list)
+            and all(isinstance(audit, str) for audit in audits)
+            else [],
+            subprocess.CompletedProcess(
+                ["gh", "issue", "view"],
+                returncode=1,
+                stdout="",
+                stderr=reason,
+            ),
+            str(state.get("session_id") or uuid.uuid4()),
+            args.workdir,
+        )
+    return True
 
 
 def rollback_issue_assignment(repo: str, number: int, assignee: str) -> None:
@@ -406,7 +464,7 @@ def run_copilot(
             start_new_session=True,
             env=environment,
         )
-    except FileNotFoundError as exc:
+    except OSError as exc:
         raise CommandError(f"command failed: {' '.join(command)}: {exc}") from exc
     try:
         stdout, stderr = process.communicate(timeout=timeout)
@@ -653,6 +711,9 @@ def run(args: argparse.Namespace) -> int:
             LOGGER.info("Another accessibility remediation is already running")
             return 0
 
+        if not args.dry_run and not reconcile_pending_rollbacks(args):
+            return 0
+
         candidates = list_candidates(
             args.repo,
             labels,
@@ -674,39 +735,6 @@ def run(args: argparse.Namespace) -> int:
                     len(audits),
                 )
                 return 0
-            saved_state = read_state(args.state_dir, issue_number)
-            if saved_state.get("status") == "rollback_pending":
-                try:
-                    current_assignees = issue_assignees(args.repo, issue_number)
-                except CommandError as exc:
-                    LOGGER.error(
-                        "Could not inspect pending assignment rollback for %s: %s",
-                        issue["url"],
-                        exc,
-                    )
-                    return 0
-                if args.assignee in current_assignees:
-                    LOGGER.error(
-                        "Assignment rollback needs manual recovery for %s",
-                        issue["url"],
-                    )
-                    return 0
-                if current_assignees:
-                    abandoned = subprocess.CompletedProcess(
-                        ["gh", "issue", "edit"],
-                        returncode=1,
-                        stdout="",
-                        stderr="another assignee owns the issue after rollback recovery",
-                    )
-                    write_result(
-                        args.state_dir,
-                        issue,
-                        audits,
-                        abandoned,
-                        str(saved_state.get("session_id") or uuid.uuid4()),
-                        args.workdir,
-                    )
-                    continue
             current_assignees = issue_assignees(args.repo, issue_number)
             if not current_assignees:
                 session_id = str(uuid.uuid4())
@@ -815,6 +843,7 @@ def run(args: argparse.Namespace) -> int:
                     session_id,
                     args.state_dir / "copilot-home",
                 )
+                resumable = True
             except CommandError as exc:
                 result = subprocess.CompletedProcess(
                     ["copilot"],
@@ -822,6 +851,7 @@ def run(args: argparse.Namespace) -> int:
                     stdout="",
                     stderr=str(exc),
                 )
+                resumable = False
             try:
                 result_path = write_result(
                     args.state_dir,
@@ -845,18 +875,31 @@ def run(args: argparse.Namespace) -> int:
                 status,
                 result_path,
             )
-            notify(
-                "Accessibility remediation",
-                f"Issue #{issue['number']} {status}. Click to prepare resume in iTerm.",
-                execute=shlex.join(
-                    [
-                        str(Path.home() / ".local/bin/resume-accessibility-session"),
-                        str(issue_number),
-                        "--state-dir",
-                        str(args.state_dir.resolve()),
-                    ]
-                ),
-            )
+            if resumable:
+                notify(
+                    "Accessibility remediation",
+                    f"Issue #{issue['number']} {status}. Click to prepare resume in iTerm.",
+                    execute=shlex.join(
+                        [
+                            str(
+                                Path.home()
+                                / ".local/bin/resume-accessibility-session"
+                            ),
+                            str(issue_number),
+                            "--state-dir",
+                            str(args.state_dir.resolve()),
+                        ]
+                    ),
+                )
+            else:
+                notify(
+                    "Accessibility remediation",
+                    (
+                        f"Issue #{issue['number']} {status}; no resumable session "
+                        f"was created. Handoff: {result_path}"
+                    ),
+                    url=issue["url"],
+                )
             return result.returncode
 
         LOGGER.info("All candidates were claimed before this run could claim one")

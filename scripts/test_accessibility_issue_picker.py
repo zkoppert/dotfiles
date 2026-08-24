@@ -70,7 +70,7 @@ def test_list_candidates_deduplicates_and_prioritizes_formal_audits() -> None:
     assert [candidate["number"] for candidate in candidates] == [1, 3]
 
 
-def test_list_candidates_includes_pending_assignment_rollback(
+def test_list_candidates_excludes_pending_assignment_rollback(
     tmp_path: Path,
 ) -> None:
     tracked = issue(
@@ -95,19 +95,16 @@ def test_list_candidates_includes_pending_assignment_rollback(
             tmp_path,
         )
 
-    assert [candidate["number"] for candidate in candidates] == [42]
+    assert candidates == []
 
 
-def test_list_candidates_prioritizes_pending_rollback(tmp_path: Path) -> None:
+def test_pending_rollback_states_accepts_repository_case_difference(
+    tmp_path: Path,
+) -> None:
     pending = issue(
         42,
         created_at="2026-01-01T00:00:00Z",
         assignees=[{"login": "zkoppert"}],
-    )
-    newer_audit = issue(
-        43,
-        created_at="2026-08-01T00:00:00Z",
-        body=f"https://github.com/{TEST_AUDIT_REPO}/issues/123",
     )
     picker.write_claim_state(
         tmp_path,
@@ -117,20 +114,30 @@ def test_list_candidates_prioritizes_pending_rollback(tmp_path: Path) -> None:
         SESSION_ID,
         tmp_path,
     )
-    with mock.patch.object(
-        picker,
-        "run_gh_json",
-        return_value=[newer_audit, pending],
-    ):
-        candidates = picker.list_candidates(
-            TEST_REPO,
-            ["a11y"],
-            "zkoppert",
-            TEST_AUDIT_REPO,
-            tmp_path,
-        )
 
-    assert [candidate["number"] for candidate in candidates] == [42, 43]
+    pending_states = picker.pending_rollback_states(
+        tmp_path,
+        TEST_REPO.upper(),
+    )
+
+    assert [number for number, _state in pending_states] == [42]
+
+
+def test_pending_rollback_states_rejects_another_repository(
+    tmp_path: Path,
+) -> None:
+    pending = issue(42, created_at="2026-01-01T00:00:00Z")
+    picker.write_claim_state(
+        tmp_path,
+        pending,
+        [],
+        "rollback_pending",
+        SESSION_ID,
+        tmp_path,
+    )
+
+    with pytest.raises(picker.CommandError, match="invalid issue URL"):
+        picker.pending_rollback_states(tmp_path, "another/project")
 
 
 def test_claim_issue_rechecks_and_verifies_assignee() -> None:
@@ -152,6 +159,21 @@ def test_claim_issue_rechecks_and_verifies_assignee() -> None:
             "zkoppert",
         ]
     )
+
+
+def test_issue_assignees_preserves_assignment_on_closed_issue() -> None:
+    with mock.patch.object(
+        picker,
+        "run_gh_json",
+        return_value={
+            "state": "CLOSED",
+            "assignees": [{"login": "zkoppert"}],
+        },
+    ):
+        assert picker.issue_assignees(TEST_REPO, 42) == {
+            "zkoppert",
+            "<closed>",
+        }
 
 
 def test_claim_issue_does_not_touch_assigned_issue() -> None:
@@ -356,12 +378,14 @@ def test_run_persists_copilot_start_failure(tmp_path: Path) -> None:
             "run_copilot",
             side_effect=picker.CommandError("copilot timed out"),
         ),
-        mock.patch.object(picker, "notify"),
+        mock.patch.object(picker, "notify") as notify,
     ):
         assert picker.run(args) == 1
 
     result = (args.state_dir / "issue-42.json").read_text(encoding="utf-8")
     assert "copilot timed out" in result
+    assert notify.call_args.kwargs == {"url": tracked["url"]}
+    assert "no resumable session" in notify.call_args.args[1]
 
 
 def test_run_copilot_restricts_paths_and_publish_commands(tmp_path: Path) -> None:
@@ -446,6 +470,45 @@ def test_run_copilot_fails_closed_without_command_sandbox(tmp_path: Path) -> Non
         )
 
     popen.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "launch_error",
+    [FileNotFoundError("copilot"), PermissionError("copilot")],
+)
+def test_run_copilot_reports_launch_error(
+    tmp_path: Path,
+    launch_error: OSError,
+) -> None:
+    token_result = subprocess.CompletedProcess(
+        ["gh", "auth", "token"],
+        returncode=0,
+        stdout="secret-token\n",
+        stderr="",
+    )
+    with (
+        mock.patch.object(
+            picker.shutil,
+            "which",
+            return_value="/usr/bin/sandbox-exec",
+        ),
+        mock.patch.object(picker, "prepare_copilot_home"),
+        mock.patch.object(picker.uuid, "uuid4", return_value="runner"),
+        mock.patch.object(picker, "run_command", return_value=token_result),
+        mock.patch.object(
+            picker.subprocess,
+            "Popen",
+            side_effect=launch_error,
+        ),
+        pytest.raises(picker.CommandError, match="command failed"),
+    ):
+        picker.run_copilot(
+            "prompt",
+            tmp_path,
+            10,
+            SESSION_ID,
+            tmp_path / "copilot-home",
+        )
 
 
 def test_run_copilot_tolerates_process_exit_before_timeout_cleanup(
@@ -658,7 +721,7 @@ def test_run_keeps_rollback_pending_while_self_assignment_remains(
             picker,
             "list_candidates",
             return_value=[tracked, next_issue],
-        ),
+        ) as list_candidates,
         mock.patch.object(picker, "run_command") as run_command,
         mock.patch.object(
             picker,
@@ -670,6 +733,7 @@ def test_run_keeps_rollback_pending_while_self_assignment_remains(
         assert picker.run(args) == 0
 
     claim_issue.assert_not_called()
+    list_candidates.assert_not_called()
     run_command.assert_not_called()
     assert picker.read_state(state_dir, 42)["status"] == "rollback_pending"
 
@@ -705,7 +769,7 @@ def test_run_keeps_rollback_pending_when_assignment_inspection_fails(
             picker,
             "list_candidates",
             return_value=[tracked, next_issue],
-        ),
+        ) as list_candidates,
         mock.patch.object(
             picker,
             "issue_assignees",
@@ -719,6 +783,7 @@ def test_run_keeps_rollback_pending_when_assignment_inspection_fails(
         assert picker.run(args) == 0
 
     claim_issue.assert_not_called()
+    list_candidates.assert_not_called()
     assert picker.read_state(state_dir, 42)["status"] == "rollback_pending"
 
 
@@ -819,12 +884,16 @@ def test_completion_notification_prepares_resume_command(tmp_path: Path) -> None
     completed = subprocess.CompletedProcess(
         ["copilot"], returncode=0, stdout="handoff", stderr=""
     )
+
+    def run_copilot(*_args: object) -> subprocess.CompletedProcess[str]:
+        return completed
+
     with (
         mock.patch.object(picker, "list_candidates", return_value=[tracked]),
         mock.patch.object(picker, "issue_assignees", return_value=set()),
         mock.patch.object(picker, "claim_issue", return_value=True),
         mock.patch.object(picker.uuid, "uuid4", return_value=SESSION_ID),
-        mock.patch.object(picker, "run_copilot", return_value=completed),
+        mock.patch.object(picker, "run_copilot", side_effect=run_copilot),
         mock.patch.object(picker, "notify") as notify,
     ):
         assert picker.run(args) == 0
@@ -835,3 +904,43 @@ def test_completion_notification_prepares_resume_command(tmp_path: Path) -> None
     execute = notify.call_args.kwargs["execute"]
     assert "resume-accessibility-session 42" in execute
     assert f"--state-dir {args.state_dir.resolve()}" in execute
+
+
+@pytest.mark.parametrize("returncode", [1, 124])
+def test_failed_started_session_still_prepares_resume(
+    tmp_path: Path,
+    returncode: int,
+) -> None:
+    tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    make_checkout(tmp_path / "work")
+    args = argparse.Namespace(
+        repo=TEST_REPO,
+        audit_repo=TEST_AUDIT_REPO,
+        labels=["a11y"],
+        assignee="zkoppert",
+        workdir=tmp_path / "work",
+        state_dir=tmp_path / "state",
+        timeout=10,
+        dry_run=False,
+    )
+
+    def run_copilot(*_args: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            ["copilot"],
+            returncode=returncode,
+            stdout="",
+            stderr="failed",
+        )
+
+    with (
+        mock.patch.object(picker, "list_candidates", return_value=[tracked]),
+        mock.patch.object(picker, "issue_assignees", return_value=set()),
+        mock.patch.object(picker, "claim_issue", return_value=True),
+        mock.patch.object(picker.uuid, "uuid4", return_value=SESSION_ID),
+        mock.patch.object(picker, "run_copilot", side_effect=run_copilot),
+        mock.patch.object(picker, "notify") as notify,
+    ):
+        assert picker.run(args) == returncode
+
+    assert "execute" in notify.call_args.kwargs
+    assert "needs attention" in notify.call_args.args[1]
