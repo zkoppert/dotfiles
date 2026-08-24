@@ -331,6 +331,7 @@ def test_run_copilot_restricts_paths_and_publish_commands(tmp_path: Path) -> Non
         ),
         mock.patch.object(picker.shutil, "which", return_value="/usr/bin/sandbox-exec"),
         mock.patch.object(picker, "prepare_copilot_home"),
+        mock.patch.object(picker.uuid, "uuid4", return_value="runner"),
         mock.patch.object(picker, "run_command", return_value=token_result),
         mock.patch.object(picker.subprocess, "Popen", return_value=process) as popen,
     ):
@@ -341,6 +342,8 @@ def test_run_copilot_restricts_paths_and_publish_commands(tmp_path: Path) -> Non
     command = popen.call_args.args[0]
     environment = popen.call_args.kwargs["env"]
     assert SESSION_ID in command
+    assert str(tmp_path) in command[command.index("-p") + 1]
+    assert command[command.index("-C") + 1].endswith("runners/run-runner")
     assert "--experimental" in command
     assert "--allow-all-paths" not in command
     assert "shell(git push)" in command
@@ -370,6 +373,7 @@ def test_run_copilot_terminates_process_group_on_timeout(tmp_path: Path) -> None
     with (
         mock.patch.object(picker.shutil, "which", return_value="/usr/bin/sandbox-exec"),
         mock.patch.object(picker, "prepare_copilot_home"),
+        mock.patch.object(picker.uuid, "uuid4", return_value="runner"),
         mock.patch.object(picker, "run_command", return_value=token_result),
         mock.patch.object(picker.subprocess, "Popen", return_value=process),
         mock.patch.object(picker.os, "killpg") as killpg,
@@ -411,6 +415,7 @@ def test_run_copilot_tolerates_process_exit_before_timeout_cleanup(
     with (
         mock.patch.object(picker.shutil, "which", return_value="/usr/bin/sandbox-exec"),
         mock.patch.object(picker, "prepare_copilot_home"),
+        mock.patch.object(picker.uuid, "uuid4", return_value="runner"),
         mock.patch.object(picker, "run_command", return_value=token_result),
         mock.patch.object(picker.subprocess, "Popen", return_value=process),
         mock.patch.object(
@@ -436,7 +441,7 @@ def test_prepare_copilot_home_disables_credentials_and_bypass(
     copilot_home = tmp_path / "isolated"
 
     with mock.patch.object(picker.Path, "home", return_value=home):
-        picker.prepare_copilot_home(copilot_home)
+        picker.prepare_copilot_home(copilot_home, tmp_path / "work")
 
     settings = (copilot_home / "settings.json").read_text(encoding="utf-8")
     assert '"enabled": true' in settings
@@ -446,6 +451,7 @@ def test_prepare_copilot_home_disables_credentials_and_bypass(
     assert '"keychainAccess": false' in settings
     assert '"allowOutbound": false' in settings
     assert '"sandboxMcpServers": false' in settings
+    assert str((tmp_path / "work").resolve()) in settings
     assert (copilot_home / "skills/remediate-accessibility-audit/SKILL.md").is_file()
 
 
@@ -527,6 +533,46 @@ def test_run_persists_assignment_rollback_for_retry(tmp_path: Path) -> None:
 
     state = picker.read_state(args.state_dir, 42)
     assert state["status"] == "rollback_pending"
+
+
+def test_run_keeps_rollback_pending_while_self_assignment_remains(
+    tmp_path: Path,
+) -> None:
+    tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    make_checkout(tmp_path / "work")
+    state_dir = tmp_path / "state"
+    picker.write_claim_state(
+        state_dir,
+        tracked,
+        [],
+        "rollback_pending",
+        SESSION_ID,
+        tmp_path / "work",
+    )
+    args = argparse.Namespace(
+        repo=TEST_REPO,
+        audit_repo=TEST_AUDIT_REPO,
+        labels=["a11y"],
+        assignee="zkoppert",
+        workdir=tmp_path / "work",
+        state_dir=state_dir,
+        timeout=10,
+        dry_run=False,
+    )
+    with (
+        mock.patch.object(picker, "list_candidates", return_value=[tracked]),
+        mock.patch.object(picker, "run_command"),
+        mock.patch.object(
+            picker,
+            "issue_assignees",
+            return_value={"zkoppert"},
+        ),
+        mock.patch.object(picker, "claim_issue") as claim_issue,
+    ):
+        assert picker.run(args) == 0
+
+    claim_issue.assert_not_called()
+    assert picker.read_state(state_dir, 42)["status"] == "rollback_pending"
 
 
 def test_completion_notification_prepares_resume_command(tmp_path: Path) -> None:

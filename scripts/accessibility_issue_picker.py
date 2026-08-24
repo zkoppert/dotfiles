@@ -305,7 +305,12 @@ def run_copilot(
     """Run the remediation agent in an isolated, credential-restricted sandbox."""
     if shutil.which("sandbox-exec") is None:
         raise CommandError("Copilot command sandboxing is unavailable on this host")
-    prepare_copilot_home(copilot_home)
+    prepare_copilot_home(copilot_home, workdir)
+    runner_root = copilot_home / "runners"
+    runner_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    runner_root.chmod(0o700)
+    runner = runner_root / f"run-{uuid.uuid4()}"
+    runner.mkdir(mode=0o700)
     token = run_command(["gh", "auth", "token"]).stdout.strip()
     if not token:
         raise CommandError("gh auth token returned an empty token")
@@ -314,11 +319,11 @@ def run_copilot(
         "copilot",
         "--experimental",
         "-C",
-        str(workdir),
+        str(runner),
         "--session-id",
         session_id,
         "-p",
-        prompt,
+        f"Use the local remediation workspace at {workdir.resolve()}.\n\n{prompt}",
         "--mode",
         "autopilot",
         "--max-autopilot-continues",
@@ -431,7 +436,7 @@ def run_copilot(
     )
 
 
-def prepare_copilot_home(copilot_home: Path) -> None:
+def prepare_copilot_home(copilot_home: Path, workdir: Path) -> None:
     """Create isolated Copilot settings with non-bypassable command sandboxing."""
     skill_source = (
         Path.home() / ".copilot/skills/remediate-accessibility-audit"
@@ -461,6 +466,7 @@ def prepare_copilot_home(copilot_home: Path) -> None:
                 },
                 "seatbelt": {"keychainAccess": False},
                 "filesystem": {
+                    "readwritePaths": [str(workdir.resolve())],
                     "deniedPaths": [
                         str(Path.home() / ".config/gh"),
                         str(Path.home() / ".git-credentials"),
@@ -689,6 +695,12 @@ def run(args: argparse.Namespace) -> int:
                     )
                     continue
                 if current_assignees:
+                    if args.assignee in current_assignees:
+                        LOGGER.error(
+                            "Assignment rollback is still visible for %s",
+                            issue["url"],
+                        )
+                        continue
                     abandoned = subprocess.CompletedProcess(
                         ["gh", "issue", "edit"],
                         returncode=1,

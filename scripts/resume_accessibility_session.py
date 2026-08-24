@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -51,10 +52,16 @@ def load_resume_state(state_dir: Path, issue_number: int) -> dict[str, Any]:
     copilot_home = (state_dir / "copilot-home").resolve()
     if not (copilot_home / "settings.json").is_file():
         raise ResumeError(f"Saved Copilot sandbox settings do not exist: {copilot_home}")
+    runner_root = copilot_home / "runners"
+    runner_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    runner_root.chmod(0o700)
+    runner = runner_root / f"resume-{uuid.uuid4()}"
+    runner.mkdir(mode=0o700)
     return {
         "session_id": session_id,
         "workdir": resolved_workdir,
         "copilot_home": copilot_home,
+        "runner": runner,
     }
 
 
@@ -65,7 +72,7 @@ def resume_command(state: dict[str, Any]) -> str:
             "copilot",
             "--experimental",
             "-C",
-            str(state["workdir"]),
+            str(state["runner"]),
             "--session-id",
             str(state["session_id"]),
             "--secret-env-vars",
