@@ -145,8 +145,7 @@ def list_candidates(
                     and resumable_claim(state_dir, issue_number, issue["url"])
                 )
                 or (
-                    assignee in assignees
-                    and rollback_pending(state_dir, issue_number, issue["url"])
+                    rollback_pending(state_dir, issue_number, issue["url"])
                 )
             ):
                 existing = candidates.get(issue_number)

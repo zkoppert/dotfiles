@@ -76,7 +76,7 @@ def test_list_candidates_includes_pending_assignment_rollback(
     tracked = issue(
         42,
         created_at="2026-01-01T00:00:00Z",
-        assignees=[{"login": "zkoppert"}, {"login": "someone"}],
+        assignees=[{"login": "someone"}],
     )
     picker.write_claim_state(
         tmp_path,
@@ -603,6 +603,46 @@ def test_run_keeps_rollback_pending_while_self_assignment_remains(
 
     claim_issue.assert_not_called()
     run_command.assert_not_called()
+    assert picker.read_state(state_dir, 42)["status"] == "rollback_pending"
+
+
+def test_run_keeps_rollback_pending_when_assignment_inspection_fails(
+    tmp_path: Path,
+) -> None:
+    tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    workdir = tmp_path / "work"
+    make_checkout(workdir)
+    state_dir = tmp_path / "state"
+    picker.write_claim_state(
+        state_dir,
+        tracked,
+        [],
+        "rollback_pending",
+        SESSION_ID,
+        workdir,
+    )
+    args = argparse.Namespace(
+        repo=TEST_REPO,
+        audit_repo=TEST_AUDIT_REPO,
+        labels=["a11y"],
+        assignee="zkoppert",
+        workdir=workdir,
+        state_dir=state_dir,
+        timeout=10,
+        dry_run=False,
+    )
+    with (
+        mock.patch.object(picker, "list_candidates", return_value=[tracked]),
+        mock.patch.object(
+            picker,
+            "issue_assignees",
+            side_effect=picker.CommandError("inspection timed out"),
+        ),
+        mock.patch.object(picker, "claim_issue") as claim_issue,
+    ):
+        assert picker.run(args) == 0
+
+    claim_issue.assert_not_called()
     assert picker.read_state(state_dir, 42)["status"] == "rollback_pending"
 
 
