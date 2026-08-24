@@ -81,6 +81,7 @@ def resume_command(state: dict[str, Any]) -> str:
         ]
     )
     return (
+        f"HOME={shlex.quote(str(state['copilot_home'] / 'user-home'))} "
         f"COPILOT_HOME={shlex.quote(str(state['copilot_home']))} "
         'COPILOT_GITHUB_TOKEN="$(gh auth token)" '
         f"{copilot_command}"

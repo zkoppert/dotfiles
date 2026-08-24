@@ -355,6 +355,7 @@ def test_run_copilot_restricts_paths_and_publish_commands(tmp_path: Path) -> Non
     assert "--add-github-mcp-tool" in command
     assert "issue_read" in command
     assert environment["COPILOT_HOME"] == str(tmp_path / "copilot-home")
+    assert environment["HOME"] == str(tmp_path / "copilot-home/user-home")
     assert environment["COPILOT_GITHUB_TOKEN"] == "secret-token"
     assert "AWS_SECRET_ACCESS_KEY" not in environment
     assert "secret-token" not in command

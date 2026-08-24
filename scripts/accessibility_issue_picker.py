@@ -392,6 +392,10 @@ def run_copilot(
         for name in safe_environment_names
         if name in os.environ
     }
+    sandbox_home = copilot_home / "user-home"
+    sandbox_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    sandbox_home.chmod(0o700)
+    environment["HOME"] = str(sandbox_home)
     environment["COPILOT_HOME"] = str(copilot_home)
     environment["COPILOT_GITHUB_TOKEN"] = token
 

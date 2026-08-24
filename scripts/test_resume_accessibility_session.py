@@ -34,6 +34,7 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
 
     command = resume.resume_command(state)
     assert f"COPILOT_HOME={copilot_home}" in command
+    assert f"HOME={copilot_home / 'user-home'}" in command
     assert 'COPILOT_GITHUB_TOKEN="$(gh auth token)"' in command
     assert f"copilot --experimental -C {state['runner']}" in command
     assert f"--session-id {session_id}" in command
