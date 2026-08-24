@@ -37,6 +37,7 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
     assert 'COPILOT_GITHUB_TOKEN="$(gh auth token)"' in command
     assert f"copilot --experimental -C {state['runner']}" in command
     assert f"--session-id {session_id}" in command
+    assert "--allow-all-paths" in command
     assert state["runner"].parent == copilot_home / "runners"
 
 

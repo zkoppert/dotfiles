@@ -345,7 +345,7 @@ def test_run_copilot_restricts_paths_and_publish_commands(tmp_path: Path) -> Non
     assert str(tmp_path) in command[command.index("-p") + 1]
     assert command[command.index("-C") + 1].endswith("runners/run-runner")
     assert "--experimental" in command
-    assert "--allow-all-paths" not in command
+    assert "--allow-all-paths" in command
     assert "shell(git push)" in command
     assert "shell(git send-pack)" in command
     assert "shell(gh issue comment)" in command

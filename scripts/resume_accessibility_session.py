@@ -75,6 +75,7 @@ def resume_command(state: dict[str, Any]) -> str:
             str(state["runner"]),
             "--session-id",
             str(state["session_id"]),
+            "--allow-all-paths",
             "--secret-env-vars",
             "COPILOT_GITHUB_TOKEN,GH_TOKEN,GITHUB_TOKEN",
         ]

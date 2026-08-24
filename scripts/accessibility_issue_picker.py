@@ -330,6 +330,7 @@ def run_copilot(
         "20",
         "--no-ask-user",
         "--allow-all-tools",
+        "--allow-all-paths",
         "--allow-url",
         "github.com",
         "--add-github-mcp-tool",
