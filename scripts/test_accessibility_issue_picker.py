@@ -591,7 +591,7 @@ def test_run_keeps_rollback_pending_while_self_assignment_remains(
     )
     with (
         mock.patch.object(picker, "list_candidates", return_value=[tracked]),
-        mock.patch.object(picker, "run_command"),
+        mock.patch.object(picker, "run_command") as run_command,
         mock.patch.object(
             picker,
             "issue_assignees",
@@ -602,7 +602,89 @@ def test_run_keeps_rollback_pending_while_self_assignment_remains(
         assert picker.run(args) == 0
 
     claim_issue.assert_not_called()
+    run_command.assert_not_called()
     assert picker.read_state(state_dir, 42)["status"] == "rollback_pending"
+
+
+def test_run_reclaims_after_manual_assignment_rollback(tmp_path: Path) -> None:
+    tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    workdir = tmp_path / "work"
+    make_checkout(workdir)
+    state_dir = tmp_path / "state"
+    picker.write_claim_state(
+        state_dir,
+        tracked,
+        [],
+        "rollback_pending",
+        SESSION_ID,
+        workdir,
+    )
+    args = argparse.Namespace(
+        repo=TEST_REPO,
+        audit_repo=TEST_AUDIT_REPO,
+        labels=["a11y"],
+        assignee="zkoppert",
+        workdir=workdir,
+        state_dir=state_dir,
+        timeout=10,
+        dry_run=False,
+    )
+    completed = subprocess.CompletedProcess(
+        ["copilot"], returncode=0, stdout="handoff", stderr=""
+    )
+    with (
+        mock.patch.object(picker, "list_candidates", return_value=[tracked]),
+        mock.patch.object(picker, "issue_assignees", side_effect=[set(), set()]),
+        mock.patch.object(picker, "claim_issue", return_value=True) as claim_issue,
+        mock.patch.object(picker, "run_copilot", return_value=completed),
+        mock.patch.object(picker, "notify"),
+    ):
+        assert picker.run(args) == 0
+
+    claim_issue.assert_called_once_with(TEST_REPO, 42, "zkoppert")
+    assert picker.read_state(state_dir, 42)["status"] == "complete"
+
+
+def test_run_abandons_rollback_when_another_assignee_owns_issue(
+    tmp_path: Path,
+) -> None:
+    tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    workdir = tmp_path / "work"
+    make_checkout(workdir)
+    state_dir = tmp_path / "state"
+    picker.write_claim_state(
+        state_dir,
+        tracked,
+        [],
+        "rollback_pending",
+        SESSION_ID,
+        workdir,
+    )
+    args = argparse.Namespace(
+        repo=TEST_REPO,
+        audit_repo=TEST_AUDIT_REPO,
+        labels=["a11y"],
+        assignee="zkoppert",
+        workdir=workdir,
+        state_dir=state_dir,
+        timeout=10,
+        dry_run=False,
+    )
+    with (
+        mock.patch.object(picker, "list_candidates", return_value=[tracked]),
+        mock.patch.object(
+            picker,
+            "issue_assignees",
+            return_value={"another-assignee"},
+        ),
+        mock.patch.object(picker, "claim_issue") as claim_issue,
+    ):
+        assert picker.run(args) == 0
+
+    claim_issue.assert_not_called()
+    state = picker.read_state(state_dir, 42)
+    assert state["status"] == "failed"
+    assert "another assignee owns" in state["stderr"]
 
 
 def test_completion_notification_prepares_resume_command(tmp_path: Path) -> None:

@@ -673,38 +673,26 @@ def run(args: argparse.Namespace) -> int:
             saved_state = read_state(args.state_dir, issue_number)
             if saved_state.get("status") == "rollback_pending":
                 try:
-                    run_command(
-                        [
-                            "gh",
-                            "issue",
-                            "edit",
-                            str(issue_number),
-                            "--repo",
-                            args.repo,
-                            "--remove-assignee",
-                            args.assignee,
-                        ]
-                    )
                     current_assignees = issue_assignees(args.repo, issue_number)
                 except CommandError as exc:
                     LOGGER.error(
-                        "Assignment rollback is still pending for %s: %s",
+                        "Could not inspect pending assignment rollback for %s: %s",
                         issue["url"],
                         exc,
                     )
                     continue
+                if args.assignee in current_assignees:
+                    LOGGER.error(
+                        "Assignment rollback needs manual recovery for %s",
+                        issue["url"],
+                    )
+                    continue
                 if current_assignees:
-                    if args.assignee in current_assignees:
-                        LOGGER.error(
-                            "Assignment rollback is still visible for %s",
-                            issue["url"],
-                        )
-                        continue
                     abandoned = subprocess.CompletedProcess(
                         ["gh", "issue", "edit"],
                         returncode=1,
                         stdout="",
-                        stderr="assignment rollback completed; another assignee owns the issue",
+                        stderr="another assignee owns the issue after rollback recovery",
                     )
                     write_result(
                         args.state_dir,
