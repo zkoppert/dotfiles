@@ -224,7 +224,13 @@ if [ -x "$ACCESSIBILITY_WRAPPER" ] &&
     ACCESSIBILITY_PICKER_CONFIG="$ACCESSIBILITY_CONFIG" \
       "$ACCESSIBILITY_WRAPPER" --validate-schedule 2>&1
   )"; then
-    ACCESSIBILITY_CONFIG_ERROR="${ACCESSIBILITY_VALIDATION_ERROR:-accessibility picker schedule validation failed}"
+    ACCESSIBILITY_CONFIG_ERROR="$(
+      printf '%s\n' "$ACCESSIBILITY_VALIDATION_ERROR" |
+        sed -nE \
+          -e 's/^accessibility-issue-picker: (.*)$/\1/p' \
+          -e 's/^[0-9]{4}-[0-9]{2}-[0-9]{2} [^ ]+ ERROR (.*)$/\1/p'
+    )"
+    ACCESSIBILITY_CONFIG_ERROR="${ACCESSIBILITY_CONFIG_ERROR:-accessibility picker schedule validation failed}"
   fi
   if [ -n "$ACCESSIBILITY_CONFIG_ERROR" ]; then
     if [ -L "$ACCESSIBILITY_PLIST_TARGET" ]; then

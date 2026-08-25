@@ -419,7 +419,7 @@ class InstallScriptTest(unittest.TestCase):
         picker_wrapper = bin_dir / "accessibility-issue-picker"
         picker_wrapper.write_text(
             "#!/bin/sh\n"
-            "printf 'Remediation workdir does not exist: /missing\\n' >&2\n"
+            "printf '2026-03-23 10:00:00,000 ERROR Remediation workdir does not exist: /missing\\n' >&2\n"
             "exit 1\n",
             encoding="utf-8",
         )
@@ -455,6 +455,42 @@ class InstallScriptTest(unittest.TestCase):
         calls = (self.home / "launchctl.log").read_text(encoding="utf-8")
         self.assertIn(f"unload {plist_target}", calls)
         self.assertIn("Remediation workdir does not exist: /missing", result.stdout)
+
+    def test_accessibility_picker_hides_unstructured_validation_stderr(
+        self,
+    ) -> None:
+        launch_agents = self.repo / "LaunchAgents"
+        launch_agents.mkdir()
+        source_plist = (
+            launch_agents / "com.zkoppert.accessibility-issue-picker.plist"
+        )
+        source_plist.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
+        bin_dir = self.repo / "bin"
+        bin_dir.mkdir()
+        picker_wrapper = bin_dir / "accessibility-issue-picker"
+        picker_wrapper.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' '/config.env: line 2: github_pat_SECRET: command not found' >&2\n"
+            "printf '%s\\n' '2026-03-23 10:00:00,000 ERROR Schedule validation failed' >&2\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        picker_wrapper.chmod(0o755)
+        resume_wrapper = bin_dir / "resume-accessibility-session"
+        resume_wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+        resume_wrapper.chmod(0o755)
+        config = self.home / ".config" / "accessibility-issue-picker.env"
+        config.parent.mkdir()
+        config.write_text(
+            "ACCESSIBILITY_ISSUE_REPO=example/project\n",
+            encoding="utf-8",
+        )
+        config.chmod(0o600)
+
+        result = self.run_installer()
+
+        self.assertIn("Schedule validation failed", result.stdout)
+        self.assertNotIn("github_pat_SECRET", result.stdout)
 
     def test_accessibility_picker_unloads_existing_job_without_private_config(
         self,
