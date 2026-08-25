@@ -29,8 +29,16 @@ class AccessibilityIssuePickerWrapperTest(unittest.TestCase):
         self.wrapper.chmod(0o755)
         (self.scripts_dir / "accessibility_issue_picker.py").write_text(
             "import os, sys\n"
+            "if '--validate-config' in sys.argv:\n"
+            "    required = ('ACCESSIBILITY_ISSUE_REPO', 'ACCESSIBILITY_AUDIT_REPO', "
+            "'ACCESSIBILITY_LABELS', 'ACCESSIBILITY_ASSIGNEE', "
+            "'ACCESSIBILITY_GITHUB_TOKEN')\n"
+            "    if any(not os.environ.get(name) for name in required):\n"
+            "        raise SystemExit(1)\n"
+            "    raise SystemExit(0)\n"
             "print(os.environ['ACCESSIBILITY_ISSUE_REPO'])\n"
             "print(os.environ['ACCESSIBILITY_LABELS'])\n"
+            "print(os.environ['GH_TOKEN'])\n"
             "print(' '.join(sys.argv[1:]))\n",
             encoding="utf-8",
         )
@@ -53,9 +61,13 @@ class AccessibilityIssuePickerWrapperTest(unittest.TestCase):
         config = self.root / "picker.env"
         config.write_text(
             'ACCESSIBILITY_ISSUE_REPO="example/project"\n'
-            'ACCESSIBILITY_LABELS="accessibility,label two"\n',
+            'ACCESSIBILITY_AUDIT_REPO="example/audits"\n'
+            'ACCESSIBILITY_LABELS="accessibility,label two"\n'
+            'ACCESSIBILITY_ASSIGNEE="zkoppert"\n'
+            'ACCESSIBILITY_GITHUB_TOKEN="repository-scoped-token"\n',
             encoding="utf-8",
         )
+        config.chmod(0o600)
         self.env["ACCESSIBILITY_PICKER_CONFIG"] = str(config)
 
         result = subprocess.run(
@@ -68,8 +80,107 @@ class AccessibilityIssuePickerWrapperTest(unittest.TestCase):
 
         self.assertEqual(
             result.stdout.splitlines(),
-            ["example/project", "accessibility,label two", "--dry-run"],
+            [
+                "example/project",
+                "accessibility,label two",
+                "repository-scoped-token",
+                "--dry-run",
+            ],
         )
+
+    def test_partial_configuration_fails_validation(self) -> None:
+        config = self.root / "picker.env"
+        config.write_text(
+            'ACCESSIBILITY_ISSUE_REPO="example/project"\n'
+            'ACCESSIBILITY_GITHUB_TOKEN="repository-scoped-token"\n',
+            encoding="utf-8",
+        )
+        config.chmod(0o600)
+        self.env["ACCESSIBILITY_PICKER_CONFIG"] = str(config)
+
+        result = subprocess.run(
+            [str(self.wrapper), "--validate-config"],
+            env=self.env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1)
+
+
+class ResumeAccessibilitySessionWrapperTest(unittest.TestCase):
+    """Exercise scoped configuration loading before a session resumes."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+        self.home = self.root / "home"
+        self.bin_dir = self.root / "repo" / "bin"
+        self.scripts_dir = self.root / "repo" / "scripts"
+        self.bin_dir.mkdir(parents=True)
+        self.scripts_dir.mkdir()
+        source = Path(__file__).with_name("bin") / "resume-accessibility-session"
+        self.wrapper = self.bin_dir / "resume-accessibility-session"
+        shutil.copy2(source, self.wrapper)
+        self.wrapper.chmod(0o755)
+        validator = self.bin_dir / "accessibility-issue-picker"
+        validator.write_text(
+            "#!/bin/sh\n"
+            "[ \"$1\" = --validate-config ]\n"
+            "[ -n \"${ACCESSIBILITY_GITHUB_TOKEN:-}\" ]\n",
+            encoding="utf-8",
+        )
+        validator.chmod(0o755)
+        (self.scripts_dir / "resume_accessibility_session.py").write_text(
+            "import os, sys\n"
+            "print(os.environ['ACCESSIBILITY_PICKER_CONFIG'])\n"
+            "print(os.environ['ACCESSIBILITY_GITHUB_TOKEN'])\n"
+            "print(' '.join(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        self.env = dict(os.environ)
+        self.env["HOME"] = str(self.home)
+
+    def test_configuration_is_validated_and_arguments_are_forwarded(self) -> None:
+        config = self.root / "picker.env"
+        config.write_text(
+            'ACCESSIBILITY_GITHUB_TOKEN="repository-scoped-token"\n',
+            encoding="utf-8",
+        )
+        config.chmod(0o600)
+        self.env["ACCESSIBILITY_PICKER_CONFIG"] = str(config)
+
+        result = subprocess.run(
+            [str(self.wrapper), "42", "--print-command"],
+            env=self.env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [str(config), "repository-scoped-token", "42 --print-command"],
+        )
+
+    def test_invalid_configuration_stops_before_python(self) -> None:
+        config = self.root / "picker.env"
+        config.write_text("", encoding="utf-8")
+        config.chmod(0o600)
+        self.env["ACCESSIBILITY_PICKER_CONFIG"] = str(config)
+
+        result = subprocess.run(
+            [str(self.wrapper), "42"],
+            env=self.env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
 
 
 if __name__ == "__main__":

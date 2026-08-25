@@ -368,9 +368,9 @@ def run_copilot(
     runner_root.chmod(0o700)
     runner = runner_root / f"run-{uuid.uuid4()}"
     runner.mkdir(mode=0o700)
-    token = run_command(["gh", "auth", "token"]).stdout.strip()
+    token = os.environ.get("ACCESSIBILITY_GITHUB_TOKEN", "").strip()
     if not token:
-        raise CommandError("gh auth token returned an empty token")
+        raise CommandError("ACCESSIBILITY_GITHUB_TOKEN is empty")
 
     command = [
         "copilot",
@@ -655,6 +655,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--timeout", type=int, default=6 * 60 * 60)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--validate-config", action="store_true")
     return parser
 
 
@@ -665,6 +666,8 @@ def validate_args(args: argparse.Namespace) -> None:
         for name in ("repo", "audit_repo", "assignee")
         if not getattr(args, name)
     ]
+    if not os.environ.get("ACCESSIBILITY_GITHUB_TOKEN", "").strip():
+        missing.append("github_token")
     labels = args.labels or [
         label.strip()
         for label in os.environ.get("ACCESSIBILITY_LABELS", "").split(",")
@@ -678,6 +681,22 @@ def validate_args(args: argparse.Namespace) -> None:
     ):
         raise CommandError("Repository configuration must use OWNER/REPOSITORY")
     args.labels = labels
+
+
+def validate_config_file() -> None:
+    """Reject a configured secrets file that other local users can read."""
+    configured_path = os.environ.get("ACCESSIBILITY_PICKER_CONFIG")
+    if not configured_path:
+        return
+    path = Path(configured_path).expanduser()
+    try:
+        mode = path.stat().st_mode
+    except OSError as exc:
+        raise CommandError(f"Cannot inspect accessibility picker config {path}: {exc}") from exc
+    if mode & 0o077:
+        raise CommandError(
+            f"Accessibility picker config must have mode 0600: {path}"
+        )
 
 
 def validate_workdir(workdir: Path) -> None:
@@ -912,7 +931,16 @@ def main() -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
-    return run(build_parser().parse_args())
+    args = build_parser().parse_args()
+    try:
+        validate_config_file()
+        if args.validate_config:
+            validate_args(args)
+            return 0
+        return run(args)
+    except CommandError as exc:
+        LOGGER.error("%s", exc)
+        return 1
 
 
 if __name__ == "__main__":

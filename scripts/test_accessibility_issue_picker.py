@@ -14,6 +14,12 @@ import accessibility_issue_picker as picker
 SESSION_ID = "e6877215-fb9f-432e-acd8-7c06a902d3a5"
 TEST_REPO = "example/project"
 TEST_AUDIT_REPO = "example/audits"
+TEST_TOKEN = "repository-scoped-token"
+
+
+@pytest.fixture(autouse=True)
+def repository_scoped_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ACCESSIBILITY_GITHUB_TOKEN", TEST_TOKEN)
 
 
 def issue(
@@ -303,7 +309,10 @@ def test_validate_args_requires_private_configuration() -> None:
     )
     with (
         mock.patch.dict(picker.os.environ, {}, clear=True),
-        pytest.raises(picker.CommandError, match="repo, audit_repo, assignee, labels"),
+        pytest.raises(
+            picker.CommandError,
+            match="repo, audit_repo, assignee, github_token, labels",
+        ),
     ):
         picker.validate_args(args)
 
@@ -317,6 +326,21 @@ def test_validate_args_rejects_invalid_repository() -> None:
     )
     with pytest.raises(picker.CommandError, match="OWNER/REPOSITORY"):
         picker.validate_args(args)
+
+
+def test_validate_config_file_rejects_readable_secret(tmp_path: Path) -> None:
+    config = tmp_path / "picker.env"
+    config.write_text("ACCESSIBILITY_GITHUB_TOKEN=secret\n", encoding="utf-8")
+    config.chmod(0o644)
+
+    with (
+        mock.patch.dict(
+            picker.os.environ,
+            {"ACCESSIBILITY_PICKER_CONFIG": str(config)},
+        ),
+        pytest.raises(picker.CommandError, match="mode 0600"),
+    ):
+        picker.validate_config_file()
 
 
 def test_dry_run_does_not_claim_or_start_copilot(tmp_path: Path) -> None:
@@ -410,9 +434,6 @@ def test_run_copilot_restricts_paths_and_publish_commands(tmp_path: Path) -> Non
     process = mock.Mock()
     process.communicate.return_value = ("", "")
     process.returncode = 0
-    token_result = subprocess.CompletedProcess(
-        ["gh"], returncode=0, stdout="secret-token\n", stderr=""
-    )
     with (
         mock.patch.dict(
             picker.os.environ,
@@ -421,7 +442,6 @@ def test_run_copilot_restricts_paths_and_publish_commands(tmp_path: Path) -> Non
         mock.patch.object(picker.shutil, "which", return_value="/usr/bin/sandbox-exec"),
         mock.patch.object(picker, "prepare_copilot_home"),
         mock.patch.object(picker.uuid, "uuid4", return_value="runner"),
-        mock.patch.object(picker, "run_command", return_value=token_result),
         mock.patch.object(picker.subprocess, "Popen", return_value=process) as popen,
     ):
         picker.run_copilot(
@@ -445,9 +465,9 @@ def test_run_copilot_restricts_paths_and_publish_commands(tmp_path: Path) -> Non
     assert "issue_read" in command
     assert environment["COPILOT_HOME"] == str(tmp_path / "copilot-home")
     assert environment["HOME"] == str(tmp_path / "copilot-home/user-home")
-    assert environment["COPILOT_GITHUB_TOKEN"] == "secret-token"
+    assert environment["COPILOT_GITHUB_TOKEN"] == TEST_TOKEN
     assert "AWS_SECRET_ACCESS_KEY" not in environment
-    assert "secret-token" not in command
+    assert TEST_TOKEN not in command
 
 
 def test_run_copilot_terminates_process_group_on_timeout(tmp_path: Path) -> None:
@@ -457,14 +477,10 @@ def test_run_copilot_terminates_process_group_on_timeout(tmp_path: Path) -> None
         subprocess.TimeoutExpired(["copilot"], 10),
         ("", ""),
     ]
-    token_result = subprocess.CompletedProcess(
-        ["gh"], returncode=0, stdout="secret-token\n", stderr=""
-    )
     with (
         mock.patch.object(picker.shutil, "which", return_value="/usr/bin/sandbox-exec"),
         mock.patch.object(picker, "prepare_copilot_home"),
         mock.patch.object(picker.uuid, "uuid4", return_value="runner"),
-        mock.patch.object(picker, "run_command", return_value=token_result),
         mock.patch.object(picker.subprocess, "Popen", return_value=process),
         mock.patch.object(picker.os, "killpg") as killpg,
     ):
@@ -498,12 +514,6 @@ def test_run_copilot_reports_launch_error(
     tmp_path: Path,
     launch_error: OSError,
 ) -> None:
-    token_result = subprocess.CompletedProcess(
-        ["gh", "auth", "token"],
-        returncode=0,
-        stdout="secret-token\n",
-        stderr="",
-    )
     with (
         mock.patch.object(
             picker.shutil,
@@ -512,7 +522,6 @@ def test_run_copilot_reports_launch_error(
         ),
         mock.patch.object(picker, "prepare_copilot_home"),
         mock.patch.object(picker.uuid, "uuid4", return_value="runner"),
-        mock.patch.object(picker, "run_command", return_value=token_result),
         mock.patch.object(
             picker.subprocess,
             "Popen",
@@ -538,14 +547,10 @@ def test_run_copilot_tolerates_process_exit_before_timeout_cleanup(
         subprocess.TimeoutExpired(["copilot"], 10),
         ("", ""),
     ]
-    token_result = subprocess.CompletedProcess(
-        ["gh"], returncode=0, stdout="secret-token\n", stderr=""
-    )
     with (
         mock.patch.object(picker.shutil, "which", return_value="/usr/bin/sandbox-exec"),
         mock.patch.object(picker, "prepare_copilot_home"),
         mock.patch.object(picker.uuid, "uuid4", return_value="runner"),
-        mock.patch.object(picker, "run_command", return_value=token_result),
         mock.patch.object(picker.subprocess, "Popen", return_value=process),
         mock.patch.object(
             picker.os,

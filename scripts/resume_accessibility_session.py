@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -52,6 +53,11 @@ def load_resume_state(state_dir: Path, issue_number: int) -> dict[str, Any]:
     copilot_home = (state_dir / "copilot-homes" / session_id).resolve()
     if not (copilot_home / "settings.json").is_file():
         raise ResumeError(f"Saved Copilot sandbox settings do not exist: {copilot_home}")
+    config_file = Path(
+        os.environ.get("ACCESSIBILITY_PICKER_CONFIG", "")
+    ).expanduser().resolve()
+    if not config_file.is_file():
+        raise ResumeError(f"Accessibility picker config does not exist: {config_file}")
     runner_root = copilot_home / "runners"
     runner_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     runner_root.chmod(0o700)
@@ -61,6 +67,7 @@ def load_resume_state(state_dir: Path, issue_number: int) -> dict[str, Any]:
         "session_id": session_id,
         "workdir": resolved_workdir,
         "copilot_home": copilot_home,
+        "config_file": config_file,
         "runner": runner,
     }
 
@@ -81,9 +88,12 @@ def resume_command(state: dict[str, Any]) -> str:
         ]
     )
     return (
+        f"set -a; . {shlex.quote(str(state['config_file']))}; set +a; "
+        'token="$ACCESSIBILITY_GITHUB_TOKEN"; '
+        "unset ACCESSIBILITY_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN; "
         f"HOME={shlex.quote(str(state['copilot_home'] / 'user-home'))} "
         f"COPILOT_HOME={shlex.quote(str(state['copilot_home']))} "
-        'COPILOT_GITHUB_TOKEN="$(gh auth token)" '
+        'COPILOT_GITHUB_TOKEN="$token" '
         f"{copilot_command}"
     )
 

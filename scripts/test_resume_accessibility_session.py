@@ -25,17 +25,29 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
     copilot_home = state_dir / "copilot-homes" / session_id
     copilot_home.mkdir(parents=True)
     (copilot_home / "settings.json").write_text("{}\n", encoding="utf-8")
+    config = tmp_path / "picker.env"
+    config.write_text(
+        "ACCESSIBILITY_GITHUB_TOKEN=repository-scoped-token\n",
+        encoding="utf-8",
+    )
     write_state(
         state_dir,
         {"session_id": session_id, "workdir": str(workdir)},
     )
 
-    state = resume.load_resume_state(state_dir, 42)
+    with mock.patch.dict(
+        resume.os.environ,
+        {"ACCESSIBILITY_PICKER_CONFIG": str(config)},
+    ):
+        state = resume.load_resume_state(state_dir, 42)
 
     command = resume.resume_command(state)
     assert f"COPILOT_HOME={copilot_home}" in command
     assert f"HOME={copilot_home / 'user-home'}" in command
-    assert 'COPILOT_GITHUB_TOKEN="$(gh auth token)"' in command
+    assert f". {config}" in command
+    assert 'COPILOT_GITHUB_TOKEN="$token"' in command
+    assert "gh auth token" not in command
+    assert "repository-scoped-token" not in command
     assert f"copilot --experimental -C {state['runner']}" in command
     assert f"--session-id {session_id}" in command
     assert "--allow-all-paths" in command

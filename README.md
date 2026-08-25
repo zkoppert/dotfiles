@@ -50,11 +50,14 @@ ACCESSIBILITY_AUDIT_REPO="OWNER/AUDIT-REPOSITORY"
 ACCESSIBILITY_LABELS="accessibility,label-two"
 ACCESSIBILITY_ASSIGNEE="YOUR-LOGIN"
 ACCESSIBILITY_WORKDIR="$HOME/repos/accessibility-remediation"
+ACCESSIBILITY_GITHUB_TOKEN="FINE-GRAINED-TOKEN"
 ```
 
-Populate `ACCESSIBILITY_WORKDIR` with at least one local Git checkout and install its test dependencies before enabling the schedule. The unattended shell cannot read login credentials, access Keychain, or use outbound networking, while the selected GitHub tools retain read access for remote verification.
+Create a dedicated fine-grained token that can access only the configured tracking, audit, and remediation repositories. Grant issue read/write access for assignment management and read access to repository contents for remote verification. The picker uses this token instead of your general `gh` credential, including for Copilot's allowed GitHub tools.
 
-Run `./install.sh` after creating the file. Use `accessibility-issue-picker --dry-run` to verify discovery without claiming an issue or starting Copilot. To stop the hourly schedule, unload the agent before removing its symlink:
+Set the configuration file to mode `0600`. Populate `ACCESSIBILITY_WORKDIR` with at least one local Git checkout and install its test dependencies before enabling the schedule. The unattended shell cannot read login credentials, access Keychain, or use outbound networking.
+
+Run `chmod 0600 ~/.config/accessibility-issue-picker.env` and `./install.sh` after creating the file. The installer loads the hourly job only after no-network configuration validation succeeds. Use `accessibility-issue-picker --dry-run` to verify discovery without claiming an issue or starting Copilot. To stop the hourly schedule, unload the agent before removing its symlink:
 
 ```bash
 launchctl unload "$HOME/Library/LaunchAgents/com.zkoppert.accessibility-issue-picker.plist"
