@@ -21,10 +21,10 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
     workdir = tmp_path / "work"
     workdir.mkdir()
     state_dir = tmp_path / "state"
-    copilot_home = state_dir / "copilot-home"
+    session_id = "e6877215-fb9f-432e-acd8-7c06a902d3a5"
+    copilot_home = state_dir / "copilot-homes" / session_id
     copilot_home.mkdir(parents=True)
     (copilot_home / "settings.json").write_text("{}\n", encoding="utf-8")
-    session_id = "e6877215-fb9f-432e-acd8-7c06a902d3a5"
     write_state(
         state_dir,
         {"session_id": session_id, "workdir": str(workdir)},

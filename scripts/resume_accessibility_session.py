@@ -49,7 +49,7 @@ def load_resume_state(state_dir: Path, issue_number: int) -> dict[str, Any]:
     resolved_workdir = Path(workdir).expanduser().resolve()
     if not resolved_workdir.is_dir():
         raise ResumeError(f"Saved working directory does not exist: {resolved_workdir}")
-    copilot_home = (state_dir / "copilot-home").resolve()
+    copilot_home = (state_dir / "copilot-homes" / session_id).resolve()
     if not (copilot_home / "settings.json").is_file():
         raise ResumeError(f"Saved Copilot sandbox settings do not exist: {copilot_home}")
     runner_root = copilot_home / "runners"

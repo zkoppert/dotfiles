@@ -311,7 +311,8 @@ def claim_issue(repo: str, number: int, assignee: str) -> bool:
 def audit_url_pattern(audit_repo: str) -> re.Pattern[str]:
     """Build the exact formal-audit URL matcher."""
     return re.compile(
-        rf"https://github\.com/{re.escape(audit_repo)}/issues/\d+"
+        rf"https://github\.com/{re.escape(audit_repo)}/issues/\d+",
+        re.IGNORECASE,
     )
 
 
@@ -841,7 +842,7 @@ def run(args: argparse.Namespace) -> int:
                     run_workdir,
                     args.timeout,
                     session_id,
-                    args.state_dir / "copilot-home",
+                    args.state_dir / "copilot-homes" / session_id,
                 )
                 resumable = True
             except CommandError as exc:

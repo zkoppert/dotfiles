@@ -266,6 +266,12 @@ def test_audit_urls_are_unique() -> None:
     ]
 
 
+def test_audit_urls_accept_repository_case_difference() -> None:
+    audit = f"https://github.com/{TEST_AUDIT_REPO.upper()}/issues/123"
+
+    assert picker.audit_urls({"body": audit}, TEST_AUDIT_REPO) == [audit]
+
+
 def test_prompt_uses_audit_skill_without_embedding_issue_body() -> None:
     tracked = issue(
         42,
@@ -897,15 +903,12 @@ def test_completion_notification_prepares_resume_command(tmp_path: Path) -> None
         ["copilot"], returncode=0, stdout="handoff", stderr=""
     )
 
-    def run_copilot(*_args: object) -> subprocess.CompletedProcess[str]:
-        return completed
-
     with (
         mock.patch.object(picker, "list_candidates", return_value=[tracked]),
         mock.patch.object(picker, "issue_assignees", return_value=set()),
         mock.patch.object(picker, "claim_issue", return_value=True),
         mock.patch.object(picker.uuid, "uuid4", return_value=SESSION_ID),
-        mock.patch.object(picker, "run_copilot", side_effect=run_copilot),
+        mock.patch.object(picker, "run_copilot", return_value=completed) as run_copilot,
         mock.patch.object(picker, "notify") as notify,
     ):
         assert picker.run(args) == 0
@@ -916,6 +919,9 @@ def test_completion_notification_prepares_resume_command(tmp_path: Path) -> None
     execute = notify.call_args.kwargs["execute"]
     assert "resume-accessibility-session 42" in execute
     assert f"--state-dir {args.state_dir.resolve()}" in execute
+    assert run_copilot.call_args.args[4] == (
+        args.state_dir / "copilot-homes" / SESSION_ID
+    )
 
 
 @pytest.mark.parametrize("returncode", [1, 124])
