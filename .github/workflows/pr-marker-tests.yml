@@ -27,3 +27,9 @@ jobs:
         run: python3 test_install.py
       - name: Run babysit-prs wrapper tests
         run: python3 test_babysit_prs_wrapper.py
+      - name: Run accessibility picker wrapper tests
+        run: python3 test_accessibility_issue_picker_wrapper.py
+      - name: Install accessibility test dependency
+        run: python3 -m pip install pytest==8.4.2
+      - name: Run accessibility picker tests
+        run: python3 -m pytest -q scripts/test_accessibility_issue_picker.py scripts/test_resume_accessibility_session.py

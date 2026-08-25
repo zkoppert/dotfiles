@@ -3,5 +3,6 @@ __pycache__/
 *.pyo
 .DS_Store
 .coverage
+.pytest_cache/
 .copilot/private/
 */.copilot/private/

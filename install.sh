@@ -192,6 +192,62 @@ if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ]; then
   fi
 fi
 
+# Install the hourly accessibility issue picker. Its private repository and label
+# configuration stays in a user-owned file outside this public repository.
+ACCESSIBILITY_WRAPPER="$DOTFILES_DIR/bin/accessibility-issue-picker"
+ACCESSIBILITY_RESUME_WRAPPER="$DOTFILES_DIR/bin/resume-accessibility-session"
+ACCESSIBILITY_PLIST="$DOTFILES_DIR/LaunchAgents/com.zkoppert.accessibility-issue-picker.plist"
+ACCESSIBILITY_CONFIG="$HOME/.config/accessibility-issue-picker.env"
+if [ -x "$ACCESSIBILITY_WRAPPER" ] &&
+  [ -x "$ACCESSIBILITY_RESUME_WRAPPER" ] &&
+  [ -f "$ACCESSIBILITY_PLIST" ] &&
+  [ "$(uname)" = "Darwin" ] &&
+  [ "$DOTFILES_DIR" = "$HOME/repos/dotfiles" ]; then
+  mkdir -p "$HOME/.local/bin" "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+  for accessibility_command in accessibility-issue-picker resume-accessibility-session; do
+    source_path="$DOTFILES_DIR/bin/$accessibility_command"
+    target_path="$HOME/.local/bin/$accessibility_command"
+    if [ -L "$target_path" ] || [ ! -e "$target_path" ]; then
+      ln -sfn "$source_path" "$target_path"
+      echo "✓ Linked $accessibility_command → $target_path"
+    else
+      echo "⚠ $target_path exists and is not a symlink - skipping"
+    fi
+  done
+
+  ACCESSIBILITY_PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.accessibility-issue-picker.plist"
+  ACCESSIBILITY_CONFIG_ERROR=""
+  if [ ! -f "$ACCESSIBILITY_CONFIG" ]; then
+    ACCESSIBILITY_CONFIG_ERROR="create $ACCESSIBILITY_CONFIG first"
+  elif ! ACCESSIBILITY_PICKER_CONFIG="$ACCESSIBILITY_CONFIG" "$ACCESSIBILITY_WRAPPER" --validate-config >/dev/null 2>&1; then
+    ACCESSIBILITY_CONFIG_ERROR="fix $ACCESSIBILITY_CONFIG and set its mode to 0600"
+  fi
+  if [ -n "$ACCESSIBILITY_CONFIG_ERROR" ]; then
+    if [ -L "$ACCESSIBILITY_PLIST_TARGET" ]; then
+      launchctl unload "$ACCESSIBILITY_PLIST_TARGET" >/dev/null 2>&1 || true
+      rm "$ACCESSIBILITY_PLIST_TARGET"
+      echo "✓ Unloaded accessibility issue picker because its configuration is unavailable"
+    fi
+    echo "⚠ Skipping accessibility issue picker launchd agent: $ACCESSIBILITY_CONFIG_ERROR"
+  else
+    if [ -L "$ACCESSIBILITY_PLIST_TARGET" ] || [ ! -e "$ACCESSIBILITY_PLIST_TARGET" ]; then
+      launchctl unload "$ACCESSIBILITY_PLIST_TARGET" >/dev/null 2>&1 || true
+      ln -sfn "$ACCESSIBILITY_PLIST" "$ACCESSIBILITY_PLIST_TARGET"
+      if launchctl load "$ACCESSIBILITY_PLIST_TARGET" 2>/dev/null; then
+        echo "✓ Loaded launchd agent com.zkoppert.accessibility-issue-picker"
+      else
+        echo "⚠ launchctl load failed for $ACCESSIBILITY_PLIST_TARGET - check ~/Library/Logs/accessibility-issue-picker.log"
+      fi
+    else
+      echo "⚠ $ACCESSIBILITY_PLIST_TARGET exists and is not a symlink - skipping"
+    fi
+  fi
+elif [ -f "$ACCESSIBILITY_PLIST" ] &&
+  [ "$(uname)" = "Darwin" ] &&
+  [ "$DOTFILES_DIR" != "$HOME/repos/dotfiles" ]; then
+  echo "⚠ Skipping accessibility issue picker launchd agent from nonstandard checkout $DOTFILES_DIR"
+fi
+
 # Install the Friday NUX first-responder handoff generator.
 NUX_HANDOFF_WRAPPER="$DOTFILES_DIR/bin/nux-fr-handoff"
 NUX_HANDOFF_INSTALLER="$DOTFILES_DIR/.copilot/skills/nux-fr-handoff/install.sh"

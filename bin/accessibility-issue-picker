@@ -1,0 +1,30 @@
+#!/bin/bash
+set -euo pipefail
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH"
+
+CONFIG_FILE="${ACCESSIBILITY_PICKER_CONFIG:-$HOME/.config/accessibility-issue-picker.env}"
+if [ ! -f "$CONFIG_FILE" ]; then
+  printf 'accessibility-issue-picker: missing config file: %s\n' "$CONFIG_FILE" >&2
+  exit 1
+fi
+export ACCESSIBILITY_PICKER_CONFIG="$CONFIG_FILE"
+
+set -a
+# shellcheck disable=SC1090
+. "$CONFIG_FILE"
+set +a
+export GH_TOKEN="${ACCESSIBILITY_GITHUB_TOKEN:-}"
+unset GITHUB_TOKEN
+
+SOURCE="$0"
+while [ -L "$SOURCE" ]; do
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$SOURCE_DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+exec /usr/bin/env python3 \
+  "$SCRIPT_DIR/../scripts/accessibility_issue_picker.py" \
+  "$@"
