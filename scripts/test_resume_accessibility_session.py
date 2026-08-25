@@ -119,7 +119,7 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
     assert "original-trap" in shell_state_result.stdout
 
     config.write_text(
-        "false\nACCESSIBILITY_GITHUB_TOKEN=repository-scoped-token\n",
+        "false | true\nACCESSIBILITY_GITHUB_TOKEN=repository-scoped-token\n",
         encoding="utf-8",
     )
     failed_result = subprocess.run(

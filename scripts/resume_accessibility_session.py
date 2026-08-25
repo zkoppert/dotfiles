@@ -94,7 +94,7 @@ def resume_command(state: dict[str, Any]) -> str:
         f"{config_file}; then printf "
         "'resume-accessibility-session: config file must have mode 0600: %s\\n' "
         f"{config_file} >&2; exit 1; fi; "
-        "set -a; config_failed=0; trap 'config_failed=1' ERR; set +e; "
+        "set -a; set -o pipefail; config_failed=0; trap 'config_failed=1' ERR; set +e; "
         f"{{ . {config_file}; config_status=$?; set +x; set +v; }} >/dev/null 2>&1; "
         "trap - ERR; set +a; "
         'if [ "$config_failed" -ne 0 ] || [ "$config_status" -ne 0 ]; then '
