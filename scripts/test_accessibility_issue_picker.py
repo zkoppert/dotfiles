@@ -116,8 +116,10 @@ def test_list_candidates_excludes_pending_assignment_rollback(
     assert candidates == []
 
 
-def test_pending_rollback_states_accepts_repository_case_difference(
+@pytest.mark.parametrize("status", ["claiming", "rollback_pending"])
+def test_pending_assignment_states_accepts_repository_case_difference(
     tmp_path: Path,
+    status: str,
 ) -> None:
     pending = issue(
         42,
@@ -128,12 +130,12 @@ def test_pending_rollback_states_accepts_repository_case_difference(
         tmp_path,
         pending,
         [],
-        "rollback_pending",
+        status,
         SESSION_ID,
         tmp_path,
     )
 
-    pending_states = picker.pending_rollback_states(
+    pending_states = picker.pending_assignment_states(
         tmp_path,
         TEST_REPO.upper(),
     )
@@ -141,7 +143,7 @@ def test_pending_rollback_states_accepts_repository_case_difference(
     assert [number for number, _state in pending_states] == [42]
 
 
-def test_pending_rollback_states_rejects_another_repository(
+def test_pending_assignment_states_rejects_another_repository(
     tmp_path: Path,
 ) -> None:
     pending = issue(42, created_at="2026-01-01T00:00:00Z")
@@ -155,7 +157,7 @@ def test_pending_rollback_states_rejects_another_repository(
     )
 
     with pytest.raises(picker.CommandError, match="invalid issue URL"):
-        picker.pending_rollback_states(tmp_path, "another/project")
+        picker.pending_assignment_states(tmp_path, "another/project")
 
 
 def test_claim_issue_rechecks_and_verifies_assignee() -> None:
@@ -761,6 +763,47 @@ def test_run_keeps_rollback_pending_while_self_assignment_remains(
     assert picker.read_state(state_dir, 42)["status"] == "rollback_pending"
 
 
+def test_run_blocks_fresh_claims_for_interrupted_claiming_state(
+    tmp_path: Path,
+) -> None:
+    tracked = issue(42, created_at="2026-01-01T00:00:00Z")
+    workdir = tmp_path / "work"
+    make_checkout(workdir)
+    state_dir = tmp_path / "state"
+    picker.write_claim_state(
+        state_dir,
+        tracked,
+        [],
+        "claiming",
+        SESSION_ID,
+        workdir,
+    )
+    args = argparse.Namespace(
+        repo=TEST_REPO,
+        audit_repo=TEST_AUDIT_REPO,
+        labels=["a11y"],
+        assignee="zkoppert",
+        workdir=workdir,
+        state_dir=state_dir,
+        timeout=10,
+        dry_run=False,
+    )
+    with (
+        mock.patch.object(picker, "list_candidates") as list_candidates,
+        mock.patch.object(
+            picker,
+            "issue_assignees",
+            return_value={"zkoppert"},
+        ),
+        mock.patch.object(picker, "claim_issue") as claim_issue,
+    ):
+        assert picker.run(args) == 0
+
+    list_candidates.assert_not_called()
+    claim_issue.assert_not_called()
+    assert picker.read_state(state_dir, 42)["status"] == "claiming"
+
+
 def test_run_keeps_rollback_pending_when_assignment_inspection_fails(
     tmp_path: Path,
 ) -> None:
@@ -927,6 +970,28 @@ def test_completion_notification_prepares_resume_command(tmp_path: Path) -> None
     assert run_copilot.call_args.args[4] == (
         args.state_dir / "copilot-homes" / SESSION_ID
     )
+
+
+def test_notify_uses_osascript_when_terminal_notifier_is_unavailable() -> None:
+    with (
+        mock.patch.object(
+            picker.shutil,
+            "which",
+            side_effect=[None, "/usr/bin/osascript"],
+        ),
+        mock.patch.object(picker, "run_command") as run_command,
+    ):
+        picker.notify(
+            'Accessibility "remediation"',
+            "Issue needs attention",
+            url="https://github.com/example/project/issues/42",
+        )
+
+    command = run_command.call_args.args[0]
+    assert command[:2] == ["/usr/bin/osascript", "-e"]
+    assert '\\"remediation\\"' in command[2]
+    assert "https://github.com/example/project/issues/42" in command[2]
+    assert run_command.call_args.kwargs == {"check": False}
 
 
 @pytest.mark.parametrize("returncode", [1, 124])

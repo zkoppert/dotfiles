@@ -171,11 +171,11 @@ def issue_assignees(repo: str, number: int) -> set[str]:
     return assignees
 
 
-def pending_rollback_states(
+def pending_assignment_states(
     state_dir: Path,
     repo: str,
 ) -> list[tuple[int, dict[str, Any]]]:
-    """Read valid pending rollback records independently of issue discovery."""
+    """Read uncertain assignment records independently of issue discovery."""
     pending: list[tuple[int, dict[str, Any]]] = []
     for path in state_dir.glob("issue-*.json"):
         match = re.fullmatch(r"issue-(\d+)\.json", path.name)
@@ -183,7 +183,7 @@ def pending_rollback_states(
             continue
         issue_number = int(match.group(1))
         state = read_state(state_dir, issue_number)
-        if state.get("status") != "rollback_pending":
+        if state.get("status") not in {"claiming", "rollback_pending"}:
             continue
         issue_url = state.get("issue")
         expected_url = f"https://github.com/{repo}/issues/{issue_number}"
@@ -192,16 +192,16 @@ def pending_rollback_states(
             or issue_url.casefold() != expected_url.casefold()
         ):
             raise CommandError(
-                f"pending rollback state has an invalid issue URL: {path}"
+                f"pending assignment state has an invalid issue URL: {path}"
             )
         pending.append((issue_number, state))
     return sorted(pending)
 
 
-def reconcile_pending_rollbacks(args: argparse.Namespace) -> bool:
-    """Resolve safe rollback outcomes before discovering any new work."""
+def reconcile_pending_assignments(args: argparse.Namespace) -> bool:
+    """Resolve interrupted claims and rollbacks before discovering new work."""
     try:
-        pending = pending_rollback_states(args.state_dir, args.repo)
+        pending = pending_assignment_states(args.state_dir, args.repo)
     except CommandError as exc:
         LOGGER.error("%s", exc)
         return False
@@ -613,16 +613,36 @@ def notify(
     url: str | None = None,
     execute: str | None = None,
 ) -> None:
-    """Send a clickable macOS notification when terminal-notifier is available."""
+    """Send a clickable notification or a visible macOS fallback."""
     notifier = shutil.which("terminal-notifier")
-    if notifier is None:
+    if notifier is not None:
+        command = [notifier, "-title", title, "-message", message]
+        if execute is not None:
+            command.extend(["-execute", execute])
+        elif url is not None:
+            command.extend(["-open", url])
+        run_command(command, check=False)
         return
-    command = [notifier, "-title", title, "-message", message]
-    if execute is not None:
-        command.extend(["-execute", execute])
-    elif url is not None:
-        command.extend(["-open", url])
-    run_command(command, check=False)
+
+    osascript = shutil.which("osascript")
+    if osascript is None:
+        LOGGER.warning("Desktop notification tools are unavailable")
+        return
+    fallback_message = message
+    if url is not None:
+        fallback_message = f"{message} Open {url} to review."
+    elif execute is not None:
+        fallback_message = f"{message} Review the saved accessibility picker handoff."
+    escaped_title = title.replace("\\", "\\\\").replace('"', '\\"')
+    escaped_message = fallback_message.replace("\\", "\\\\").replace('"', '\\"')
+    run_command(
+        [
+            osascript,
+            "-e",
+            f'display notification "{escaped_message}" with title "{escaped_title}"',
+        ],
+        check=False,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -731,7 +751,7 @@ def run(args: argparse.Namespace) -> int:
             LOGGER.info("Another accessibility remediation is already running")
             return 0
 
-        if not args.dry_run and not reconcile_pending_rollbacks(args):
+        if not args.dry_run and not reconcile_pending_assignments(args):
             return 0
 
         candidates = list_candidates(
