@@ -405,7 +405,7 @@ class InstallScriptTest(unittest.TestCase):
         )
         self.assertFalse(plist_target.exists())
 
-    def test_accessibility_picker_unloads_job_with_invalid_private_config(
+    def test_accessibility_picker_unloads_job_when_schedule_validation_fails(
         self,
     ) -> None:
         launch_agents = self.repo / "LaunchAgents"
@@ -417,7 +417,12 @@ class InstallScriptTest(unittest.TestCase):
         bin_dir = self.repo / "bin"
         bin_dir.mkdir()
         picker_wrapper = bin_dir / "accessibility-issue-picker"
-        picker_wrapper.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        picker_wrapper.write_text(
+            "#!/bin/sh\n"
+            "printf 'Remediation workdir does not exist: /missing\\n' >&2\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
         picker_wrapper.chmod(0o755)
         resume_wrapper = bin_dir / "resume-accessibility-session"
         resume_wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -449,8 +454,7 @@ class InstallScriptTest(unittest.TestCase):
         self.assertFalse(plist_target.exists())
         calls = (self.home / "launchctl.log").read_text(encoding="utf-8")
         self.assertIn(f"unload {plist_target}", calls)
-        self.assertIn("fix", result.stdout)
-        self.assertIn("0600", result.stdout)
+        self.assertIn("Remediation workdir does not exist: /missing", result.stdout)
 
     def test_accessibility_picker_unloads_existing_job_without_private_config(
         self,

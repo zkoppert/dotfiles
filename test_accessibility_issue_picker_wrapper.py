@@ -19,6 +19,7 @@ class AccessibilityIssuePickerWrapperTest(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.root = Path(self.temp_dir.name)
         self.home = self.root / "home"
+        self.home.mkdir()
         self.bin_dir = self.root / "repo" / "bin"
         self.scripts_dir = self.root / "repo" / "scripts"
         self.bin_dir.mkdir(parents=True)
@@ -125,6 +126,7 @@ class AccessibilityIssuePickerWrapperTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertFalse(sentinel.exists())
+        self.assertIn("config file must have mode 0600", result.stderr)
 
 
 class ResumeAccessibilitySessionWrapperTest(unittest.TestCase):
@@ -135,6 +137,7 @@ class ResumeAccessibilitySessionWrapperTest(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.root = Path(self.temp_dir.name)
         self.home = self.root / "home"
+        self.home.mkdir()
         self.bin_dir = self.root / "repo" / "bin"
         self.scripts_dir = self.root / "repo" / "scripts"
         self.bin_dir.mkdir(parents=True)
@@ -217,6 +220,7 @@ class ResumeAccessibilitySessionWrapperTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertFalse(sentinel.exists())
+        self.assertIn("config file must have mode 0600", result.stderr)
 
 
 if __name__ == "__main__":
