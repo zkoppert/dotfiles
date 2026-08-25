@@ -89,7 +89,7 @@ def resume_command(state: dict[str, Any]) -> str:
     )
     return (
         f"set -a; . {shlex.quote(str(state['config_file']))}; set +a; "
-        'token="$ACCESSIBILITY_GITHUB_TOKEN"; '
+        'unset token; token="$ACCESSIBILITY_GITHUB_TOKEN"; '
         "unset ACCESSIBILITY_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN; "
         f"HOME={shlex.quote(str(state['copilot_home'] / 'user-home'))} "
         f"COPILOT_HOME={shlex.quote(str(state['copilot_home']))} "

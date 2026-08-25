@@ -676,6 +676,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=int, default=6 * 60 * 60)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--validate-config", action="store_true")
+    parser.add_argument("--validate-schedule", action="store_true")
     return parser
 
 
@@ -954,8 +955,10 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         validate_config_file()
-        if args.validate_config:
+        if args.validate_config or args.validate_schedule:
             validate_args(args)
+            if args.validate_schedule:
+                validate_workdir(args.workdir)
             return 0
         return run(args)
     except CommandError as exc:

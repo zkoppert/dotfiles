@@ -108,6 +108,24 @@ class AccessibilityIssuePickerWrapperTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
 
+    def test_readable_configuration_is_not_sourced(self) -> None:
+        config = self.root / "picker.env"
+        sentinel = self.home / "config-executed"
+        config.write_text(f'touch "{sentinel}"\n', encoding="utf-8")
+        config.chmod(0o644)
+        self.env["ACCESSIBILITY_PICKER_CONFIG"] = str(config)
+
+        result = subprocess.run(
+            [str(self.wrapper), "--validate-config"],
+            env=self.env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(sentinel.exists())
+
 
 class ResumeAccessibilitySessionWrapperTest(unittest.TestCase):
     """Exercise scoped configuration loading before a session resumes."""
@@ -181,6 +199,24 @@ class ResumeAccessibilitySessionWrapperTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
+
+    def test_readable_configuration_is_not_sourced(self) -> None:
+        config = self.root / "picker.env"
+        sentinel = self.home / "config-executed"
+        config.write_text(f'touch "{sentinel}"\n', encoding="utf-8")
+        config.chmod(0o644)
+        self.env["ACCESSIBILITY_PICKER_CONFIG"] = str(config)
+
+        result = subprocess.run(
+            [str(self.wrapper), "42"],
+            env=self.env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(sentinel.exists())
 
 
 if __name__ == "__main__":

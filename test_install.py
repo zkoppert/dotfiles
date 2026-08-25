@@ -326,7 +326,10 @@ class InstallScriptTest(unittest.TestCase):
             "resume-accessibility-session",
         ):
             wrapper = bin_dir / command
-            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            script = "#!/bin/sh\n"
+            if command == "accessibility-issue-picker":
+                script += "printf '%s\\n' \"$*\" >> \"$HOME/accessibility-picker.log\"\n"
+            wrapper.write_text(script, encoding="utf-8")
             wrapper.chmod(0o755)
         config = self.home / ".config" / "accessibility-issue-picker.env"
         config.parent.mkdir()
@@ -366,6 +369,10 @@ class InstallScriptTest(unittest.TestCase):
         calls = (self.home / "launchctl.log").read_text(encoding="utf-8")
         self.assertIn(f"unload {plist_target}", calls)
         self.assertIn(f"load {plist_target}", calls)
+        validation = (self.home / "accessibility-picker.log").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(validation, "--validate-schedule\n")
 
     def test_accessibility_picker_does_not_load_without_private_config(
         self,

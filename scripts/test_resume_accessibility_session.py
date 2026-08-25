@@ -45,6 +45,7 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
     assert f"COPILOT_HOME={copilot_home}" in command
     assert f"HOME={copilot_home / 'user-home'}" in command
     assert f". {config}" in command
+    assert 'unset token; token="$ACCESSIBILITY_GITHUB_TOKEN"' in command
     assert 'COPILOT_GITHUB_TOKEN="$token"' in command
     assert "gh auth token" not in command
     assert "repository-scoped-token" not in command

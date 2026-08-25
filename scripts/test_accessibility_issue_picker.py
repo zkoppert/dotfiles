@@ -624,6 +624,40 @@ def test_validate_workdir_rejects_empty_directory(tmp_path: Path) -> None:
         picker.validate_workdir(tmp_path)
 
 
+def test_validate_schedule_rejects_missing_workdir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = argparse.Namespace(
+        repo=TEST_REPO,
+        audit_repo=TEST_AUDIT_REPO,
+        labels=["a11y"],
+        assignee="zkoppert",
+        workdir=tmp_path / "missing",
+        validate_config=False,
+        validate_schedule=True,
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "accessibility_issue_picker.py",
+            "--repo",
+            args.repo,
+            "--audit-repo",
+            args.audit_repo,
+            "--label",
+            args.labels[0],
+            "--assignee",
+            args.assignee,
+            "--workdir",
+            str(args.workdir),
+            "--validate-schedule",
+        ],
+    )
+
+    assert picker.main() == 1
+
+
 def test_claim_issue_reports_failed_assignment_rollback() -> None:
     cleanup_failure = picker.CommandError("cleanup failed")
     with (
