@@ -724,10 +724,33 @@ def validate_workdir(workdir: Path) -> None:
     """Require a local checkout before an issue can be claimed."""
     if not workdir.is_dir():
         raise CommandError(f"Remediation workdir does not exist: {workdir}")
-    if (workdir / ".git").exists():
+
+    def is_git_checkout(path: Path) -> bool:
+        result = run_command(
+            [
+                "env",
+                "-u",
+                "GIT_DIR",
+                "-u",
+                "GIT_WORK_TREE",
+                "git",
+                "-C",
+                str(path),
+                "rev-parse",
+                "--show-toplevel",
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            return False
+        return Path(result.stdout.strip()).resolve() == path.resolve()
+
+    if is_git_checkout(workdir):
         return
     try:
-        has_checkout = any((child / ".git").exists() for child in workdir.iterdir())
+        has_checkout = any(
+            child.is_dir() and is_git_checkout(child) for child in workdir.iterdir()
+        )
     except OSError as exc:
         raise CommandError(f"Cannot inspect remediation workdir {workdir}: {exc}") from exc
     if not has_checkout:

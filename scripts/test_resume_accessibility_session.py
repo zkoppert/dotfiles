@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from unittest import mock
@@ -59,8 +60,7 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
     assert "--allow-all-paths" in command
     assert state["runner"].parent == copilot_home / "runners"
     assert "set -e" not in command
-    assert command.startswith("( ")
-    assert command.endswith(" )")
+    assert command.startswith("/bin/bash -c ")
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -70,17 +70,21 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
     env = dict(os.environ)
     env["PATH"] = f"{fake_bin}:{env['PATH']}"
 
-    result = subprocess.run(
-        ["bash", "-c", command],
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    shells = ["bash"]
+    if shutil.which("zsh"):
+        shells.append("zsh")
+    for shell in shells:
+        result = subprocess.run(
+            [shell, "-c", command],
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
 
-    assert result.returncode == 0
-    assert "github_pat_SECRET" not in result.stderr
-    assert "repository-scoped-token" not in result.stderr
+        assert result.returncode == 0
+        assert "github_pat_SECRET" not in result.stderr
+        assert "repository-scoped-token" not in result.stderr
 
     config.chmod(0o644)
     readable_result = subprocess.run(

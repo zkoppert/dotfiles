@@ -88,7 +88,7 @@ def resume_command(state: dict[str, Any]) -> str:
             "COPILOT_GITHUB_TOKEN,GH_TOKEN,GITHUB_TOKEN",
         ]
     )
-    return (
+    script = (
         "( if ! /usr/bin/env python3 -c "
         "'import os, sys; sys.exit(0 if os.stat(sys.argv[1]).st_mode & 0o077 == 0 else 1)' "
         f"{config_file}; then printf "
@@ -107,6 +107,7 @@ def resume_command(state: dict[str, Any]) -> str:
         'COPILOT_GITHUB_TOKEN="$token" '
         f"{copilot_command} )"
     )
+    return shlex.join(["/bin/bash", "-c", script])
 
 
 def open_iterm(command: str) -> None:
