@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 from unittest import mock
 
@@ -27,6 +29,7 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
     (copilot_home / "settings.json").write_text("{}\n", encoding="utf-8")
     config = tmp_path / "picker.env"
     config.write_text(
+        "printf 'github_pat_SECRET\\n' >&2\n"
         "ACCESSIBILITY_GITHUB_TOKEN=repository-scoped-token\n",
         encoding="utf-8",
     )
@@ -53,6 +56,40 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
     assert f"--session-id {session_id}" in command
     assert "--allow-all-paths" in command
     assert state["runner"].parent == copilot_home / "runners"
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    copilot = fake_bin / "copilot"
+    copilot.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    copilot.chmod(0o755)
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "github_pat_SECRET" not in result.stderr
+
+    config.write_text(
+        "false\nACCESSIBILITY_GITHUB_TOKEN=repository-scoped-token\n",
+        encoding="utf-8",
+    )
+    failed_result = subprocess.run(
+        ["bash", "-c", command],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert failed_result.returncode == 1
+    assert "failed to load config file" in failed_result.stderr
 
 
 def test_load_resume_state_rejects_invalid_session_id(tmp_path: Path) -> None:

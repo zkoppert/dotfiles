@@ -74,6 +74,7 @@ def load_resume_state(state_dir: Path, issue_number: int) -> dict[str, Any]:
 
 def resume_command(state: dict[str, Any]) -> str:
     """Build the command that iTerm will display."""
+    config_file = shlex.quote(str(state["config_file"]))
     copilot_command = shlex.join(
         [
             "copilot",
@@ -88,7 +89,12 @@ def resume_command(state: dict[str, Any]) -> str:
         ]
     )
     return (
-        f"set -a; . {shlex.quote(str(state['config_file']))}; set +a; "
+        "set -a; config_failed=0; trap 'config_failed=1' ERR; set +e; "
+        f". {config_file} >/dev/null 2>&1; config_status=$?; "
+        "trap - ERR; set -e; set +a; "
+        'if [ "$config_failed" -ne 0 ] || [ "$config_status" -ne 0 ]; then '
+        "printf 'resume-accessibility-session: failed to load config file: %s\\n' "
+        f"{config_file} >&2; exit 1; fi; "
         'unset token; token="$ACCESSIBILITY_GITHUB_TOKEN"; '
         "unset ACCESSIBILITY_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN; "
         f"HOME={shlex.quote(str(state['copilot_home'] / 'user-home'))} "
