@@ -217,10 +217,43 @@ if [ -x "$ACCESSIBILITY_WRAPPER" ] &&
 
   ACCESSIBILITY_PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.accessibility-issue-picker.plist"
   ACCESSIBILITY_CONFIG_ERROR=""
+  ACCESSIBILITY_VALIDATION_ERROR=""
   if [ ! -f "$ACCESSIBILITY_CONFIG" ]; then
     ACCESSIBILITY_CONFIG_ERROR="create $ACCESSIBILITY_CONFIG first"
-  elif ! ACCESSIBILITY_PICKER_CONFIG="$ACCESSIBILITY_CONFIG" "$ACCESSIBILITY_WRAPPER" --validate-config >/dev/null 2>&1; then
-    ACCESSIBILITY_CONFIG_ERROR="fix $ACCESSIBILITY_CONFIG and set its mode to 0600"
+  elif ! ACCESSIBILITY_VALIDATION_ERROR="$(
+    ACCESSIBILITY_PICKER_CONFIG="$ACCESSIBILITY_CONFIG" \
+      "$ACCESSIBILITY_WRAPPER" --validate-schedule 2>&1
+  )"; then
+    while IFS= read -r validation_line; do
+      case "$validation_line" in
+        "accessibility-issue-picker: missing config file:"*)
+          ACCESSIBILITY_CONFIG_ERROR="accessibility picker config file is missing"
+          ;;
+        "accessibility-issue-picker: config file must have mode 0600:"*)
+          ACCESSIBILITY_CONFIG_ERROR="accessibility picker config file must have mode 0600"
+          ;;
+        "accessibility-issue-picker: failed to load config file:"*)
+          ACCESSIBILITY_CONFIG_ERROR="accessibility picker config file failed to load"
+          ;;
+        "accessibility-issue-picker: Missing accessibility picker configuration:"*)
+          ACCESSIBILITY_CONFIG_ERROR="accessibility picker configuration is incomplete"
+          ;;
+        "accessibility-issue-picker: Repository configuration must use OWNER/REPOSITORY")
+          ACCESSIBILITY_CONFIG_ERROR="accessibility picker repositories must use OWNER/REPOSITORY"
+          ;;
+        "accessibility-issue-picker: Remediation workdir does not exist:"*)
+          ACCESSIBILITY_CONFIG_ERROR="accessibility remediation workdir does not exist"
+          ;;
+        "accessibility-issue-picker: Remediation workdir contains no Git checkout:"*)
+          ACCESSIBILITY_CONFIG_ERROR="accessibility remediation workdir contains no Git checkout"
+          ;;
+        "accessibility-issue-picker: Cannot inspect remediation workdir "*)
+          ACCESSIBILITY_CONFIG_ERROR="accessibility remediation workdir cannot be inspected"
+          ;;
+      esac
+      [ -n "$ACCESSIBILITY_CONFIG_ERROR" ] && break
+    done <<< "$ACCESSIBILITY_VALIDATION_ERROR"
+    ACCESSIBILITY_CONFIG_ERROR="${ACCESSIBILITY_CONFIG_ERROR:-accessibility picker schedule validation failed}"
   fi
   if [ -n "$ACCESSIBILITY_CONFIG_ERROR" ]; then
     if [ -L "$ACCESSIBILITY_PLIST_TARGET" ]; then

@@ -74,6 +74,7 @@ def load_resume_state(state_dir: Path, issue_number: int) -> dict[str, Any]:
 
 def resume_command(state: dict[str, Any]) -> str:
     """Build the command that iTerm will display."""
+    config_file = shlex.quote(str(state["config_file"]))
     copilot_command = shlex.join(
         [
             "copilot",
@@ -87,15 +88,26 @@ def resume_command(state: dict[str, Any]) -> str:
             "COPILOT_GITHUB_TOKEN,GH_TOKEN,GITHUB_TOKEN",
         ]
     )
-    return (
-        f"set -a; . {shlex.quote(str(state['config_file']))}; set +a; "
-        'token="$ACCESSIBILITY_GITHUB_TOKEN"; '
+    script = (
+        "( if ! /usr/bin/env python3 -c "
+        "'import os, sys; sys.exit(0 if os.stat(sys.argv[1]).st_mode & 0o077 == 0 else 1)' "
+        f"{config_file}; then printf "
+        "'resume-accessibility-session: config file must have mode 0600: %s\\n' "
+        f"{config_file} >&2; exit 1; fi; "
+        "set -a; set -o pipefail; config_failed=0; trap 'config_failed=1' ERR; set +e; "
+        f"{{ . {config_file}; config_status=$?; set +x; set +v; }} >/dev/null 2>&1; "
+        "trap - ERR; set +a; "
+        'if [ "$config_failed" -ne 0 ] || [ "$config_status" -ne 0 ]; then '
+        "printf 'resume-accessibility-session: failed to load config file: %s\\n' "
+        f"{config_file} >&2; exit 1; fi; "
+        'unset token; token="$ACCESSIBILITY_GITHUB_TOKEN"; '
         "unset ACCESSIBILITY_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN; "
         f"HOME={shlex.quote(str(state['copilot_home'] / 'user-home'))} "
         f"COPILOT_HOME={shlex.quote(str(state['copilot_home']))} "
         'COPILOT_GITHUB_TOKEN="$token" '
-        f"{copilot_command}"
+        f"{copilot_command} )"
     )
+    return shlex.join(["/bin/bash", "-c", script])
 
 
 def open_iterm(command: str) -> None:

@@ -2,16 +2,39 @@
 set -euo pipefail
 
 CONFIG_FILE="${ACCESSIBILITY_PICKER_CONFIG:-$HOME/.config/accessibility-issue-picker.env}"
+case "$CONFIG_FILE" in
+  /*) ;;
+  *) CONFIG_FILE="$PWD/$CONFIG_FILE" ;;
+esac
 if [ ! -f "$CONFIG_FILE" ]; then
   printf 'resume-accessibility-session: missing config file: %s\n' "$CONFIG_FILE" >&2
   exit 1
 fi
 export ACCESSIBILITY_PICKER_CONFIG="$CONFIG_FILE"
 
+if ! /usr/bin/env python3 -c 'import os, sys; sys.exit(0 if os.stat(sys.argv[1]).st_mode & 0o077 == 0 else 1)' "$CONFIG_FILE"; then
+  printf 'resume-accessibility-session: config file must have mode 0600: %s\n' "$CONFIG_FILE" >&2
+  exit 1
+fi
+
 set -a
 # shellcheck disable=SC1090
-. "$CONFIG_FILE"
+config_failed=0
+trap 'config_failed=1' ERR
+set +e
+{
+  . "$CONFIG_FILE"
+  config_status=$?
+  set +x
+  set +v
+} >/dev/null 2>&1
+trap - ERR
+set -e
 set +a
+if [ "$config_failed" -ne 0 ] || [ "$config_status" -ne 0 ]; then
+  printf 'resume-accessibility-session: failed to load config file: %s\n' "$CONFIG_FILE" >&2
+  exit 1
+fi
 
 SOURCE="$0"
 while [ -L "$SOURCE" ]; do

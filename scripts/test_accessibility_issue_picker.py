@@ -42,9 +42,14 @@ def issue(
 
 
 def make_checkout(path: Path) -> None:
-    """Create the minimum local checkout marker required by the picker."""
+    """Create a local Git checkout for picker tests."""
     path.mkdir(parents=True, exist_ok=True)
-    (path / ".git").mkdir()
+    subprocess.run(
+        ["git", "init", "--quiet", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 @pytest.mark.parametrize(
@@ -624,6 +629,132 @@ def test_validate_workdir_rejects_empty_directory(tmp_path: Path) -> None:
         picker.validate_workdir(tmp_path)
 
 
+def test_validate_workdir_rejects_empty_git_marker(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+
+    with pytest.raises(picker.CommandError, match="contains no Git checkout"):
+        picker.validate_workdir(tmp_path)
+
+
+def test_validate_workdir_accepts_child_checkout(tmp_path: Path) -> None:
+    make_checkout(tmp_path / "project")
+
+    picker.validate_workdir(tmp_path)
+
+
+def test_validate_workdir_rejects_nested_directory(tmp_path: Path) -> None:
+    checkout = tmp_path / "project"
+    make_checkout(checkout)
+    nested = checkout / "empty"
+    nested.mkdir()
+
+    with pytest.raises(picker.CommandError, match="contains no Git checkout"):
+        picker.validate_workdir(nested)
+
+
+def test_validate_workdir_ignores_inherited_git_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout = tmp_path / "project"
+    make_checkout(checkout)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("GIT_DIR", str(checkout / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(empty))
+
+    with pytest.raises(picker.CommandError, match="contains no Git checkout"):
+        picker.validate_workdir(empty)
+
+
+def test_validate_schedule_rejects_missing_workdir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = argparse.Namespace(
+        repo=TEST_REPO,
+        audit_repo=TEST_AUDIT_REPO,
+        labels=["a11y"],
+        assignee="zkoppert",
+        workdir=tmp_path / "missing",
+        validate_config=False,
+        validate_schedule=True,
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "accessibility_issue_picker.py",
+            "--repo",
+            args.repo,
+            "--audit-repo",
+            args.audit_repo,
+            "--label",
+            args.labels[0],
+            "--assignee",
+            args.assignee,
+            "--workdir",
+            str(args.workdir),
+            "--validate-schedule",
+        ],
+    )
+
+    assert picker.main() == 1
+
+
+def test_validate_schedule_accepts_ready_workdir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workdir = tmp_path / "work"
+    make_checkout(workdir)
+    monkeypatch.setenv("ACCESSIBILITY_GITHUB_TOKEN", "repository-scoped-token")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "accessibility_issue_picker.py",
+            "--repo",
+            TEST_REPO,
+            "--audit-repo",
+            TEST_AUDIT_REPO,
+            "--label",
+            "a11y",
+            "--assignee",
+            "zkoppert",
+            "--workdir",
+            str(workdir),
+            "--validate-schedule",
+        ],
+    )
+
+    assert picker.main() == 0
+
+
+def test_validate_config_does_not_require_ready_workdir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ACCESSIBILITY_GITHUB_TOKEN", "repository-scoped-token")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "accessibility_issue_picker.py",
+            "--repo",
+            TEST_REPO,
+            "--audit-repo",
+            TEST_AUDIT_REPO,
+            "--label",
+            "a11y",
+            "--assignee",
+            "zkoppert",
+            "--workdir",
+            str(tmp_path / "missing"),
+            "--validate-config",
+        ],
+    )
+
+    assert picker.main() == 0
+
+
 def test_claim_issue_reports_failed_assignment_rollback() -> None:
     cleanup_failure = picker.CommandError("cleanup failed")
     with (
@@ -747,6 +878,7 @@ def test_run_keeps_rollback_pending_while_self_assignment_remains(
             "list_candidates",
             return_value=[tracked, next_issue],
         ) as list_candidates,
+        mock.patch.object(picker, "validate_workdir") as validate_workdir,
         mock.patch.object(picker, "run_command") as run_command,
         mock.patch.object(
             picker,
@@ -759,6 +891,7 @@ def test_run_keeps_rollback_pending_while_self_assignment_remains(
 
     claim_issue.assert_not_called()
     list_candidates.assert_not_called()
+    validate_workdir.assert_called_once_with(args.workdir)
     run_command.assert_not_called()
     assert picker.read_state(state_dir, 42)["status"] == "rollback_pending"
 

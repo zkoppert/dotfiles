@@ -676,6 +676,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=int, default=6 * 60 * 60)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--validate-config", action="store_true")
+    parser.add_argument("--validate-schedule", action="store_true")
     return parser
 
 
@@ -723,10 +724,33 @@ def validate_workdir(workdir: Path) -> None:
     """Require a local checkout before an issue can be claimed."""
     if not workdir.is_dir():
         raise CommandError(f"Remediation workdir does not exist: {workdir}")
-    if (workdir / ".git").exists():
+
+    def is_git_checkout(path: Path) -> bool:
+        result = run_command(
+            [
+                "env",
+                "-u",
+                "GIT_DIR",
+                "-u",
+                "GIT_WORK_TREE",
+                "git",
+                "-C",
+                str(path),
+                "rev-parse",
+                "--show-toplevel",
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            return False
+        return Path(result.stdout.strip()).resolve() == path.resolve()
+
+    if is_git_checkout(workdir):
         return
     try:
-        has_checkout = any((child / ".git").exists() for child in workdir.iterdir())
+        has_checkout = any(
+            child.is_dir() and is_git_checkout(child) for child in workdir.iterdir()
+        )
     except OSError as exc:
         raise CommandError(f"Cannot inspect remediation workdir {workdir}: {exc}") from exc
     if not has_checkout:
@@ -954,12 +978,17 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         validate_config_file()
-        if args.validate_config:
+        if args.validate_config or args.validate_schedule:
             validate_args(args)
+            if args.validate_schedule:
+                validate_workdir(args.workdir)
             return 0
         return run(args)
     except CommandError as exc:
-        LOGGER.error("%s", exc)
+        if args.validate_config or args.validate_schedule:
+            print(f"accessibility-issue-picker: {exc}", file=sys.stderr)
+        else:
+            LOGGER.error("%s", exc)
         return 1
 
 
