@@ -89,6 +89,38 @@ class AccessibilityIssuePickerWrapperTest(unittest.TestCase):
             ],
         )
 
+    def test_relative_configuration_does_not_search_path(self) -> None:
+        config = self.root / "picker.env"
+        config.write_text(
+            'ACCESSIBILITY_ISSUE_REPO="example/project"\n'
+            'ACCESSIBILITY_AUDIT_REPO="example/audits"\n'
+            'ACCESSIBILITY_LABELS="accessibility"\n'
+            'ACCESSIBILITY_ASSIGNEE="zkoppert"\n'
+            'ACCESSIBILITY_GITHUB_TOKEN="repository-scoped-token"\n',
+            encoding="utf-8",
+        )
+        config.chmod(0o600)
+        path_dir = self.root / "path"
+        path_dir.mkdir()
+        sentinel = self.root / "path-config-executed"
+        path_config = path_dir / "picker.env"
+        path_config.write_text(f'touch "{sentinel}"\n', encoding="utf-8")
+        path_config.chmod(0o600)
+        self.env["ACCESSIBILITY_PICKER_CONFIG"] = "picker.env"
+        self.env["PATH"] = f"{path_dir}:{self.env['PATH']}"
+
+        result = subprocess.run(
+            [str(self.wrapper), "--dry-run"],
+            cwd=self.root,
+            env=self.env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertIn("repository-scoped-token", result.stdout)
+        self.assertFalse(sentinel.exists())
+
     def test_partial_configuration_fails_validation(self) -> None:
         config = self.root / "picker.env"
         config.write_text(
@@ -254,6 +286,37 @@ class ResumeAccessibilitySessionWrapperTest(unittest.TestCase):
             result.stdout.splitlines(),
             [str(config), "repository-scoped-token", "42 --print-command"],
         )
+
+    def test_relative_configuration_does_not_search_path(self) -> None:
+        config = self.root / "picker.env"
+        config.write_text(
+            'ACCESSIBILITY_GITHUB_TOKEN="repository-scoped-token"\n',
+            encoding="utf-8",
+        )
+        config.chmod(0o600)
+        path_dir = self.root / "path"
+        path_dir.mkdir()
+        sentinel = self.root / "path-config-executed"
+        path_config = path_dir / "picker.env"
+        path_config.write_text(f'touch "{sentinel}"\n', encoding="utf-8")
+        path_config.chmod(0o600)
+        self.env["ACCESSIBILITY_PICKER_CONFIG"] = "picker.env"
+        self.env["PATH"] = f"{path_dir}:{self.env['PATH']}"
+
+        result = subprocess.run(
+            [str(self.wrapper), "42", "--print-command"],
+            cwd=self.root,
+            env=self.env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [str(config.resolve()), "repository-scoped-token", "42 --print-command"],
+        )
+        self.assertFalse(sentinel.exists())
 
     def test_invalid_configuration_stops_before_python(self) -> None:
         config = self.root / "picker.env"

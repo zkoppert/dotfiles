@@ -2,6 +2,10 @@
 set -euo pipefail
 
 CONFIG_FILE="${ACCESSIBILITY_PICKER_CONFIG:-$HOME/.config/accessibility-issue-picker.env}"
+case "$CONFIG_FILE" in
+  /*) ;;
+  *) CONFIG_FILE="$PWD/$CONFIG_FILE" ;;
+esac
 if [ ! -f "$CONFIG_FILE" ]; then
   printf 'resume-accessibility-session: missing config file: %s\n' "$CONFIG_FILE" >&2
   exit 1
