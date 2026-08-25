@@ -56,6 +56,9 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
     assert f"--session-id {session_id}" in command
     assert "--allow-all-paths" in command
     assert state["runner"].parent == copilot_home / "runners"
+    assert "set -e" not in command
+    assert command.startswith("( ")
+    assert command.endswith(" )")
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -75,6 +78,25 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert "github_pat_SECRET" not in result.stderr
+
+    shell_state_result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "trap 'printf original-trap >&2' ERR; "
+                f"{command}; printf 'shell-alive\\n'; trap -p ERR"
+            ),
+        ],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert shell_state_result.returncode == 0
+    assert "shell-alive" in shell_state_result.stdout
+    assert "original-trap" in shell_state_result.stdout
 
     config.write_text(
         "false\nACCESSIBILITY_GITHUB_TOKEN=repository-scoped-token\n",

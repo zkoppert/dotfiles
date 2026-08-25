@@ -89,9 +89,9 @@ def resume_command(state: dict[str, Any]) -> str:
         ]
     )
     return (
-        "set -a; config_failed=0; trap 'config_failed=1' ERR; set +e; "
+        "( set -a; config_failed=0; trap 'config_failed=1' ERR; set +e; "
         f". {config_file} >/dev/null 2>&1; config_status=$?; "
-        "trap - ERR; set -e; set +a; "
+        "trap - ERR; set +a; "
         'if [ "$config_failed" -ne 0 ] || [ "$config_status" -ne 0 ]; then '
         "printf 'resume-accessibility-session: failed to load config file: %s\\n' "
         f"{config_file} >&2; exit 1; fi; "
@@ -100,7 +100,7 @@ def resume_command(state: dict[str, Any]) -> str:
         f"HOME={shlex.quote(str(state['copilot_home'] / 'user-home'))} "
         f"COPILOT_HOME={shlex.quote(str(state['copilot_home']))} "
         'COPILOT_GITHUB_TOKEN="$token" '
-        f"{copilot_command}"
+        f"{copilot_command} )"
     )
 
 
