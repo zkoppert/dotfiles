@@ -41,6 +41,18 @@ def make_checkout(path: Path) -> None:
     (path / ".git").mkdir()
 
 
+@pytest.mark.parametrize(
+    "launch_error",
+    [PermissionError("gh"), OSError("exec format error")],
+)
+def test_run_command_reports_os_launch_error(launch_error: OSError) -> None:
+    with (
+        mock.patch.object(picker.subprocess, "run", side_effect=launch_error),
+        pytest.raises(picker.CommandError, match="command failed: gh"),
+    ):
+        picker.run_command(["gh"])
+
+
 def test_list_candidates_deduplicates_and_prioritizes_formal_audits() -> None:
     first = [
         issue(

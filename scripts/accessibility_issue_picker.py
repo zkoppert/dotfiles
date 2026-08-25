@@ -43,7 +43,7 @@ def run_command(
             timeout=timeout,
             check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise CommandError(f"command failed: {' '.join(command)}: {exc}") from exc
     if check and result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "no output"

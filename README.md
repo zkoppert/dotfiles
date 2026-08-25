@@ -54,4 +54,9 @@ ACCESSIBILITY_WORKDIR="$HOME/repos/accessibility-remediation"
 
 Populate `ACCESSIBILITY_WORKDIR` with at least one local Git checkout and install its test dependencies before enabling the schedule. The unattended shell cannot read login credentials, access Keychain, or use outbound networking, while the selected GitHub tools retain read access for remote verification.
 
-Run `./install.sh` after creating the file. Use `accessibility-issue-picker --dry-run` to verify discovery without claiming an issue or starting Copilot. Remove `~/Library/LaunchAgents/com.zkoppert.accessibility-issue-picker.plist` and unload the agent to stop the hourly schedule.
+Run `./install.sh` after creating the file. Use `accessibility-issue-picker --dry-run` to verify discovery without claiming an issue or starting Copilot. To stop the hourly schedule, unload the agent before removing its symlink:
+
+```bash
+launchctl unload "$HOME/Library/LaunchAgents/com.zkoppert.accessibility-issue-picker.plist"
+rm "$HOME/Library/LaunchAgents/com.zkoppert.accessibility-issue-picker.plist"
+```
