@@ -109,6 +109,48 @@ class AccessibilityIssuePickerWrapperTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
 
+    def test_configuration_output_is_suppressed(self) -> None:
+        config = self.root / "picker.env"
+        config.write_text(
+            "printf 'github_pat_SECRET\\n' >&2\n"
+            'ACCESSIBILITY_ISSUE_REPO="example/project"\n'
+            'ACCESSIBILITY_AUDIT_REPO="example/audits"\n'
+            'ACCESSIBILITY_LABELS="accessibility"\n'
+            'ACCESSIBILITY_ASSIGNEE="zkoppert"\n'
+            'ACCESSIBILITY_GITHUB_TOKEN="repository-scoped-token"\n',
+            encoding="utf-8",
+        )
+        config.chmod(0o600)
+        self.env["ACCESSIBILITY_PICKER_CONFIG"] = str(config)
+
+        result = subprocess.run(
+            [str(self.wrapper), "--validate-config"],
+            env=self.env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotIn("github_pat_SECRET", result.stderr)
+
+    def test_malformed_configuration_does_not_echo_contents(self) -> None:
+        config = self.root / "picker.env"
+        config.write_text("github_pat_SECRET\n", encoding="utf-8")
+        config.chmod(0o600)
+        self.env["ACCESSIBILITY_PICKER_CONFIG"] = str(config)
+
+        result = subprocess.run(
+            [str(self.wrapper), "--validate-config"],
+            env=self.env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("github_pat_SECRET", result.stderr)
+        self.assertIn("failed to load config file", result.stderr)
+
     def test_readable_configuration_is_not_sourced(self) -> None:
         config = self.root / "picker.env"
         sentinel = self.home / "config-executed"
@@ -202,6 +244,26 @@ class ResumeAccessibilitySessionWrapperTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
+
+    def test_configuration_output_is_suppressed(self) -> None:
+        config = self.root / "picker.env"
+        config.write_text(
+            "printf 'github_pat_SECRET\\n' >&2\n"
+            'ACCESSIBILITY_GITHUB_TOKEN="repository-scoped-token"\n',
+            encoding="utf-8",
+        )
+        config.chmod(0o600)
+        self.env["ACCESSIBILITY_PICKER_CONFIG"] = str(config)
+
+        result = subprocess.run(
+            [str(self.wrapper), "42", "--print-command"],
+            env=self.env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotIn("github_pat_SECRET", result.stderr)
 
     def test_readable_configuration_is_not_sourced(self) -> None:
         config = self.root / "picker.env"

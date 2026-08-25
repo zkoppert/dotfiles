@@ -962,7 +962,10 @@ def main() -> int:
             return 0
         return run(args)
     except CommandError as exc:
-        LOGGER.error("%s", exc)
+        if args.validate_config or args.validate_schedule:
+            print(f"accessibility-issue-picker: {exc}", file=sys.stderr)
+        else:
+            LOGGER.error("%s", exc)
         return 1
 
 

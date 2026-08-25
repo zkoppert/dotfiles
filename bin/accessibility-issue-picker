@@ -17,8 +17,15 @@ fi
 
 set -a
 # shellcheck disable=SC1090
-. "$CONFIG_FILE"
+set +e
+. "$CONFIG_FILE" >/dev/null 2>&1
+config_status=$?
+set -e
 set +a
+if [ "$config_status" -ne 0 ]; then
+  printf 'accessibility-issue-picker: failed to load config file: %s\n' "$CONFIG_FILE" >&2
+  exit 1
+fi
 export GH_TOKEN="${ACCESSIBILITY_GITHUB_TOKEN:-}"
 unset GITHUB_TOKEN
 

@@ -658,6 +658,60 @@ def test_validate_schedule_rejects_missing_workdir(
     assert picker.main() == 1
 
 
+def test_validate_schedule_accepts_ready_workdir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workdir = tmp_path / "work"
+    make_checkout(workdir)
+    monkeypatch.setenv("ACCESSIBILITY_GITHUB_TOKEN", "repository-scoped-token")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "accessibility_issue_picker.py",
+            "--repo",
+            TEST_REPO,
+            "--audit-repo",
+            TEST_AUDIT_REPO,
+            "--label",
+            "a11y",
+            "--assignee",
+            "zkoppert",
+            "--workdir",
+            str(workdir),
+            "--validate-schedule",
+        ],
+    )
+
+    assert picker.main() == 0
+
+
+def test_validate_config_does_not_require_ready_workdir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ACCESSIBILITY_GITHUB_TOKEN", "repository-scoped-token")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "accessibility_issue_picker.py",
+            "--repo",
+            TEST_REPO,
+            "--audit-repo",
+            TEST_AUDIT_REPO,
+            "--label",
+            "a11y",
+            "--assignee",
+            "zkoppert",
+            "--workdir",
+            str(tmp_path / "missing"),
+            "--validate-config",
+        ],
+    )
+
+    assert picker.main() == 0
+
+
 def test_claim_issue_reports_failed_assignment_rollback() -> None:
     cleanup_failure = picker.CommandError("cleanup failed")
     with (

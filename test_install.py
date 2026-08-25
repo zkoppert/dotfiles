@@ -419,7 +419,7 @@ class InstallScriptTest(unittest.TestCase):
         picker_wrapper = bin_dir / "accessibility-issue-picker"
         picker_wrapper.write_text(
             "#!/bin/sh\n"
-            "printf '2026-03-23 10:00:00,000 ERROR Remediation workdir does not exist: /missing\\n' >&2\n"
+            "printf 'accessibility-issue-picker: Remediation workdir does not exist: /missing\\n' >&2\n"
             "exit 1\n",
             encoding="utf-8",
         )
@@ -471,7 +471,7 @@ class InstallScriptTest(unittest.TestCase):
         picker_wrapper.write_text(
             "#!/bin/sh\n"
             "printf '%s\\n' '/config.env: line 2: github_pat_SECRET: command not found' >&2\n"
-            "printf '%s\\n' '2026-03-23 10:00:00,000 ERROR Schedule validation failed' >&2\n"
+            "printf '%s\\n' 'accessibility-issue-picker: Schedule validation failed' >&2\n"
             "exit 1\n",
             encoding="utf-8",
         )
