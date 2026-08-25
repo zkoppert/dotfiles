@@ -29,10 +29,12 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
     (copilot_home / "settings.json").write_text("{}\n", encoding="utf-8")
     config = tmp_path / "picker.env"
     config.write_text(
+        "set -x\n"
         "printf 'github_pat_SECRET\\n' >&2\n"
         "ACCESSIBILITY_GITHUB_TOKEN=repository-scoped-token\n",
         encoding="utf-8",
     )
+    config.chmod(0o600)
     write_state(
         state_dir,
         {"session_id": session_id, "workdir": str(workdir)},
@@ -78,6 +80,20 @@ def test_load_resume_state_and_build_command(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert "github_pat_SECRET" not in result.stderr
+    assert "repository-scoped-token" not in result.stderr
+
+    config.chmod(0o644)
+    readable_result = subprocess.run(
+        ["bash", "-c", command],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert readable_result.returncode == 1
+    assert "config file must have mode 0600" in readable_result.stderr
+    config.chmod(0o600)
 
     shell_state_result = subprocess.run(
         [

@@ -419,7 +419,7 @@ class InstallScriptTest(unittest.TestCase):
         picker_wrapper = bin_dir / "accessibility-issue-picker"
         picker_wrapper.write_text(
             "#!/bin/sh\n"
-            "printf 'accessibility-issue-picker: Remediation workdir does not exist: /missing\\n' >&2\n"
+            "printf 'accessibility-issue-picker: Remediation workdir does not exist: github_pat_SECRET\\n' >&2\n"
             "exit 1\n",
             encoding="utf-8",
         )
@@ -454,7 +454,11 @@ class InstallScriptTest(unittest.TestCase):
         self.assertFalse(plist_target.exists())
         calls = (self.home / "launchctl.log").read_text(encoding="utf-8")
         self.assertIn(f"unload {plist_target}", calls)
-        self.assertIn("Remediation workdir does not exist: /missing", result.stdout)
+        self.assertIn(
+            "accessibility remediation workdir does not exist",
+            result.stdout,
+        )
+        self.assertNotIn("github_pat_SECRET", result.stdout)
 
     def test_accessibility_picker_hides_unstructured_validation_stderr(
         self,
@@ -489,7 +493,7 @@ class InstallScriptTest(unittest.TestCase):
 
         result = self.run_installer()
 
-        self.assertIn("Schedule validation failed", result.stdout)
+        self.assertIn("accessibility picker schedule validation failed", result.stdout)
         self.assertNotIn("github_pat_SECRET", result.stdout)
 
     def test_accessibility_picker_unloads_existing_job_without_private_config(

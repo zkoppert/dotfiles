@@ -20,8 +20,12 @@ set -a
 config_failed=0
 trap 'config_failed=1' ERR
 set +e
-. "$CONFIG_FILE" >/dev/null 2>&1
-config_status=$?
+{
+  . "$CONFIG_FILE"
+  config_status=$?
+  set +x
+  set +v
+} >/dev/null 2>&1
 trap - ERR
 set -e
 set +a

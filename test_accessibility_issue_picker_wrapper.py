@@ -112,6 +112,7 @@ class AccessibilityIssuePickerWrapperTest(unittest.TestCase):
     def test_configuration_output_is_suppressed(self) -> None:
         config = self.root / "picker.env"
         config.write_text(
+            "set -x\n"
             "printf 'github_pat_SECRET\\n' >&2\n"
             'ACCESSIBILITY_ISSUE_REPO="example/project"\n'
             'ACCESSIBILITY_AUDIT_REPO="example/audits"\n'
@@ -132,6 +133,7 @@ class AccessibilityIssuePickerWrapperTest(unittest.TestCase):
         )
 
         self.assertNotIn("github_pat_SECRET", result.stderr)
+        self.assertNotIn("repository-scoped-token", result.stderr)
 
     def test_malformed_configuration_does_not_echo_contents(self) -> None:
         config = self.root / "picker.env"
@@ -273,6 +275,7 @@ class ResumeAccessibilitySessionWrapperTest(unittest.TestCase):
     def test_configuration_output_is_suppressed(self) -> None:
         config = self.root / "picker.env"
         config.write_text(
+            "set -x\n"
             "printf 'github_pat_SECRET\\n' >&2\n"
             'ACCESSIBILITY_GITHUB_TOKEN="repository-scoped-token"\n',
             encoding="utf-8",
@@ -289,6 +292,7 @@ class ResumeAccessibilitySessionWrapperTest(unittest.TestCase):
         )
 
         self.assertNotIn("github_pat_SECRET", result.stderr)
+        self.assertNotIn("repository-scoped-token", result.stderr)
 
     def test_intermediate_configuration_failure_is_not_masked(self) -> None:
         config = self.root / "picker.env"
