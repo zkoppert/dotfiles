@@ -225,12 +225,7 @@ class InstallScriptTest(unittest.TestCase):
         wrapper.chmod(0o755)
         companion = self.home / "repos" / "babysit-prs" / "babysit_prs.py"
         companion.parent.mkdir()
-        companion.write_text(
-            "import sys\n"
-            "if '--help' in sys.argv:\n"
-            "    print('--review-lab-repo OWNER/REPO --preview-repo OWNER/REPO')\n",
-            encoding="utf-8",
-        )
+        companion.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
 
         launchctl = self.fake_bin / "launchctl"
         launchctl.write_text(
@@ -252,33 +247,6 @@ class InstallScriptTest(unittest.TestCase):
         calls = (self.home / "launchctl.log").read_text(encoding="utf-8")
         self.assertIn(f"unload {target}", calls)
         self.assertIn(f"load {target}", calls)
-
-    def test_babysit_launch_agent_requires_compatible_companion(self) -> None:
-        launch_agents = self.repo / "LaunchAgents"
-        launch_agents.mkdir()
-        (launch_agents / "com.zkoppert.babysit-prs.plist").write_text(
-            "<plist version=\"1.0\"></plist>\n",
-            encoding="utf-8",
-        )
-        wrapper = self.repo / "bin" / "babysit-prs"
-        wrapper.parent.mkdir()
-        wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
-        wrapper.chmod(0o755)
-        companion = self.home / "repos" / "babysit-prs" / "babysit_prs.py"
-        companion.parent.mkdir()
-        companion.write_text("print('legacy help')\n", encoding="utf-8")
-
-        result = self.run_installer()
-
-        self.assertIn("update", result.stdout)
-        self.assertIn("before enabling review-lab deployment", result.stdout)
-        target = (
-            self.home
-            / "Library"
-            / "LaunchAgents"
-            / "com.zkoppert.babysit-prs.plist"
-        )
-        self.assertFalse(target.exists())
 
     def test_babysit_launch_agent_skips_nonstandard_checkout(self) -> None:
         launch_agents = self.repo / "LaunchAgents"

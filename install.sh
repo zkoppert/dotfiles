@@ -133,9 +133,6 @@ if [ -f "$BABYSIT_PLIST" ] && [ "$(uname)" = "Darwin" ]; then
     echo "⚠ Skipping babysit-prs launchd agent: expected dotfiles at $EXPECTED_DOTFILES_DIR and companion script at $BABYSIT_SCRIPT"
   elif [ ! -x "$DOTFILES_DIR/bin/babysit-prs" ]; then
     echo "⚠ Skipping babysit-prs launchd agent: $DOTFILES_DIR/bin/babysit-prs is not executable"
-  elif ! /usr/bin/env python3 "$BABYSIT_SCRIPT" --help 2>/dev/null | grep -q -- '--review-lab-repo' ||
-    ! /usr/bin/env python3 "$BABYSIT_SCRIPT" --help 2>/dev/null | grep -q -- '--preview-repo'; then
-    echo "⚠ Skipping babysit-prs launchd agent: update $BABYSIT_SCRIPT before enabling review-lab deployment"
   else
     mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
     BABYSIT_PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.babysit-prs.plist"
