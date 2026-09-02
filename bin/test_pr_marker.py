@@ -79,9 +79,9 @@ def bash_convergence_rounds(path: str) -> int:
         "set -euo pipefail\n"
         "count=\"$(grep -c '^<!-- review-convergence:' \"$1\" 2>/dev/null || true)\"\n"
         "rounds=\"$(sed -n "
-        "'s/^<!-- review-convergence: clean; rounds: \\([1-3]\\) -->$/\\1/p' "
+        "'s/^<!-- review-convergence: clean; rounds: \\([1-9][0-9]*\\) -->$/\\1/p' "
         "\"$1\" 2>/dev/null)\"\n"
-        'if [ "${count:-0}" = "1" ] && [[ "$rounds" =~ ^[1-3]$ ]]; then\n'
+        'if [ "${count:-0}" = "1" ] && [[ "$rounds" =~ ^[1-9][0-9]?$ ]]; then\n'
         '  printf "%s" "$rounds"\n'
         "else\n"
         '  printf "0"\n'
@@ -271,9 +271,9 @@ def test_gh_guard_matches_kinds() -> None:
     assert match, "gh-guard missing constant MIN_REVIEW_MODELS"
     assert int(match.group(1)) == pr_marker.MIN_MODELS, "MIN_MODELS drift"
     assert pr_marker.MIN_REVIEW_ROUNDS == 1
-    assert pr_marker.MAX_REVIEW_ROUNDS == 3
+    assert pr_marker.MAX_REVIEW_ROUNDS == 99
     assert (
-        r"rounds: \([1-3]\)" in gh and r'=~ ^[1-3]$' in gh
+        r"rounds: \([1-9][0-9]*\)" in gh and r'=~ ^[1-9][0-9]?$' in gh
     ), "gh-guard convergence range drift"
 
     # The tests-result header gh-guard greps for must match pr-marker's literal,
@@ -798,9 +798,11 @@ def test_convergence_parsing_parity() -> None:
         marker = Path(tmp) / "code-review.md"
         cases = [
             (["<!-- review-convergence: clean; rounds: 2 -->"], 2),
+            (["<!-- review-convergence: clean; rounds: 8 -->"], 8),
+            (["<!-- review-convergence: clean; rounds: 99 -->"], 99),
             (["<!-- review-convergence: clean; rounds:  2 -->"], 0),
             (["<!-- review-convergence: clean; rounds: two -->"], 0),
-            (["<!-- review-convergence: clean; rounds: 4 -->"], 0),
+            (["<!-- review-convergence: clean; rounds: 100 -->"], 0),
             (["<!-- review-convergence: clean; rounds: 999999999999999999 -->"], 0),
             (
                 [

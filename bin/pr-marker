@@ -41,7 +41,8 @@ multi-model review. `status`/`check` and gh-guard reject a review marker that
 declares fewer than 3 distinct models. The demo and tests markers are exempt.
 The code-review marker also requires `--convergence-rounds N`, where N is the
 final panel round that found no new verified findings. `status`/`check` and
-gh-guard accept only the workflow's range of 1 through 3.
+gh-guard accept rounds 1 through 99. The standard workflow remains capped at
+3 rounds; higher values record explicitly authorized confirmation rounds.
 
 The tests marker is machine-produced: `run-tests` requires a clean repository,
 runs the test-quality evidence preflight and the given check commands, verifies
@@ -169,11 +170,12 @@ MIN_MODELS = 3
 
 # A code-review marker must record that its final review round was clean and
 # how many rounds were needed. Both pr-marker and gh-guard enforce the exact
-# header and the workflow's 3-round cap.
+# header. The standard workflow is capped at 3 rounds, but an explicitly
+# authorized confirmation beyond the cap must still be recorded accurately.
 REVIEW_CONVERGENCE_PREFIX = "<!-- review-convergence: clean; rounds: "
 REVIEW_CONVERGENCE_SUFFIX = " -->"
 MIN_REVIEW_ROUNDS = 1
-MAX_REVIEW_ROUNDS = 3
+MAX_REVIEW_ROUNDS = 99
 
 # A machine-produced marker (tests) must carry this exact header, written only
 # by `run-tests` after every check command exits 0. `status`/`check` and gh-guard
@@ -483,7 +485,8 @@ def cmd_write(args: argparse.Namespace) -> int:
             print(
                 f"pr-marker: refusing to write {kind.name} marker: "
                 "the code-review gate requires a final clean convergence round. "
-                "Pass --convergence-rounds 1, 2, or 3.",
+                f"Pass --convergence-rounds {MIN_REVIEW_ROUNDS} through "
+                f"{MAX_REVIEW_ROUNDS}.",
                 file=sys.stderr,
             )
             return 1

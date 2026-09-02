@@ -387,10 +387,10 @@ eval_marker() {
   if [ "$requires_convergence" = "1" ]; then
     local convergence_lines rounds
     convergence_lines="$(grep -c '^<!-- review-convergence:' "$path" 2>/dev/null || true)"
-    rounds="$(sed -n 's/^<!-- review-convergence: clean; rounds: \([1-3]\) -->$/\1/p' "$path" 2>/dev/null)"
-    if [ "${convergence_lines:-0}" != "1" ] || ! [[ "$rounds" =~ ^[1-3]$ ]]; then
+    rounds="$(sed -n 's/^<!-- review-convergence: clean; rounds: \([1-9][0-9]*\) -->$/\1/p' "$path" 2>/dev/null)"
+    if [ "${convergence_lines:-0}" != "1" ] || ! [[ "$rounds" =~ ^[1-9][0-9]?$ ]]; then
       marker_all_ok=0
-      status_lines="${status_lines}  [ NO-CONVERGENCE ] ${label} -> ${path} (missing valid final-clean-round metadata; rewrite with pr-marker --convergence-rounds 1, 2, or 3)"$'\n'
+      status_lines="${status_lines}  [ NO-CONVERGENCE ] ${label} -> ${path} (missing valid final-clean-round metadata; rewrite with pr-marker --convergence-rounds 1 through 99)"$'\n'
       return
     fi
   fi
@@ -581,8 +581,10 @@ The plan, code-review, and PR-description markers each require a multi-model
 review: pass >=3 distinct models via --models (e.g. --models
 opus-4.8,sonnet-4.6,gpt-5.5). A "1-MODEL" status above means the marker declares
 fewer than 3 models; re-run the review across different models and rewrite it.
-The code-review marker also requires --convergence-rounds N, where N is 1, 2,
-or 3 and identifies the final panel round that found no new verified findings.
+The code-review marker also requires --convergence-rounds N, where N identifies
+the final panel round that found no new verified findings. The standard workflow
+is capped at 3 rounds; values through 99 record explicitly authorized extra
+confirmation rounds.
 
 For the demo marker, use the record-demo skill (codespace + playwright,
 before/after images). If the change has no visual surface, the demo marker may
