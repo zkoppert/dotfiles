@@ -112,6 +112,29 @@ def _gh_guard_create(repo: Path, fake_bin: Path) -> subprocess.CompletedProcess:
     )
 
 
+def _gh_guard_ready(
+    args: list[str], *, confirmed_draft: bool = False
+) -> subprocess.CompletedProcess:
+    """Run gh-guard against a fake gh binary in a noninteractive shell."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_bin = Path(tmp)
+        fake_gh = fake_bin / "gh"
+        fake_gh.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\"\n", encoding="utf-8")
+        fake_gh.chmod(0o755)
+        env = dict(os.environ)
+        env["PATH"] = f"{fake_bin}{os.pathsep}/usr/bin:/bin"
+        if confirmed_draft:
+            env["ZACK_CONFIRMED_PR_DRAFT"] = "1"
+        guard = Path(__file__).resolve().with_name("gh-guard")
+        return subprocess.run(
+            [str(guard), *args],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+
+
 SAMPLE_BRANCHES = [
     "main",
     "feat/foo",
@@ -258,6 +281,25 @@ def test_gh_guard_matches_kinds() -> None:
     assert (
         f"grep -qxF -- '{pr_marker.TESTS_RESULT_HEADER}'" in gh
     ), "gh-guard tests-result header literal drift from pr_marker.TESTS_RESULT_HEADER"
+
+
+def test_gh_guard_blocks_noninteractive_draft_conversion() -> None:
+    """Automation cannot reverse a manual ready-for-review transition."""
+    for flag in ("--undo", "--undo=true"):
+        result = _gh_guard_ready(["pr", "ready", "32128", flag])
+
+        assert result.returncode == 1
+        assert "ZACK_CONFIRMED_PR_DRAFT=1" in result.stderr
+
+
+def test_gh_guard_allows_explicit_draft_confirmation() -> None:
+    """An explicit current-task confirmation can pass the draft guard."""
+    result = _gh_guard_ready(
+        ["pr", "ready", "32128", "--undo"], confirmed_draft=True
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "pr ready 32128 --undo"
 
 
 def test_pin_roundtrip() -> None:

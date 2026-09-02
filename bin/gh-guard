@@ -3,6 +3,8 @@
 # unconfirmed use:
 #
 #   1. `gh pr ready`  - marks a draft PR ready and notifies reviewers.
+#      `gh pr ready --undo` converts a ready PR back to draft and is guarded
+#      separately so automation cannot reverse a human readiness decision.
 #   2. `gh pr create` - opens a PR. Zack's staged change workflow requires five
 #      review, demo, and check-run artifacts before a PR is opened, so this
 #      wrapper blocks PR creation until all five marker files exist in the
@@ -39,6 +41,8 @@
 #
 # Per-command confirmation:
 #   - `gh pr ready`:  set ZACK_CONFIRMED_PR_READY=1 in the same invocation.
+#   - `gh pr ready --undo`: set ZACK_CONFIRMED_PR_DRAFT=1 in the same
+#       invocation.
 #   - `gh pr create`: write all five per-branch review/demo/tests markers under
 #       <git-dir>/copilot-pr-review/ (use `pr-marker write <kind> -`, and
 #       `pr-marker run-tests` for the tests marker)
@@ -136,17 +140,19 @@ op=""
 }
 
 is_pr_ready=0
+is_pr_draft=0
 is_pr_create=0
 is_pr_edit=0
 if [ "$subcmd" = "pr" ] && [ "$op" = "ready" ]; then
   is_pr_ready=1
-  # `--undo` reverts a ready PR back to draft and does NOT notify reviewers,
-  # so it should not trigger the guard.
   for a in "$@"; do
-    if [ "$a" = "--undo" ]; then
-      is_pr_ready=0
-      break
-    fi
+    case "$a" in
+      --undo|--undo=*)
+        is_pr_ready=0
+        is_pr_draft=1
+        break
+        ;;
+    esac
   done
 elif [ "$subcmd" = "pr" ] && [ "$op" = "create" ]; then
   is_pr_create=1
@@ -158,12 +164,13 @@ fi
 # not seen by the parser above because it breaks at `op`. Scan the full
 # argument list and let help requests pass through unguarded so agents can
 # introspect flags without tripping the gate.
-if [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ] || [ "$is_pr_edit" = "1" ]; then
+if [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ] || [ "$is_pr_draft" = "1" ] || [ "$is_pr_edit" = "1" ]; then
   for a in "$@"; do
     case "$a" in
       --help|-h|help)
         is_pr_create=0
         is_pr_ready=0
+        is_pr_draft=0
         is_pr_edit=0
         break
         ;;
@@ -399,6 +406,37 @@ eval_marker() {
   fi
   status_lines="${status_lines}  [ ok      ] ${label} -> ${path}"$'\n'
 }
+
+# --- gh pr ready --undo --------------------------------------------------
+if [ "$is_pr_draft" = "1" ]; then
+  if [ -t 0 ] && [ -t 1 ]; then
+    echo "About to run: gh $*" >&2
+    echo "This converts a ready PR back to draft." >&2
+    printf "Continue? [y/N] " >&2
+    read -r ans
+    case "$ans" in
+      y|Y|yes|YES|Yes) ;;
+      *) echo "Aborted." >&2; exit 1 ;;
+    esac
+  else
+    if [ "${ZACK_CONFIRMED_PR_DRAFT:-}" != "1" ]; then
+      cat >&2 <<'EOF'
+gh-guard: `gh pr ready --undo` blocked.
+
+Reason: a manual ready-for-review transition is explicit approval and must not
+be reversed by automation.
+
+If Zack has explicitly asked in the current conversation to convert this PR
+back to draft, set:
+
+  ZACK_CONFIRMED_PR_DRAFT=1 gh pr ready --undo <args>
+
+Otherwise, preserve the PR's ready state.
+EOF
+      exit 1
+    fi
+  fi
+fi
 
 # --- gh pr ready ---------------------------------------------------------
 if [ "$is_pr_ready" = "1" ]; then

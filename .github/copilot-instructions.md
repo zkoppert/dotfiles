@@ -78,6 +78,7 @@ For context on this mindset, see [Kamil Gwozdz, "Reasons why your prompts suck (
 ## Pull Requests
 - **Check CONTRIBUTING.md before opening PRs**: Before opening a PR or draft PR, search the target repository for a `CONTRIBUTING.md` (or `contributing.md`, `.github/CONTRIBUTING.md`) and follow any guidance there (e.g., commit signing, branch naming, PR format, required checks). This applies to every repo, not just ours.
 - **Always create PRs as draft** unless I explicitly say otherwise
+- **Never convert a ready PR back to draft** unless I explicitly ask for that exact transition in the current conversation. A manual ready-for-review transition is explicit approval and must be preserved, even when an earlier instruction said to keep the PR as a draft.
 - **Always assign me (`zkoppert`) as the assignee** when opening PRs; this helps me track work in progress and follow up
 - Always check a PR's status (open/merged/closed) before pushing commits to it
 - PR descriptions should be kept up to date with the actual changes; verify before finalizing
