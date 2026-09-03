@@ -704,6 +704,19 @@ def test_models_provenance() -> None:
                 )
                 == 1
             )
+            # Gemini models are prohibited even when 3 distinct models are named.
+            assert (
+                pr_marker.main(
+                    [
+                        "write",
+                        "pr-review",
+                        str(body),
+                        "--models",
+                        "opus-4.8,gemini-3.7-flash,gpt-5.5",
+                    ]
+                )
+                == 1
+            )
             # Three distinct: accepted.
             assert (
                 pr_marker.main(
@@ -726,6 +739,14 @@ def test_models_provenance() -> None:
             ok, detail, _s, _p = pr_marker.marker_status(prr, "feat/models")
             assert ok and detail == "ok", detail
             assert bash_count_models(str(marker)) == 3
+
+            marker.write_text(
+                "<!-- reviewed-by-models: opus-4.8, Gemini-3.7-Flash, gpt-5.5 -->\n"
+                + ("PR description review synthesis. " * 8),
+                encoding="utf-8",
+            )
+            ok, detail, _s, _p = pr_marker.marker_status(prr, "feat/models")
+            assert not ok and detail == "prohibited models", detail
 
             # Strip the models header -> status reports "needs models".
             kept = [
@@ -920,11 +941,11 @@ def test_models_argv_order() -> None:
 
 
 def test_gh_guard_gate() -> None:
-    """The real gh-guard `pr create` gate blocks review markers with <3 models.
+    """The real gh-guard gate blocks insufficient or prohibited review models.
 
     Drives the actual gh-guard binary (not a Python reimplementation) against a
     fake `gh`, so it exercises count_review_models/eval_marker for real. Covers
-    the header-less 0-model case that previously failed open.
+    the header-less 0-model case that previously failed open and Gemini models.
     """
     restore = Path.cwd()
     try:
@@ -1044,7 +1065,19 @@ def test_gh_guard_gate() -> None:
             assert res.returncode == 1, out
             assert "FEW-MODELS" in out, out
 
-            # (3) Three distinct models -> still BLOCK until the tests marker exists.
+            # (3) A Gemini model -> BLOCK even with three distinct models.
+            prr.write_text(
+                "<!-- reviewed-by-models: a, Gemini-3.7-Flash, c -->\n"
+                + "pr description review synthesis. " * 6,
+                encoding="utf-8",
+            )
+            res = _gh_guard_create(repo, fake_bin)
+            out = res.stdout + res.stderr
+            assert res.returncode == 1, out
+            assert "PROHIBITED-MODEL" in out, out
+            assert "FAKE-GH-EXECUTED" not in out, out
+
+            # (4) Three allowed models -> still BLOCK until the tests marker exists.
             assert (
                 pr_marker.main(["write", "pr-review", str(body), "--models", "a,b,c"])
                 == 0
@@ -1054,7 +1087,7 @@ def test_gh_guard_gate() -> None:
             assert res.returncode == 1, out
             assert "FAKE-GH-EXECUTED" not in out, out
 
-            # (3b) A forged tests marker over the byte floor and correctly pinned to
+            # (4b) A forged tests marker over the byte floor and correctly pinned to
             # HEAD, but WITHOUT the machine-produced result header, must still BLOCK
             # with NO-RESULT (the gate keys on the header, not size + pin).
             tests_path = pr_marker.marker_path(
@@ -1073,7 +1106,7 @@ def test_gh_guard_gate() -> None:
             assert "NO-RESULT" in out, out
             assert "FAKE-GH-EXECUTED" not in out, out
 
-            # (3c) The result header embedded MID-LINE (not on its own line) must
+            # (4c) The result header embedded MID-LINE (not on its own line) must
             # also BLOCK: gh-guard's grep -qxF matches whole lines only, agreeing
             # with pr-marker's exact-line membership test (no substring bypass).
             tests_path.write_text(
@@ -1088,7 +1121,7 @@ def test_gh_guard_gate() -> None:
             assert "NO-RESULT" in out, out
             assert "FAKE-GH-EXECUTED" not in out, out
 
-            # (4) Machine-produced tests marker present -> PASS (execs the fake gh).
+            # (5) Machine-produced tests marker present -> PASS (execs the fake gh).
             assert pr_marker.main(["run-tests", "--cmd", "true"]) == 0
             res = _gh_guard_create(repo, fake_bin)
             out = res.stdout + res.stderr

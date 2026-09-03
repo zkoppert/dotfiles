@@ -38,7 +38,9 @@ multi-model review: `write` refuses them unless `--models` names >=3 distinct
 models, and records them in a `<!-- reviewed-by-models: a, b, c -->` header, so
 a lightweight single-pass self-review cannot satisfy a gate meant to require a
 multi-model review. `status`/`check` and gh-guard reject a review marker that
-declares fewer than 3 distinct models. The demo and tests markers are exempt.
+declares fewer than 3 distinct models or names a prohibited model. Gemini models
+are prohibited because they repeatedly fail in this workflow and delay reviews.
+The demo and tests markers are exempt.
 The code-review marker also requires `--convergence-rounds N`, where N is the
 final panel round that found no new verified findings. `status`/`check` and
 gh-guard accept rounds 1 through 99. The standard workflow remains capped at
@@ -167,6 +169,7 @@ REVIEWED_COMMIT_SUFFIX = " -->"
 REVIEWED_MODELS_PREFIX = "<!-- reviewed-by-models: "
 REVIEWED_MODELS_SUFFIX = " -->"
 MIN_MODELS = 3
+PROHIBITED_MODEL_PREFIXES = ("gemini",)
 
 # A code-review marker must record that its final review round was clean and
 # how many rounds were needed. Both pr-marker and gh-guard enforce the exact
@@ -311,6 +314,15 @@ def parse_models(raw: str | None) -> list[str]:
         seen.add(key)
         distinct.append(name)
     return distinct
+
+
+def prohibited_models(models: list[str]) -> list[str]:
+    """Return model names that are prohibited from multi-model reviews."""
+    return [
+        model
+        for model in models
+        if model.lower().startswith(PROHIBITED_MODEL_PREFIXES)
+    ]
 
 
 def read_reviewed_models(path: Path) -> list[str]:
@@ -467,6 +479,16 @@ def cmd_write(args: argparse.Namespace) -> int:
     models: list[str] = []
     if kind.requires_models:
         models = parse_models(args.models)
+        blocked_models = prohibited_models(models)
+        if blocked_models:
+            print(
+                f"pr-marker: refusing to write {kind.name} marker: "
+                f"Gemini models are prohibited in multi-model reviews "
+                f"({', '.join(blocked_models)}). Re-run those reviewers with "
+                "Claude, GPT, or another available non-Gemini model.",
+                file=sys.stderr,
+            )
+            return 1
         if len(models) < MIN_MODELS:
             print(
                 f"pr-marker: refusing to write {kind.name} marker: "
@@ -784,8 +806,9 @@ def marker_status(kind: Kind, branch: str) -> tuple[bool, str, int, Path]:
 
     detail is one of: "ok", "missing", "too small", "stale" (pinned marker whose
     reviewed-commit no longer equals HEAD), "needs models" (fewer than MIN_MODELS
-    declared), "needs convergence" (no valid final-clean-round metadata), or
-    "no result" (a requires_result marker missing the machine header).
+    declared), "prohibited models" (a banned model is declared),
+    "needs convergence" (no valid final-clean-round metadata), or "no result"
+    (a requires_result marker missing the machine header).
     """
     path = marker_path(kind, branch)
     if not path.is_file():
@@ -798,8 +821,12 @@ def marker_status(kind: Kind, branch: str) -> tuple[bool, str, int, Path]:
         head = current_head()
         if not recorded or not head or recorded != head:
             return (False, "stale", size, path)
-    if kind.requires_models and len(read_reviewed_models(path)) < MIN_MODELS:
-        return (False, "needs models", size, path)
+    if kind.requires_models:
+        models = read_reviewed_models(path)
+        if prohibited_models(models):
+            return (False, "prohibited models", size, path)
+        if len(models) < MIN_MODELS:
+            return (False, "needs models", size, path)
     if kind.requires_convergence and read_convergence_rounds(path) is None:
         return (False, "needs convergence", size, path)
     if kind.requires_result and not has_result_header(path):

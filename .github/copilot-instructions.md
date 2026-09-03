@@ -110,6 +110,7 @@ When asked to review a PR (or conduct a self-review), follow this workflow autom
 
 ### Multi-model review
 - Launch **at least 3 code review agents in parallel** using different models (e.g., Claude Opus, Claude Sonnet, GPT) to get diverse perspectives
+- **Never use Gemini models** for plan reviews, code reviews, PR-description reviews, or any other multi-model panel. Choose Claude, GPT, or another available non-Gemini model instead.
 - Keep all three reviewers and give at least one an explicit adversarial focus: challenge assumptions, trace failure paths, and try to disprove the proposed behavior. Use a model outside the host model's lineage when one is available.
 - For coordinated changes across multiple PRs or repositories, retrieve and review the actual sibling diffs. Check the seams between them only when sibling changes exist; never rely on descriptions as a substitute for code.
 - Include a simplification pass that asks what code, configuration, or abstraction can be removed without losing required behavior.

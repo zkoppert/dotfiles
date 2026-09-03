@@ -21,12 +21,12 @@
 #      rejected as STALE once HEAD moves past it, so late commits force a
 #      re-review and a re-run. The code-review marker must record a final clean
 #      convergence round from 1 through 3. The three review markers must also
-#      declare >=3 distinct models in a reviewed-by-models
-#      header (pr-marker `--models a,b,c`), so a single-pass self-review cannot
-#      satisfy a gate meant to require a multi-model review. Additionally, the
-#      PR body is piped through the `validate-style` lint skill and the create is
-#      blocked if any hard-rule violations are reported (em-dashes, "per" misuse,
-#      "This PR" as a sentence subject, subjectless action-verb bullets, etc.).
+#      declare >=3 distinct non-Gemini models in a reviewed-by-models header
+#      (pr-marker `--models a,b,c`), so a single-pass self-review or a prohibited
+#      Gemini reviewer cannot satisfy the gate. Additionally, the PR body is
+#      piped through the `validate-style` lint skill and the create is blocked if
+#      any hard-rule violations are reported (em-dashes, "per" misuse, "This PR"
+#      as a sentence subject, subjectless action-verb bullets, etc.).
 #   3. `gh pr edit`   - if `--body` or `--body-file` is provided, the new
 #      body content is piped through the same `validate-style` lint skill
 #      and the edit is blocked if any hard-rule violations are reported.
@@ -329,6 +329,18 @@ count_review_models() {
   printf '%s' "${count:-0}"
 }
 
+# has_prohibited_review_model <path>
+# Succeeds when the first reviewed-by-models header names a Gemini model.
+has_prohibited_review_model() {
+  local path="$1"
+  sed -n 's/^<!-- reviewed-by-models: \(.*\) -->$/\1/p' "$path" 2>/dev/null \
+    | head -n1 \
+    | tr ',' '\n' \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+    | tr '[:upper:]' '[:lower:]' \
+    | grep -Eq '^gemini'
+}
+
 # check_marker <path> <min_bytes>
 # Succeeds (returns 0) when the marker file exists and is at least <min_bytes>
 # bytes, so a bare `touch` never satisfies the gate. Always called from an `if`
@@ -377,6 +389,11 @@ eval_marker() {
   fi
   if [ "$requires_models" = "1" ]; then
     local models_count
+    if has_prohibited_review_model "$path"; then
+      marker_all_ok=0
+      status_lines="${status_lines}  [ PROHIBITED-MODEL ] ${label} -> ${path} (Gemini models cannot satisfy multi-model review; re-run with non-Gemini models)"$'\n'
+      return
+    fi
     models_count="$(count_review_models "$path")"
     if [ "${models_count:-0}" -lt "$MIN_REVIEW_MODELS" ]; then
       marker_all_ok=0
