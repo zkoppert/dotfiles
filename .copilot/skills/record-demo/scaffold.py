@@ -170,6 +170,21 @@ def _has_video(artifacts: Path) -> bool:
     )
 
 
+def _matching_image_pairs(images: list[Path]) -> list[str]:
+    """Return view names that have non-empty before and after images."""
+    before = {
+        path.stem.removeprefix("before-")
+        for path in images
+        if path.stem.startswith("before-")
+    }
+    after = {
+        path.stem.removeprefix("after-")
+        for path in images
+        if path.stem.startswith("after-")
+    }
+    return sorted(before & after)
+
+
 def cmd_check(_args: argparse.Namespace) -> int:
     """Verify the demo marker exists and has images (visual) or an alt aid (N/A)."""
     marker, artifacts = demo_paths()
@@ -203,14 +218,22 @@ def cmd_check(_args: argparse.Namespace) -> int:
         return 0
 
     images = _nonempty_images(artifacts)
-    if not images:
+    pairs = _matching_image_pairs(images)
+    if not pairs:
         sys.stderr.write(
-            f"scaffold check: no non-empty images in {artifacts}. Capture at least "
-            "one before/after pair, or record an N/A marker if there is no surface.\n"
+            f"scaffold check: no matched non-empty before-*/after-* image pair in "
+            f"{artifacts}. Capture both sides of at least one view, or record an N/A "
+            "marker if there is no surface.\n"
         )
         return 1
 
-    print(f"scaffold check: ok ({len(images)} image(s) in {artifacts.name})")
+    print(
+        f"scaffold check: ok ({len(pairs)} matched before/after pair(s) in "
+        f"{artifacts.name})"
+    )
+    for view in pairs:
+        print(f"  - {view}")
+    print(f"scaffold check: found {len(images)} non-empty image(s)")
     for img in images:
         print(f"  - {img.name} ({img.stat().st_size} bytes)")
     if _has_video(artifacts):

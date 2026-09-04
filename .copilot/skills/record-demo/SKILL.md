@@ -36,6 +36,8 @@ the PR description. Two paths:
   `browser_take_screenshot`, `browser_snapshot`, `browser_resize`, ...).
 - `pr-marker` is on PATH (installed to `~/.local/bin`), or call it at
   `~/repos/dotfiles/bin/pr-marker`.
+- The `validate-pr-with-codespace` skill is available. Reuse its Codespace
+  lifecycle and app-bringup playbook instead of inventing a second startup flow.
 
 ## Step 1: scaffold the artifact layout
 
@@ -54,21 +56,46 @@ Suggested filenames inside that directory:
 - `before-<view>.png`, `after-<view>.png` (one pair per view you are changing)
 - `demo.webm` (before/after screen recording, **preferred**)
 
-## Step 2: bring up the app in a Codespace and forward the port
+## Step 2: bring up fresh, complete environments
 
-Start (or reuse) a Codespace on the feature branch, run the app, and forward its
-port so Playwright can reach it. Non-interactive `gh codespace ssh` needs a login
-shell so `GITHUB_TOKEN` is present for bootstrap:
+Invoke `validate-pr-with-codespace` and follow its current lifecycle and bringup
+instructions. In particular:
+
+- Create a fresh Codespace on the exact feature ref. Do not reuse an unrelated or
+  previously shut down Codespace.
+- Use the repository's documented full-stack command. For `github/github`, this
+  means the UI-enabled path from the monolith playbook, not a Rails-only server.
+- Run the feature-specific setup scripts and enable the required feature flags.
+- Confirm every required service is healthy before opening Playwright. A page
+  returning 200 is insufficient when its JavaScript, CSS, manifest, database,
+  git backend, or sibling service is unavailable.
+- Give long validation and demo sessions enough idle time to finish. If a
+  Codespace restarts, rerun the complete readiness gate before continuing.
+
+For the **before** shots, use a separate fresh Codespace on the base ref or a
+known-good deployed baseline. Record both refs and commit SHAs. Keep the viewport,
+route, fixture data, feature flags, and service topology identical.
+
+### Run the HTTP asset preflight
+
+Before Playwright capture, run the reusable preflight against each environment:
 
 ```bash
-# Get the forwarded URL for the app's port (example: 3000).
-gh codespace ports forward 3000:3000 --codespace "$CS" &   # or use the Ports panel
-gh codespace ssh -c "$CS" -- bash -lc 'cd /workspaces/<repo> && <start-app-command>'
+python3 ~/.copilot/skills/record-demo/preflight.py \
+  --url "http://github.localhost/<route>" \
+  --expect-text "<stable text unique to the page>" \
+  --require-frontend \
+  --require-image
 ```
 
-For the **before** shots, point Playwright at the same app running on the base
-branch (a second Codespace on `main`, or the deployed baseline). Capturing before
-and after against the same viewport and route is what makes the comparison honest.
+Use the URL recommended by `validate-pr-with-codespace`; do not assume a
+`*.app.github.dev` URL is usable by headless Chromium. Omit `--require-image`
+only when the intended page genuinely has no images. The preflight fails when
+the page does not render, expected text is absent, frontend assets are missing,
+or a discovered required asset returns an error.
+
+Save the successful output for both base and feature environments in the demo
+artifacts directory as `before-preflight.txt` and `after-preflight.txt`.
 
 ## Step 3: capture before/after with Playwright
 
@@ -78,11 +105,40 @@ identical across before and after:
 1. `browser_resize` to a fixed size (for example 1280x800) so both shots match.
 2. `browser_navigate` to the route under test.
 3. `browser_snapshot` to confirm the page rendered the state you intend to show.
-4. `browser_take_screenshot` and save into the artifacts directory with the
+4. Check the browser console and failed network requests. Any failed JavaScript,
+   CSS, manifest, image, or API request blocks capture until explained and fixed.
+5. Run this image-health check with `browser_evaluate` and require an empty result:
+
+   ```js
+   Array.from(document.images)
+     .filter(image => image.offsetParent !== null)
+     .filter(image => !image.complete || image.naturalWidth === 0)
+     .map(image => image.currentSrc || image.src)
+   ```
+
+   This catches missing avatars and user icons that an HTTP 200 cannot detect.
+6. `browser_take_screenshot` and save into the artifacts directory with the
    `before-*` / `after-*` names above.
 
 Repeat for each meaningful view. Look at each screenshot before moving on, following
-the "use vision for visual work" rule; do not assume the capture is correct.
+the "use vision for visual work" rule; do not assume the capture is correct. Reject
+screenshots with missing CSS, broken icons, placeholder error pages, loading
+spinners, dev overlays, or a different route/state than the matching image.
+
+### Environment fingerprint
+
+Before recording, write these facts into the demo marker:
+
+- Codespace name, repository, branch/ref, and commit SHA for base and feature.
+- Start command and required supporting services.
+- Feature flags and fixture/setup scripts.
+- URL, route, viewport, and fixture identity.
+- HTTP preflight result, browser console result, failed-request count, and broken
+  visible-image count.
+
+If the full page cannot render and you switch to a fragment or synthetic harness,
+stop and ask Zack before capture. A fragment without production CSS or avatars is
+not equivalent visual evidence for a full-page change.
 
 ### Preferred: a recorded before/after video walkthrough
 
@@ -146,10 +202,10 @@ python3 ~/.copilot/skills/record-demo/scaffold.py check
 ```
 
 `check` confirms the demo marker exists and, for a visual demo, that the artifacts
-directory holds at least one non-empty image. It also warns when a visual demo has
-no before/after video, since a recording is the preferred deliverable. For an `N/A`
-marker it confirms the justification records an alternative visual aid. Fix any gap
-it reports before moving on to the PR description.
+directory holds at least one matched, non-empty `before-*` and `after-*` image pair.
+It also warns when a visual demo has no before/after video, since a recording is the
+preferred deliverable. For an `N/A` marker it confirms the justification records an
+alternative visual aid. Fix any gap it reports before moving on to the PR description.
 
 ## After this skill
 
