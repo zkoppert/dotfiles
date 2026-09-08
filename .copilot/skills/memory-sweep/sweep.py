@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Memory-to-instructions sweep.
+"""Durable-guidance sweep.
 
-Reads a dump of the agent's stored memories and the personal
-copilot-instructions.md file, then reports which memory facts are likely
-already covered in the instructions and which are memory-only rules that
-should be promoted into the file.
+Reads candidate rules extracted from memories and session history, then
+reports which are covered by durable global, skill, or repository guidance.
 
 Usage:
-    python3 sweep.py <memories.md> <instructions.md>
+    python3 sweep.py <candidates.md> <guidance-path> [<guidance-path> ...]
 
 Exit codes:
     0  Run completed (regardless of findings).
@@ -23,7 +21,10 @@ memory list down to a small set of candidates that the human can review
 in one sitting.
 """
 
+from __future__ import annotations
+
 import argparse
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -46,8 +47,24 @@ STOPWORDS = {
 }
 
 # Verdict thresholds.
-PRESENT_THRESHOLD = 0.70
+PRESENT_THRESHOLD = 0.90
 AMBIGUOUS_THRESHOLD = 0.30
+
+GUIDANCE_FILENAMES = {
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "SKILL.md",
+    "copilot-instructions.md",
+}
+IGNORED_DIRECTORIES = {
+    ".git",
+    ".pytest_cache",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "vendor",
+}
 
 
 @dataclass
@@ -69,6 +86,7 @@ class Finding:
     matched_tokens: list[str]
     missing_tokens: list[str]
     matched_phrases: list[str]
+    guidance_path: Path | None = None
 
 
 def parse_memories(text: str) -> list[Memory]:
@@ -178,11 +196,12 @@ def extract_tokens(text: str) -> set[str]:
     """Return the set of distinctive lowercase tokens in `text`.
 
     A token is 4+ characters, starting with a letter, followed by
-    letters, digits, hyphens, or underscores; and not in STOPWORDS.
-    Hyphens and underscores are kept on purpose so domain terms like
-    `co-authored` and `foo_bar` survive tokenization intact.
+    letters, digits, or underscores; and not in STOPWORDS. Hyphen-like
+    punctuation is normalized to spaces so ``em-dashes`` and ``em dashes``
+    compare consistently.
     """
-    words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}", text.lower())
+    normalized = re.sub(r"[-\u2010-\u2015]", " ", text.lower())
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_]{3,}", normalized)
     return {w for w in words if w not in STOPWORDS}
 
 
@@ -196,6 +215,7 @@ def classify(
     memory: Memory,
     instructions_tokens: set[str],
     instructions_lower: str,
+    guidance_path: Path | None = None,
 ) -> Finding:
     """Score a single memory against the instructions corpus.
 
@@ -236,6 +256,7 @@ def classify(
         matched_tokens=matched_tokens,
         missing_tokens=missing_tokens,
         matched_phrases=matched_phrases,
+        guidance_path=guidance_path,
     )
 
 
@@ -253,7 +274,11 @@ def format_finding(f: Finding) -> str:
     ]
     if f.matched_phrases:
         lines.append(f"  matched phrases: {', '.join(repr(p) for p in f.matched_phrases[:3])}")
-    if f.verdict != "PRESENT" and f.missing_tokens:
+    if f.guidance_path:
+        lines.append(f"  closest guidance: {f.guidance_path}")
+    if f.memory.citations:
+        lines.append(f"  citations: {f.memory.citations}")
+    if f.missing_tokens:
         sample = ", ".join(f.missing_tokens[:8])
         lines.append(f"  missing tokens (sample): {sample}")
     return "\n".join(lines)
@@ -269,14 +294,162 @@ def _read_text(path: Path, label: str) -> str:
         raise IOError(f"could not decode {label} file {path} as UTF-8: {exc}") from exc
 
 
-def run_sweep(memories_path: Path, instructions_path: Path) -> tuple[list[Finding], dict[str, int]]:
-    memories_text = _read_text(memories_path, "memories")
-    instructions_text = _read_text(instructions_path, "instructions")
-    instructions_lower = instructions_text.lower()
-    instructions_tokens = extract_tokens(instructions_text)
+def is_guidance_file(path: Path) -> bool:
+    """Return whether a discovered file contains durable agent guidance."""
+    return path.name in GUIDANCE_FILENAMES or path.name.endswith(".instructions.md")
 
-    memories = parse_memories(memories_text)
-    findings = [classify(m, instructions_tokens, instructions_lower) for m in memories]
+
+def resolve_path(path: Path) -> Path:
+    """Resolve a path or raise a CLI-friendly error."""
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise IOError(f"could not resolve guidance path {path}: {exc}") from exc
+
+
+def _is_within(path: Path, directory: Path) -> bool:
+    """Return whether ``path`` resolves within ``directory``."""
+    try:
+        resolve_path(path).relative_to(resolve_path(directory))
+    except ValueError:
+        return False
+    return True
+
+
+def _scan_guidance_tree(display_root: Path, boundary: Path) -> list[Path]:
+    """Scan one guidance tree without crossing nested symlink boundaries."""
+    guidance_files: list[Path] = []
+    pending = [display_root]
+    seen_directories: set[Path] = set()
+
+    while pending:
+        current = pending.pop()
+        resolved_directory = resolve_path(current)
+        if resolved_directory in seen_directories:
+            continue
+        seen_directories.add(resolved_directory)
+
+        try:
+            entries = list(os.scandir(current))
+        except OSError as exc:
+            raise IOError(f"could not scan guidance directory {current}: {exc}") from exc
+
+        for entry in entries:
+            candidate = Path(entry.path)
+            try:
+                is_symlink = entry.is_symlink()
+                is_directory = entry.is_dir(follow_symlinks=False)
+                is_file = entry.is_file(follow_symlinks=False)
+            except OSError as exc:
+                raise IOError(f"could not inspect guidance entry {candidate}: {exc}") from exc
+
+            if is_directory:
+                if entry.name not in IGNORED_DIRECTORIES:
+                    pending.append(candidate)
+                continue
+
+            if is_symlink:
+                if entry.name in IGNORED_DIRECTORIES or not is_guidance_file(candidate):
+                    continue
+                try:
+                    linked_file = entry.is_file(follow_symlinks=True)
+                except OSError as exc:
+                    raise IOError(f"could not inspect guidance symlink {candidate}: {exc}") from exc
+                if linked_file and is_guidance_file(candidate) and _is_within(candidate, boundary):
+                    guidance_files.append(candidate)
+                continue
+
+            if is_file and is_guidance_file(candidate):
+                guidance_files.append(candidate)
+
+    return guidance_files
+
+
+def collect_guidance_files(paths: list[Path]) -> list[Path]:
+    """Expand explicit files and directories into deduplicated guidance files."""
+    discovered: dict[Path, Path] = {}
+
+    for path in paths:
+        expanded = path.expanduser().absolute()
+        canonical = resolve_path(expanded)
+        if expanded.is_file():
+            discovered.setdefault(canonical, expanded)
+            continue
+        if not expanded.is_dir():
+            raise IOError(f"guidance path not found: {path}")
+
+        scan_roots: list[tuple[Path, Path]] = [(expanded, expanded)]
+        supplied_as_skill_root = expanded.parts[-2:] == (".copilot", "skills")
+        resolved_as_skill_root = canonical.parts[-2:] == (".copilot", "skills")
+        if supplied_as_skill_root or resolved_as_skill_root:
+            scan_roots = []
+            try:
+                entries = list(os.scandir(expanded))
+            except OSError as exc:
+                raise IOError(f"could not scan guidance directory {expanded}: {exc}") from exc
+
+            for entry in entries:
+                candidate = Path(entry.path)
+                if entry.name in IGNORED_DIRECTORIES:
+                    continue
+                try:
+                    is_symlink = entry.is_symlink()
+                    linked_directory = entry.is_dir(follow_symlinks=True)
+                    linked_file = entry.is_file(follow_symlinks=True)
+                except OSError as exc:
+                    raise IOError(f"could not inspect guidance entry {candidate}: {exc}") from exc
+
+                if linked_directory:
+                    scan_roots.append((candidate, resolve_path(candidate)))
+                elif linked_file and is_guidance_file(candidate):
+                    discovered.setdefault(resolve_path(candidate), candidate)
+                elif is_symlink and not linked_file:
+                    raise IOError(f"skill symlink does not resolve to a file or directory: {candidate}")
+
+        for display_root, boundary in scan_roots:
+            for candidate in _scan_guidance_tree(display_root, boundary):
+                discovered.setdefault(resolve_path(candidate), candidate)
+
+    guidance_files = sorted(discovered.values(), key=lambda item: str(item))
+    if not guidance_files:
+        raise IOError("no guidance files found in the supplied paths")
+    return guidance_files
+
+
+def run_sweep(
+    candidates_path: Path,
+    guidance_paths: Path | list[Path],
+) -> tuple[list[Finding], dict[str, int]]:
+    candidates_text = _read_text(candidates_path, "candidates")
+    requested_paths = [guidance_paths] if isinstance(guidance_paths, Path) else guidance_paths
+    guidance_files = collect_guidance_files(requested_paths)
+    guidance_documents = [
+        (path, text, text.lower(), extract_tokens(text))
+        for path in guidance_files
+        for text in [_read_text(path, "guidance")]
+    ]
+
+    candidates = parse_memories(candidates_text)
+    findings = [
+        max(
+            (
+                classify(
+                    candidate,
+                    guidance_tokens,
+                    guidance_lower,
+                    guidance_path,
+                )
+                for guidance_path, _, guidance_lower, guidance_tokens in guidance_documents
+            ),
+            key=lambda finding: (
+                finding.score,
+                -len(finding.missing_tokens),
+                len(finding.matched_tokens),
+                len(finding.matched_phrases),
+            ),
+        )
+        for candidate in candidates
+    ]
 
     counts = {"PRESENT": 0, "AMBIGUOUS": 0, "PROMOTE": 0}
     for f in findings:
@@ -288,20 +461,23 @@ def run_sweep(memories_path: Path, instructions_path: Path) -> tuple[list[Findin
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Compare a dump of stored Copilot memories against the personal "
-            "copilot-instructions.md file and flag memory-only rules that "
-            "should be promoted into the file."
+            "Compare candidate rules from memories and session history against "
+            "durable global, skill, and repository guidance."
         )
     )
     parser.add_argument(
-        "memories",
+        "candidates",
         type=Path,
-        help="Path to the memories dump (markdown).",
+        help="Path to candidate rules extracted from memories and session history.",
     )
     parser.add_argument(
-        "instructions",
+        "guidance",
         type=Path,
-        help="Path to the personal copilot-instructions.md.",
+        nargs="+",
+        help=(
+            "Guidance file or directory. Directories are searched for global, "
+            "repository, agent, and skill instruction files."
+        ),
     )
     parser.add_argument(
         "--only",
@@ -310,22 +486,23 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.memories.is_file():
-        print(f"error: memories file not found: {args.memories}", file=sys.stderr)
-        return 1
-    if not args.instructions.is_file():
-        print(f"error: instructions file not found: {args.instructions}", file=sys.stderr)
+    if not args.candidates.is_file():
+        print(f"error: candidates file not found: {args.candidates}", file=sys.stderr)
         return 1
 
     try:
-        findings, counts = run_sweep(args.memories, args.instructions)
+        guidance_files = collect_guidance_files(args.guidance)
+        findings, counts = run_sweep(args.candidates, guidance_files)
     except IOError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     findings.sort(key=lambda f: (f.score, f.memory.subject))
 
-    print(f"Scanned {len(findings)} memories against {args.instructions.name}\n")
+    print(
+        f"Scanned {len(findings)} candidate rules against "
+        f"{len(guidance_files)} guidance files\n"
+    )
     print(
         f"  PROMOTE: {counts['PROMOTE']:3d}   "
         f"AMBIGUOUS: {counts['AMBIGUOUS']:3d}   "

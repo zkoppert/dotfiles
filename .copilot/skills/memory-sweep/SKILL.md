@@ -1,147 +1,109 @@
 ---
 name: memory-sweep
-description: This skill should be used when the user asks to "audit my memories", "sweep memories", "find memory-only rules", "what memories should be promoted to instructions", "review my Copilot memories", or any similar request to identify rules that live only in stored Copilot memories but are not yet documented in their personal copilot-instructions.md. It dumps the current memories from the agent's prompt context to a tempfile and runs a Python classifier that scores each memory against the instructions file for keyword and phrase overlap. Output is a list of memories classified as PROMOTE (memory-only, candidate for promotion), AMBIGUOUS (partial overlap, worth eyeballing), or PRESENT (already covered).
+description: Use when the user asks to audit memories, find memory-only rules, review Copilot memories, or identify durable guidance that exists only in session history. Compare explicit user rules from memories and sessions against global instructions, skill definitions, and repository rules, then recommend the correct durable owner for uncovered guidance.
 ---
 
-# Memory Sweep: find memory-only rules that should be in copilot-instructions.md
+# Audit durable Copilot guidance
 
-## When to use this skill
+Use this skill to find explicit user rules that appear in memories or session history but are missing from durable guidance.
 
-Trigger this skill whenever the user asks any of:
+## Sources of truth
 
-- "audit my memories"
-- "sweep my memories"
-- "any memory-only rules?"
-- "review my Copilot memories"
-- "what memories should be promoted to instructions"
-- "is anything in memory that should be in the file?"
+- Universal preferences belong in `~/.copilot/copilot-instructions.md`.
+- Task-specific behavior belongs in the relevant skill's `SKILL.md`, which is authoritative for that skill.
+- Repository conventions belong in that repository's `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.github/copilot-instructions.md`, or `.github/instructions/**/*.instructions.md`.
+- Session history and memories are evidence for candidate rules, not durable policy by themselves.
 
-Also proactively offer to run this skill if you notice during a session
-that a user-stated rule lives only in memory and not in the instructions
-file (e.g., when a recent multi-model PR review flags a "smuggled rule"
-finding like the gratitude-first case).
+## Run the sweep
 
-## Why this matters
-
-Memories are great for capturing preferences mid-conversation, but they
-have downsides:
-
-- They're personal to one user account and don't transfer to teammates.
-- They can be down-voted into oblivion accidentally.
-- They're invisible during code review or onboarding.
-- They can drift out of sync with the canonical instructions file.
-
-Rules that the user wants to apply consistently belong in
-`copilot-instructions.md`, where they're visible, source-controlled,
-and survive any memory churn. The memory remains useful as a quick
-reference but the file is authoritative.
-
-## How to run the sweep
-
-Follow these steps **in order**:
-
-### Step 1: Dump the current memories block
-
-You have the user's stored memories in your prompt context inside a
-`<memories>` block. Write that block verbatim to a tempfile in a
-private per-invocation directory. Memories can contain personal
-preferences and context you do not want on a predictable shared path.
+### 1. Create a private workspace
 
 ```bash
 SWEEP_DIR=$(mktemp -d -t memory-sweep.XXXXXX)
 chmod 700 "$SWEEP_DIR"
 ```
 
-Then use your file-write tool to create
-`"$SWEEP_DIR/memories.md"` containing **only** the memory entries
-from the `<memories>` block, one entry per memory, in this exact
-markdown format:
+Create `"$SWEEP_DIR/candidates.md"` using this format:
 
 ```markdown
-**subject heading**
-- Fact: <fact text>
-- Citations: <citations text>
-
-**next subject**
-- Fact: <fact text>
-- Citations: <citations text>
+**subject**
+- Fact: <explicit user rule>
+- Citations: <memory citation or session ID and timestamp>
 ```
 
-Do **not** include the surrounding instructional prose ("Be sure to
-consider these stored facts carefully...", "If you come across a
-memory you can verify...", etc.). Only the memory entries themselves.
+### 2. Collect candidate rules
 
-### Step 2: Run the classifier
+Add the current `<memories>` block without its surrounding instructional prose. Then search session history with `session_store_sql`, starting with the last 7 days and widening only when needed. Inspect user messages, not assistant responses, for explicit durable language such as "always," "never," "prefer," "don't," or "should." Use a time-bounded query and a finite limit, for example:
+
+```sql
+SELECT session_id, timestamp, user_message
+FROM turns
+WHERE timestamp >= now() - INTERVAL '7 days'
+  AND (
+    user_message ILIKE '%always%'
+    OR user_message ILIKE '%never%'
+    OR user_message ILIKE '%prefer%'
+    OR user_message ILIKE '%don''t%'
+    OR user_message ILIKE '%should%'
+  )
+ORDER BY timestamp DESC
+LIMIT 200
+```
+
+Extract only rules the user stated or explicitly approved. Do not treat assistant suggestions as user policy. Add each session-derived rule to `candidates.md` with its session ID and timestamp.
+
+### 3. Compare against durable guidance
+
+Build the guidance argument list, adding the current repository only when the command is running inside one:
+
+```bash
+GUIDANCE=(
+  ~/.copilot/copilot-instructions.md
+  ~/.copilot/skills
+)
+if REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
+  GUIDANCE+=("$REPO_ROOT")
+fi
+```
+
+Run:
 
 ```bash
 python3 ~/.copilot/skills/memory-sweep/sweep.py \
-  "$SWEEP_DIR/memories.md" \
-  ~/repos/dotfiles/.github/copilot-instructions.md
+  "$SWEEP_DIR/candidates.md" \
+  "${GUIDANCE[@]}"
 ```
 
-To focus on only the promotion candidates:
+Directory arguments are searched only for recognized instruction and skill files. Use `--only PROMOTE` to show only likely gaps.
 
-```bash
-python3 ~/.copilot/skills/memory-sweep/sweep.py \
-  "$SWEEP_DIR/memories.md" \
-  ~/repos/dotfiles/.github/copilot-instructions.md \
-  --only PROMOTE
-```
+### 4. Review findings
 
-When the review is finished, clean up the temp directory:
+The classifier sorts findings from least to most overlap:
+
+| Verdict | Score | Meaning |
+|---------|-------|---------|
+| PROMOTE | `< 0.30` | Little overlap with durable guidance |
+| AMBIGUOUS | `0.30` to `< 0.90` | Partial overlap that needs review |
+| PRESENT | `>= 0.90` | Strongly represented in one durable guidance file |
+
+For each `PROMOTE` or relevant `AMBIGUOUS` finding:
+
+1. Verify the candidate against its memory or session citation.
+2. Ask the user whether it should become durable guidance.
+3. Recommend the correct owner: global instructions, a skill, or repository rules.
+4. Check for conflicting existing guidance before editing.
+
+Do not promote findings automatically. The classifier is a keyword and phrase triage aid, not a semantic policy engine.
+
+### 5. Clean up
 
 ```bash
 rm -rf "$SWEEP_DIR"
 ```
 
-### Step 3: Review the output with the user
-
-The output sorts findings by score (lowest first), so the strongest
-PROMOTE candidates appear at the top. For each candidate:
-
-1. Read the fact text aloud (or summarize it).
-2. Confirm with the user whether it's a rule they want documented in
-   the instructions file.
-3. If yes, ask which section of the file it belongs under (e.g.,
-   Writing Style, Pull Requests, GitHub Actions).
-4. If the user says "skip" or "leave in memory only", move on.
-
-Do **not** silently file a PR for everything flagged as PROMOTE. The
-classifier is a heuristic and the user gets the final say on what
-becomes documented policy.
-
-### Step 4: Promote agreed-upon rules
-
-For each rule the user approves for promotion:
-
-1. Draft the change to `~/repos/dotfiles/.github/copilot-instructions.md`.
-   Match the surrounding section's tone and structure.
-2. Self-lint with the validate-style skill before opening a PR.
-3. Follow the user's PR workflow from their personal instructions:
-   multi-model review, draft PR, sign-off, Co-authored-by Copilot trailer,
-   full repo PR template.
-
-## Verdict guide
-
-| Verdict   | Score range  | What it means                                                                              |
-|-----------|--------------|--------------------------------------------------------------------------------------------|
-| PROMOTE   | < 0.30       | Almost no overlap with the file. Strong candidate for promotion.                           |
-| AMBIGUOUS | 0.30 to <0.70| Partial overlap. Eyeball the matched/missing tokens to decide.                             |
-| PRESENT   | >= 0.70      | Significant token overlap with the file. Likely already documented. Exact quoted-phrase matches add weight (up to +0.3) but cannot reach PRESENT on their own. |
-
-PRESENT findings are not always perfect matches. If the user has
-recently added a rule to the file and the memory was already there, the
-two should agree. If they don't, that's a different problem (drift)
-worth surfacing.
-
 ## Caveats
 
-- This is a keyword and phrase classifier, not a semantic one. False
-  positives and false negatives both happen. Treat output as a triage
-  aid, not as gospel.
-- The classifier only checks the instructions file passed as the second
-  argument. Repo-level `.github/copilot-instructions.md` files are not
-  considered.
-- The `<memories>` block in your prompt context already excludes
-  memories outside the current scope. Whatever you dump is the working
-  set.
+- Session searches are best-effort and must remain time-bounded.
+- Repository guidance outside the current checkout is not included unless passed explicitly.
+- User-level skill discovery follows each immediate skill symlink under `~/.copilot/skills`, but does not follow nested symlinks inside a skill. Repository scans do not follow directory symlinks or file symlinks that resolve outside the repository.
+- A `PRESENT` result can still hide contradictory wording, so inspect likely conflicts directly.

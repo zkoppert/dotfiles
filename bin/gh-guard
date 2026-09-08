@@ -20,7 +20,7 @@
 #      markers are HEAD-pinned: they record the reviewed/tested commit and are
 #      rejected as STALE once HEAD moves past it, so late commits force a
 #      re-review and a re-run. The code-review marker must record a final clean
-#      convergence round from 1 through 3. The three review markers must also
+#      convergence round from 1 through 5. The three review markers must also
 #      declare >=3 distinct non-Gemini models in a reviewed-by-models header
 #      (pr-marker `--models a,b,c`), so a single-pass self-review or a prohibited
 #      Gemini reviewer cannot satisfy the gate. Additionally, the PR body is
@@ -600,7 +600,7 @@ opus-4.8,sonnet-4.6,gpt-5.5). A "1-MODEL" status above means the marker declares
 fewer than 3 models; re-run the review across different models and rewrite it.
 The code-review marker also requires --convergence-rounds N, where N identifies
 the final panel round that found no new verified findings. The standard workflow
-is capped at 3 rounds; values through 99 record explicitly authorized extra
+is capped at 5 rounds; values through 99 record explicitly authorized extra
 confirmation rounds.
 
 For the demo marker, use the record-demo skill (codespace + playwright,

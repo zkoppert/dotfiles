@@ -16,7 +16,7 @@ minimum size in bytes, whether HEAD-pinned, and whether a multi-model review):
 
   code-review  code-review.md   200   multi-model review of the code diff
                                       (pinned, requires >=3 models and a final
-                                      clean convergence round from 1 through 3)
+                                      clean convergence round from 1 through 5)
   plan         plan.md          120   multi-model review of the plan
                                       (requires >=3 models)
   demo         demo.md          120   demo video + before/after images
@@ -44,7 +44,7 @@ The demo and tests markers are exempt.
 The code-review marker also requires `--convergence-rounds N`, where N is the
 final panel round that found no new verified findings. `status`/`check` and
 gh-guard accept rounds 1 through 99. The standard workflow remains capped at
-3 rounds; higher values record explicitly authorized confirmation rounds.
+5 rounds; higher values record explicitly authorized confirmation rounds.
 
 The tests marker is machine-produced: `run-tests` requires a clean repository,
 runs the test-quality evidence preflight and the given check commands, verifies
@@ -173,7 +173,7 @@ PROHIBITED_MODEL_PREFIXES = ("gemini",)
 
 # A code-review marker must record that its final review round was clean and
 # how many rounds were needed. Both pr-marker and gh-guard enforce the exact
-# header. The standard workflow is capped at 3 rounds, but an explicitly
+# header. The standard workflow is capped at 5 rounds, but an explicitly
 # authorized confirmation beyond the cap must still be recorded accurately.
 REVIEW_CONVERGENCE_PREFIX = "<!-- review-convergence: clean; rounds: "
 REVIEW_CONVERGENCE_SUFFIX = " -->"
