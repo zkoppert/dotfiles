@@ -13,6 +13,7 @@ These preferences apply across all repositories and sessions.
 - **Capture side quests as issues** - when you discover bugs, optimization opportunities, or other improvements that are out of scope for the current task, don't silently ignore them. Prompt me to ask if I'd like to create a new GitHub issue in the repo to capture the work. This keeps us focused on the task at hand while ensuring we don't lose track of valuable findings that could trip us up later.
 - **Never guess the day of the week** - always determine it from the `<current_datetime>` tag in user messages or by running `date` in the shell. Do not calculate from anchor dates or estimate from memory.
 - **Never name internal repos, issues, or PRs in public contexts** - when writing PR descriptions, issue comments, discussion posts, or documentation in public repositories, do not reference internal/private repository names, issue numbers, or PR links. Anonymize them instead (e.g., "a private UI monorepo" or "an internal service repo"). Public repos include any repo visible to people outside the organization.
+- **Deploy to review lab at most once without approval** - after initiating a review-lab deployment for a PR or branch, do not submit another deployment request, including a retry or a different review-lab target, unless I explicitly approve it in the current conversation. Check the existing request and escalate a stuck deployment instead.
 
 ## Copilot Skills
 
