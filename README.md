@@ -38,6 +38,62 @@ copilot plugin update gho11y
 
 To retry a failed or interrupted setup, confirm that `gh auth status` and `copilot --version` succeed, set `COPILOT_SKILL_CATALOG_REPO`, and run `./install.sh` again.
 
+## How do exact-head review exceptions work?
+
+`bin/pr-marker` owns a private, explicit exception for an authorized continuation of an **existing** PR. It waives only the `plan`, `code-review`, and `pr-review` requirements, including model counts and clean convergence. It reports **WAIVED (not clean approval)** and leaves all original reviewer files and findings intact. Without a waiver record, existing CLI behavior is unchanged.
+
+### Approval and application
+
+Obtain explicit owner approval for that PR, source branch, full commit, and the one-time review exception. Approval to implement this mechanism does not authorize applying it to another change. Keep the approval, reason, and provenance in private storage, outside tracked files. The record is an honest attestation of that approval, not a signature verifier; like existing marker evidence, it does not defend against deliberate forgery by the checkout owner.
+
+Create a private JSON file with exactly these fields (the values below are placeholders):
+
+```json
+{
+  "schema": "pr-marker-review-waiver.v1",
+  "repo": "OWNER/REPOSITORY",
+  "pr": 42,
+  "source_branch": "author/existing-pr-source",
+  "local_branch": "task/local-checkout-branch",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "approved_by": "Owner who authorized the exception",
+  "reason": "One-time continuation without further reviews or clean convergence",
+  "provenance": "Private references to the explicit exception and approval messages"
+}
+```
+
+`repo` is the exact canonical GitHub.com owner/name, without a URL or `.git` suffix. `pr` must be a positive JSON integer. `commit` must be the complete lowercase 40-character SHA. All text fields must be nonempty, trimmed strings without control characters. Missing, extra, or duplicate fields are rejected. Both branch names must be literal valid Git branch names. `local_branch` is separate because an isolated task branch can publish to an existing PR's differently named `source_branch`.
+
+From the approved, clean checkout at that exact commit:
+
+```bash
+pr-marker review-waiver apply /private/path/approval.json
+pr-marker status --repo OWNER/REPOSITORY --pr 42 --source-branch author/existing-pr-source
+pr-marker check --repo OWNER/REPOSITORY --pr 42 --source-branch author/existing-pr-source
+```
+
+Application validates the local branch, HEAD, cleanliness, and single canonical `origin` URL (HTTPS, SCP-style SSH, or `ssh://git@github.com/`). It stores `review-waiver.json` with mode `0600` beside the existing per-branch markers in the **per-checkout Git directory**, never in the tracked tree or a global exemption list. Applying again refuses to replace an existing record. Symlink records are rejected.
+
+### Checking and publication
+
+Every check with a stored waiver requires all three explicit target arguments and revalidates the checkout. A wrong repository, PR, source branch, local branch, or HEAD refuses; malformed records refuse even if the review markers themselves pass. A future head cannot inherit consent. Plain `check`/`status` refuse while a waiver exists because they cannot establish the intended PR. Reports retain each marker's actual evidence status alongside the waived requirement and include the approval reason and provenance; keep those reports private too.
+
+The `demo` and machine-produced, HEAD-pinned `tests` markers must still pass. Failed tests cannot be waived, and dirty checkouts refuse. Continue to use `pr-marker run-tests` for the full applicable checks. The exception adds no push, merge, readiness, force-push, branch-protection, or CI authority. Publication must still verify the live PR's canonical repository and source branch, remote predecessor, readiness and body, fast-forward safety, required CI, and all existing protections. `pr-marker` checks local evidence and explicit target context; it does not query GitHub or publish anything.
+
+`gh-guard` delegates to the same canonical reader when it encounters a waiver during `pr create`. It refuses creation even when old review markers are clean: an existing-PR authorization cannot justify a new PR. Its usual confirmations, body linting, ready/draft guards, and default marker checks remain in force. Existing-PR continuation uses the explicit `pr-marker check` above before the already-authorized publication workflow.
+
+### Revocation and activation
+
+After the authorized continuation, revoke the local record:
+
+```bash
+pr-marker review-waiver revoke
+```
+
+Revocation removes only the current branch's exception, including a malformed or stale record. It never rewrites review evidence. Repeated checks on the exact approved revision are allowed until revocation, so status inspection does not consume consent; “one-time” means one explicitly approved PR revision, not one CLI invocation. A new revision needs new explicit authorization and a new record, or the normal review workflow after revocation.
+
+The supported activation path is the existing `./install.sh` from a validated, durable dotfiles checkout, followed by a new shell (or `export PATH="$HOME/.local/bin:$PATH"` in the current shell). It links both `pr-marker` and `gh-guard` from the same checkout. It also updates the other documented user-level dotfiles integrations: obtain authorization for that installation scope before running it in a managed environment. Do not install from a disposable worktree that will be removed. Both helpers require the existing Python 3.9+ runtime. Implementation/validation alone does not install the helpers or mint a live waiver.
+
 ## How does the accessibility issue picker work?
 
 The macOS installer can schedule one accessibility remediation attempt each hour. The picker claims one eligible unassigned issue, starts a credential-restricted Copilot session in the local command sandbox, saves the handoff, and sends a notification that can prepare the saved session in iTerm without executing it.

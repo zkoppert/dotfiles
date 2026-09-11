@@ -13,6 +13,9 @@ Run: python3 bin/test_pr_marker.py
 from __future__ import annotations
 
 import importlib.util
+import json
+import contextlib
+import io
 import os
 import re
 import subprocess
@@ -22,7 +25,7 @@ from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 # pr-marker has no .py extension, so point the loader at it explicitly.
-_MODULE_PATH = Path(__file__).with_name("pr-marker")
+_MODULE_PATH = Path(__file__).resolve().with_name("pr-marker")
 _LOADER = SourceFileLoader("pr_marker", str(_MODULE_PATH))
 _SPEC = importlib.util.spec_from_loader("pr_marker", _LOADER)
 assert _SPEC
@@ -1135,6 +1138,262 @@ def _run(*args: str) -> None:
     subprocess.run(args, check=True, capture_output=True, text=True)
 
 
+@contextlib.contextmanager
+def waiver_fixture():
+    restore = Path.cwd()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        repo = root / "repo"
+        repo.mkdir()
+        try:
+            os.chdir(repo)
+            _run("git", "init", "-q")
+            _run("git", "config", "user.email", "test@example.com")
+            _run("git", "config", "user.name", "pr-marker test")
+            _run("git", "checkout", "-q", "-b", "task/local")
+            _run("git", "remote", "add", "origin", "https://github.com/example/project.git")
+            _run("git", "commit", "-q", "--allow-empty", "-m", "base")
+            record = {
+                "schema": "pr-marker-review-waiver.v1",
+                "repo": "example/project",
+                "pr": 42,
+                "source_branch": "author/source",
+                "local_branch": "task/local",
+                "commit": pr_marker.current_head(),
+                "approved_by": "repository owner",
+                "reason": "Explicit one-time continuation without further reviews or clean convergence.",
+                "provenance": "private conversation: authorization message and helper approval message",
+            }
+            source = root / "consent.json"
+            source.write_text(json.dumps(record), encoding="utf-8")
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            gh = fake_bin / "gh"
+            gh.write_text("#!/bin/sh\nprintf 'FAKE-GH-EXECUTED\\n'\n", encoding="utf-8")
+            gh.chmod(0o755)
+            yield repo, source, record, fake_bin
+        finally:
+            os.chdir(restore)
+
+
+WAIVER_CONTEXT = ["--repo", "example/project", "--pr", "42", "--source-branch", "author/source"]
+
+
+def marker_cli(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(_MODULE_PATH.resolve()), *args],
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL)
+
+
+def seed_waiver_markers() -> dict[Path, bytes]:
+    directory = pr_marker.branch_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    # Deliberately retain a non-clean old review; a waiver must not certify it.
+    review = directory / "code-review.md"
+    review.write_text("Unresolved reviewer findings on the predecessor.\n" * 6, encoding="utf-8")
+    demo = directory / "demo.md"
+    demo.write_text("N/A: terminal-only feature; CLI transcript retained privately.\n" * 3, encoding="utf-8")
+    assert pr_marker.main(["run-tests", "--cmd", "true"]) == 0
+    return {path: path.read_bytes() for path in directory.iterdir() if path.suffix == ".md"}
+
+
+def test_review_waiver_lifecycle_preserves_evidence() -> None:
+    with waiver_fixture() as (repo, source, record, fake_bin):
+        evidence = seed_waiver_markers()
+        assert marker_cli("check").returncode == 1
+        applied = marker_cli("review-waiver", "apply", str(source))
+        assert applied.returncode == 0, applied.stderr
+        path = pr_marker.branch_dir() / pr_marker.REVIEW_WAIVER_FILE
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert json.loads(path.read_text()) == record
+        assert marker_cli("review-waiver", "apply", str(source)).returncode != 0
+        for command in ("check", "status"):
+            result = marker_cli(command, *WAIVER_CONTEXT)
+            assert result.returncode == 0, result.stderr
+            assert "WAIVED (not clean approval)" in result.stdout
+            assert record["reason"] in result.stdout
+            assert record["provenance"] in result.stdout
+            if command == "status":
+                assert "STALE" in result.stdout
+                assert "all markers satisfied" not in result.stdout
+        assert all(path.read_bytes() == contents for path, contents in evidence.items())
+        assert marker_cli("check").returncode != 0
+        result = _gh_guard_create(repo, fake_bin)
+        assert result.returncode != 0
+        assert "FAKE-GH-EXECUTED" not in result.stdout
+        assert "existing-PR review waiver cannot authorize" in result.stderr
+        assert marker_cli("review-waiver", "revoke").returncode == 0
+        assert not path.exists()
+        assert marker_cli("check", *WAIVER_CONTEXT).returncode == 1
+        assert all(path.read_bytes() == contents for path, contents in evidence.items())
+
+
+def test_review_waiver_rejects_wrong_context_and_checkout() -> None:
+    with waiver_fixture() as (_repo, source, record, _fake_bin):
+        seed_waiver_markers()
+        assert marker_cli("review-waiver", "apply", str(source)).returncode == 0
+        for context in (
+            [], ["--repo", record["repo"]],
+            ["--repo", "other/project", "--pr", "42", "--source-branch", "author/source"],
+            ["--repo", record["repo"], "--pr", "43", "--source-branch", "author/source"],
+            ["--repo", record["repo"], "--pr", "42", "--source-branch", "other/source"],
+        ):
+            assert marker_cli("check", *context).returncode != 0, context
+        for url in ("https://github.com/other/project.git", "https://elsewhere.example/example/project.git",
+                    "https://github.com/example/project.git/", "https://github.com/example/project.git?x"):
+            _run("git", "remote", "set-url", "origin", url)
+            assert marker_cli("check", *WAIVER_CONTEXT).returncode != 0, url
+        for url in ("git@github.com:example/project.git", "ssh://git@github.com/example/project.git",
+                    "https://github.com/example/project"):
+            _run("git", "remote", "set-url", "origin", url)
+            assert marker_cli("check", *WAIVER_CONTEXT).returncode == 0, url
+        _run("git", "remote", "set-url", "--add", "origin", "https://github.com/other/project")
+        assert marker_cli("check", *WAIVER_CONTEXT).returncode != 0
+        _run("git", "remote", "set-url", "--delete", "origin", "https://github.com/other/project")
+        Path("dirty.txt").write_text("dirty", encoding="utf-8")
+        assert marker_cli("check", *WAIVER_CONTEXT).returncode != 0
+        Path("dirty.txt").unlink()
+        _run("git", "commit", "-q", "--allow-empty", "-m", "future head")
+        # Even newly passing tests cannot let a future commit inherit consent.
+        assert pr_marker.main(["run-tests", "--base-ref", record["commit"], "--cmd", "true"]) == 0
+        assert marker_cli("check", *WAIVER_CONTEXT).returncode != 0
+        _run("git", "checkout", "-q", "--detach", record["commit"])
+        assert marker_cli("check", *WAIVER_CONTEXT).returncode != 0
+        _run("git", "checkout", "-q", "-b", "different/local")
+        copied = pr_marker.branch_dir()
+        copied.mkdir(parents=True)
+        (copied / pr_marker.REVIEW_WAIVER_FILE).write_text(json.dumps(record))
+        assert marker_cli("check", *WAIVER_CONTEXT).returncode != 0
+
+
+def test_review_waiver_rejects_malformed_records() -> None:
+    with waiver_fixture() as (_repo, source, record, _fake_bin):
+        bad_records = [[], None, {**record, "extra": True}]
+        for field in record:
+            missing = dict(record)
+            missing.pop(field)
+            bad_records.append(missing)
+            bad_records.append({**record, field: None})
+        for field, values in {
+            "schema": ["v2"], "pr": [True, 0, -1, "42", 42.0],
+            "commit": [record["commit"][:12], "A" * 40, "a" * 39, "a" * 41],
+            "source_branch": ["", "-source", "HEAD", "@{-1}", "a b", "a/../b"],
+            "local_branch": ["elsewhere", "HEAD"],
+            "repo": ["example/*", "https://github.com/example/project", "example/.."],
+            "approved_by": ["", " ", [], "owner\nother"],
+            "reason": ["", "reason\tother"], "provenance": ["", " padded "],
+        }.items():
+            bad_records.extend({**record, field: value} for value in values)
+        for bad in bad_records:
+            source.write_text(json.dumps(bad), encoding="utf-8")
+            result = marker_cli("review-waiver", "apply", str(source))
+            assert result.returncode != 0, bad
+            assert not (pr_marker.branch_dir() / pr_marker.REVIEW_WAIVER_FILE).exists()
+        for invalid in ("{", json.dumps(record)[:-1] + ', "pr": 43}', '{"pr": NaN}'):
+            source.write_text(invalid, encoding="utf-8")
+            assert marker_cli("review-waiver", "apply", str(source)).returncode != 0
+        source.write_bytes(b"\xff")
+        assert marker_cli("review-waiver", "apply", str(source)).returncode != 0
+        source.write_text(json.dumps(record), encoding="utf-8")
+        link = source.with_name("link.json")
+        link.symlink_to(source)
+        assert marker_cli("review-waiver", "apply", str(link)).returncode != 0
+
+
+def test_review_waiver_cannot_waive_tests_or_demo() -> None:
+    with waiver_fixture() as (_repo, source, _record, _fake_bin):
+        evidence = seed_waiver_markers()
+        assert marker_cli("review-waiver", "apply", str(source)).returncode == 0
+        for kind in ("tests", "demo"):
+            path = pr_marker.marker_path(pr_marker.KINDS[kind])
+            contents = evidence[path]
+            for content in (None, b"too short", b"no proof\n" * 40):
+                if kind == "demo" and content == b"no proof\n" * 40:
+                    continue
+                if content is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(content)
+                result = marker_cli("check", *WAIVER_CONTEXT)
+                assert result.returncode == 1, result.stdout
+                assert kind in result.stderr
+                path.write_bytes(contents)
+        tests = pr_marker.marker_path(pr_marker.KINDS["tests"])
+        tests.write_bytes(evidence[tests].replace(pr_marker.TESTS_RESULT_HEADER.encode(), b""))
+        assert "no result tests" in marker_cli("check", *WAIVER_CONTEXT).stderr
+        tests.write_bytes(evidence[tests].replace(pr_marker.current_head().encode(), b"0" * 40))
+        assert "stale tests" in marker_cli("check", *WAIVER_CONTEXT).stderr
+        assert pr_marker.main(["run-tests", "--cmd", "false"]) == 1
+        assert not tests.exists()
+        assert marker_cli("check", *WAIVER_CONTEXT).returncode == 1
+
+
+def test_corrupt_waiver_fails_closed_with_clean_reviews() -> None:
+    with waiver_fixture() as (repo, source, _record, fake_bin):
+        seed_waiver_markers()
+        with contextlib.redirect_stdout(io.StringIO()):
+            for kind in pr_marker.REVIEW_KINDS:
+                body = source.with_suffix(".md")
+                body.write_text("Genuine test-fixture clean review content. " * 10)
+                args = ["write", kind, str(body), "--models", "a,b,c"]
+                if kind == "code-review":
+                    args += ["--convergence-rounds", "1"]
+                assert pr_marker.main(args) == 0
+        assert marker_cli("check").returncode == 0
+        assert marker_cli("review-waiver", "apply", str(source)).returncode == 0
+        waiver = pr_marker.branch_dir() / pr_marker.REVIEW_WAIVER_FILE
+        for corrupt in (False, True):
+            if corrupt:
+                waiver.write_text('{"schema": "broken"}')
+            assert marker_cli("check").returncode != 0
+            result = _gh_guard_create(repo, fake_bin)
+            assert result.returncode != 0
+            assert "FAKE-GH-EXECUTED" not in result.stdout
+        assert marker_cli("review-waiver", "revoke").returncode == 0
+        assert marker_cli("check").returncode == 0
+        assert _gh_guard_create(repo, fake_bin).returncode == 0
+
+
+def test_review_waiver_is_worktree_local_and_guard_uses_sibling() -> None:
+    with waiver_fixture() as (repo, source, _record, fake_bin):
+        seed_waiver_markers()
+        worktree = repo.parent / "worktree"
+        _run("git", "worktree", "add", "-q", "-b", "task/isolated", str(worktree))
+        os.chdir(worktree)
+        record = json.loads(source.read_text())
+        record["local_branch"] = "task/isolated"
+        source.write_text(json.dumps(record))
+        assert marker_cli("review-waiver", "apply", str(source)).returncode == 0
+        waiver = pr_marker.branch_dir() / pr_marker.REVIEW_WAIVER_FILE
+        assert "/worktrees/" in str(waiver)
+        assert not (repo / ".git/copilot-pr-review/task%2Flocal/review-waiver.json").exists()
+        installed = repo.parent / "installed"
+        installed.mkdir()
+        (installed / "gh").symlink_to(_MODULE_PATH.with_name("gh-guard"))
+        # A same-name helper on PATH must not override the canonical sibling.
+        fake_helper = fake_bin / "pr-marker"
+        fake_helper.write_text("#!/bin/sh\nexit 0\n")
+        fake_helper.chmod(0o755)
+        env = dict(os.environ, PATH=f"{installed}:{fake_bin}:{os.environ['PATH']}",
+                   ZACK_CONFIRMED_PR_CREATE="1")
+        result = subprocess.run([str(installed / "gh"), "pr", "create"], env=env,
+                                capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        assert result.returncode != 0
+        assert "exact --repo" in result.stderr
+        assert "FAKE-GH-EXECUTED" not in result.stdout
+        # Removing or corrupting the sibling cannot let the create path pass.
+        orphan = repo.parent / "orphan"
+        orphan.mkdir()
+        guard = orphan / "gh-guard"
+        guard.write_bytes(_MODULE_PATH.with_name("gh-guard").read_bytes())
+        guard.chmod(0o755)
+        result = subprocess.run([str(guard), "pr", "create"],
+                                env=dict(env, PATH=f"{fake_bin}:{os.environ['PATH']}"),
+                                capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        assert result.returncode != 0
+        assert "FAKE-GH-EXECUTED" not in result.stdout
+        assert marker_cli("review-waiver", "revoke").returncode == 0
+
+
 def main() -> int:
     """Run every test and report a pass/fail summary."""
     # test_* helpers resolve the marker dir via git, so run from the repo root
@@ -1160,6 +1419,12 @@ def main() -> int:
         test_code_review_marker_rewrite,
         test_models_argv_order,
         test_gh_guard_gate,
+        test_review_waiver_lifecycle_preserves_evidence,
+        test_review_waiver_rejects_wrong_context_and_checkout,
+        test_review_waiver_rejects_malformed_records,
+        test_review_waiver_cannot_waive_tests_or_demo,
+        test_corrupt_waiver_fails_closed_with_clean_reviews,
+        test_review_waiver_is_worktree_local_and_guard_uses_sibling,
     ]
     failures = 0
     for test in tests:

@@ -80,7 +80,12 @@ Usage:
                                    command exits 0 and the repository stays clean
   pr-marker status                 show all five markers and whether each passes
   pr-marker check                  exit 0 only if every marker passes (fresh + over
-                                   floor)
+                                    floor)
+
+An authorized existing-PR continuation can use `review-waiver apply FILE` and
+`check|status --repo OWNER/REPO --pr NUMBER --source-branch BRANCH`. The private
+JSON record binds that target to a local branch and full HEAD; see README.md.
+Review evidence is never rewritten or reported as clean by this exception.
 """
 
 from __future__ import annotations
@@ -88,6 +93,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -152,6 +158,9 @@ KINDS: dict[str, Kind] = {
 }
 
 MARKER_SUBDIR = "copilot-pr-review"
+REVIEW_WAIVER_FILE = "review-waiver.json"
+REVIEW_WAIVER_SCHEMA = "pr-marker-review-waiver.v1"
+REVIEW_KINDS = frozenset(name for name, kind in KINDS.items() if kind.requires_models)
 
 # A pinned marker records the commit it reviewed on its first line so the gate
 # can reject it once HEAD moves past that commit (a review that never saw the
@@ -395,6 +404,104 @@ def branch_dir(branch: str | None = None) -> Path:
 def marker_path(kind: Kind, branch: str | None = None) -> Path:
     """Return the absolute marker file path for a kind on the given branch."""
     return branch_dir(branch) / kind.filename
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field")
+        result[key] = value
+    return result
+
+
+def read_review_waiver(path: Path) -> dict:
+    """Reject ambiguous authorization rather than interpreting it generously."""
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("review waiver must be a regular file, not a symlink")
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object)
+    except (ValueError, UnicodeError) as exc:
+        raise RuntimeError("invalid review waiver JSON") from exc
+    fields = {"schema", "repo", "pr", "source_branch", "local_branch", "commit",
+              "approved_by", "reason", "provenance"}
+    if not isinstance(record, dict) or set(record) != fields:
+        raise RuntimeError("review waiver must contain exactly the documented fields")
+    for key in fields - {"pr"}:
+        value = record[key]
+        if (not isinstance(value, str) or not value.strip() or value != value.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+            raise RuntimeError(f"invalid review waiver field: {key}")
+    if record["schema"] != REVIEW_WAIVER_SCHEMA:
+        raise RuntimeError("unsupported review waiver schema")
+    if type(record["pr"]) is not int or record["pr"] <= 0:
+        raise RuntimeError("review waiver pr must be a positive integer")
+    if not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", record["repo"]):
+        raise RuntimeError("review waiver repo must be canonical OWNER/REPO on github.com")
+    if record["repo"].split("/")[1] in (".", ".."):
+        raise RuntimeError("invalid review waiver repository name")
+    if not re.fullmatch(r"[0-9a-f]{40}", record["commit"]):
+        raise RuntimeError("review waiver requires a full lowercase commit SHA")
+    for key in ("local_branch", "source_branch"):
+        result = subprocess.run(["git", "check-ref-format", "--branch", record[key]],
+                                capture_output=True, text=True)
+        if result.returncode or result.stdout.strip() != record[key]:
+            raise RuntimeError(f"invalid review waiver field: {key}")
+    return record
+
+
+def validate_waiver_checkout(record: dict) -> None:
+    urls = _git("remote", "get-url", "--all", "origin").splitlines()
+    repo = re.escape(record["repo"])
+    if len(urls) != 1 or not re.fullmatch(
+        rf"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/){repo}(?:\.git)?",
+        urls[0],
+    ):
+        raise RuntimeError("review waiver does not match the canonical origin repository")
+    if record["local_branch"] != current_branch() or record["commit"] != current_head():
+        raise RuntimeError("review waiver does not match this local branch and HEAD")
+    if dirty_worktree_entries():
+        raise RuntimeError("review waiver requires a clean repository")
+
+
+def cmd_review_waiver(args: argparse.Namespace) -> int:
+    path = branch_dir() / REVIEW_WAIVER_FILE
+    if args.action == "revoke":
+        # Revocation must remain possible even after a head change or corrupt record.
+        path.unlink(missing_ok=True)
+        print("pr-marker: review waiver revoked; reviewer evidence unchanged")
+        return 0
+    record = read_review_waiver(Path(args.file))
+    validate_waiver_checkout(record)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Exclusive creation prevents silently replacing an earlier authorization.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+        output.write(json.dumps(record, indent=2) + "\n")
+    print("pr-marker: applied exact-head review waiver; reviewer evidence unchanged")
+    return 0
+
+
+def active_review_waiver(args: argparse.Namespace) -> dict | None:
+    path = branch_dir() / REVIEW_WAIVER_FILE
+    context = (args.repo, args.pr, args.source_branch)
+    if any(value is not None for value in context) and not all(value is not None for value in context):
+        raise RuntimeError("review waiver context requires --repo, --pr and --source-branch together")
+    if not path.exists() and not path.is_symlink():
+        return None
+    record = read_review_waiver(path)
+    validate_waiver_checkout(record)
+    if context != (record["repo"], record["pr"], record["source_branch"]):
+        raise RuntimeError("review waiver requires its exact --repo, --pr and --source-branch context")
+    return record
+
+
+def report_review_waiver(record: dict) -> None:
+    print(f"review requirements WAIVED (not clean approval): {', '.join(sorted(REVIEW_KINDS))}")
+    print(f"target: https://github.com/{record['repo']}/pull/{record['pr']} "
+          f"source: {record['source_branch']} commit: {record['commit']}")
+    for field in ("approved_by", "reason", "provenance"):
+        print(f"{field}: {record[field]}")
 
 
 def artifacts_dir(kind: Kind, branch: str | None = None) -> Path:
@@ -834,25 +941,29 @@ def marker_status(kind: Kind, branch: str) -> tuple[bool, str, int, Path]:
     return (True, "ok", size, path)
 
 
-def cmd_status(_args: argparse.Namespace) -> int:
+def cmd_status(args: argparse.Namespace) -> int:
     """Print each marker's status and whether the gate would pass."""
     branch = current_branch()
+    waiver = active_review_waiver(args)
     print(f"branch: {branch}")
     print(f"marker dir: {branch_dir(branch)}")
     print()
     all_ok = True
     for kind in KINDS.values():
         ok, detail, size, path = marker_status(kind, branch)
-        all_ok = all_ok and ok
+        waived = waiver is not None and kind.name in REVIEW_KINDS
+        all_ok = all_ok and (ok or waived)
         mark = "ok " if ok else detail.upper()
         pin = " pinned" if kind.pinned else ""
         print(
             f"  [{mark:>9}] {kind.name:<12} {size:>5}B (>= {kind.min_bytes}B)  "
-            f"{path.name}{pin}"
+            f"{path.name}{pin}" + ("  requirement WAIVED; evidence unchanged" if waived else "")
         )
     print()
+    if waiver:
+        report_review_waiver(waiver)
     if all_ok:
-        print("all markers satisfied")
+        print("non-review markers satisfied; review requirements waived" if waiver else "all markers satisfied")
     else:
         print("gate would BLOCK: fill the missing/stale markers")
         print(
@@ -862,13 +973,16 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return 0 if all_ok else 1
 
 
-def cmd_check(_args: argparse.Namespace) -> int:
+def cmd_check(args: argparse.Namespace) -> int:
     """Exit non-zero (printing each gap) unless every marker passes its floor."""
     branch = current_branch()
+    waiver = active_review_waiver(args)
+    if waiver:
+        report_review_waiver(waiver)
     failures = []
     for kind in KINDS.values():
         ok, detail, _size, path = marker_status(kind, branch)
-        if not ok:
+        if not ok and not (waiver and kind.name in REVIEW_KINDS):
             failures.append((detail, kind, path))
     if failures:
         for detail, kind, path in failures:
@@ -929,6 +1043,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_check = sub.add_parser("check", help="exit 0 only if every marker passes")
     p_check.set_defaults(func=cmd_check)
+
+    for command in (p_status, p_check):
+        command.add_argument("--repo", help="canonical OWNER/REPO for an existing-PR review waiver")
+        command.add_argument("--pr", type=int, help="existing PR number for the review waiver")
+        command.add_argument("--source-branch", help="exact existing PR source branch")
+
+    p_waiver = sub.add_parser("review-waiver", help="apply or revoke a private exact-head review waiver")
+    waiver_sub = p_waiver.add_subparsers(dest="action", required=True)
+    apply_waiver = waiver_sub.add_parser("apply", help="validate and exclusively install a private JSON record")
+    apply_waiver.add_argument("file")
+    apply_waiver.set_defaults(func=cmd_review_waiver)
+    revoke_waiver = waiver_sub.add_parser("revoke", help="remove this branch's waiver, preserving reviews")
+    revoke_waiver.set_defaults(func=cmd_review_waiver)
 
     p_run = sub.add_parser(
         "run-tests",

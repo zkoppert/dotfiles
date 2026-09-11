@@ -527,6 +527,16 @@ if [ "$is_pr_create" = "1" ]; then
     # plan marker cannot collide with branch `x.plan`'s code-review marker.
     marker_base="$git_dir/copilot-pr-review/$safe_branch"
 
+    # An existing-PR waiver cannot authorize creation of a different PR. Use the
+    # canonical reader, without an existing-PR context, to fail closed even if
+    # all the old review markers happen to be clean.
+    if [ -e "$marker_base/review-waiver.json" ] || [ -L "$marker_base/review-waiver.json" ]; then
+      if ! "$SELF_REAL_PATH/pr-marker" check; then
+        echo "gh-guard: existing-PR review waiver cannot authorize pr create; revoke it before normal creation." >&2
+        exit 1
+      fi
+    fi
+
     # Start optimistic; any failing eval_marker clears the flag. All five must
     # pass, so their order here is cosmetic (shown in workflow order). This block
     # runs before the TTY/non-TTY split, so it feeds both the soft prompt and the
