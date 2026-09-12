@@ -1322,6 +1322,49 @@ def test_run_reopens_terminal_item_for_direct_mention(
     ]
 
 
+def test_run_routes_existing_terminal_thread_to_scheduled_review(todo_file):
+    item = {
+        "id": "old",
+        "title": "Previously completed notification",
+        "status": "done",
+        "completed": "2026-07-01",
+        "notification": {
+            "thread_id": "1001",
+            "reason": "author",
+            "marked_done": True,
+        },
+    }
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": [], "q2_schedule": []},
+                "done": [item],
+            }
+        )
+    )
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps(
+            [_notif("review_requested", updated_at="2026-07-06T15:00:00Z")]
+        ),
+    }
+
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
+        stats = triage.run(
+            triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        )
+
+    updated = yaml.safe_load(todo_file.read_text())
+    scheduled = updated["prioritized"]["q2_schedule"]
+    assert stats.already_tracked == 1
+    assert updated["done"] == []
+    assert scheduled[0]["id"] == "old"
+    assert scheduled[0]["status"] == "pending"
+    assert scheduled[0]["notification"]["reason"] == "review_requested"
+    assert scheduled[0]["notification"]["escalates_at"] == "2026-07-07T15:00:00Z"
+
+
 @pytest.mark.parametrize("active_section", ["in_progress", "blocked", "in_review"])
 def test_run_preserves_active_item_for_unchanged_direct_mention(
     todo_file, active_section
@@ -1421,6 +1464,39 @@ def test_run_reopens_done_canonical_artifact_for_assignment(todo_file):
     assert data["done"] == []
     assert data["prioritized"]["q1_do_first"][0]["id"] == "done-pr"
     assert data["prioritized"]["q1_do_first"][0]["status"] == "pending"
+
+
+def test_run_reopens_terminal_q1_canonical_artifact_for_assignment(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {
+                    "q1_do_first": [
+                        {
+                            "id": "done-pr",
+                            "title": "Completed urgent PR",
+                            "status": "done",
+                            "completed": "2026-07-01",
+                            "link": "https://github.com/octocat/Hello-World/pull/99",
+                        }
+                    ]
+                },
+                "done": [],
+            }
+        )
+    )
+
+    stats, delete_calls, data = _run_with_assign_notification(
+        todo_file, _assign_notif_for_tracked_url()
+    )
+
+    item = data["prioritized"]["q1_do_first"][0]
+    assert stats.already_tracked == 1
+    assert delete_calls == []
+    assert item["id"] == "done-pr"
+    assert item["status"] == "pending"
+    assert "completed" not in item
 
 
 def test_run_keeps_new_assignment_in_q1_when_url_is_untracked(todo_file):

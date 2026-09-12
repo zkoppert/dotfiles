@@ -453,6 +453,7 @@ class TodoMutations:
 
     add_q1: list[dict[str, Any]] = field(default_factory=list)
     add_q2: list[dict[str, Any]] = field(default_factory=list)
+    route_existing_q2: list[dict[str, Any]] = field(default_factory=list)
     add_inbox: list[dict[str, Any]] = field(default_factory=list)
     add_done: list[dict[str, Any]] = field(default_factory=list)
     mark_done: list[MarkDoneDelta] = field(default_factory=list)
@@ -1320,6 +1321,46 @@ def apply_todo_mutations(
         else:
             applied["already_tracked"] += 1
 
+    for entry in mutations.route_existing_q2:
+        notification = entry.get("notification")
+        thread_id = _item_thread_id(entry)
+        tracked = next(
+            (
+                (section, item)
+                for section, item in _iter_notification_items_with_sections(data)
+                if _item_thread_id(item) == thread_id
+            ),
+            None,
+        )
+        if tracked is None or not isinstance(notification, dict):
+            continue
+        section, item = tracked
+        terminal = tracker_terminal_disposition(item, section)
+        item["notification"] = dict(notification)
+        if section not in {"in_progress", "blocked", "in_review"}:
+            quadrant = section.removeprefix("prioritized.")
+            if section in {"inbox", "done"}:
+                data[section].remove(item)
+            elif quadrant in PRUNE_QUADRANTS:
+                data["prioritized"][quadrant].remove(item)
+            item["quadrant"] = "q2_schedule"
+            item["urgency"] = "high"
+            item["importance"] = "high"
+            if terminal:
+                item["status"] = "pending"
+                item.pop("completed", None)
+                reopened_threads.append(
+                    {
+                        "thread_id": thread_id or "",
+                        "reason": "review_requested",
+                        "tracker_section": "prioritized.q2_schedule",
+                    }
+                )
+            data["prioritized"]["q2_schedule"].append(item)
+            section = "prioritized.q2_schedule"
+        tracker_links.append({"entry": item, "section": section})
+        changed = True
+
     for entry in mutations.add_q2:
         reconciled = _reconcile_canonical_entry(data, entry, "q2_schedule")
         if reconciled:
@@ -1619,6 +1660,9 @@ def _reconcile_canonical_entry(
         active_sections = {"in_progress", "blocked", "in_review"}
         current_quadrant = section.removeprefix("prioritized.")
         if section in active_sections or current_quadrant == "q1_do_first":
+            if terminal and target_quadrant == "q1_do_first":
+                item["status"] = "pending"
+                item.pop("completed", None)
             return item, section
         if current_quadrant == target_quadrant:
             return item, section
@@ -2384,6 +2428,20 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                     if tracker_terminal_disposition(tracked[1], tracked[0]):
                         reopened_thread_ids.add(thread_id)
+            elif classification.bucket == BUCKET_Q2:
+                mutations.route_existing_q2.append(
+                    build_todo_entry(notif, classification)
+                )
+                tracked = next(
+                    (
+                        (section, item)
+                        for section, item in _iter_notification_items_with_sections(data)
+                        if _item_thread_id(item) == thread_id
+                    ),
+                    None,
+                )
+                if tracked and tracker_terminal_disposition(tracked[1], tracked[0]):
+                    reopened_thread_ids.add(thread_id)
             stats.already_tracked += 1
             continue
 
@@ -2579,6 +2637,7 @@ def run(args: argparse.Namespace) -> TriageStats:
     has_todo_mutations = bool(
         mutations.add_q1
         or mutations.add_q2
+        or mutations.route_existing_q2
         or mutations.add_inbox
         or mutations.add_done
         or mutations.mark_done
@@ -2626,7 +2685,9 @@ def run(args: argparse.Namespace) -> TriageStats:
                         source_type="github",
                         source_id=reopened["thread_id"],
                         reason=reopened["reason"],
-                        tracker_section="prioritized.q1_do_first",
+                        tracker_section=reopened.get(
+                            "tracker_section", "prioritized.q1_do_first"
+                        ),
                     )
         reconcile_stats_from_applied(stats, applied)
         if not args.dry_run:
