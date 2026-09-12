@@ -133,9 +133,7 @@ def test_classify_security_alert_goes_to_q1():
     assert c.bucket == triage.BUCKET_Q1
 
 
-def test_classify_assign_on_my_own_pr_goes_to_inbox():
-    """Self-assign or CODEOWNERS auto-assign on a PR I authored is a
-    'waiting on reviewers' status update, not a Q1 action item."""
+def test_classify_assign_on_my_own_pr_goes_to_q1():
     c = triage.classify(
         _notif("assign"),
         my_login="zkoppert",
@@ -144,13 +142,10 @@ def test_classify_assign_on_my_own_pr_goes_to_inbox():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
     )
-    assert c.bucket == triage.BUCKET_INBOX
-    assert "authored" in c.reason
+    assert c.bucket == triage.BUCKET_Q1
 
 
-def test_classify_mention_on_my_own_pr_goes_to_inbox():
-    """An @-mention in the body of a PR I wrote is not someone pulling
-    me in - it's me referencing myself."""
+def test_classify_mention_on_my_own_pr_goes_to_q1():
     c = triage.classify(
         _notif("mention"),
         my_login="zkoppert",
@@ -159,8 +154,7 @@ def test_classify_mention_on_my_own_pr_goes_to_inbox():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "ZKoppert",
     )
-    assert c.bucket == triage.BUCKET_INBOX
-    assert "authored" in c.reason
+    assert c.bucket == triage.BUCKET_Q1
     assert c.direct_mention is True
 
 
@@ -228,7 +222,7 @@ def test_review_requested_from_teammate_goes_to_q2():
         subject_author_fetcher=lambda _: "iansan5653",
     )
     assert c.bucket == triage.BUCKET_Q2
-    assert "iansan5653" in c.reason
+    assert c.reason == "review_requested - scheduled review"
 
 
 def test_review_requested_from_outsider_goes_to_q2():
@@ -1223,6 +1217,9 @@ def test_run_dedupes_already_tracked(todo_file):
         stats = triage.run(args)
     assert stats.already_tracked == 1
     assert stats.added_q2 == 0
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["inbox"] == []
+    assert data["prioritized"]["q1_do_first"][0]["id"] == "old"
     notify_mock.assert_not_called()
 
 

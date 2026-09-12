@@ -72,18 +72,6 @@ _RT_YAML.indent(mapping=2, sequence=4, offset=2)
 
 logger = logging.getLogger("triage")
 
-# Allowlist of GitHub logins whose review_requested notifications auto-route
-# to Q1. Currently Zack's direct reports plus his manager - kept narrow on
-# purpose so cross-team requests still hit inbox for review.
-NUX_TEAM_LOGINS_Q1: set[str] = {
-    "iansan5653",  # Ian
-    "andimiya",  # Andi
-    "sutterj",  # Jacob
-    "francisfuzz",  # Francis
-    "Hkly",  # Hannah
-    "depoll",  # David Poll (manager)
-}
-
 # Reasons that route straight to Q1 regardless of author.
 Q1_REASONS: set[str] = {
     "mention",
@@ -708,7 +696,7 @@ def classify(
     notif: dict[str, Any],
     *,
     my_login: str,
-    q1_logins: set[str],
+    q1_logins: set[str] | None = None,
     state_fetcher=fetch_thread_state,
     comment_fetcher=fetch_latest_comment,
     subject_author_fetcher=fetch_subject_author,
@@ -726,7 +714,6 @@ def classify(
     return _classify_internal(
         notif,
         my_login=my_login,
-        q1_logins=q1_logins,
         state_fetcher=state_fetcher,
         comment_fetcher=comment_fetcher,
         subject_author_fetcher=subject_author_fetcher,
@@ -737,7 +724,6 @@ def _classify_internal(
     notif: dict[str, Any],
     *,
     my_login: str,
-    q1_logins: set[str],
     state_fetcher=fetch_thread_state,
     comment_fetcher=fetch_latest_comment,
     subject_author_fetcher=fetch_subject_author,
@@ -824,33 +810,9 @@ def _classify_internal(
     # already fire for read notifications too, so noise gets cleaned up
     # regardless of read status.
     if reason == "review_requested":
-        # Review requests are scheduled work, not immediate interrupts.
-        # Keep them in Q2 regardless of who authored the PR; an aged,
-        # untouched review request is escalated to Q1 by the reconciliation
-        # pass after one business day.
-        author = subject_author_fetcher(notif)
-        if author and author in q1_logins:
-            return Classification(
-                BUCKET_Q2,
-                f"review_requested on PR by teammate @{author} - scheduled review",
-            )
-        if author:
-            return Classification(
-                BUCKET_Q2,
-                f"review_requested on PR by @{author} - scheduled review",
-            )
         return Classification(BUCKET_Q2, "review_requested - scheduled review")
 
     if reason in Q1_REASONS:  # mention, assign, security_alert
-        if reason in {"assign", "mention"}:
-            if (notif.get("subject") or {}).get("type") == "PullRequest":
-                author = subject_author_fetcher(notif)
-                if author and author.lower() == my_login.lower():
-                    return Classification(
-                        BUCKET_INBOX,
-                        f"{reason} on PR I authored - status update only",
-                        direct_mention=reason == "mention",
-                    )
         return Classification(
             BUCKET_Q1,
             f"{reason} → Q1",
@@ -1235,30 +1197,35 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
     if not isinstance(q1, list):
         return False
     candidate: dict[str, Any] | None = None
+    candidate_section = ""
     for section, item in _iter_notification_items_with_sections(data):
-        if section == "done":
+        if tracker_terminal_disposition(item, section):
             continue
         if item.get("id") != delta.item_id and _item_thread_id(item) != delta.thread_id:
             continue
         candidate = item
+        candidate_section = section
         break
     if candidate is None:
         return False
 
-    for section_name in ("inbox", "q2_schedule"):
-        bucket = prioritized.get(section_name) if section_name != "inbox" else data.get("inbox")
-        if isinstance(bucket, list):
-            bucket[:] = [item for item in bucket if item is not candidate]
-    for quadrant in ("q1_do_first", "q2_schedule", "q3_delegate", "q4_eliminate"):
-        bucket = prioritized.get(quadrant)
-        if isinstance(bucket, list):
-            bucket[:] = [item for item in bucket if item is not candidate]
+    quadrant = candidate_section.removeprefix("prioritized.")
+    if quadrant == "q1_do_first":
+        return False
+    if candidate_section == "inbox":
+        data["inbox"][:] = [item for item in data["inbox"] if item is not candidate]
+    elif quadrant in PRUNE_QUADRANTS:
+        prioritized[quadrant][:] = [
+            item for item in prioritized[quadrant] if item is not candidate
+        ]
+    else:
+        return False
     candidate["urgency"] = "high"
     candidate["importance"] = "high"
     candidate["quadrant"] = "q1_do_first"
     candidate["status"] = candidate.get("status") or "pending"
     notif = candidate.get("notification")
-    if isinstance(notif, dict):
+    if isinstance(notif, dict) and delta.escalated_at:
         notif["review_requested_escalated_at"] = delta.escalated_at
     q1.append(candidate)
     return True
@@ -2384,14 +2351,9 @@ def run(args: argparse.Namespace) -> TriageStats:
         repo = str((notif.get("repository") or {}).get("full_name") or "")
         title = str(subject.get("title") or "")
 
-        if thread_id and thread_id in seen_ids:
-            stats.already_tracked += 1
-            continue
-
         classification = classify(
             notif,
             my_login=my_login,
-            q1_logins=NUX_TEAM_LOGINS_Q1,
         )
         logger.debug(
             "thread %s → %s (%s)",
@@ -2399,6 +2361,14 @@ def run(args: argparse.Namespace) -> TriageStats:
             classification.bucket,
             classification.reason,
         )
+
+        if thread_id and thread_id in seen_ids:
+            if classification.bucket == BUCKET_Q1:
+                mutations.escalate.append(
+                    EscalationDelta(item_id="", thread_id=thread_id)
+                )
+            stats.already_tracked += 1
+            continue
 
         if classification.bucket == BUCKET_DROP:
             stats.dropped += 1
