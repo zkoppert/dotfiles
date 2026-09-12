@@ -283,6 +283,46 @@ class NotificationLedger:
         )
         return int(cur.lastrowid)
 
+    def _claim_canonical_row(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        source_type: str,
+        source_id: str,
+        canonical_artifact: str | None,
+    ) -> int | None:
+        if not canonical_artifact:
+            return None
+        row = conn.execute(
+            """
+            UPDATE notifications
+               SET source_id = ?
+             WHERE id = (
+                       SELECT MIN(id)
+                         FROM notifications
+                        WHERE source_type = ?
+                          AND canonical_artifact = ?
+                          AND (source_id IS NULL OR source_id = '')
+                       HAVING COUNT(*) = 1
+                   )
+               AND NOT EXISTS (
+                       SELECT 1
+                         FROM notifications
+                        WHERE source_type = ?
+                          AND source_id = ?
+                   )
+            RETURNING id
+            """,
+            (
+                source_id,
+                source_type,
+                canonical_artifact,
+                source_type,
+                source_id,
+            ),
+        ).fetchone()
+        return int(row["id"]) if row else None
+
     def capture(
         self,
         *,
@@ -306,6 +346,13 @@ class NotificationLedger:
                 source_id=source_id,
                 canonical_artifact=canonical_artifact,
             )
+            if row_id is None and source_id:
+                row_id = self._claim_canonical_row(
+                    conn,
+                    source_type=source_type,
+                    source_id=source_id,
+                    canonical_artifact=canonical_artifact,
+                )
             if row_id is None:
                 row_id = self._insert_row(
                     conn,

@@ -4422,6 +4422,48 @@ def test_ledger_tracks_distinct_threads_for_same_artifact(todo_file: Path):
     assert failures[0]["last_clear_error"] == "HTTP 500"
 
 
+def test_ledger_first_thread_claims_canonical_tracker_row(todo_file: Path):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/1"
+    ledger.link_tracker(
+        source_type="github",
+        source_id=None,
+        canonical_artifact=artifact,
+        tracker_item_id="existing-item",
+        tracker_section="prioritized.q1_now",
+    )
+
+    first_id = ledger.capture(
+        source_type="github",
+        source_id="thread-a",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+    )
+    second_id = ledger.capture(
+        source_type="github",
+        source_id="thread-b",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+    )
+
+    rows = ledger._rows(
+        """
+        SELECT id, source_id, tracker_item_id, tracker_section
+          FROM notifications
+         ORDER BY id
+        """
+    )
+    assert first_id == rows[0]["id"]
+    assert rows[0]["source_id"] == "thread-a"
+    assert rows[0]["tracker_item_id"] == "existing-item"
+    assert rows[0]["tracker_section"] == "prioritized.q1_now"
+    assert second_id == rows[1]["id"]
+    assert rows[1]["source_id"] == "thread-b"
+    assert rows[1]["tracker_item_id"] is None
+
+
 def test_run_policy_drop_records_ledger_before_clear(todo_file: Path):
     notif = _notif("ci_activity", id="drop-1")
     ledger_file = todo_file.parent / "ledger.sqlite"
