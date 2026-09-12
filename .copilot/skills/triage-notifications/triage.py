@@ -2474,6 +2474,25 @@ def run(args: argparse.Namespace) -> TriageStats:
                 None,
             )
             renewed = bool(tracked and notification_has_new_activity(notif, tracked[1]))
+            tracked_reason = str(
+                ((tracked[1].get("notification") or {}).get("reason") if tracked else "")
+                or ""
+            ).lower()
+            tracked_direct_ask = bool(
+                tracked
+                and not tracker_terminal_disposition(tracked[1], tracked[0])
+                and tracked_reason in {"mention", "assign"}
+            )
+            subject_resolved = classification.bucket == BUCKET_DROP and (
+                "closed" in classification.reason or "merged" in classification.reason
+            )
+            if (
+                tracked_direct_ask
+                and classification.bucket != BUCKET_Q1
+                and not subject_resolved
+            ):
+                stats.already_tracked += 1
+                continue
             if classification.bucket == BUCKET_Q1:
                 if (
                     renewed

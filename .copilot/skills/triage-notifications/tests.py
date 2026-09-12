@@ -1581,6 +1581,56 @@ def test_run_preserves_active_q1_when_thread_changes_to_author(todo_file):
     assert updated["prioritized"]["q1_do_first"] == [item]
 
 
+@pytest.mark.parametrize("reason", ["review_requested", "ci_activity"])
+def test_run_preserves_unresolved_direct_ask_when_reason_changes(todo_file, reason):
+    item = {
+        "id": "old",
+        "title": "Unresolved direct ask",
+        "status": "pending",
+        "quadrant": "q1_do_first",
+        "urgency": "high",
+        "importance": "high",
+        "notification": {
+            "thread_id": "1001",
+            "reason": "mention",
+            "captured_at": "2026-07-01T12:00:00Z",
+        },
+    }
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": [item], "q2_schedule": []},
+                "done": [],
+            }
+        )
+    )
+    notification = _notif(reason, updated_at="2026-07-02T12:00:00Z")
+    delete_calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(tuple(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return _gh_returns(
+            {
+                "/user": json.dumps({"login": "zkoppert"}),
+                "/notifications?all=true": json.dumps([notification]),
+                "/repos/zkoppert/example/pulls/42": json.dumps(
+                    {"state": "open", "user": {"login": "octocat"}}
+                ),
+            }
+        )(cmd, *args, **kwargs)
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    updated = yaml.safe_load(todo_file.read_text())
+    assert updated["prioritized"]["q1_do_first"] == [item]
+    assert updated["prioritized"]["q2_schedule"] == []
+    assert delete_calls == []
+
+
 def test_run_clears_existing_thread_reclassified_as_drop(todo_file):
     item = {
         "id": "old",

@@ -5,7 +5,7 @@
 set -euo pipefail
 
 DOTFILES_DIR="$(cd "$(dirname "$0")" && pwd)"
-NOTIFICATION_RUNTIME_ROOT="${DOTFILES_NOTIFICATION_RUNTIME_ROOT:-$HOME/.local/share/dotfiles/notification-workers}"
+NOTIFICATION_RUNTIME_ROOT="$HOME/.local/share/dotfiles/notification-workers"
 NOTIFICATION_RUNTIME_VENV="$NOTIFICATION_RUNTIME_ROOT/venv"
 NOTIFICATION_RUNTIME_PYTHON="$NOTIFICATION_RUNTIME_VENV/bin/python3"
 NOTIFICATION_REQUIREMENTS="$DOTFILES_DIR/python/notification-worker-requirements.txt"

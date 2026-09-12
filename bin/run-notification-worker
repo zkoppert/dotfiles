@@ -67,7 +67,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 self_dir="$(resolve_path "${BASH_SOURCE[0]}")"
 dotfiles_dir="${DOTFILES_DIR_OVERRIDE:-$(cd "$self_dir/.." && pwd -P)}"
-runtime_root="${DOTFILES_NOTIFICATION_RUNTIME_ROOT:-$HOME/.local/share/dotfiles/notification-workers}"
+runtime_root="$HOME/.local/share/dotfiles/notification-workers"
 runtime_python="${DOTFILES_NOTIFICATION_RUNTIME_PYTHON:-$runtime_root/venv/bin/python3}"
 health_dir="${DOTFILES_NOTIFICATION_LOG_DIR:-$HOME/Library/Logs}"
 health_file="${DOTFILES_NOTIFICATION_HEALTH_FILE_OVERRIDE:-$health_dir/$health_filename}"

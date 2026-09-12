@@ -23,13 +23,16 @@ def _path_from_env(name: str, default: Path) -> Path:
 
 
 HOME = Path.home()
-DEFAULT_RUNTIME_ROOT = _path_from_env(
-    "DOTFILES_NOTIFICATION_RUNTIME_ROOT",
-    HOME / ".local" / "share" / "dotfiles" / "notification-workers",
-)
 DEFAULT_RUNTIME_PYTHON = _path_from_env(
     "DOTFILES_NOTIFICATION_RUNTIME_PYTHON",
-    DEFAULT_RUNTIME_ROOT / "venv" / "bin" / "python3",
+    HOME
+    / ".local"
+    / "share"
+    / "dotfiles"
+    / "notification-workers"
+    / "venv"
+    / "bin"
+    / "python3",
 )
 DEFAULT_SUPPORT_DIR = _path_from_env(
     "DOTFILES_NOTIFICATION_SUPPORT_DIR",
