@@ -652,7 +652,7 @@ def fetch_subject_author(notif: dict[str, Any]) -> str | None:
 def fetch_latest_comment(
     notif: dict[str, Any],
 ) -> tuple[str | None, str | None]:
-    """Return (author_login, body) for the latest comment on a notification.
+    """Return the latest author and bodies of comments relevant to a notification.
 
     Returns (None, None) if unavailable. Used to detect super-linter posts
     and bot-noise comments that don't @-mention the user.
@@ -662,6 +662,51 @@ def fetch_latest_comment(
     if not latest:
         return None, None
     path = latest.replace("https://api.github.com", "")
+    subject_path = str(subject.get("url") or "").replace(
+        "https://api.github.com", ""
+    )
+    collection_path: str | None = None
+    if "/pulls/comments/" in path and "/pulls/" in subject_path:
+        collection_path = f"{subject_path}/comments"
+    elif "/issues/comments/" in path:
+        collection_path = f"{subject_path.replace('/pulls/', '/issues/')}/comments"
+    elif "/comments/" in path and subject_path:
+        collection_path = f"{subject_path}/comments"
+
+    last_read_at = notif.get("last_read_at")
+    if collection_path and last_read_at:
+        try:
+            out = run_gh(
+                [
+                    "api",
+                    collection_path,
+                    "--method",
+                    "GET",
+                    "-f",
+                    f"since={last_read_at}",
+                    "--paginate",
+                    "--slurp",
+                ],
+                timeout=20,
+            )
+            pages = json.loads(out)
+            comments = [
+                comment
+                for page in pages
+                for comment in (page if isinstance(page, list) else [page])
+                if isinstance(comment, dict)
+            ]
+            if comments:
+                author = (comments[-1].get("user") or {}).get("login")
+                bodies = "\n".join(str(comment.get("body") or "") for comment in comments)
+                return author, bodies
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            json.JSONDecodeError,
+        ) as exc:
+            logger.warning("comment history fetch failed for %s: %s", collection_path, exc)
+
     try:
         out = run_gh(["api", path], timeout=20)
         data = json.loads(out)
