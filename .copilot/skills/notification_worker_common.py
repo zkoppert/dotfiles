@@ -23,25 +23,11 @@ def _path_from_env(name: str, default: Path) -> Path:
 
 
 HOME = Path.home()
-DEFAULT_RUNTIME_PYTHON = _path_from_env(
-    "DOTFILES_NOTIFICATION_RUNTIME_PYTHON",
-    HOME
-    / ".local"
-    / "share"
-    / "dotfiles"
-    / "notification-workers"
-    / "venv"
-    / "bin"
-    / "python3",
-)
 DEFAULT_SUPPORT_DIR = _path_from_env(
     "DOTFILES_NOTIFICATION_SUPPORT_DIR",
     HOME / "Library" / "Application Support" / "notification-workers",
 )
-DEFAULT_LOG_DIR = _path_from_env(
-    "DOTFILES_NOTIFICATION_LOG_DIR",
-    HOME / "Library" / "Logs",
-)
+DEFAULT_LOG_DIR = HOME / "Library" / "Logs"
 DEFAULT_LEDGER_FILE = _path_from_env(
     "DOTFILES_NOTIFICATION_LEDGER_FILE",
     DEFAULT_SUPPORT_DIR / "ledger.sqlite",

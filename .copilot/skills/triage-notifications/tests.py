@@ -5029,7 +5029,9 @@ def test_ledger_uses_private_filesystem_permissions(tmp_path: Path):
 
 
 def test_runtime_preflight_wrapper_writes_health_on_missing_python_modules(tmp_path: Path):
-    runtime = tmp_path / "fake-python3"
+    home = tmp_path / "home"
+    runtime = home / ".local/share/dotfiles/notification-workers/venv/bin/python3"
+    runtime.parent.mkdir(parents=True)
     runtime.write_text(
         "#!/bin/sh\n"
         "if [ \"$1\" = \"-c\" ]; then\n"
@@ -5040,12 +5042,10 @@ def test_runtime_preflight_wrapper_writes_health_on_missing_python_modules(tmp_p
         encoding="utf-8",
     )
     runtime.chmod(0o755)
-    health_file = tmp_path / "health.json"
+    health_file = home / "Library/Logs/notification-triage-health.json"
     wrapper = Path(__file__).resolve().parents[3] / "bin" / "notification-triage"
     env = os.environ.copy()
-    env["DOTFILES_NOTIFICATION_RUNTIME_PYTHON"] = str(runtime)
-    env["DOTFILES_NOTIFICATION_HEALTH_FILE_OVERRIDE"] = str(health_file)
-    env["DOTFILES_DIR_OVERRIDE"] = str(Path(__file__).resolve().parents[3])
+    env["HOME"] = str(home)
 
     result = subprocess.run([str(wrapper), "--help"], capture_output=True, text=True, env=env)
 
