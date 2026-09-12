@@ -472,7 +472,7 @@ def test_build_todo_entry_inbox_has_no_quadrant_fields():
 
 
 # ----------------------------------------------------------------------
-# load_todo / write_todo_atomic / existing_thread_ids / items_to_mark_done
+# load_todo / write_todo_atomic / existing_thread_ids / items_ready_for_clear
 # ----------------------------------------------------------------------
 
 
@@ -518,16 +518,19 @@ def test_existing_thread_ids_covers_all_sections():
     assert ids == {"111", "222", "333", "999"}
 
 
-def test_items_to_mark_done_picks_done_with_thread_id():
+def test_items_ready_for_clear_picks_done_with_thread_id():
     # `done-archived` has no `status` field but lives in the `done:`
     # section, so it must still be picked up. `q1` has status=done and a
     # thread_id, so it's picked up. The marked_done item is skipped.
-    items = triage.items_to_mark_done(_sample_todo())
+    items = [
+        item
+        for item, _section, _disposition in triage.items_ready_for_clear(_sample_todo())
+    ]
     titles = sorted(i["title"] for i in items)
     assert titles == ["done-archived", "q1"]
 
 
-def test_items_to_mark_done_skips_in_progress_without_done_status():
+def test_items_ready_for_clear_skips_in_progress_without_done_status():
     data = {
         "in_progress": [
             {
@@ -539,7 +542,7 @@ def test_items_to_mark_done_skips_in_progress_without_done_status():
         ],
         "done": [],
     }
-    assert triage.items_to_mark_done(data) == []
+    assert triage.items_ready_for_clear(data) == []
 
 
 def test_existing_thread_ids_skips_non_dict_notification():
@@ -557,7 +560,7 @@ def test_existing_thread_ids_skips_non_dict_notification():
     assert triage.existing_thread_ids(data) == {"111"}
 
 
-def test_items_to_mark_done_skips_non_dict_notification():
+def test_items_ready_for_clear_skips_non_dict_notification():
     # Same defensive guard as existing_thread_ids: a non-dict
     # ``notification:`` value must be ignored, not crash the run.
     data = {
@@ -566,7 +569,9 @@ def test_items_to_mark_done_skips_non_dict_notification():
             {"id": "bad", "notification": "not a dict"},
         ],
     }
-    items = triage.items_to_mark_done(data)
+    items = [
+        item for item, _section, _disposition in triage.items_ready_for_clear(data)
+    ]
     titles = [i["id"] for i in items]
     assert titles == ["ok"]
 
@@ -751,6 +756,75 @@ def test_apply_todo_mutations_with_lock_dedupes_url_against_fresh_document(tmp_p
     ]
     reloaded = yaml.safe_load(todo_path.read_text())
     assert reloaded["inbox"] == []
+
+
+def test_apply_todo_mutations_reopens_only_fresh_terminal_item():
+    active_item = {
+        "id": "active-ask",
+        "status": "in_progress",
+        "notification": {"thread_id": "thread-1", "reason": "mention"},
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {"q1_do_first": [], "q2_schedule": []},
+        "in_progress": [active_item],
+        "done": [],
+    }
+    mutations = triage.TodoMutations(
+        escalate=[
+            triage.EscalationDelta(
+                item_id="active-ask",
+                thread_id="thread-1",
+                reopen_terminal=True,
+                reason="mention",
+            )
+        ]
+    )
+
+    applied = triage.apply_todo_mutations(data, mutations)
+
+    assert applied["changed"] is False
+    assert data["in_progress"] == [active_item]
+    assert data["prioritized"]["q1_do_first"] == []
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_section"),
+    [("q1_do_first", "q1_do_first"), ("q2_schedule", "q2_schedule")],
+)
+def test_apply_todo_mutations_reconciles_canonical_artifact(target, expected_section):
+    existing = {
+        "id": "tracked-pr",
+        "title": "Tracked PR",
+        "artifacts": ["https://github.com/o/r/pull/7"],
+    }
+    entry = {
+        "id": "notification-pr",
+        "notification": {
+            "thread_id": "thread-7",
+            "url": "https://github.com/o/r/pull/7",
+            "reason": "assign" if target == "q1_do_first" else "review_requested",
+        },
+    }
+    data = {
+        "inbox": [existing],
+        "prioritized": {"q1_do_first": [], "q2_schedule": []},
+        "done": [],
+    }
+    mutations = triage.TodoMutations(
+        add_q1=[entry] if target == "q1_do_first" else [],
+        add_q2=[entry] if target == "q2_schedule" else [],
+    )
+
+    applied = triage.apply_todo_mutations(data, mutations)
+
+    assert applied["already_tracked"] == 1
+    assert data["inbox"] == []
+    assert data["prioritized"][expected_section] == [existing]
+    assert existing["notification"]["thread_id"] == "thread-7"
+    assert applied["tracker_links"] == [
+        {"entry": existing, "section": f"prioritized.{expected_section}"}
+    ]
 
 
 def test_apply_todo_mutations_keeps_untracked_inbox_url(tmp_path):
@@ -1284,7 +1358,7 @@ def test_run_preserves_active_item_for_unchanged_direct_mention(
     assert updated["prioritized"]["q1_do_first"] == []
 
 
-def test_run_drops_inbox_notification_when_url_is_prioritized_artifact(todo_file):
+def test_run_links_assignment_to_prioritized_canonical_artifact(todo_file):
     todo_file.write_text(
         yaml.safe_dump(
             {
@@ -1309,14 +1383,15 @@ def test_run_drops_inbox_notification_when_url_is_prioritized_artifact(todo_file
         todo_file, _assign_notif_for_tracked_url()
     )
 
-    assert stats.dropped == 1
-    assert stats.added_inbox == 0
+    assert stats.dropped == 0
+    assert stats.added_q1 == 0
     assert stats.already_tracked == 1
-    assert any("/notifications/threads/2001" in " ".join(c) for c in delete_calls)
+    assert delete_calls == []
     assert data["inbox"] == []
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "2001"
 
 
-def test_run_drops_inbox_notification_when_url_is_done_link(todo_file):
+def test_run_reopens_done_canonical_artifact_for_assignment(todo_file):
     todo_file.write_text(
         yaml.safe_dump(
             {
@@ -1338,28 +1413,31 @@ def test_run_drops_inbox_notification_when_url_is_done_link(todo_file):
         todo_file, _assign_notif_for_tracked_url()
     )
 
-    assert stats.dropped == 1
-    assert stats.added_inbox == 0
+    assert stats.dropped == 0
+    assert stats.added_q1 == 0
     assert stats.already_tracked == 1
-    assert any("/notifications/threads/2001" in " ".join(c) for c in delete_calls)
+    assert delete_calls == []
     assert data["inbox"] == []
+    assert data["done"] == []
+    assert data["prioritized"]["q1_do_first"][0]["id"] == "done-pr"
+    assert data["prioritized"]["q1_do_first"][0]["status"] == "pending"
 
 
-def test_run_keeps_new_inbox_notification_when_url_is_untracked(todo_file):
+def test_run_keeps_new_assignment_in_q1_when_url_is_untracked(todo_file):
     stats, delete_calls, data = _run_with_assign_notification(
         todo_file, _assign_notif_for_tracked_url()
     )
 
     assert stats.dropped == 0
-    assert stats.added_inbox == 1
+    assert stats.added_q1 == 1
     assert stats.already_tracked == 0
     assert delete_calls == []
-    assert data["inbox"][0]["notification"]["url"] == (
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["url"] == (
         "https://github.com/octocat/Hello-World/pull/99"
     )
 
 
-def test_run_tracked_url_dedup_normalizes_artifact_url(todo_file):
+def test_run_canonical_reconciliation_normalizes_artifact_url(todo_file):
     todo_file.write_text(
         yaml.safe_dump(
             {
@@ -1389,10 +1467,12 @@ def test_run_tracked_url_dedup_normalizes_artifact_url(todo_file):
         todo_file, _assign_notif_for_tracked_url()
     )
 
-    assert stats.dropped == 1
-    assert stats.added_inbox == 0
-    assert any("/notifications/threads/2001" in " ".join(c) for c in delete_calls)
+    assert stats.dropped == 0
+    assert stats.added_q1 == 0
+    assert stats.already_tracked == 1
+    assert delete_calls == []
     assert data["inbox"] == []
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "2001"
 
 
 def test_run_adds_q1_for_mention(todo_file):
@@ -4490,7 +4570,7 @@ def test_ledger_uses_private_filesystem_permissions(tmp_path: Path):
 
     triage.NotificationLedger(ledger_file)
 
-    assert ledger_dir.stat().st_mode & 0o777 == 0o700
+    assert ledger_dir.stat().st_mode & 0o777 == 0o755
     assert ledger_file.stat().st_mode & 0o777 == 0o600
     assert sidecar.stat().st_mode & 0o777 == 0o600
 

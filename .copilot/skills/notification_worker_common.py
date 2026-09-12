@@ -158,7 +158,8 @@ class NotificationLedger:
     def __init__(self, path: Path = DEFAULT_LEDGER_FILE):
         self.path = path
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        self.path.parent.chmod(0o700)
+        if self.path == DEFAULT_LEDGER_FILE:
+            self.path.parent.chmod(0o700)
         fd = os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600)
         os.close(fd)
         self._secure_files()

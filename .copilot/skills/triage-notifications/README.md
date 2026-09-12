@@ -257,7 +257,7 @@ cd ~/repos/dotfiles/.copilot/skills/triage-notifications
 - **A new GitHub notification reason appears**: under the aggressive
   policy the classifier **drops** any reason that isn't in
   `KEEP_REASONS`. If a new directed-ping reason shows up that I care
-  about, add it to `KEEP_REASONS` (and route it in `_classify_internal`)
+  about, add it to `KEEP_REASONS` (and route it in `classify`)
   in `triage.py`. Run with `--dry-run --verbose` to see how unfamiliar
   reasons are being classified before they're cleared.
 - **Pruner dropped something I wanted to keep**: the pruner only drops

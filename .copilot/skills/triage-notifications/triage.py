@@ -475,6 +475,7 @@ class AppliedTodoMutations(TypedDict):
     url_deduped: list[dict[str, str]]
     reopened_threads: list[dict[str, str]]
     added_entries: list[dict[str, Any]]
+    tracker_links: list[dict[str, Any]]
     changed: bool
 
 
@@ -712,30 +713,6 @@ def classify(
     Read notifications classify identically to unread ones; the
     `already_tracked` short-circuit prevents the same notification from
     being added to the inbox on successive cron ticks.
-    """
-    return _classify_internal(
-        notif,
-        my_login=my_login,
-        state_fetcher=state_fetcher,
-        comment_fetcher=comment_fetcher,
-        subject_author_fetcher=subject_author_fetcher,
-    )
-
-
-def _classify_internal(
-    notif: dict[str, Any],
-    *,
-    my_login: str,
-    state_fetcher=fetch_thread_state,
-    comment_fetcher=fetch_latest_comment,
-    subject_author_fetcher=fetch_subject_author,
-) -> Classification:
-    """Reason-based classification under the aggressive "bulk triage"
-    policy: only directed personal-action reasons (KEEP_REASONS) and
-    AoR-matched items survive; everything else drops and is marked done.
-
-    Split from `classify` for testability and because the public entry
-    point may grow additional pre/post processing later.
     """
     reason = (notif.get("reason") or "").lower()
     subject = notif.get("subject") or {}
@@ -1201,10 +1178,13 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
     candidate: dict[str, Any] | None = None
     candidate_section = ""
     for section, item in _iter_notification_items_with_sections(data):
-        if tracker_terminal_disposition(item, section) and not delta.reopen_terminal:
+        terminal_disposition = tracker_terminal_disposition(item, section)
+        if terminal_disposition and not delta.reopen_terminal:
             continue
         if item.get("id") != delta.item_id and _item_thread_id(item) != delta.thread_id:
             continue
+        if delta.reopen_terminal and not terminal_disposition:
+            return False
         candidate = item
         candidate_section = section
         break
@@ -1256,6 +1236,7 @@ def apply_todo_mutations(
     pruned_by_reason: dict[str, int] = {}
     added_entries: list[dict[str, Any]] = []
     reopened_threads: list[dict[str, str]] = []
+    tracker_links: list[dict[str, Any]] = []
     applied: AppliedTodoMutations = {
         "added_q1": 0,
         "added_q2": 0,
@@ -1269,6 +1250,7 @@ def apply_todo_mutations(
         "url_deduped": [],
         "reopened_threads": reopened_threads,
         "added_entries": added_entries,
+        "tracker_links": tracker_links,
         "changed": False,
     }
 
@@ -1313,17 +1295,37 @@ def apply_todo_mutations(
             applied["already_tracked"] += 1
 
     for entry in mutations.add_q1:
+        reconciled = _reconcile_canonical_entry(data, entry, "q1_do_first")
+        if reconciled:
+            reconciled_entry, section = reconciled
+            applied["already_tracked"] += 1
+            tracker_links.append({"entry": reconciled_entry, "section": section})
+            changed = True
+            continue
         if _append_unique(data, data["prioritized"]["q1_do_first"], entry):
             applied["added_q1"] += 1
             added_entries.append(entry)
+            tracker_links.append(
+                {"entry": entry, "section": "prioritized.q1_do_first"}
+            )
             changed = True
         else:
             applied["already_tracked"] += 1
 
     for entry in mutations.add_q2:
+        reconciled = _reconcile_canonical_entry(data, entry, "q2_schedule")
+        if reconciled:
+            reconciled_entry, section = reconciled
+            applied["already_tracked"] += 1
+            tracker_links.append({"entry": reconciled_entry, "section": section})
+            changed = True
+            continue
         if _append_unique(data, data["prioritized"]["q2_schedule"], entry):
             applied["added_q2"] += 1
             added_entries.append(entry)
+            tracker_links.append(
+                {"entry": entry, "section": "prioritized.q2_schedule"}
+            )
             changed = True
         else:
             applied["already_tracked"] += 1
@@ -1350,6 +1352,7 @@ def apply_todo_mutations(
         if _append_unique(data, data["inbox"], entry):
             applied["added_inbox"] += 1
             added_entries.append(entry)
+            tracker_links.append({"entry": entry, "section": "inbox"})
             changed = True
         else:
             applied["already_tracked"] += 1
@@ -1585,6 +1588,52 @@ def _tracked_pr_issue_url_exists_elsewhere(
     return False
 
 
+def _reconcile_canonical_entry(
+    data: dict[str, Any], entry: dict[str, Any], target_quadrant: str
+) -> tuple[dict[str, Any], str] | None:
+    notification = entry.get("notification")
+    url = notification.get("url") if isinstance(notification, dict) else None
+    target = _canonical_pr_issue_url_key(url)
+    if target is None:
+        return None
+
+    for section, item in _iter_notification_items_with_sections(data):
+        if _item_thread_id(item):
+            continue
+        if not any(
+            _canonical_pr_issue_url_key(reference_url) == target
+            for reference_url in _item_reference_urls(item)
+        ):
+            continue
+
+        terminal = tracker_terminal_disposition(item, section)
+        item["notification"] = dict(notification)
+        active_sections = {"in_progress", "blocked", "in_review"}
+        current_quadrant = section.removeprefix("prioritized.")
+        if section in active_sections or current_quadrant == "q1_do_first":
+            return item, section
+        if current_quadrant == target_quadrant:
+            return item, section
+
+        if section in {"inbox", "done"}:
+            data[section].remove(item)
+        elif current_quadrant in PRUNE_QUADRANTS:
+            data["prioritized"][current_quadrant].remove(item)
+        else:
+            return item, section
+
+        item["quadrant"] = target_quadrant
+        if target_quadrant == "q1_do_first":
+            item["urgency"] = "high"
+            item["importance"] = "high"
+        if terminal:
+            item["status"] = "pending"
+            item.pop("completed", None)
+        data["prioritized"][target_quadrant].append(item)
+        return item, f"prioritized.{target_quadrant}"
+    return None
+
+
 def _iter_notification_items_with_sections(
     data: dict[str, Any],
 ) -> list[tuple[str, dict[str, Any]]]:
@@ -1633,11 +1682,6 @@ def items_ready_for_clear(data: dict[str, Any]) -> list[tuple[dict[str, Any], st
             continue
         ready.append((item, section, disposition))
     return ready
-
-
-def items_to_mark_done(data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Backward-compatible helper returning only the clearable items."""
-    return [item for item, _section, _disposition in items_ready_for_clear(data)]
 
 
 def mark_thread_done(thread_id: str) -> None:
@@ -2579,14 +2623,11 @@ def run(args: argparse.Namespace) -> TriageStats:
         reconcile_stats_from_applied(stats, applied)
         if not args.dry_run:
             added_entries = applied["added_entries"]
-            for entry in added_entries:
+            for tracker_link in applied["tracker_links"]:
+                entry = tracker_link["entry"]
                 notif_meta = entry.get("notification")
                 if not isinstance(notif_meta, dict):
                     continue
-                section = "inbox"
-                quadrant = str(entry.get("quadrant") or "")
-                if quadrant:
-                    section = f"prioritized.{quadrant}"
                 _ledger_capture(
                     ledger,
                     dry_run=args.dry_run,
@@ -2598,7 +2639,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     reason=str(notif_meta.get("reason") or "").lower(),
                     repo=str(notif_meta.get("repo") or ""),
                     tracker_item_id=str(entry.get("id") or "") or None,
-                    tracker_section=section,
+                    tracker_section=tracker_link["section"],
                 )
 
     retry_pending_github_clears(
