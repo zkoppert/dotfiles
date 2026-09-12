@@ -204,9 +204,6 @@ in-memory load and reports that preview without writing.
 # Preview without writing to todo.yml, the ledger, or GitHub
 ~/repos/dotfiles/bin/notification-triage --dry-run --verbose
 
-# Preview a migration/backfill into the ledger without writing it
-~/repos/dotfiles/bin/notification-triage --backfill-ledger --dry-run --verbose
-
 # Skip the macOS notification (useful during testing)
 ~/repos/dotfiles/bin/notification-triage --no-notify
 

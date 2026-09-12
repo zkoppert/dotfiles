@@ -406,8 +406,6 @@ class TriageStats:
     pruned_by_reason: dict[str, int] = field(default_factory=dict)
     archived_to_done: int = 0
     ledger_rows: int = 0
-    ledger_backfill_captured: int = 0
-    ledger_backfill_linked: int = 0
     # Dependabot bumps dropped from the inbox but left unread on GitHub for
     # triage-dependabot to consume.
     left_for_dependabot: int = 0
@@ -1404,8 +1402,7 @@ def apply_todo_mutations(
             continue
         section, item = tracked
         terminal = tracker_terminal_disposition(item, section)
-        if section in {"in_progress", "blocked", "in_review"} and not terminal:
-            tracker_links.append({"entry": item, "section": section})
+        if not terminal:
             continue
         quadrant = section.removeprefix("prioritized.")
         if section in {"inbox", "done"}:
@@ -2133,11 +2130,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Path to the machine-readable health file (default: {DEFAULT_HEALTH_FILE}).",
     )
     parser.add_argument(
-        "--backfill-ledger",
-        action="store_true",
-        help="Reconcile the current GitHub notification view and todo.yml into the ledger.",
-    )
-    parser.add_argument(
         "--no-notify",
         action="store_true",
         help="Skip clickable macOS alerts for new direct mentions.",
@@ -2235,9 +2227,6 @@ def reconcile_tracker_rows_to_ledger(
             tracker_section=section,
             payload={"source": item.get("source")},
         )
-        stats.ledger_backfill_captured += 1
-        if item.get("id"):
-            stats.ledger_backfill_linked += 1
         disposition = tracker_terminal_disposition(item, section)
         if disposition:
             _ledger_capture(
@@ -2510,12 +2499,16 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
                 if tracked and tracker_terminal_disposition(tracked[1], tracked[0]):
                     reopened_thread_ids.add(thread_id)
-            elif classification.bucket == BUCKET_INBOX and renewed:
+            elif (
+                classification.bucket == BUCKET_INBOX
+                and renewed
+                and tracked
+                and tracker_terminal_disposition(tracked[1], tracked[0])
+            ):
                 mutations.route_existing_inbox.append(
                     build_todo_entry(notif, classification)
                 )
-                if tracked and tracker_terminal_disposition(tracked[1], tracked[0]):
-                    reopened_thread_ids.add(thread_id)
+                reopened_thread_ids.add(thread_id)
             elif classification.bucket == BUCKET_DROP and tracked:
                 stats.dropped += 1
                 disposition = "completed" if (
@@ -2606,12 +2599,10 @@ def run(args: argparse.Namespace) -> TriageStats:
                 terminal_disposition=None if classification.skip_mark_done else disposition,
                 queue_clear=not classification.skip_mark_done,
             )
-            if classification.archive_to_done and not args.backfill_ledger:
+            if classification.archive_to_done:
                 mutations.add_done.append(build_done_archive_entry(notif))
             if classification.skip_mark_done:
                 stats.left_for_dependabot += 1
-                continue
-            if args.backfill_ledger:
                 continue
             if not args.dry_run:
                 try:
@@ -2655,8 +2646,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 "direct_mention": classification.direct_mention,
             },
         )
-        if args.backfill_ledger:
-            continue
         if classification.direct_mention and thread_id:
             direct_mention_thread_ids.add(thread_id)
         if classification.bucket == BUCKET_Q1:
@@ -2665,10 +2654,6 @@ def run(args: argparse.Namespace) -> TriageStats:
             mutations.add_q2.append(entry)
         else:
             mutations.add_inbox.append(entry)
-
-    if args.backfill_ledger:
-        stats.ledger_rows = ledger.row_count() if ledger is not None else 0
-        return stats
 
     for item, section, disposition in items_ready_for_clear(data):
         notif_meta = item["notification"]
@@ -2895,8 +2880,7 @@ def main(argv: list[str] | None = None) -> int:
         f"dropped={stats.dropped} archived_to_done={stats.archived_to_done} "
         f"already_tracked={stats.already_tracked} marked_done={stats.marked_done} "
         f"left_for_dependabot={stats.left_for_dependabot} pruned_stale={stats.pruned_stale} "
-        f"ledger_rows={stats.ledger_rows} ledger_backfill_captured={stats.ledger_backfill_captured} "
-        f"ledger_backfill_linked={stats.ledger_backfill_linked}"
+        f"ledger_rows={stats.ledger_rows}"
     )
     if stats.pruned_by_reason:
         breakdown = ", ".join(

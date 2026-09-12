@@ -1540,6 +1540,47 @@ def test_run_reopens_terminal_thread_in_inbox(todo_file):
     assert "marked_done" not in updated["inbox"][0]["notification"]
 
 
+def test_run_preserves_active_q1_when_thread_changes_to_author(todo_file):
+    item = {
+        "id": "old",
+        "title": "Unresolved direct ask",
+        "status": "pending",
+        "quadrant": "q1_do_first",
+        "urgency": "high",
+        "importance": "high",
+        "notification": {
+            "thread_id": "1001",
+            "reason": "mention",
+            "captured_at": "2026-07-01T12:00:00Z",
+        },
+    }
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": [item], "q2_schedule": []},
+                "done": [],
+            }
+        )
+    )
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps(
+            [_notif("author", updated_at="2026-07-02T12:00:00Z")]
+        ),
+        "/repos/zkoppert/example/pulls/42": json.dumps(
+            {"state": "open", "user": {"login": "zkoppert"}}
+        ),
+    }
+
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
+        triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    updated = yaml.safe_load(todo_file.read_text())
+    assert updated["inbox"] == []
+    assert updated["prioritized"]["q1_do_first"] == [item]
+
+
 def test_run_clears_existing_thread_reclassified_as_drop(todo_file):
     item = {
         "id": "old",
@@ -5253,56 +5294,6 @@ def test_run_preserves_clear_failure_for_dropped_item(todo_file: Path):
     failure = ledger.rows_with_clear_failures()[0]
     assert failure["source_id"] == "q4-fail"
     assert failure["terminal_disposition"] == "irrelevant"
-
-
-def test_backfill_ledger_dry_run_does_not_write_ledger(todo_file: Path):
-    todo_file.write_text(
-        yaml.safe_dump(
-            {
-                "inbox": [
-                    {
-                        "id": "existing-review",
-                        "title": "Existing review",
-                        "source": "github-notification",
-                        "notification": {
-                            "thread_id": "backfill-1",
-                            "url": "https://github.com/o/r/pull/1",
-                            "reason": "review_requested",
-                            "repo": "o/r",
-                        },
-                    }
-                ],
-                "prioritized": {
-                    "q1_do_first": [],
-                    "q2_schedule": [],
-                    "q3_delegate": [],
-                    "q4_eliminate": [],
-                },
-                "done": [],
-            }
-        )
-    )
-    ledger_file = todo_file.parent / "ledger.sqlite"
-    responses = {
-        "/user": json.dumps({"login": "zkoppert"}),
-        "/notifications?all=true": json.dumps([_notif("mention", id="backfill-2")]),
-    }
-    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
-        args = triage.parse_args(
-            [
-                "--todo-file",
-                str(todo_file),
-                "--ledger-file",
-                str(ledger_file),
-                "--backfill-ledger",
-                "--dry-run",
-                "--no-notify",
-            ]
-        )
-        stats = triage.run(args)
-
-    assert stats.ledger_backfill_captured >= 1
-    assert not ledger_file.exists()
 
 
 def test_run_retries_pending_clear_without_duplicating_tracker_item(todo_file: Path):
