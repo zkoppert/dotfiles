@@ -2474,21 +2474,33 @@ def run(args: argparse.Namespace) -> TriageStats:
                 None,
             )
             renewed = bool(tracked and notification_has_new_activity(notif, tracked[1]))
-            tracked_reason = str(
-                ((tracked[1].get("notification") or {}).get("reason") if tracked else "")
-                or ""
-            ).lower()
-            tracked_direct_ask = bool(
-                tracked
-                and not tracker_terminal_disposition(tracked[1], tracked[0])
-                and tracked_reason in {"mention", "assign"}
+            tracked_nonterminal = bool(
+                tracked and not tracker_terminal_disposition(tracked[1], tracked[0])
+            )
+            tracked_urgent = bool(
+                tracked_nonterminal
+                and tracked
+                and tracked[0]
+                in {
+                    "prioritized.q1_do_first",
+                    "in_progress",
+                    "blocked",
+                    "in_review",
+                }
             )
             subject_resolved = classification.bucket == BUCKET_DROP and (
                 "closed" in classification.reason or "merged" in classification.reason
             )
             if (
-                tracked_direct_ask
+                tracked_urgent
                 and classification.bucket != BUCKET_Q1
+                and not subject_resolved
+            ):
+                stats.already_tracked += 1
+                continue
+            if (
+                tracked_nonterminal
+                and classification.bucket == BUCKET_DROP
                 and not subject_resolved
             ):
                 stats.already_tracked += 1

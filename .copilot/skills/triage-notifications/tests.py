@@ -1581,8 +1581,11 @@ def test_run_preserves_active_q1_when_thread_changes_to_author(todo_file):
     assert updated["prioritized"]["q1_do_first"] == [item]
 
 
+@pytest.mark.parametrize("tracked_reason", ["mention", "comment"])
 @pytest.mark.parametrize("reason", ["review_requested", "ci_activity"])
-def test_run_preserves_unresolved_direct_ask_when_reason_changes(todo_file, reason):
+def test_run_preserves_unresolved_direct_ask_when_reason_changes(
+    todo_file, tracked_reason, reason
+):
     item = {
         "id": "old",
         "title": "Unresolved direct ask",
@@ -1592,7 +1595,7 @@ def test_run_preserves_unresolved_direct_ask_when_reason_changes(todo_file, reas
         "importance": "high",
         "notification": {
             "thread_id": "1001",
-            "reason": "mention",
+            "reason": tracked_reason,
             "captured_at": "2026-07-01T12:00:00Z",
         },
     }
@@ -1631,7 +1634,7 @@ def test_run_preserves_unresolved_direct_ask_when_reason_changes(todo_file, reas
     assert delete_calls == []
 
 
-def test_run_clears_existing_thread_reclassified_as_drop(todo_file):
+def test_run_preserves_scheduled_review_reclassified_as_passive_noise(todo_file):
     item = {
         "id": "old",
         "title": "Scheduled review",
@@ -1670,8 +1673,8 @@ def test_run_clears_existing_thread_reclassified_as_drop(todo_file):
         triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
 
     updated = yaml.safe_load(todo_file.read_text())
-    assert updated["prioritized"]["q2_schedule"] == []
-    assert any("/notifications/threads/1001" in " ".join(call) for call in delete_calls)
+    assert updated["prioritized"]["q2_schedule"] == [item]
+    assert delete_calls == []
 
 
 def test_canonical_terminal_q1_routes_to_scheduled_review():
