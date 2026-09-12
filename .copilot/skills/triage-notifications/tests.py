@@ -1322,7 +1322,7 @@ def test_run_reopens_terminal_item_for_direct_mention(
     ]
 
 
-def test_run_clears_unchanged_terminal_direct_mention(todo_file):
+def test_run_clears_uncleared_legacy_terminal_direct_mention(todo_file):
     item = {
         "id": "old",
         "title": "Completed ask",
@@ -1331,7 +1331,6 @@ def test_run_clears_unchanged_terminal_direct_mention(todo_file):
         "notification": {
             "thread_id": "1001",
             "reason": "mention",
-            "captured_at": "2026-07-01T12:00:00Z",
             "terminal_disposition": "completed",
         },
     }

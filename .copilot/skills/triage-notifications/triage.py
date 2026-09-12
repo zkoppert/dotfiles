@@ -927,7 +927,9 @@ def notification_has_new_activity(
         return True
     updated_at = parse_iso_datetime(notif.get("updated_at"))
     captured_at = parse_iso_datetime(tracked.get("captured_at"))
-    return bool(updated_at and (captured_at is None or updated_at > captured_at))
+    if captured_at is None:
+        return bool(tracked.get("marked_done"))
+    return bool(updated_at and updated_at > captured_at)
 
 
 def build_done_archive_entry(notif: dict[str, Any]) -> dict[str, Any]:
