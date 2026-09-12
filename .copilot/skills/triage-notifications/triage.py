@@ -1303,18 +1303,6 @@ def apply_todo_mutations(
             applied["marked_done"] += 1
             changed = True
 
-    for escalation_delta in mutations.escalate:
-        if _escalate_review_request(data, escalation_delta):
-            applied["escalated_review_requests"] += 1
-            if escalation_delta.reopen_terminal and escalation_delta.thread_id:
-                reopened_threads.append(
-                    {
-                        "thread_id": escalation_delta.thread_id,
-                        "reason": escalation_delta.reason,
-                    }
-                )
-            changed = True
-
     for entry in mutations.add_done:
         if _append_unique(data, data["done"], entry):
             applied["added_done"] += 1
@@ -1386,6 +1374,18 @@ def apply_todo_mutations(
             section = "prioritized.q2_schedule"
         tracker_links.append({"entry": item, "section": section})
         changed = True
+
+    for escalation_delta in mutations.escalate:
+        if _escalate_review_request(data, escalation_delta):
+            applied["escalated_review_requests"] += 1
+            if escalation_delta.reopen_terminal and escalation_delta.thread_id:
+                reopened_threads.append(
+                    {
+                        "thread_id": escalation_delta.thread_id,
+                        "reason": escalation_delta.reason,
+                    }
+                )
+            changed = True
 
     for entry in mutations.route_existing_inbox:
         notification = entry.get("notification")

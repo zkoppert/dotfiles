@@ -2089,6 +2089,61 @@ def test_collect_review_request_escalations_promotes_stale_items_to_q1():
     assert q1[0]["notification"]["review_requested_escalated_at"] == "2026-07-07T12:00:00Z"
 
 
+def test_review_request_escalation_wins_over_same_run_activity_refresh():
+    item = {
+        "id": "review-1",
+        "title": "Review request",
+        "status": "pending",
+        "quadrant": "q2_schedule",
+        "notification": {
+            "thread_id": "thr-1",
+            "reason": "review_requested",
+            "captured_at": "2026-07-03T12:00:00Z",
+            "escalates_at": "2026-07-04T12:00:00Z",
+        },
+    }
+    refreshed = {
+        "id": "review-1",
+        "title": "Review request",
+        "notification": {
+            "thread_id": "thr-1",
+            "reason": "review_requested",
+            "captured_at": "2026-07-07T11:00:00Z",
+            "escalates_at": "2026-07-08T11:00:00Z",
+        },
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {
+            "q1_do_first": [],
+            "q2_schedule": [item],
+            "q3_delegate": [],
+            "q4_eliminate": [],
+        },
+        "done": [],
+    }
+    mutations = triage.TodoMutations(
+        route_existing_q2=[refreshed],
+        escalate=[
+            triage.EscalationDelta(
+                item_id="review-1",
+                thread_id="thr-1",
+                escalated_at="2026-07-07T12:00:00Z",
+            )
+        ],
+    )
+
+    applied = triage.apply_todo_mutations(data, mutations)
+
+    assert applied["escalated_review_requests"] == 1
+    assert data["prioritized"]["q2_schedule"] == []
+    assert data["prioritized"]["q1_do_first"] == [item]
+    assert item["notification"]["captured_at"] == "2026-07-03T12:00:00Z"
+    assert item["notification"]["review_requested_escalated_at"] == (
+        "2026-07-07T12:00:00Z"
+    )
+
+
 @pytest.mark.parametrize("active_section", ["in_progress", "blocked", "in_review"])
 def test_stale_review_escalation_preserves_fresh_active_item(active_section):
     item = {
