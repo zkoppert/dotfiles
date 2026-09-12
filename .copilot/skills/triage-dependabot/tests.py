@@ -3663,7 +3663,7 @@ def test_run_branch_protection_failure_flags_and_sets_long_cooldown(
     # No additional approve happened in the run loop; do_merge raised
     # before its internal approve fallback could re-fire.
     approve_mock.assert_not_called()
-    # Notification cleared so it does not re-enter next hour.
+    # Notification clears only after its Q1 entry is persisted.
     mark_done_mock.assert_called_once_with("thread-bp", dry_run=False)
 
     # Q1 entry has the branch-protection reason in its description.
@@ -3671,6 +3671,24 @@ def test_run_branch_protection_failure_flags_and_sets_long_cooldown(
     flags = reloaded["prioritized"]["q1_do_first"]
     assert len(flags) == 1
     assert "branch protection" in flags[0]["description"]
+
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    rows = ledger._rows(
+        """
+        SELECT tracker_item_id, tracker_section, terminal_disposition, clear_state
+          FROM notifications
+         WHERE source_id = ?
+        """,
+        ("thread-bp",),
+    )
+    assert rows == [
+        {
+            "tracker_item_id": flags[0]["id"],
+            "tracker_section": "prioritized.q1_do_first",
+            "terminal_disposition": "tracked_elsewhere",
+            "clear_state": "cleared",
+        }
+    ]
 
     # Long cooldown set: a follow-up run within the next 24h must skip.
     state = td.load_state(args.state_file)
@@ -3681,6 +3699,67 @@ def test_run_branch_protection_failure_flags_and_sets_long_cooldown(
         23 * 3600
     )
     assert td.in_cooldown(state, pr_url, now=now_plus_23h)
+
+
+def test_run_branch_protection_keeps_notification_when_todo_write_fails(
+    tmp_path: Path,
+) -> None:
+    notif = {
+        "id": "thread-bp-write-failure",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/github/example/pulls/60",
+        },
+    }
+    pr_url = "https://github.com/github/example/pull/60"
+    pr = _base_pr(number=60, url=pr_url)
+    pr["headRefOid"] = "abc123"
+    args = _make_args(tmp_path)
+    bp_err = td.BranchProtectionBlocked(
+        repo="github/example",
+        number=60,
+        marker="the base branch policy prohibits the merge",
+    )
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=95
+    ), mock.patch.object(
+        td, "do_merge", side_effect=bp_err
+    ), mock.patch.object(
+        td, "apply_todo_mutations_with_lock", side_effect=OSError("write failed")
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_done_mock:
+        stats = td.run(args)
+
+    mark_done_mock.assert_not_called()
+    assert stats.flagged == 0
+    assert stats.errors == ["failed to write todo file: write failed"]
+    assert td.load_todo(args.todo_file)["prioritized"]["q1_do_first"] == []
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    rows = ledger._rows(
+        """
+        SELECT classification, tracker_item_id, terminal_disposition, clear_state
+          FROM notifications
+         WHERE source_id = ?
+        """,
+        ("thread-bp-write-failure",),
+    )
+    assert rows == [
+        {
+            "classification": "actionable",
+            "tracker_item_id": None,
+            "terminal_disposition": None,
+            "clear_state": "not_applicable",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -2088,6 +2088,7 @@ def run(args: argparse.Namespace) -> TriageStats:
     now = datetime.datetime.now(datetime.timezone.utc).timestamp()
     mutations = TodoMutations()
     added_flag_entries: list[dict[str, Any]] = []
+    branch_protection_handoffs: list[FlagTodoDelta] = []
     use_copilot = not args.no_copilot_subagent
     allowed = set(args.allowed_repo)
     coverage_cache: dict[str, int | None] = {}
@@ -2620,28 +2621,17 @@ def run(args: argparse.Namespace) -> TriageStats:
                 title=title,
                 reason=reason,
                 repo=repo,
-                terminal_disposition="tracked_elsewhere",
-                queue_clear=bool(thread_id),
             )
-            mutations.flags.append(
-                FlagTodoDelta(
-                    entry=build_flag_entry(pr, repo, notif, bp_decision),
-                    pr_url=pr_url,
-                )
+            handoff = FlagTodoDelta(
+                entry=build_flag_entry(pr, repo, notif, bp_decision),
+                pr_url=pr_url,
             )
+            mutations.flags.append(handoff)
+            branch_protection_handoffs.append(handoff)
             if pr_url:
                 cooldown_offset = BRANCH_PROTECTION_COOLDOWN_SECONDS
                 cooldown_offset -= ACTION_COOLDOWN_SECONDS
                 state[pr_url] = now + cooldown_offset
-            if thread_id:
-                _safe_mark_thread_done(
-                    thread_id,
-                    dry_run=args.dry_run,
-                    stats=stats,
-                    context=f"branch-protected {pr_url}",
-                    ledger=ledger,
-                    canonical_artifact=pr_url,
-                )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             stats.errors.append(f"action {decision.outcome} failed for {pr_url}: {exc}")
 
@@ -2677,6 +2667,36 @@ def run(args: argparse.Namespace) -> TriageStats:
                 tracker_item_id=str(entry.get("id") or "") or None,
                 tracker_section="prioritized.q1_do_first",
             )
+        for handoff in branch_protection_handoffs:
+            entry = handoff.entry
+            notif_meta = entry.get("notification")
+            if not isinstance(notif_meta, dict):
+                continue
+            handoff_thread_id = str(notif_meta.get("thread_id") or "")
+            _ledger_capture(
+                ledger,
+                dry_run=args.dry_run,
+                thread_id=handoff_thread_id or None,
+                canonical_artifact=handoff.pr_url,
+                classification="actionable",
+                worker="dependabot-branch-protection",
+                title=str(entry.get("title") or ""),
+                reason=str(notif_meta.get("reason") or "").lower(),
+                repo=str(notif_meta.get("repo") or ""),
+                tracker_item_id=str(entry.get("id") or "") or None,
+                tracker_section="prioritized.q1_do_first",
+                terminal_disposition="tracked_elsewhere",
+                queue_clear=bool(handoff_thread_id),
+            )
+            if handoff_thread_id:
+                _safe_mark_thread_done(
+                    handoff_thread_id,
+                    dry_run=args.dry_run,
+                    stats=stats,
+                    context=f"branch-protected {handoff.pr_url}",
+                    ledger=ledger,
+                    canonical_artifact=handoff.pr_url,
+                )
     elif mutations.flags and args.dry_run:
         try:
             preview = load_todo(args.todo_file)
