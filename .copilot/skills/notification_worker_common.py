@@ -614,50 +614,6 @@ class NotificationLedger:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [dict(row) for row in rows]
 
-    def rows_missing_tracker_links(self, *, source_type: str = "github") -> list[dict[str, Any]]:
-        return self._rows(
-            """
-            SELECT source_id, canonical_artifact, reason, repo, classification,
-                   first_seen_at, last_seen_at
-              FROM notifications
-             WHERE source_type = ?
-               AND classification = 'actionable'
-               AND (tracker_item_id IS NULL OR tracker_item_id = '')
-               AND terminal_disposition IS NULL
-             ORDER BY first_seen_at ASC
-            """,
-            (source_type,),
-        )
-
-    def rows_with_clear_failures(self, *, source_type: str = "github") -> list[dict[str, Any]]:
-        return self._rows(
-            """
-            SELECT source_id, canonical_artifact, reason, repo, terminal_disposition,
-                   clear_state, last_clear_error, clear_attempted_at
-              FROM notifications
-             WHERE source_type = ?
-               AND clear_state = 'failed'
-             ORDER BY clear_attempted_at DESC
-            """,
-            (source_type,),
-        )
-
-    def rows_with_stale_irrelevant_items(
-        self, *, source_type: str = "github"
-    ) -> list[dict[str, Any]]:
-        return self._rows(
-            """
-            SELECT source_id, canonical_artifact, reason, repo, tracker_item_id,
-                   clear_state, terminal_recorded_at, last_clear_error
-              FROM notifications
-             WHERE source_type = ?
-               AND terminal_disposition = 'irrelevant'
-               AND clear_state != 'succeeded'
-             ORDER BY terminal_recorded_at ASC
-            """,
-            (source_type,),
-        )
-
     def pending_github_clears(self) -> list[dict[str, Any]]:
         return self._rows(
             """

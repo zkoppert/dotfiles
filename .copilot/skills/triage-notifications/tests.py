@@ -5123,20 +5123,8 @@ def test_ledger_tracks_distinct_threads_for_same_artifact(todo_file: Path):
         classification="policy_drop",
         worker="test",
     )
-    ledger.record_clear_failure(
-        source_type="github",
-        source_id="thread-b",
-        canonical_artifact=artifact,
-        error="HTTP 500",
-    )
-
     assert first_id != second_id
     assert ledger.row_count() == 2
-    failures = ledger.rows_with_clear_failures()
-    assert len(failures) == 1
-    assert failures[0]["source_id"] == "thread-b"
-    assert failures[0]["canonical_artifact"] == artifact
-    assert failures[0]["last_clear_error"] == "HTTP 500"
 
 
 def test_ledger_first_thread_claims_canonical_tracker_row(todo_file: Path):
@@ -5387,7 +5375,7 @@ def test_run_preserves_clear_failure_for_dropped_item(todo_file: Path):
     assert stats.marked_done == 0
     assert any("mark-done-on-completed failed" in err for err in stats.errors)
     ledger = triage.NotificationLedger(ledger_file)
-    failure = ledger.rows_with_clear_failures()[0]
+    failure = ledger.pending_github_clears()[0]
     assert failure["source_id"] == "q4-fail"
     assert failure["terminal_disposition"] == "irrelevant"
 
