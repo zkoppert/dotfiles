@@ -2119,6 +2119,21 @@ def run(args: argparse.Namespace) -> TriageStats:
         reason = (notif.get("reason") or "").lower()
         title = str(pr.get("title") or "")
 
+        if reason in {"mention", "assign"}:
+            _ledger_capture(
+                ledger,
+                dry_run=args.dry_run,
+                thread_id=thread_id or None,
+                canonical_artifact=pr_url,
+                classification="actionable",
+                worker="dependabot-direct-ask-handoff",
+                title=title,
+                reason=reason,
+                repo=repo,
+            )
+            stats.skipped += 1
+            continue
+
         if is_archived_repo(repo):
             logger.info("%s#%d -> skipping archived repo %s", repo, number, repo)
             stats.skipped_archived += 1
@@ -2325,20 +2340,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
             if pr_url and cleared:
                 state[pr_url] = now
-            continue
-        if reason in {"mention", "assign"}:
-            _ledger_capture(
-                ledger,
-                dry_run=args.dry_run,
-                thread_id=thread_id or None,
-                canonical_artifact=pr_url,
-                classification="actionable",
-                worker="dependabot-direct-ask-handoff",
-                title=title,
-                reason=reason,
-                repo=repo,
-            )
-            stats.skipped += 1
             continue
         stats.dependabot += 1
 

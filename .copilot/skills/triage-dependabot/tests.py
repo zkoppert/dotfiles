@@ -3313,6 +3313,55 @@ def test_run_skips_archived_repo_and_clears_notification(tmp_path: Path) -> None
     assert "https://github.com/zkoppert/advanced-security-enforcer/pull/73" in state
 
 
+@pytest.mark.parametrize("reason", ["mention", "assign"])
+def test_run_hands_archived_direct_asks_to_general_triage(
+    tmp_path: Path, reason: str
+) -> None:
+    notif = {
+        "id": "thread-archived-direct",
+        "reason": reason,
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/zkoppert/archived/pulls/73",
+        },
+    }
+    pr_url = "https://github.com/zkoppert/archived/pull/73"
+    pr = _base_pr(number=73, url=pr_url)
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "is_archived_repo", return_value=True
+    ) as archive_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_done_mock:
+        stats = td.run(args)
+
+    archive_mock.assert_not_called()
+    mark_done_mock.assert_not_called()
+    assert stats.skipped == 1
+    assert stats.skipped_archived == 0
+    assert stats.dependabot == 0
+    assert pr_url not in td.load_state(args.state_file)
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    rows = ledger._rows(
+        "SELECT classification, reason, clear_state FROM notifications WHERE source_id = ?",
+        ("thread-archived-direct",),
+    )
+    assert rows == [
+        {
+            "classification": "actionable",
+            "reason": reason,
+            "clear_state": "not_applicable",
+        }
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Branch-protection / consistent approval (bug 3)
 # ---------------------------------------------------------------------------
