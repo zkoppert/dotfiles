@@ -735,6 +735,15 @@ def classify(
     # are the exception: passive bump notifications should be marked done
     # instead of handed off.
     if subject_type == "pullrequest" and is_dependabot_bump(title):
+        if reason == "comment":
+            state = state_fetcher(notif)
+            author, body = comment_fetcher(notif)
+            if state not in CLOSED_STATES and mentions_me(body, my_login):
+                return Classification(
+                    BUCKET_Q1,
+                    f"@mention in comment by @{author}",
+                    direct_mention=True,
+                )
         repo_lc = repo_full.lower()
         if repo_lc in WATCH_ONLY_DEPENDABOT_MARK_DONE_REPOS:
             if reason not in DIRECTED_REPO_REASONS:

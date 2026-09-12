@@ -2007,6 +2007,33 @@ def test_run_notifies_for_direct_mention_in_comment(todo_file):
     )
 
 
+def test_run_routes_dependabot_comment_mention_to_q1(todo_file):
+    notif = _notif("comment")
+    notif["subject"]["title"] = "Bump urllib3 from 2.0.0 to 2.1.0"
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+        "/repos/zkoppert/example/pulls/42": json.dumps({"state": "open"}),
+        "/repos/zkoppert/example/issues/comments/9": json.dumps(
+            {
+                "user": {"login": "teammate"},
+                "body": "@zkoppert can you review this update?",
+            }
+        ),
+    }
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
+    assert stats.added_q1 == 1
+    assert stats.left_for_dependabot == 0
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_called_once()
+
+
 def test_run_notifies_commit_mention_with_commit_url(todo_file):
     notif = _notif(
         "mention",
