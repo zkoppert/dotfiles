@@ -2119,7 +2119,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         reason = (notif.get("reason") or "").lower()
         title = str(pr.get("title") or "")
 
-        if reason in {"mention", "assign"}:
+        if reason in {"mention", "assign", "comment"}:
             _ledger_capture(
                 ledger,
                 dry_run=args.dry_run,

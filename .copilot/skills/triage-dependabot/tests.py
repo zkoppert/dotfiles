@@ -3313,7 +3313,7 @@ def test_run_skips_archived_repo_and_clears_notification(tmp_path: Path) -> None
     assert "https://github.com/zkoppert/advanced-security-enforcer/pull/73" in state
 
 
-@pytest.mark.parametrize("reason", ["mention", "assign"])
+@pytest.mark.parametrize("reason", ["mention", "assign", "comment"])
 def test_run_hands_archived_direct_asks_to_general_triage(
     tmp_path: Path, reason: str
 ) -> None:
