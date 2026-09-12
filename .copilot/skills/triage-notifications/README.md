@@ -241,7 +241,7 @@ If you ever make that file public, redact entries with
 
 ```bash
 cd ~/repos/dotfiles/.copilot/skills/triage-notifications
-~/.local/share/dotfiles/notification-workers/venv/bin/python3 -m pytest tests.py -v
+pytest tests.py -v
 ```
 
 ## Failure modes

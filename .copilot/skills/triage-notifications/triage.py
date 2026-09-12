@@ -455,6 +455,8 @@ class TodoMutations:
     add_q1: list[dict[str, Any]] = field(default_factory=list)
     add_q2: list[dict[str, Any]] = field(default_factory=list)
     route_existing_q2: list[dict[str, Any]] = field(default_factory=list)
+    route_existing_inbox: list[dict[str, Any]] = field(default_factory=list)
+    route_existing_drop: list[PruneDelta] = field(default_factory=list)
     add_inbox: list[dict[str, Any]] = field(default_factory=list)
     add_done: list[dict[str, Any]] = field(default_factory=list)
     mark_done: list[MarkDoneDelta] = field(default_factory=list)
@@ -1282,7 +1284,7 @@ def apply_todo_mutations(
         "changed": False,
     }
 
-    for prune_delta in mutations.prune:
+    for prune_delta in [*mutations.prune, *mutations.route_existing_drop]:
         removed = _remove_pruned_entry(data, prune_delta)
         if removed:
             applied["pruned"] += removed
@@ -1355,7 +1357,14 @@ def apply_todo_mutations(
             continue
         section, item = tracked
         terminal = tracker_terminal_disposition(item, section)
-        item["notification"] = dict(notification)
+        replacement_notification = dict(notification)
+        if not terminal:
+            existing_notification = item.get("notification")
+            if isinstance(existing_notification, dict):
+                for key in ("captured_at", "escalates_at"):
+                    if key in existing_notification:
+                        replacement_notification[key] = existing_notification[key]
+        item["notification"] = replacement_notification
         if section not in {"in_progress", "blocked", "in_review"}:
             quadrant = section.removeprefix("prioritized.")
             if section in {"inbox", "done"}:
@@ -1378,6 +1387,49 @@ def apply_todo_mutations(
             data["prioritized"]["q2_schedule"].append(item)
             section = "prioritized.q2_schedule"
         tracker_links.append({"entry": item, "section": section})
+        changed = True
+
+    for entry in mutations.route_existing_inbox:
+        notification = entry.get("notification")
+        thread_id = _item_thread_id(entry)
+        tracked = next(
+            (
+                (section, item)
+                for section, item in _iter_notification_items_with_sections(data)
+                if _item_thread_id(item) == thread_id
+            ),
+            None,
+        )
+        if tracked is None or not isinstance(notification, dict):
+            continue
+        section, item = tracked
+        terminal = tracker_terminal_disposition(item, section)
+        if section in {"in_progress", "blocked", "in_review"} and not terminal:
+            tracker_links.append({"entry": item, "section": section})
+            continue
+        quadrant = section.removeprefix("prioritized.")
+        if section in {"inbox", "done"}:
+            data[section].remove(item)
+        elif quadrant in PRUNE_QUADRANTS:
+            data["prioritized"][quadrant].remove(item)
+        else:
+            continue
+        item["notification"] = dict(notification)
+        item.pop("quadrant", None)
+        item.pop("urgency", None)
+        item.pop("importance", None)
+        if terminal:
+            item["status"] = "pending"
+            item.pop("completed", None)
+            reopened_threads.append(
+                {
+                    "thread_id": thread_id or "",
+                    "reason": str(notification.get("reason") or ""),
+                    "tracker_section": "inbox",
+                }
+            )
+        data["inbox"].append(item)
+        tracker_links.append({"entry": item, "section": "inbox"})
         changed = True
 
     for entry in mutations.add_q2:
@@ -1678,10 +1730,9 @@ def _reconcile_canonical_entry(
         item["notification"] = dict(notification)
         active_sections = {"in_progress", "blocked", "in_review"}
         current_quadrant = section.removeprefix("prioritized.")
-        if section in active_sections or current_quadrant == "q1_do_first":
-            if terminal and target_quadrant == "q1_do_first":
-                item["status"] = "pending"
-                item.pop("completed", None)
+        if not terminal and (
+            section in active_sections or current_quadrant == "q1_do_first"
+        ):
             return item, section
         if current_quadrant == target_quadrant:
             return item, section
@@ -2459,6 +2510,76 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
                 if tracked and tracker_terminal_disposition(tracked[1], tracked[0]):
                     reopened_thread_ids.add(thread_id)
+            elif classification.bucket == BUCKET_INBOX and renewed:
+                mutations.route_existing_inbox.append(
+                    build_todo_entry(notif, classification)
+                )
+                if tracked and tracker_terminal_disposition(tracked[1], tracked[0]):
+                    reopened_thread_ids.add(thread_id)
+            elif classification.bucket == BUCKET_DROP and tracked:
+                stats.dropped += 1
+                disposition = "completed" if (
+                    classification.archive_to_done
+                    or "closed" in classification.reason
+                    or "merged" in classification.reason
+                ) else "irrelevant"
+                classification_name = (
+                    "dependabot_handoff"
+                    if classification.skip_mark_done
+                    else "policy_drop"
+                )
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id,
+                    canonical_artifact=canonical_url,
+                    classification=classification_name,
+                    worker="github-intake",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                    tracker_item_id=str(tracked[1].get("id") or "") or None,
+                    tracker_section=tracked[0],
+                    terminal_disposition=(
+                        None if classification.skip_mark_done else disposition
+                    ),
+                    queue_clear=not classification.skip_mark_done,
+                )
+                mutations.route_existing_drop.append(
+                    PruneDelta(
+                        item_id=str(tracked[1].get("id") or ""),
+                        thread_id=thread_id,
+                        stale_reason=classification.reason,
+                        notification_reason=reason,
+                        section=tracked[0],
+                    )
+                )
+                if classification.skip_mark_done:
+                    stats.left_for_dependabot += 1
+                elif not args.dry_run:
+                    try:
+                        attempted_thread_ids.add(thread_id)
+                        mark_thread_done(thread_id)
+                        _ledger_record_clear_result(
+                            ledger,
+                            dry_run=args.dry_run,
+                            thread_id=thread_id,
+                            canonical_artifact=canonical_url,
+                        )
+                    except (
+                        subprocess.CalledProcessError,
+                        subprocess.TimeoutExpired,
+                    ) as exc:
+                        stats.errors.append(
+                            f"mark-done failed for thread {thread_id}: {exc}"
+                        )
+                        _ledger_record_clear_result(
+                            ledger,
+                            dry_run=args.dry_run,
+                            thread_id=thread_id,
+                            canonical_artifact=canonical_url,
+                            error=exc,
+                        )
             stats.already_tracked += 1
             continue
 
@@ -2655,6 +2776,8 @@ def run(args: argparse.Namespace) -> TriageStats:
         mutations.add_q1
         or mutations.add_q2
         or mutations.route_existing_q2
+        or mutations.route_existing_inbox
+        or mutations.route_existing_drop
         or mutations.add_inbox
         or mutations.add_done
         or mutations.mark_done

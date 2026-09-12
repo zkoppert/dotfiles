@@ -1457,6 +1457,160 @@ def test_run_routes_existing_terminal_thread_to_scheduled_review(todo_file):
     assert scheduled[0]["notification"]["escalates_at"] == "2026-07-07T15:00:00Z"
 
 
+def test_run_preserves_existing_review_escalation_deadline(todo_file):
+    item = {
+        "id": "old",
+        "title": "Scheduled review",
+        "status": "pending",
+        "quadrant": "q2_schedule",
+        "notification": {
+            "thread_id": "1001",
+            "reason": "review_requested",
+            "captured_at": "2026-07-01T15:00:00Z",
+            "escalates_at": "2026-07-02T15:00:00Z",
+        },
+    }
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": [], "q2_schedule": [item]},
+                "done": [],
+            }
+        )
+    )
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps(
+            [_notif("review_requested", updated_at="2026-07-01T16:00:00Z")]
+        ),
+    }
+
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.utcnow_iso", return_value="2026-07-01T16:00:00Z"
+    ):
+        triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    notification = yaml.safe_load(todo_file.read_text())["prioritized"][
+        "q2_schedule"
+    ][0]["notification"]
+    assert notification["captured_at"] == "2026-07-01T15:00:00Z"
+    assert notification["escalates_at"] == "2026-07-02T15:00:00Z"
+
+
+def test_run_reopens_terminal_thread_in_inbox(todo_file):
+    item = {
+        "id": "old",
+        "title": "Completed notification",
+        "status": "done",
+        "completed": "2026-07-01",
+        "notification": {
+            "thread_id": "1001",
+            "reason": "mention",
+            "captured_at": "2026-07-01T12:00:00Z",
+            "marked_done": True,
+        },
+    }
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": [], "q2_schedule": []},
+                "done": [item],
+            }
+        )
+    )
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps(
+            [_notif("author", updated_at="2026-07-02T12:00:00Z")]
+        ),
+        "/repos/zkoppert/example/pulls/42": json.dumps(
+            {"state": "open", "user": {"login": "zkoppert"}}
+        ),
+    }
+
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
+        triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    updated = yaml.safe_load(todo_file.read_text())
+    assert updated["done"] == []
+    assert updated["inbox"][0]["status"] == "pending"
+    assert updated["inbox"][0]["notification"]["reason"] == "author"
+    assert "marked_done" not in updated["inbox"][0]["notification"]
+
+
+def test_run_clears_existing_thread_reclassified_as_drop(todo_file):
+    item = {
+        "id": "old",
+        "title": "Scheduled review",
+        "status": "pending",
+        "quadrant": "q2_schedule",
+        "notification": {
+            "thread_id": "1001",
+            "reason": "review_requested",
+            "captured_at": "2026-07-01T12:00:00Z",
+        },
+    }
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": [], "q2_schedule": [item]},
+                "done": [],
+            }
+        )
+    )
+    notification = _notif("ci_activity", updated_at="2026-07-02T12:00:00Z")
+    delete_calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(tuple(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return _gh_returns(
+            {
+                "/user": json.dumps({"login": "zkoppert"}),
+                "/notifications?all=true": json.dumps([notification]),
+            }
+        )(cmd, *args, **kwargs)
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    updated = yaml.safe_load(todo_file.read_text())
+    assert updated["prioritized"]["q2_schedule"] == []
+    assert any("/notifications/threads/1001" in " ".join(call) for call in delete_calls)
+
+
+def test_canonical_terminal_q1_routes_to_scheduled_review():
+    terminal = {
+        "id": "done-pr",
+        "title": "Completed urgent PR",
+        "status": "done",
+        "quadrant": "q1_do_first",
+        "link": "https://github.com/octocat/Hello-World/pull/99",
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {"q1_do_first": [terminal], "q2_schedule": []},
+        "done": [],
+    }
+    entry = {
+        "notification": {
+            "thread_id": "2001",
+            "url": "https://github.com/octocat/Hello-World/pull/99",
+            "reason": "review_requested",
+        }
+    }
+
+    triage.apply_todo_mutations(data, triage.TodoMutations(add_q2=[entry]))
+
+    assert data["prioritized"]["q1_do_first"] == []
+    assert data["prioritized"]["q2_schedule"][0]["id"] == "done-pr"
+    assert data["prioritized"]["q2_schedule"][0]["status"] == "pending"
+
+
 @pytest.mark.parametrize("active_section", ["in_progress", "blocked", "in_review"])
 def test_run_preserves_active_item_for_unchanged_direct_mention(
     todo_file, active_section
