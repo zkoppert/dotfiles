@@ -1368,6 +1368,53 @@ def test_run_clears_unchanged_terminal_direct_mention(todo_file):
     assert any("/notifications/threads/1001" in " ".join(call) for call in delete_calls)
 
 
+def test_run_reopens_legacy_terminal_item_for_renewed_direct_mention(todo_file):
+    item = {
+        "id": "old",
+        "title": "Completed ask",
+        "status": "done",
+        "completed": "2026-07-02",
+        "notification": {
+            "thread_id": "1001",
+            "reason": "mention",
+            "marked_done": True,
+            "terminal_disposition": "completed",
+        },
+    }
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": [], "q2_schedule": []},
+                "done": [item],
+            }
+        )
+    )
+    notification = _notif("mention", updated_at="2026-07-06T15:00:00Z")
+
+    with patch(
+        "triage.subprocess.run",
+        side_effect=_gh_returns(
+            {
+                "/user": json.dumps({"login": "zkoppert"}),
+                "/notifications?all=true": json.dumps([notification]),
+            }
+        ),
+    ):
+        triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    updated = yaml.safe_load(todo_file.read_text())
+    reopened = updated["prioritized"]["q1_do_first"]
+    assert updated["done"] == []
+    assert len(reopened) == 1
+    assert reopened[0]["status"] == "pending"
+    assert reopened[0]["notification"] == {
+        "thread_id": "1001",
+        "reason": "mention",
+        "captured_at": "2026-07-06T15:00:00Z",
+    }
+
+
 def test_run_routes_existing_terminal_thread_to_scheduled_review(todo_file):
     item = {
         "id": "old",
