@@ -3762,6 +3762,77 @@ def test_run_branch_protection_keeps_notification_when_todo_write_fails(
     ]
 
 
+def test_run_branch_protection_keeps_notification_when_only_done_item_exists(
+    tmp_path: Path,
+) -> None:
+    notif = {
+        "id": "thread-bp-done",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/github/example/pulls/61",
+        },
+    }
+    pr_url = "https://github.com/github/example/pull/61"
+    pr = _base_pr(number=61, url=pr_url)
+    pr["headRefOid"] = "abc123"
+    args = _make_args(tmp_path)
+    todo = td.load_todo(args.todo_file)
+    todo["done"].append(
+        {
+            "id": "dependabot-example-pr-61",
+            "title": "Previously completed review",
+            "notification": {"thread_id": "thread-bp-done", "url": pr_url},
+        }
+    )
+    td.write_todo_atomic(args.todo_file, todo)
+    bp_err = td.BranchProtectionBlocked(
+        repo="github/example",
+        number=61,
+        marker="the base branch policy prohibits the merge",
+    )
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=95
+    ), mock.patch.object(
+        td, "do_merge", side_effect=bp_err
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_done_mock:
+        stats = td.run(args)
+
+    mark_done_mock.assert_not_called()
+    assert stats.flagged == 0
+    assert stats.already_tracked == 1
+    reloaded = td.load_todo(args.todo_file)
+    assert reloaded["prioritized"]["q1_do_first"] == []
+    assert [item["id"] for item in reloaded["done"]] == [
+        "dependabot-example-pr-61"
+    ]
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    rows = ledger._rows(
+        """
+        SELECT tracker_item_id, terminal_disposition, clear_state
+          FROM notifications
+         WHERE source_id = ?
+        """,
+        ("thread-bp-done",),
+    )
+    assert rows == [
+        {
+            "tracker_item_id": None,
+            "terminal_disposition": None,
+            "clear_state": "not_applicable",
+        }
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Stale-removal guard (bug 4)
 # ---------------------------------------------------------------------------

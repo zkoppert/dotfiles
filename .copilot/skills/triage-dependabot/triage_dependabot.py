@@ -316,6 +316,7 @@ class AppliedTodoMutations(TypedDict):
     changed: bool
     added_pr_urls: list[str]
     added_entries: list[dict[str, Any]]
+    active_q1_entries: list[dict[str, Any]]
 
 
 # ---------------------------------------------------------------------------
@@ -1652,17 +1653,23 @@ def _item_thread_id(item: Any) -> str | None:
     return str(thread_id) if thread_id else None
 
 
-def _entry_exists(data: dict[str, Any], entry: dict[str, Any]) -> bool:
+def _matching_entry(
+    items: list[Any], entry: dict[str, Any]
+) -> dict[str, Any] | None:
     entry_id = entry.get("id")
     entry_thread_id = _item_thread_id(entry)
-    for item in _iter_todo_items(data):
+    for item in items:
         if not isinstance(item, dict):
             continue
         if entry_id and item.get("id") == entry_id:
-            return True
+            return item
         if entry_thread_id and _item_thread_id(item) == entry_thread_id:
-            return True
-    return False
+            return item
+    return None
+
+
+def _entry_exists(data: dict[str, Any], entry: dict[str, Any]) -> bool:
+    return _matching_entry(_iter_todo_items(data), entry) is not None
 
 
 def apply_todo_mutations(
@@ -1681,6 +1688,7 @@ def apply_todo_mutations(
 
     added_pr_urls: list[str] = []
     added_entries: list[dict[str, Any]] = []
+    active_q1_entries: list[dict[str, Any]] = []
     changed = False
     applied: AppliedTodoMutations = {
         "added_flags": 0,
@@ -1689,6 +1697,7 @@ def apply_todo_mutations(
         "changed": False,
         "added_pr_urls": added_pr_urls,
         "added_entries": added_entries,
+        "active_q1_entries": active_q1_entries,
     }
 
     for prune_delta in mutations.prunes:
@@ -1702,6 +1711,13 @@ def apply_todo_mutations(
             changed = True
 
     for flag_delta in mutations.flags:
+        active_entry = _matching_entry(
+            data["prioritized"]["q1_do_first"], flag_delta.entry
+        )
+        if active_entry is not None:
+            active_q1_entries.append(active_entry)
+            applied["already_tracked"] = int(applied["already_tracked"]) + 1
+            continue
         if _entry_exists(data, flag_delta.entry):
             applied["already_tracked"] = int(applied["already_tracked"]) + 1
             continue
@@ -1709,6 +1725,7 @@ def apply_todo_mutations(
         applied["added_flags"] += 1
         added_pr_urls.append(flag_delta.pr_url)
         added_entries.append(flag_delta.entry)
+        active_q1_entries.append(flag_delta.entry)
         changed = True
 
     applied["changed"] = changed
@@ -2645,6 +2662,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         stats.already_tracked += int(applied["already_tracked"])
         stats.stale_removed = int(applied["stale_removed"])
         added_flag_entries = applied["added_entries"]
+        active_q1_entries = applied["active_q1_entries"]
         for added_pr_url in applied["added_pr_urls"]:
             if added_pr_url and state.get(added_pr_url, 0) <= now:
                 state[added_pr_url] = now
@@ -2668,7 +2686,9 @@ def run(args: argparse.Namespace) -> TriageStats:
                 tracker_section="prioritized.q1_do_first",
             )
         for handoff in branch_protection_handoffs:
-            entry = handoff.entry
+            entry = _matching_entry(active_q1_entries, handoff.entry)
+            if entry is None:
+                continue
             notif_meta = entry.get("notification")
             if not isinstance(notif_meta, dict):
                 continue
