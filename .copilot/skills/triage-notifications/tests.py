@@ -1322,6 +1322,52 @@ def test_run_reopens_terminal_item_for_direct_mention(
     ]
 
 
+def test_run_clears_unchanged_terminal_direct_mention(todo_file):
+    item = {
+        "id": "old",
+        "title": "Completed ask",
+        "status": "done",
+        "completed": "2026-07-02",
+        "notification": {
+            "thread_id": "1001",
+            "reason": "mention",
+            "captured_at": "2026-07-01T12:00:00Z",
+            "terminal_disposition": "completed",
+        },
+    }
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": [], "q2_schedule": []},
+                "done": [item],
+            }
+        )
+    )
+    notification = _notif("mention", updated_at="2026-07-01T12:00:00Z")
+    delete_calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(tuple(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return _gh_returns(
+            {
+                "/user": json.dumps({"login": "zkoppert"}),
+                "/notifications?all=true": json.dumps([notification]),
+            }
+        )(cmd, *args, **kwargs)
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    updated = yaml.safe_load(todo_file.read_text())
+    assert updated["prioritized"]["q1_do_first"] == []
+    assert updated["done"][0]["status"] == "done"
+    assert updated["done"][0]["notification"]["marked_done"] is True
+    assert any("/notifications/threads/1001" in " ".join(call) for call in delete_calls)
+
+
 def test_run_routes_existing_terminal_thread_to_scheduled_review(todo_file):
     item = {
         "id": "old",

@@ -433,6 +433,7 @@ class EscalationDelta:
     escalated_at: str = ""
     reopen_terminal: bool = False
     reason: str = ""
+    captured_at: str = ""
 
 
 @dataclass
@@ -915,6 +916,20 @@ def build_todo_entry(
     return entry
 
 
+def notification_has_new_activity(
+    notif: dict[str, Any], tracked_item: dict[str, Any]
+) -> bool:
+    tracked = tracked_item.get("notification")
+    if not isinstance(tracked, dict):
+        return True
+    reason = str(notif.get("reason") or "").lower()
+    if reason != str(tracked.get("reason") or "").lower():
+        return True
+    updated_at = parse_iso_datetime(notif.get("updated_at"))
+    captured_at = parse_iso_datetime(tracked.get("captured_at"))
+    return bool(updated_at and captured_at and updated_at > captured_at)
+
+
 def build_done_archive_entry(notif: dict[str, Any]) -> dict[str, Any]:
     """Construct a done-archive entry for a closed/merged PR I authored.
 
@@ -1225,12 +1240,14 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
     if isinstance(notif, dict):
         if delta.escalated_at:
             notif["review_requested_escalated_at"] = delta.escalated_at
+        if delta.reason:
+            notif["reason"] = delta.reason
+        if delta.captured_at:
+            notif["captured_at"] = delta.captured_at
         if delta.reopen_terminal:
             notif.pop("marked_done", None)
             notif.pop("marked_done_at", None)
             notif.pop("terminal_disposition", None)
-            if delta.reason:
-                notif["reason"] = delta.reason
     q1.append(candidate)
     return True
 
@@ -2406,16 +2423,21 @@ def run(args: argparse.Namespace) -> TriageStats:
         )
 
         if thread_id and thread_id in seen_ids:
+            tracked = next(
+                (
+                    (section, item)
+                    for section, item in _iter_notification_items_with_sections(data)
+                    if _item_thread_id(item) == thread_id
+                ),
+                None,
+            )
+            renewed = bool(tracked and notification_has_new_activity(notif, tracked[1]))
             if classification.bucket == BUCKET_Q1:
-                tracked = next(
-                    (
-                        (section, item)
-                        for section, item in _iter_notification_items_with_sections(data)
-                        if _item_thread_id(item) == thread_id
-                    ),
-                    None,
-                )
-                if tracked and tracked[0] not in {"in_progress", "blocked", "in_review"}:
+                if (
+                    renewed
+                    and tracked
+                    and tracked[0] not in {"in_progress", "blocked", "in_review"}
+                ):
                     mutations.escalate.append(
                         EscalationDelta(
                             item_id="",
@@ -2424,21 +2446,14 @@ def run(args: argparse.Namespace) -> TriageStats:
                                 tracker_terminal_disposition(tracked[1], tracked[0])
                             ),
                             reason=reason,
+                            captured_at=str(notif.get("updated_at") or ""),
                         )
                     )
                     if tracker_terminal_disposition(tracked[1], tracked[0]):
                         reopened_thread_ids.add(thread_id)
-            elif classification.bucket == BUCKET_Q2:
+            elif classification.bucket == BUCKET_Q2 and renewed:
                 mutations.route_existing_q2.append(
                     build_todo_entry(notif, classification)
-                )
-                tracked = next(
-                    (
-                        (section, item)
-                        for section, item in _iter_notification_items_with_sections(data)
-                        if _item_thread_id(item) == thread_id
-                    ),
-                    None,
                 )
                 if tracked and tracker_terminal_disposition(tracked[1], tracked[0]):
                     reopened_thread_ids.add(thread_id)
