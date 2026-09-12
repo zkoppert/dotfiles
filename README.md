@@ -4,7 +4,7 @@ My personal configuration for macOS and GitHub Codespaces.
 
 ## What does the installer configure?
 
-`install.sh` links the repository's Copilot instructions, local skills, CLI wrappers, and macOS launch agents into their user-level locations. It can also install these tools from a private skill catalog:
+`install.sh` links the repository's Copilot instructions, local skills, CLI wrappers, and macOS launch agents into their user-level locations. It also provisions the pinned notification-worker Python runtime at `~/.local/share/dotfiles/notification-workers/venv` and verifies `PyYAML` plus `ruamel.yaml` before loading the GitHub notification agents. It can also install these tools from a private skill catalog:
 
 | Tool | Problem it addresses |
 | --- | --- |
@@ -25,7 +25,7 @@ export COPILOT_SKILL_CATALOG_REPO="OWNER/REPOSITORY"
 ./install.sh
 ```
 
-The installer skips tools that are already present. Missing CLIs, authentication failures, or unavailable catalog tools produce warnings without stopping the rest of dotfiles setup.
+The installer skips tools that are already present. Missing CLIs, authentication failures, or unavailable catalog tools produce warnings without stopping the rest of dotfiles setup. If the notification-worker runtime cannot be provisioned or fails import preflight, the wrappers still install but the notification launch agents stay unloaded until the next successful `./install.sh` run.
 
 ## How do I update catalog tools?
 

@@ -1,6 +1,6 @@
 ---
 name: triage-dependabot
-description: Triggers when the user says "triage dependabot", "review my dependabot PRs", "what dependency updates are waiting", "merge safe dependabot bumps", or any similar request to process Dependabot PRs surfaced via GitHub notifications. Runs the dotfiles tool which filters notifications to Dependabot-authored PRs, evaluates each PR against a five-outcome decision tree (auto-merge, request rebase, label-and-merge for security releases, close-prerelease for alpha/beta/rc/dev target versions, or flag for human review in ~/repos/zkoppert-todo/todo.yml), and skips PRs that another human is already engaged on or whose CI is still pending. Safe to re-run; per-PR cooldown prevents double-acting within an hour.
+description: Triggers when the user says "triage dependabot", "review my dependabot PRs", "what dependency updates are waiting", "merge safe dependabot bumps", or any similar request to process Dependabot PRs surfaced via GitHub notifications. Runs the dotfiles tool which filters notifications to Dependabot-authored PRs, evaluates each PR against a five-outcome decision tree (auto-merge, request rebase, label-and-merge for security releases, close-prerelease for alpha/beta/rc/dev target versions, or flag for human review in ~/repos/zkoppert-todo/todo.yml), and records notification-clear state in the shared local ledger before any GitHub DELETE. Safe to re-run; per-PR cooldown prevents double-acting within an hour.
 ---
 
 # Triage Dependabot PRs
@@ -20,7 +20,7 @@ upgrades or seeing a backlog of dependabot notifications.
 
 ## What it does
 
-1. Fetches all unread notifications via `gh api /notifications --paginate`.
+1. Fetches all notifications via `gh api /notifications?all=true --paginate`.
 2. Filters to notifications whose subject is a PullRequest authored by
    `dependabot[bot]` (or `dependabot-preview[bot]`).
 3. Skips repos whose owner is not `github`, `github-community-projects`,
@@ -43,7 +43,8 @@ upgrades or seeing a backlog of dependabot notifications.
      has historically ignored `@dependabot close` comments for hours.
    - `flag-for-review` - write a Q1 entry to
      `~/repos/zkoppert-todo/todo.yml` for human attention.
-5. Marks the notification done on GitHub when an action runs.
+5. Records the source decision in the shared local ledger and then marks
+   the notification done on GitHub when an action runs.
 6. Persists a per-PR cooldown timestamp in
    `~/Library/Logs/triage-dependabot-state.json` so re-runs within an
    hour do not double-act.
@@ -54,9 +55,8 @@ upgrades or seeing a backlog of dependabot notifications.
    `flag-for-review` entry. Selecting it opens the PR URL. Routine actions,
    already tracked flags, no-op runs, and dry runs stay silent.
 
-A launchd job (`com.zkoppert.triage-dependabot.plist`) runs this every
-hour on weekdays from 08:00 through 18:00. This skill is for ad-hoc runs
-in between.
+A launchd job (`com.zkoppert.triage-dependabot.plist`) runs this hourly,
+24x7. This skill is for ad-hoc runs in between.
 
 ## How to run
 
@@ -65,21 +65,20 @@ GitHub endpoints, and sends clickable alerts only for PRs that need human
 attention:
 
 ```bash
-python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py
+~/repos/dotfiles/bin/triage-dependabot
 ```
 
 Preview without mutations (no merges, no comments, no labels, no todo
 writes, no DELETE on the notification):
 
 ```bash
-python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py \
-  --dry-run --verbose
+~/repos/dotfiles/bin/triage-dependabot --dry-run --verbose
 ```
 
 Restrict to specific repos inside the owned-owner allowlist:
 
 ```bash
-python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py \
+~/repos/dotfiles/bin/triage-dependabot \
   --allowed-repo zkoppert/dotfiles \
   --allowed-repo github-community-projects/contributors
 ```
@@ -88,15 +87,14 @@ Disable the Copilot CLI sub-agent (use regex-only security
 classification):
 
 ```bash
-python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py \
-  --no-copilot-subagent
+~/repos/dotfiles/bin/triage-dependabot --no-copilot-subagent
 ```
 
 ## After running
 
 1. Read the printed summary
-   (`fetched=N dependabot=N merged=N labeled=N rebased=N flagged=N
-   skipped=N cooldown=N already_tracked=N`).
+   (`fetched=N unread=N dependabot=N merged=N labeled=N rebased=N
+   flagged=N skipped=N cooldown=N already_tracked=N ledger_rows=N`).
 2. If any PRs were flagged, tell the user which repos and why so they
    know what awaits review.
 3. If `ERROR:` lines appear on stderr, surface them (most commonly an

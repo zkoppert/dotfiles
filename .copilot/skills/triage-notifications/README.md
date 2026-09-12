@@ -11,11 +11,11 @@ second run produces no duplicate todos and no spurious mark-dones.
 ## What problem this solves
 
 I get a lot of GitHub notifications and miss the important ones. This
-tool runs every two hours on weekdays and does an aggressive "bulk
-triage": it drops the passive subscription noise (and clears those
-GitHub notifications), keeps only the personal-action items in my
-existing todo workflow, and leaves Dependabot bumps for a separate
-handler. The notification inbox stops being a wall of red.
+tool runs hourly, 24x7, and does an aggressive "bulk triage": it drops
+the passive subscription noise (and clears those GitHub notifications),
+routes direct asks into Q1, keeps ordinary review requests in Q2 with a
+one-business-day escalation path, and leaves Dependabot bumps for a
+separate handler. The notification inbox stops being a wall of red.
 
 The fetch uses `?all=true` so the cron also sees notifications I've
 viewed on github.com (marked read) but never deleted. Without that,
@@ -28,7 +28,10 @@ discussion in the default browser. A direct mention includes GitHub's
 `mention` reason and comment notifications whose body contains an exact,
 case-insensitive mention of my login. Assignments, review requests, security
 alerts, author updates, already tracked items, dropped noise, and no-op runs
-stay silent.
+stay silent. A durable local ledger in
+`~/Library/Application Support/notification-workers/ledger.sqlite` records
+classification, tracker linkage, terminal disposition, and notification-clear
+state before any GitHub DELETE runs.
 
 ## How it classifies
 
@@ -93,16 +96,17 @@ The reason table (after the early-exit drops above):
 
 | Reason             | Bucket                                          |
 | ------------------ | ----------------------------------------------- |
-| `mention`          | Q1 (urgent + important)                         |
+| `mention`          | Q1 (urgent direct ask)                          |
 | `assign`           | Q1                                              |
 | `security_alert`   | Q1                                              |
-| `review_requested` | Q1 if from NUX teammate, else INBOX             |
+| `review_requested` | Q2 scheduled work; auto-escalate after 1 business day if untouched |
 | `author`           | INBOX (my own open PR/issue, status item)       |
 | `comment`          | Q1 if the body @-mentions me; else DROP         |
 | anything else      | DROP (passive subscription noise)               |
 
-The NUX teammate allowlist is hardcoded in `triage.py` as
-`NUX_TEAM_LOGINS_Q1`. Edit there to add or remove people.
+The NUX teammate allowlist is still hardcoded in `triage.py` as
+`NUX_TEAM_LOGINS_Q1`. It now only affects the human-readable review-request
+reason string; ordinary review requests stay in Q2 regardless of author.
 
 ## How it integrates with zkoppert-todo
 
@@ -141,18 +145,21 @@ signed-off local commit with the Copilot co-author trailer. It then tries
 are logged as warnings so launchd keeps running, while the local commit
 still records the change.
 
-When you move the todo to `status: done`, the next triage run will:
+When you move the todo to `status: done`, or move a GitHub-backed item to
+`prioritized.q4_eliminate` / `status: dropped`, the next triage run will:
 
-1. DELETE `/notifications/threads/{thread_id}` to mark it done on GitHub
+1. Record the terminal disposition in the local ledger (`completed` or
+   `irrelevant`) before any GitHub mutation.
+2. DELETE `/notifications/threads/{thread_id}` to mark it done on GitHub
    (removes it from the inbox and moves it to the Done tab).
-2. Add `marked_done: true` and `marked_done_at: <today>` to the
-   `notification` block so it isn't marked-done twice.
+3. Add `marked_done: true`, `marked_done_at: <today>`, and the terminal
+   disposition to the `notification` block so it isn't cleared twice.
 
 ## Schedule
 
-A launchd plist runs the tool every two hours on weekdays at 8, 10,
-12, 14, 16, and 18 local time. Logs land in
-`~/Library/Logs/notification-triage.log`.
+A launchd plist runs the tool every hour on the hour, 24x7. Logs land in
+`~/Library/Logs/notification-triage.log`, and machine-readable worker health
+lands in `~/Library/Logs/notification-triage-health.json`.
 
 To pause: `launchctl unload ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist`
 To resume: `launchctl load ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist`
@@ -196,30 +203,32 @@ in-memory load and reports that preview without writing.
 ## Ad-hoc usage
 
 ```bash
-# Default run
+# Default run (uses the pinned dotfiles-owned runtime)
 ~/repos/dotfiles/bin/notification-triage
 
-# Preview without writing
-python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py \
-  --dry-run --verbose
+# Preview without writing to todo.yml, the ledger, or GitHub
+~/repos/dotfiles/bin/notification-triage --dry-run --verbose
+
+# Preview a migration/backfill into the ledger without writing it
+~/repos/dotfiles/bin/notification-triage --backfill-ledger --dry-run --verbose
 
 # Skip the macOS notification (useful during testing)
-python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py \
-  --no-notify
+~/repos/dotfiles/bin/notification-triage --no-notify
 
 # Skip the inbox pruner (still classifies new notifications)
-python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py \
-  --no-prune
+~/repos/dotfiles/bin/notification-triage --no-prune
 ```
 
 ## Requirements
 
-Runtime dependencies (all installed via `pip`):
+Runtime dependencies are pinned in
+`~/repos/dotfiles/python/notification-worker-requirements.txt` and are
+installed by `./install.sh` into a dotfiles-owned runtime at
+`~/.local/share/dotfiles/notification-workers/venv`.
 
-- `PyYAML` - used by tests for fixture setup
-- `ruamel.yaml` - used in production to round-trip `todo.yml` while
-  preserving the manually maintained section header comments. Plain
-  `yaml.safe_dump` would silently strip every `#` comment in the file.
+The wrapper fails fast with a preflight error when that runtime cannot import
+`PyYAML` and `ruamel.yaml`, and writes the failure to
+`~/Library/Logs/notification-triage-health.json` before any GitHub call.
 
 GitHub access:
 
@@ -237,14 +246,17 @@ If you ever make that file public, redact entries with
 
 ```bash
 cd ~/repos/dotfiles/.copilot/skills/triage-notifications
-python3 -m pytest tests.py -v
+~/.local/share/dotfiles/notification-workers/venv/bin/python3 -m pytest tests.py -v
 ```
 
 ## Failure modes
 
+- **Pinned runtime missing modules**: the wrapper exits before loading
+  `triage.py`, prints the preflight failure, and writes an error snapshot to
+  `~/Library/Logs/notification-triage-health.json`.
 - **`gh auth` expired**: classifier prints `ERROR: failed to fetch /user`
   and exits with code 1. The launchd job will surface this in
-  `~/Library/Logs/notification-triage.log`.
+  `~/Library/Logs/notification-triage.log` and the health file.
 - **`todo.yml` missing**: script exits with code 1. Re-create the file
   (or check that `~/repos/zkoppert-todo` is still cloned).
 - **A new GitHub notification reason appears**: under the aggressive

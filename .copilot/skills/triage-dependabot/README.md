@@ -18,8 +18,8 @@ piles automatically.
 
 ## Decision tree
 
-For each unread notification whose subject is a `PullRequest` authored
-by `dependabot[bot]` or `dependabot-preview[bot]`:
+For each notification from `gh api /notifications?all=true` whose subject is a
+`PullRequest` authored by `dependabot[bot]` or `dependabot-preview[bot]`:
 
 | Condition | Outcome |
 | --- | --- |
@@ -104,7 +104,8 @@ conservative default.
 
 - **Auto-merge**: submit an approving review, then
   `gh pr merge --auto --squash --delete-branch`, and the notification is
-  marked done. The approval comes first because most target repos require
+  marked done only after the shared local notification ledger records the
+  terminal decision. The approval comes first because most target repos require
   an approving code-owner review; enabling auto-merge alone would leave
   the PR stuck until a human approved. When the repo doesn't allow
   auto-merge at the repo level, the merge falls back to a synchronous
@@ -133,7 +134,10 @@ conservative default.
 `~/Library/Logs/triage-dependabot-state.json` records the last action
 timestamp per PR url. Re-runs within `ACTION_COOLDOWN_SECONDS` (3600)
 skip the same PR so an unrefreshed notification stream cannot trigger a
-duplicate merge.
+duplicate merge. The shared source ledger lives at
+`~/Library/Application Support/notification-workers/ledger.sqlite` and
+tracks tracker linkage plus notification-clear retries independently of
+that cooldown.
 
 ## Integration with zkoppert-todo
 
@@ -156,15 +160,15 @@ signed-off local commit with the Copilot co-author trailer. It then tries
 are logged as warnings so launchd keeps running, while the local commit
 still records the change.
 
-When the user moves a flagged todo to `done`, the existing
-`triage-notifications` mark-done loop will catch it on its next run and
+When the user moves a flagged todo to `done`, `status: dropped`, or Q4,
+the existing `triage-notifications` reconciliation loop will catch it on its
+next run, record the terminal disposition in the shared ledger, and then
 DELETE the underlying notification thread.
 
 ## Schedule
 
-`com.zkoppert.triage-dependabot.plist` runs hourly on weekdays from
-08:00 through 18:00 (eleven runs per weekday, fifty-five per week). The
-`RunAtLoad` key is false so loading the plist does not trigger an
+`com.zkoppert.triage-dependabot.plist` runs hourly on the hour, 24x7.
+The `RunAtLoad` key is false so loading the plist does not trigger an
 immediate run.
 
 To install:
@@ -181,25 +185,23 @@ To unload:
 launchctl unload -w "$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist"
 ```
 
-Logs go to `~/Library/Logs/triage-dependabot.log`.
+Logs go to `~/Library/Logs/triage-dependabot.log`, and machine-readable
+worker health goes to `~/Library/Logs/triage-dependabot-health.json`.
 
 ## Ad-hoc usage
 
 ```bash
-# Default run (mutating).
-python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py
+# Default run (mutating, uses the pinned dotfiles-owned runtime).
+~/repos/dotfiles/bin/triage-dependabot
 
 # Preview only.
-python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py \
-  --dry-run --verbose
+~/repos/dotfiles/bin/triage-dependabot --dry-run --verbose
 
 # Process a single repo while testing rule changes.
-python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py \
-  --allowed-repo zkoppert/dotfiles
+~/repos/dotfiles/bin/triage-dependabot --allowed-repo zkoppert/dotfiles
 
 # Skip the Copilot sub-agent (regex-only security classification).
-python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py \
-  --no-copilot-subagent
+~/repos/dotfiles/bin/triage-dependabot --no-copilot-subagent
 ```
 
 ## Requirements
@@ -210,7 +212,11 @@ python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py 
   (default). The skill falls back to a regex classifier on any sub-agent
   failure, so the `--no-copilot-subagent` flag is for explicit opt-out
   rather than failure recovery.
-- Python 3.11+ with `ruamel.yaml` and `pyyaml`.
+- The pinned notification-worker runtime provisioned by `./install.sh` at
+  `~/.local/share/dotfiles/notification-workers/venv`, using
+  `python/notification-worker-requirements.txt` (`PyYAML` and
+  `ruamel.yaml`). The wrapper fails fast and writes health red when that
+  runtime is missing dependencies.
 - `terminal-notifier` on `PATH` for clickable macOS alerts. Install it
   with `brew install terminal-notifier`.
 

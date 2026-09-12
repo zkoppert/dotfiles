@@ -1,14 +1,23 @@
 #!/bin/bash
-# Wrapper for launchd: ensures PATH is set so `gh` and `copilot` are
-# findable, then execs the dependabot triage script. Logs are routed
-# via the plist.
+# Wrapper for launchd and ad-hoc runs. Resolves the dotfiles checkout,
+# verifies the pinned notification-worker runtime, then execs
+# triage_dependabot.py.
 set -euo pipefail
 
-# Brew prepends /opt/homebrew/bin in interactive shells; replicate here
-# so `gh`, `copilot`, and `python3` are on PATH when launchd invokes
-# us directly.
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+source_path="${BASH_SOURCE[0]}"
+while [ -L "$source_path" ]; do
+  source_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+  linked_path="$(readlink "$source_path")"
+  if [[ "$linked_path" = /* ]]; then
+    source_path="$linked_path"
+  else
+    source_path="$source_dir/$linked_path"
+  fi
+done
+bin_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
 
-exec /usr/bin/env python3 \
-  "$HOME/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py" \
+exec "$bin_dir/run-notification-worker" \
+  triage-dependabot \
+  .copilot/skills/triage-dependabot/triage_dependabot.py \
+  triage-dependabot-health.json \
   "$@"

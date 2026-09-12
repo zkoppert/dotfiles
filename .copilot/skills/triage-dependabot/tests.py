@@ -21,6 +21,12 @@ import triage_dependabot as td
 
 
 @pytest.fixture(autouse=True)
+def _isolate_notification_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(td, "DEFAULT_LEDGER_PATH", tmp_path / "ledger.sqlite")
+    monkeypatch.setattr(td, "DEFAULT_HEALTH_FILE", tmp_path / "health.json")
+
+
+@pytest.fixture(autouse=True)
 def _treat_fixture_owners_as_owned(monkeypatch: pytest.MonkeyPatch) -> None:
     # Most tests use sample owners to avoid real repo names.
     monkeypatch.setattr(td, "OWNED_OWNERS", td.OWNED_OWNERS | {"o"})
@@ -1529,6 +1535,8 @@ def _make_args(tmp_path: Path, **overrides: Any) -> argparse.Namespace:
     defaults = dict(
         todo_file=todo_file,
         state_file=tmp_path / "state.json",
+        ledger_file=tmp_path / "ledger.sqlite",
+        health_file=tmp_path / "health.json",
         dry_run=False,
         no_copilot_subagent=True,
         allowed_repo=[],

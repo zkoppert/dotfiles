@@ -45,7 +45,20 @@ from pathlib import Path
 from typing import Any, TypedDict
 from urllib.parse import urlparse
 
+_SKILLS_DIR = Path(__file__).resolve().parents[1]
+if str(_SKILLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SKILLS_DIR))
+
 import yaml
+from notification_worker_common import (
+    DEFAULT_LEDGER_FILE,
+    DEFAULT_NOTIFICATION_HEALTH_FILE,
+    NotificationLedger,
+    parse_iso_datetime,
+    review_request_escalates_at,
+    update_health_file,
+    utcnow_iso,
+)
 from ruamel.yaml import YAML
 from ruamel.yaml import YAMLError as _RuamelYAMLError
 
@@ -359,9 +372,12 @@ SECURITY_TITLE_PATTERN: re.Pattern[str] = re.compile(
 )
 
 DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
+DEFAULT_LEDGER_PATH = DEFAULT_LEDGER_FILE
+DEFAULT_HEALTH_FILE = DEFAULT_NOTIFICATION_HEALTH_FILE
 
 # Buckets the classifier can return.
 BUCKET_DROP = "DROP"
+BUCKET_Q1 = "QUADRANT_Q1"
 BUCKET_Q2 = "QUADRANT_Q2"
 BUCKET_INBOX = "INBOX"
 
@@ -388,14 +404,20 @@ class TriageStats:
     """Tally of what happened during one run, for the digest."""
 
     fetched: int = 0
+    unread: int = 0
     dropped: int = 0
+    added_q1: int = 0
     added_q2: int = 0
     added_inbox: int = 0
+    escalated_review_requests: int = 0
     already_tracked: int = 0
     marked_done: int = 0
     pruned_stale: int = 0
     pruned_by_reason: dict[str, int] = field(default_factory=dict)
     archived_to_done: int = 0
+    ledger_rows: int = 0
+    ledger_backfill_captured: int = 0
+    ledger_backfill_linked: int = 0
     # Dependabot bumps dropped from the inbox but left unread on GitHub for
     # triage-dependabot to consume.
     left_for_dependabot: int = 0
@@ -409,6 +431,16 @@ class MarkDoneDelta:
     item_id: str
     thread_id: str
     marked_done_at: str
+    terminal_disposition: str | None = None
+
+
+@dataclass
+class EscalationDelta:
+    """Move an aged review request from inbox/Q2 into Q1."""
+
+    item_id: str
+    thread_id: str | None = None
+    escalated_at: str = ""
 
 
 @dataclass
@@ -427,19 +459,23 @@ class PruneDelta:
 class TodoMutations:
     """The todo.yml deltas computed before the locked write section."""
 
+    add_q1: list[dict[str, Any]] = field(default_factory=list)
     add_q2: list[dict[str, Any]] = field(default_factory=list)
     add_inbox: list[dict[str, Any]] = field(default_factory=list)
     add_done: list[dict[str, Any]] = field(default_factory=list)
     mark_done: list[MarkDoneDelta] = field(default_factory=list)
+    escalate: list[EscalationDelta] = field(default_factory=list)
     prune: list[PruneDelta] = field(default_factory=list)
 
 
 class AppliedTodoMutations(TypedDict):
     """Counts from applying todo.yml deltas to a concrete document."""
 
+    added_q1: int
     added_q2: int
     added_inbox: int
     added_done: int
+    escalated_review_requests: int
     already_tracked: int
     marked_done: int
     pruned: int
@@ -788,23 +824,22 @@ def _classify_internal(
     # already fire for read notifications too, so noise gets cleaned up
     # regardless of read status.
     if reason == "review_requested":
-        # Auto-Q2 only when the PR author is on the narrow allowlist.
-        # GitHub doesn't put the requester in the notification payload, and
-        # the latest comment author is unrelated to who clicked "request
-        # review". Use the PR author as a pragmatic proxy: the dominant
-        # NUX-team case is teammates opening their own PR and adding Zack
-        # as reviewer in one step. Fall through to inbox if we can't
-        # confirm.
+        # Review requests are scheduled work, not immediate interrupts.
+        # Keep them in Q2 regardless of who authored the PR; an aged,
+        # untouched review request is escalated to Q1 by the reconciliation
+        # pass after one business day.
         author = subject_author_fetcher(notif)
         if author and author in q1_logins:
             return Classification(
                 BUCKET_Q2,
-                f"review_requested on PR by teammate @{author}",
+                f"review_requested on PR by teammate @{author} - scheduled review",
             )
-        return Classification(
-            BUCKET_INBOX,
-            "review_requested - PR author not on Q2 allowlist (or unknown)",
-        )
+        if author:
+            return Classification(
+                BUCKET_Q2,
+                f"review_requested on PR by @{author} - scheduled review",
+            )
+        return Classification(BUCKET_Q2, "review_requested - scheduled review")
 
     if reason in Q1_REASONS:  # mention, assign, security_alert
         if reason in {"assign", "mention"}:
@@ -817,8 +852,8 @@ def _classify_internal(
                         direct_mention=reason == "mention",
                     )
         return Classification(
-            BUCKET_Q2,
-            f"{reason} → Q2",
+            BUCKET_Q1,
+            f"{reason} → Q1",
             direct_mention=reason == "mention",
         )
 
@@ -838,7 +873,7 @@ def _classify_internal(
         author, body = comment_fetcher(notif)
         if mentions_me(body, my_login):
             return Classification(
-                BUCKET_Q2,
+                BUCKET_Q1,
                 f"@mention in comment by @{author}",
                 direct_mention=True,
             )
@@ -900,7 +935,8 @@ def build_todo_entry(
     repo = (notif.get("repository") or {}).get("full_name") or "unknown"
     today = datetime.date.today().isoformat()
     title = subject.get("title") or "Untitled notification"
-    reason = notif.get("reason") or "unknown"
+    reason = (notif.get("reason") or "unknown").lower()
+    captured_at = str(notif.get("updated_at") or utcnow_iso())
 
     entry: dict[str, Any] = {
         "id": make_todo_id(notif),
@@ -915,15 +951,22 @@ def build_todo_entry(
             "url": web_url(notif),
             "reason": reason,
             "repo": repo,
+            "captured_at": captured_at,
         },
     }
 
-    if classification.bucket == BUCKET_Q2:
+    if reason == "review_requested":
+        escalates_at = review_request_escalates_at(captured_at)
+        if escalates_at:
+            entry["notification"]["escalates_at"] = escalates_at
+
+    if classification.bucket in {BUCKET_Q1, BUCKET_Q2}:
+        quadrant = "q1_do_first" if classification.bucket == BUCKET_Q1 else "q2_schedule"
         entry.update(
             {
                 "urgency": "high",
                 "importance": "high",
-                "quadrant": "q2_schedule",
+                "quadrant": quadrant,
                 "status": "pending",
             }
         )
@@ -1036,10 +1079,9 @@ def load_todo(path: Path) -> dict[str, Any]:
         data["inbox"] = []
     if data.get("prioritized") is None:
         data["prioritized"] = {}
-    if data["prioritized"].get("q1_do_first") is None:
-        data["prioritized"]["q1_do_first"] = []
-    if data["prioritized"].get("q2_schedule") is None:
-        data["prioritized"]["q2_schedule"] = []
+    for quadrant in ("q1_do_first", "q2_schedule", "q3_delegate", "q4_eliminate"):
+        if data["prioritized"].get(quadrant) is None:
+            data["prioritized"][quadrant] = []
     if data.get("done") is None:
         data["done"] = []
     return data
@@ -1169,12 +1211,57 @@ def _mark_local_notification_done(data: dict[str, Any], delta: MarkDoneDelta) ->
         notif = item.get("notification")
         if not isinstance(notif, dict):
             continue
-        if notif.get("marked_done") and notif.get("marked_done_at") == delta.marked_done_at:
-            return False
-        notif["marked_done"] = True
-        notif["marked_done_at"] = delta.marked_done_at
-        return True
+        changed = False
+        if not (
+            notif.get("marked_done")
+            and notif.get("marked_done_at") == delta.marked_done_at
+        ):
+            notif["marked_done"] = True
+            notif["marked_done_at"] = delta.marked_done_at
+            changed = True
+        if (
+            delta.terminal_disposition
+            and notif.get("terminal_disposition") != delta.terminal_disposition
+        ):
+            notif["terminal_disposition"] = delta.terminal_disposition
+            changed = True
+        return changed
     return False
+
+
+def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bool:
+    prioritized = data.get("prioritized") or {}
+    q1 = prioritized.get("q1_do_first")
+    if not isinstance(q1, list):
+        return False
+    candidate: dict[str, Any] | None = None
+    for section, item in _iter_notification_items_with_sections(data):
+        if section == "done":
+            continue
+        if item.get("id") != delta.item_id and _item_thread_id(item) != delta.thread_id:
+            continue
+        candidate = item
+        break
+    if candidate is None:
+        return False
+
+    for section_name in ("inbox", "q2_schedule"):
+        bucket = prioritized.get(section_name) if section_name != "inbox" else data.get("inbox")
+        if isinstance(bucket, list):
+            bucket[:] = [item for item in bucket if item is not candidate]
+    for quadrant in ("q1_do_first", "q2_schedule", "q3_delegate", "q4_eliminate"):
+        bucket = prioritized.get(quadrant)
+        if isinstance(bucket, list):
+            bucket[:] = [item for item in bucket if item is not candidate]
+    candidate["urgency"] = "high"
+    candidate["importance"] = "high"
+    candidate["quadrant"] = "q1_do_first"
+    candidate["status"] = candidate.get("status") or "pending"
+    notif = candidate.get("notification")
+    if isinstance(notif, dict):
+        notif["review_requested_escalated_at"] = delta.escalated_at
+    q1.append(candidate)
+    return True
 
 
 def apply_todo_mutations(
@@ -1187,9 +1274,11 @@ def apply_todo_mutations(
     pruned_by_reason: dict[str, int] = {}
     added_entries: list[dict[str, Any]] = []
     applied: AppliedTodoMutations = {
+        "added_q1": 0,
         "added_q2": 0,
         "added_inbox": 0,
         "added_done": 0,
+        "escalated_review_requests": 0,
         "already_tracked": 0,
         "marked_done": 0,
         "pruned": 0,
@@ -1220,9 +1309,22 @@ def apply_todo_mutations(
             applied["marked_done"] += 1
             changed = True
 
+    for escalation_delta in mutations.escalate:
+        if _escalate_review_request(data, escalation_delta):
+            applied["escalated_review_requests"] += 1
+            changed = True
+
     for entry in mutations.add_done:
         if _append_unique(data, data["done"], entry):
             applied["added_done"] += 1
+            changed = True
+        else:
+            applied["already_tracked"] += 1
+
+    for entry in mutations.add_q1:
+        if _append_unique(data, data["prioritized"]["q1_do_first"], entry):
+            applied["added_q1"] += 1
+            added_entries.append(entry)
             changed = True
         else:
             applied["already_tracked"] += 1
@@ -1300,8 +1402,10 @@ def reconcile_stats_from_applied(
     stats: TriageStats, applied: AppliedTodoMutations
 ) -> None:
     """Update digest counters from deltas applied to a concrete document."""
+    stats.added_q1 = applied["added_q1"]
     stats.added_q2 = applied["added_q2"]
     stats.added_inbox = applied["added_inbox"]
+    stats.escalated_review_requests = applied["escalated_review_requests"]
     stats.already_tracked += applied["already_tracked"]
     url_deduped = len(applied["url_deduped"])
     stats.dropped += url_deduped
@@ -1490,41 +1594,59 @@ def _tracked_pr_issue_url_exists_elsewhere(
     return False
 
 
-def items_to_mark_done(data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return items with a thread_id whose notification can be marked done.
-
-    Items in the top-level `done:` section are completed by definition:
-    zkoppert-todo doesn't carry a `status` field there (entries have
-    `id`/`title`/`completed`/`category`). So `done:` membership alone is
-    proof of completion. All other sections still require `status: done`
-    because they hold work-in-flight items where status drives this loop.
-    """
-    ready: list[dict[str, Any]] = []
-
-    def scan(items: Any, *, require_status_done: bool) -> None:
-        if not isinstance(items, list):
-            return
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            if require_status_done and item.get("status") != "done":
-                continue
-            notif = item.get("notification")
-            if not isinstance(notif, dict):
-                continue
-            if not notif.get("thread_id"):
-                continue
-            if notif.get("marked_done"):
-                continue
-            ready.append(item)
-
-    scan(data.get("done"), require_status_done=False)
+def _iter_notification_items_with_sections(
+    data: dict[str, Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    items: list[tuple[str, dict[str, Any]]] = []
+    for key in ("inbox", "done", "in_progress", "blocked", "in_review"):
+        bucket = data.get(key)
+        if not isinstance(bucket, list):
+            continue
+        for item in bucket:
+            if isinstance(item, dict):
+                items.append((key, item))
     prioritized = data.get("prioritized") or {}
-    for items in prioritized.values():
-        scan(items, require_status_done=True)
-    for key in ("in_progress", "blocked", "in_review"):
-        scan(data.get(key), require_status_done=True)
+    if isinstance(prioritized, dict):
+        for quadrant, bucket in prioritized.items():
+            if not isinstance(bucket, list):
+                continue
+            for item in bucket:
+                if isinstance(item, dict):
+                    items.append((f"prioritized.{quadrant}", item))
+    return items
+
+
+def tracker_terminal_disposition(item: dict[str, Any], section: str) -> str | None:
+    """Return the terminal disposition implied by a tracker item, if any."""
+    status = str(item.get("status") or "").lower()
+    if section == "done" or status == "done":
+        return "completed"
+    if section == "prioritized.q4_eliminate" or status == "dropped":
+        return "irrelevant"
+    return None
+
+
+def items_ready_for_clear(data: dict[str, Any]) -> list[tuple[dict[str, Any], str, str]]:
+    """Return `(item, section, disposition)` for clearable notification rows."""
+    ready: list[tuple[dict[str, Any], str, str]] = []
+    for section, item in _iter_notification_items_with_sections(data):
+        disposition = tracker_terminal_disposition(item, section)
+        if not disposition:
+            continue
+        notif = item.get("notification")
+        if not isinstance(notif, dict):
+            continue
+        if not notif.get("thread_id"):
+            continue
+        if notif.get("marked_done"):
+            continue
+        ready.append((item, section, disposition))
     return ready
+
+
+def items_to_mark_done(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Backward-compatible helper returning only the clearable items."""
+    return [item for item, _section, _disposition in items_ready_for_clear(data)]
 
 
 def mark_thread_done(thread_id: str) -> None:
@@ -1816,16 +1938,6 @@ def collect_stale_notification_prunes(
     """Compute stale-entry removals without mutating the loaded todo snapshot."""
     prunes = stale_notification_prune_deltas(data)
     for delta in prunes:
-        if delta.thread_id and not dry_run:
-            try:
-                mark_thread_done(delta.thread_id)
-            except (
-                subprocess.CalledProcessError,
-                subprocess.TimeoutExpired,
-            ) as exc:
-                stats.errors.append(
-                    f"prune mark-done failed for thread {delta.thread_id}: {exc}"
-                )
         logger.info(
             "planned prune of %s item %s (%s)",
             delta.section,
@@ -1849,7 +1961,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Classify and report, but do not modify todo.yml or call DELETE.",
+        help="Classify and report, but do not modify todo.yml, the ledger, or call DELETE.",
+    )
+    parser.add_argument(
+        "--ledger-file",
+        type=Path,
+        default=DEFAULT_LEDGER_PATH,
+        help=f"Path to the durable notification ledger (default: {DEFAULT_LEDGER_PATH}).",
+    )
+    parser.add_argument(
+        "--health-file",
+        type=Path,
+        default=DEFAULT_HEALTH_FILE,
+        help=f"Path to the machine-readable health file (default: {DEFAULT_HEALTH_FILE}).",
+    )
+    parser.add_argument(
+        "--backfill-ledger",
+        action="store_true",
+        help="Reconcile the current GitHub notification view and todo.yml into the ledger.",
     )
     parser.add_argument(
         "--no-notify",
@@ -1869,10 +1998,188 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _ledger_capture(
+    ledger: NotificationLedger | None,
+    *,
+    dry_run: bool,
+    thread_id: str | None,
+    canonical_artifact: str | None,
+    classification: str,
+    worker: str,
+    title: str = "",
+    reason: str = "",
+    repo: str = "",
+    tracker_item_id: str | None = None,
+    tracker_section: str | None = None,
+    terminal_disposition: str | None = None,
+    queue_clear: bool = False,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    if ledger is None or dry_run:
+        return
+    ledger.capture(
+        source_type="github",
+        source_id=thread_id,
+        canonical_artifact=canonical_artifact,
+        classification=classification,
+        worker=worker,
+        title=title,
+        reason=reason,
+        repo=repo,
+        payload=payload,
+    )
+    if tracker_item_id and tracker_section:
+        ledger.link_tracker(
+            source_type="github",
+            source_id=thread_id,
+            canonical_artifact=canonical_artifact,
+            tracker_item_id=tracker_item_id,
+            tracker_section=tracker_section,
+        )
+    if terminal_disposition:
+        ledger.record_terminal(
+            source_type="github",
+            source_id=thread_id,
+            canonical_artifact=canonical_artifact,
+            terminal_disposition=terminal_disposition,
+        )
+    if queue_clear:
+        ledger.queue_clear(
+            source_type="github",
+            source_id=thread_id,
+            canonical_artifact=canonical_artifact,
+        )
+
+
+def _ledger_record_clear_result(
+    ledger: NotificationLedger | None,
+    *,
+    dry_run: bool,
+    thread_id: str,
+    canonical_artifact: str | None,
+    error: BaseException | None = None,
+) -> None:
+    if ledger is None or dry_run:
+        return
+    if error is None:
+        ledger.record_clear_success(
+            source_type="github",
+            source_id=thread_id,
+            canonical_artifact=canonical_artifact,
+        )
+        return
+    ledger.record_clear_failure(
+        source_type="github",
+        source_id=thread_id,
+        canonical_artifact=canonical_artifact,
+        error=str(error),
+    )
+
+
+def collect_review_request_escalations(data: dict[str, Any]) -> list[EscalationDelta]:
+    """Return deltas for review requests that have aged past one business day."""
+    now = utcnow_iso()
+    current = parse_iso_datetime(now)
+    if current is None:
+        return []
+    deltas: list[EscalationDelta] = []
+    for section, item in _iter_notification_items_with_sections(data):
+        if section not in {"inbox", "prioritized.q2_schedule"}:
+            continue
+        notif = item.get("notification")
+        if not isinstance(notif, dict):
+            continue
+        if str(notif.get("reason") or "").lower() != "review_requested":
+            continue
+        if notif.get("review_requested_escalated_at"):
+            continue
+        status = str(item.get("status") or "pending").lower()
+        if status not in {"", "pending", "not_started"}:
+            continue
+        escalates_at = parse_iso_datetime(notif.get("escalates_at"))
+        if escalates_at is None:
+            computed = review_request_escalates_at(
+                notif.get("captured_at") or item.get("added")
+            )
+            escalates_at = parse_iso_datetime(computed or item.get("added"))
+        if escalates_at is None or current < escalates_at:
+            continue
+        deltas.append(
+            EscalationDelta(
+                item_id=str(item.get("id") or ""),
+                thread_id=str(notif.get("thread_id") or "") or None,
+                escalated_at=now,
+            )
+        )
+    return deltas
+
+
+def reconcile_tracker_rows_to_ledger(
+    data: dict[str, Any],
+    *,
+    ledger: NotificationLedger | None,
+    dry_run: bool,
+    stats: TriageStats,
+) -> None:
+    """Mirror the current tracker view into the durable notification ledger."""
+    for section, item in _iter_notification_items_with_sections(data):
+        notif = item.get("notification")
+        if not isinstance(notif, dict):
+            continue
+        thread_id = str(notif.get("thread_id") or "") or None
+        canonical = str(notif.get("url") or item.get("link") or "") or None
+        if not thread_id and not canonical:
+            continue
+        reason = str(notif.get("reason") or "").lower()
+        repo = str(notif.get("repo") or "")
+        classification = "actionable"
+        title = str(item.get("title") or "")
+        if str(item.get("source") or "") == "github-notification-auto-archive":
+            classification = "policy_drop"
+        if reason == "review_requested" and "escalates_at" not in notif:
+            escalates_at = review_request_escalates_at(
+                notif.get("captured_at") or item.get("added")
+            )
+            if escalates_at and isinstance(notif, dict):
+                notif["escalates_at"] = escalates_at
+        _ledger_capture(
+            ledger,
+            dry_run=dry_run,
+            thread_id=thread_id,
+            canonical_artifact=canonical,
+            classification=classification,
+            worker="tracker-reconcile",
+            title=title,
+            reason=reason,
+            repo=repo,
+            tracker_item_id=str(item.get("id") or "") or None,
+            tracker_section=section,
+            payload={"source": item.get("source")},
+        )
+        stats.ledger_backfill_captured += 1
+        if item.get("id"):
+            stats.ledger_backfill_linked += 1
+        disposition = tracker_terminal_disposition(item, section)
+        if disposition:
+            _ledger_capture(
+                ledger,
+                dry_run=dry_run,
+                thread_id=thread_id,
+                canonical_artifact=canonical,
+                classification=classification,
+                worker="tracker-reconcile",
+                terminal_disposition=disposition,
+                queue_clear=not bool(notif.get("marked_done")),
+            )
+
+
 def clear_url_deduped_threads(
     path: Path,
     deduped: list[dict[str, str]],
     stats: TriageStats,
+    *,
+    ledger: NotificationLedger | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Clear GitHub threads for URL-deduped inbox entries.
 
@@ -1904,8 +2211,25 @@ def clear_url_deduped_threads(
                 current, url, exclude_thread_id=thread_id
             ):
                 continue
+            _ledger_capture(
+                ledger,
+                dry_run=dry_run,
+                thread_id=thread_id,
+                canonical_artifact=url,
+                classification="actionable",
+                worker="github-url-dedupe",
+                reason="url_deduped",
+                terminal_disposition="tracked_elsewhere",
+                queue_clear=True,
+            )
             try:
                 mark_thread_done(thread_id)
+                _ledger_record_clear_result(
+                    ledger,
+                    dry_run=dry_run,
+                    thread_id=thread_id,
+                    canonical_artifact=url,
+                )
             except (
                 subprocess.CalledProcessError,
                 subprocess.TimeoutExpired,
@@ -1913,11 +2237,109 @@ def clear_url_deduped_threads(
                 stats.errors.append(
                     f"mark-done failed for thread {thread_id}: {exc}"
                 )
+                _ledger_record_clear_result(
+                    ledger,
+                    dry_run=dry_run,
+                    thread_id=thread_id,
+                    canonical_artifact=url,
+                    error=exc,
+                )
+
+
+def retry_pending_github_clears(
+    ledger: NotificationLedger | None,
+    *,
+    dry_run: bool,
+    stats: TriageStats,
+    attempted_thread_ids: set[str],
+) -> None:
+    if ledger is None:
+        return
+    for row in ledger.pending_github_clears():
+        thread_id = str(row.get("source_id") or "")
+        canonical = row.get("canonical_artifact")
+        if not thread_id or thread_id in attempted_thread_ids:
+            continue
+        try:
+            if not dry_run:
+                mark_thread_done(thread_id)
+            attempted_thread_ids.add(thread_id)
+            _ledger_record_clear_result(
+                ledger,
+                dry_run=dry_run,
+                thread_id=thread_id,
+                canonical_artifact=canonical,
+            )
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as exc:
+            stats.errors.append(f"mark-done retry failed for thread {thread_id}: {exc}")
+            _ledger_record_clear_result(
+                ledger,
+                dry_run=dry_run,
+                thread_id=thread_id,
+                canonical_artifact=canonical,
+                error=exc,
+            )
+
+
+def write_health_snapshot(
+    args: argparse.Namespace,
+    *,
+    stats: TriageStats,
+    ledger: NotificationLedger | None,
+) -> None:
+    health_file = getattr(args, "health_file", DEFAULT_HEALTH_FILE)
+    actionable_without_tracker = (
+        ledger.rows_missing_tracker_links() if ledger is not None else []
+    )
+    clear_failures = ledger.rows_with_clear_failures() if ledger is not None else []
+    stale_dropped = (
+        ledger.rows_with_stale_irrelevant_items() if ledger is not None else []
+    )
+    stats.ledger_rows = ledger.row_count() if ledger is not None else 0
+    update_health_file(
+        health_file,
+        worker="notification-triage",
+        had_errors=bool(stats.errors),
+        summary={
+            "fetched": stats.fetched,
+            "unread": stats.unread,
+            "added_q1": stats.added_q1,
+            "added_q2": stats.added_q2,
+            "added_inbox": stats.added_inbox,
+            "escalated_review_requests": stats.escalated_review_requests,
+            "dropped": stats.dropped,
+            "marked_done": stats.marked_done,
+            "pruned_stale": stats.pruned_stale,
+            "left_for_dependabot": stats.left_for_dependabot,
+            "ledger_rows": stats.ledger_rows,
+            "actionable_without_tracker_links": len(actionable_without_tracker),
+            "clear_failures": len(clear_failures),
+            "stale_dropped_items": len(stale_dropped),
+            "errors": list(stats.errors),
+        },
+        details={
+            "current_github_notifications": {
+                "all": stats.fetched,
+                "unread": stats.unread,
+                "read": max(stats.fetched - stats.unread, 0),
+            },
+            "actionable_items_without_tracker_links": actionable_without_tracker,
+            "clear_failures": clear_failures,
+            "stale_dropped_items": stale_dropped,
+        },
+    )
 
 
 def run(args: argparse.Namespace) -> TriageStats:
     """Main entrypoint - returns stats so tests can assert behaviour."""
     stats = TriageStats()
+    ledger_path = getattr(args, "ledger_file", DEFAULT_LEDGER_PATH)
+    ledger: NotificationLedger | None = None
+    if not args.dry_run or ledger_path.exists():
+        ledger = NotificationLedger(ledger_path)
 
     try:
         my_login = get_my_login()
@@ -1933,6 +2355,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         return stats
 
     stats.fetched = len(notifications)
+    stats.unread = sum(1 for notif in notifications if notif.get("unread"))
     logger.info("fetched %d notification(s)", stats.fetched)
 
     try:
@@ -1941,15 +2364,30 @@ def run(args: argparse.Namespace) -> TriageStats:
         stats.errors.append(f"failed to load todo file: {exc}")
         return stats
 
+    reconcile_tracker_rows_to_ledger(
+        data,
+        ledger=ledger,
+        dry_run=args.dry_run,
+        stats=stats,
+    )
+
     seen_ids = existing_thread_ids(data)
     mutations = TodoMutations()
     direct_mention_thread_ids: set[str] = set()
+    attempted_thread_ids: set[str] = set()
 
     for notif in notifications:
         thread_id = str(notif.get("id") or "")
+        subject = notif.get("subject") or {}
+        canonical_url = web_url(notif)
+        reason = str(notif.get("reason") or "").lower()
+        repo = str((notif.get("repository") or {}).get("full_name") or "")
+        title = str(subject.get("title") or "")
+
         if thread_id and thread_id in seen_ids:
             stats.already_tracked += 1
             continue
+
         classification = classify(
             notif,
             my_login=my_login,
@@ -1961,18 +2399,47 @@ def run(args: argparse.Namespace) -> TriageStats:
             classification.bucket,
             classification.reason,
         )
+
         if classification.bucket == BUCKET_DROP:
             stats.dropped += 1
-            if classification.archive_to_done:
+            disposition = "completed" if (
+                classification.archive_to_done
+                or "closed" in classification.reason
+                or "merged" in classification.reason
+            ) else "irrelevant"
+            classification_name = (
+                "dependabot_handoff" if classification.skip_mark_done else "policy_drop"
+            )
+            _ledger_capture(
+                ledger,
+                dry_run=args.dry_run,
+                thread_id=thread_id or None,
+                canonical_artifact=canonical_url,
+                classification=classification_name,
+                worker="github-intake",
+                title=title,
+                reason=reason,
+                repo=repo,
+                terminal_disposition=None if classification.skip_mark_done else disposition,
+                queue_clear=not classification.skip_mark_done,
+            )
+            if classification.archive_to_done and not args.backfill_ledger:
                 mutations.add_done.append(build_done_archive_entry(notif))
             if classification.skip_mark_done:
-                # Dependabot bump: drop from the inbox but leave the GitHub
-                # notification unread so triage-dependabot can consume it.
                 stats.left_for_dependabot += 1
+                continue
+            if args.backfill_ledger:
                 continue
             if not args.dry_run:
                 try:
                     mark_thread_done(thread_id)
+                    attempted_thread_ids.add(thread_id)
+                    _ledger_record_clear_result(
+                        ledger,
+                        dry_run=args.dry_run,
+                        thread_id=thread_id,
+                        canonical_artifact=canonical_url,
+                    )
                 except (
                     subprocess.CalledProcessError,
                     subprocess.TimeoutExpired,
@@ -1980,31 +2447,82 @@ def run(args: argparse.Namespace) -> TriageStats:
                     stats.errors.append(
                         f"mark-done failed for thread {thread_id}: {exc}"
                     )
+                    _ledger_record_clear_result(
+                        ledger,
+                        dry_run=args.dry_run,
+                        thread_id=thread_id,
+                        canonical_artifact=canonical_url,
+                        error=exc,
+                    )
             continue
+
         entry = build_todo_entry(notif, classification)
+        _ledger_capture(
+            ledger,
+            dry_run=args.dry_run,
+            thread_id=thread_id or None,
+            canonical_artifact=canonical_url,
+            classification="actionable",
+            worker="github-intake",
+            title=title,
+            reason=reason,
+            repo=repo,
+            payload={
+                "bucket": classification.bucket,
+                "direct_mention": classification.direct_mention,
+            },
+        )
+        if args.backfill_ledger:
+            continue
         if classification.direct_mention and thread_id:
             direct_mention_thread_ids.add(thread_id)
-        if classification.bucket == BUCKET_Q2:
+        if classification.bucket == BUCKET_Q1:
+            mutations.add_q1.append(entry)
+        elif classification.bucket == BUCKET_Q2:
             mutations.add_q2.append(entry)
-            stats.added_q2 += 1
         else:
             mutations.add_inbox.append(entry)
-            stats.added_inbox += 1
 
-    # Mark-done-on-completed loop: scan tracked items now marked done.
-    ready = items_to_mark_done(data)
-    for item in ready:
+    if args.backfill_ledger:
+        stats.ledger_rows = ledger.row_count() if ledger is not None else 0
+        return stats
+
+    for item, section, disposition in items_ready_for_clear(data):
         notif_meta = item["notification"]
         thread_id = str(notif_meta["thread_id"])
+        canonical_url = str(notif_meta.get("url") or item.get("link") or "") or None
+        _ledger_capture(
+            ledger,
+            dry_run=args.dry_run,
+            thread_id=thread_id,
+            canonical_artifact=canonical_url,
+            classification="actionable",
+            worker="tracker-terminal",
+            title=str(item.get("title") or ""),
+            reason=str(notif_meta.get("reason") or "").lower(),
+            repo=str(notif_meta.get("repo") or ""),
+            tracker_item_id=str(item.get("id") or "") or None,
+            tracker_section=section,
+            terminal_disposition=disposition,
+            queue_clear=True,
+        )
         mark_done_delta = MarkDoneDelta(
             item_id=str(item.get("id") or ""),
             thread_id=thread_id,
             marked_done_at=datetime.date.today().isoformat(),
+            terminal_disposition=disposition,
         )
         if not args.dry_run:
             try:
                 mark_thread_done(thread_id)
+                attempted_thread_ids.add(thread_id)
                 mutations.mark_done.append(mark_done_delta)
+                _ledger_record_clear_result(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id,
+                    canonical_artifact=canonical_url,
+                )
             except (
                 subprocess.CalledProcessError,
                 subprocess.TimeoutExpired,
@@ -2012,23 +2530,70 @@ def run(args: argparse.Namespace) -> TriageStats:
                 stats.errors.append(
                     f"mark-done-on-completed failed for thread {thread_id}: {exc}"
                 )
+                _ledger_record_clear_result(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id,
+                    canonical_artifact=canonical_url,
+                    error=exc,
+                )
         else:
             mutations.mark_done.append(mark_done_delta)
 
-    # Stale-notification pruner: drop github-notification entries from
-    # inbox and quadrants whose subject is now closed/merged/locked/
-    # answered. Runs even on --dry-run (so we can see what would be
-    # pruned) but the write itself is gated below.
+    mutations.escalate.extend(collect_review_request_escalations(data))
+
     if not args.no_prune:
         mutations.prune.extend(
             collect_stale_notification_prunes(data, stats, dry_run=args.dry_run)
         )
+        for delta in mutations.prune:
+            if not delta.thread_id:
+                continue
+            _ledger_capture(
+                ledger,
+                dry_run=args.dry_run,
+                thread_id=delta.thread_id,
+                canonical_artifact=None,
+                classification="policy_drop",
+                worker="github-pruner",
+                reason=delta.stale_reason,
+                tracker_item_id=delta.item_id or None,
+                tracker_section=delta.section or None,
+                terminal_disposition="completed",
+                queue_clear=True,
+            )
+            if not args.dry_run:
+                try:
+                    mark_thread_done(delta.thread_id)
+                    attempted_thread_ids.add(delta.thread_id)
+                    _ledger_record_clear_result(
+                        ledger,
+                        dry_run=args.dry_run,
+                        thread_id=delta.thread_id,
+                        canonical_artifact=None,
+                    )
+                except (
+                    subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired,
+                ) as exc:
+                    stats.errors.append(
+                        f"prune mark-done failed for thread {delta.thread_id}: {exc}"
+                    )
+                    _ledger_record_clear_result(
+                        ledger,
+                        dry_run=args.dry_run,
+                        thread_id=delta.thread_id,
+                        canonical_artifact=None,
+                        error=exc,
+                    )
 
     has_todo_mutations = bool(
-        mutations.add_q2
+        mutations.add_q1
+        or mutations.add_q2
         or mutations.add_inbox
         or mutations.add_done
         or mutations.mark_done
+        or mutations.escalate
         or mutations.prune
     )
     added_entries: list[dict[str, Any]] = []
@@ -2059,13 +2624,44 @@ def run(args: argparse.Namespace) -> TriageStats:
                 commit_todo_changes(
                     args.todo_file, "Record notification triage todo updates"
                 )
-            # Clear GitHub threads for URL-deduped inbox entries, revalidating
-            # each URL against the post-commit document so a concurrent removal
-            # during the commit's pull/rebase cannot orphan a notification.
-            clear_url_deduped_threads(args.todo_file, applied["url_deduped"], stats)
+            clear_url_deduped_threads(
+                args.todo_file,
+                applied["url_deduped"],
+                stats,
+                ledger=ledger,
+                dry_run=args.dry_run,
+            )
         reconcile_stats_from_applied(stats, applied)
         if not args.dry_run:
             added_entries = applied["added_entries"]
+            for entry in added_entries:
+                notif_meta = entry.get("notification")
+                if not isinstance(notif_meta, dict):
+                    continue
+                section = "inbox"
+                quadrant = str(entry.get("quadrant") or "")
+                if quadrant:
+                    section = f"prioritized.{quadrant}"
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=str(notif_meta.get("thread_id") or "") or None,
+                    canonical_artifact=str(notif_meta.get("url") or "") or None,
+                    classification="actionable",
+                    worker="tracker-link",
+                    title=str(entry.get("title") or ""),
+                    reason=str(notif_meta.get("reason") or "").lower(),
+                    repo=str(notif_meta.get("repo") or ""),
+                    tracker_item_id=str(entry.get("id") or "") or None,
+                    tracker_section=section,
+                )
+
+    retry_pending_github_clears(
+        ledger,
+        dry_run=args.dry_run,
+        stats=stats,
+        attempted_thread_ids=attempted_thread_ids,
+    )
 
     if not args.no_notify and not args.dry_run:
         for entry in added_entries:
@@ -2081,6 +2677,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 str(notif_meta.get("url") or ""),
             )
 
+    stats.ledger_rows = ledger.row_count() if ledger is not None else 0
     return stats
 
 
@@ -2088,17 +2685,23 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)s %(message)s",
+        format="%(asctime)s %(levelname)s %(message)s",
     )
     stats = run(args)
+    ledger_path = getattr(args, "ledger_file", DEFAULT_LEDGER_PATH)
+    ledger: NotificationLedger | None = None
+    if ledger_path.exists():
+        ledger = NotificationLedger(ledger_path)
+    write_health_snapshot(args, stats=stats, ledger=ledger)
     print(
-        f"fetched={stats.fetched} added_q2={stats.added_q2} "
-        f"added_inbox={stats.added_inbox} dropped={stats.dropped} "
-        f"archived_to_done={stats.archived_to_done} "
-        f"already_tracked={stats.already_tracked} "
-        f"marked_done={stats.marked_done} "
-        f"left_for_dependabot={stats.left_for_dependabot} "
-        f"pruned_stale={stats.pruned_stale}"
+        f"fetched={stats.fetched} unread={stats.unread} "
+        f"added_q1={stats.added_q1} added_q2={stats.added_q2} "
+        f"added_inbox={stats.added_inbox} escalated_review_requests={stats.escalated_review_requests} "
+        f"dropped={stats.dropped} archived_to_done={stats.archived_to_done} "
+        f"already_tracked={stats.already_tracked} marked_done={stats.marked_done} "
+        f"left_for_dependabot={stats.left_for_dependabot} pruned_stale={stats.pruned_stale} "
+        f"ledger_rows={stats.ledger_rows} ledger_backfill_captured={stats.ledger_backfill_captured} "
+        f"ledger_backfill_linked={stats.ledger_backfill_linked}"
     )
     if stats.pruned_by_reason:
         breakdown = ", ".join(

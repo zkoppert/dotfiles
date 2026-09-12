@@ -1,0 +1,92 @@
+#!/bin/bash
+set -euo pipefail
+
+resolve_path() {
+  local source_path="$1"
+  while [ -L "$source_path" ]; do
+    local source_dir
+    source_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+    local linked
+    linked="$(readlink "$source_path")"
+    if [[ "$linked" = /* ]]; then
+      source_path="$linked"
+    else
+      source_path="$source_dir/$linked"
+    fi
+  done
+  cd -P "$(dirname "$source_path")" && pwd
+}
+
+json_escape() {
+  local text="${1-}"
+  text=${text//\\/\\\\}
+  text=${text//\"/\\\"}
+  text=${text//$'\n'/\\n}
+  text=${text//$'\r'/}
+  printf '%s' "$text"
+}
+
+write_health_error() {
+  local path="$1"
+  local worker="$2"
+  local message="$3"
+  local timestamp
+  timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  mkdir -p "$(dirname "$path")"
+  local tmp
+  tmp="$path.tmp"
+  cat >"$tmp" <<JSON
+{
+  "worker": "$(json_escape "$worker")",
+  "status": "error",
+  "last_run_at": "$timestamp",
+  "last_error_at": "$timestamp",
+  "last_error": "$(json_escape "$message")",
+  "summary": {
+    "errors": [
+      "$(json_escape "$message")"
+    ]
+  },
+  "details": {}
+}
+JSON
+  mv "$tmp" "$path"
+}
+
+if [ "$#" -lt 3 ]; then
+  echo "usage: $0 WORKER SCRIPT_RELATIVE_PATH HEALTH_FILENAME [ARGS...]" >&2
+  exit 64
+fi
+
+worker="$1"
+script_relative="$2"
+health_filename="$3"
+shift 3
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+self_dir="$(resolve_path "${BASH_SOURCE[0]}")"
+dotfiles_dir="${DOTFILES_DIR_OVERRIDE:-$(cd "$self_dir/.." && pwd -P)}"
+runtime_root="${DOTFILES_NOTIFICATION_RUNTIME_ROOT:-$HOME/.local/share/dotfiles/notification-workers}"
+runtime_python="${DOTFILES_NOTIFICATION_RUNTIME_PYTHON:-$runtime_root/venv/bin/python3}"
+health_dir="${DOTFILES_NOTIFICATION_LOG_DIR:-$HOME/Library/Logs}"
+health_file="${DOTFILES_NOTIFICATION_HEALTH_FILE_OVERRIDE:-$health_dir/$health_filename}"
+script_path="$dotfiles_dir/$script_relative"
+
+if [ ! -x "$runtime_python" ]; then
+  message="${worker}: pinned runtime missing at $runtime_python; run ./install.sh to provision notification workers"
+  write_health_error "$health_file" "$worker" "$message"
+  echo "$message" >&2
+  exit 1
+fi
+
+preflight_error=""
+if ! preflight_error="$($runtime_python -c 'import yaml, ruamel.yaml' 2>&1 >/dev/null)"; then
+  message="${worker}: pinned runtime failed import preflight at $runtime_python: ${preflight_error:-missing PyYAML or ruamel.yaml}"
+  write_health_error "$health_file" "$worker" "$message"
+  echo "$message" >&2
+  exit 1
+fi
+
+export DOTFILES_NOTIFICATION_RUNTIME_PYTHON="$runtime_python"
+exec "$runtime_python" "$script_path" "$@"

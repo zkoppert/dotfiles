@@ -13,34 +13,11 @@
     <key>RunAtLoad</key>
     <false/>
 
-    <!-- Every 2 hours, 08:00 through 18:00, every day of the week. -->
+    <!-- Every hour, on the hour, 24/7. -->
     <key>StartCalendarInterval</key>
-    <array>
-        <dict>
-            <key>Hour</key><integer>8</integer>
-            <key>Minute</key><integer>0</integer>
-        </dict>
-        <dict>
-            <key>Hour</key><integer>10</integer>
-            <key>Minute</key><integer>0</integer>
-        </dict>
-        <dict>
-            <key>Hour</key><integer>12</integer>
-            <key>Minute</key><integer>0</integer>
-        </dict>
-        <dict>
-            <key>Hour</key><integer>14</integer>
-            <key>Minute</key><integer>0</integer>
-        </dict>
-        <dict>
-            <key>Hour</key><integer>16</integer>
-            <key>Minute</key><integer>0</integer>
-        </dict>
-        <dict>
-            <key>Hour</key><integer>18</integer>
-            <key>Minute</key><integer>0</integer>
-        </dict>
-    </array>
+    <dict>
+        <key>Minute</key><integer>0</integer>
+    </dict>
 
     <key>StandardOutPath</key>
     <string>/Users/zkoppert/Library/Logs/notification-triage.log</string>

@@ -45,7 +45,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypedDict
 
+_SKILLS_DIR = Path(__file__).resolve().parents[1]
+if str(_SKILLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SKILLS_DIR))
+
 import yaml
+from notification_worker_common import (
+    DEFAULT_DEPENDABOT_HEALTH_FILE,
+    DEFAULT_LEDGER_FILE,
+    NotificationLedger,
+    update_health_file,
+)
 from ruamel.yaml import YAML
 from ruamel.yaml import YAMLError as _RuamelYAMLError
 
@@ -58,6 +68,8 @@ logger = logging.getLogger("triage-dependabot")
 
 DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
 DEFAULT_STATE_FILE = Path.home() / "Library" / "Logs" / "triage-dependabot-state.json"
+DEFAULT_LEDGER_PATH = DEFAULT_LEDGER_FILE
+DEFAULT_HEALTH_FILE = DEFAULT_DEPENDABOT_HEALTH_FILE
 PRIVATE_TRIAGE_REPOS_PATH = Path.home() / ".copilot" / "private" / "triage-repos.yml"
 OWNED_OWNERS: frozenset[str] = frozenset(
     {"github", "github-community-projects", "zkoppert"}
@@ -239,6 +251,7 @@ class TriageStats:
     """Tally of what happened during one run, for the digest."""
 
     fetched: int = 0
+    unread: int = 0
     dependabot: int = 0
     merged: int = 0
     rebased: int = 0
@@ -251,6 +264,7 @@ class TriageStats:
     cooldown: int = 0
     already_tracked: int = 0
     stale_removed: int = 0
+    ledger_rows: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -1422,6 +1436,8 @@ def _safe_mark_thread_done(
     dry_run: bool,
     stats: TriageStats,
     context: str,
+    ledger: NotificationLedger | None = None,
+    canonical_artifact: str | None = None,
 ) -> bool:
     """Best-effort wrapper around ``mark_thread_done`` for post-action cleanup.
 
@@ -1445,10 +1461,23 @@ def _safe_mark_thread_done(
         return True
     try:
         mark_thread_done(thread_id, dry_run=dry_run)
+        _ledger_record_clear_result(
+            ledger,
+            dry_run=dry_run,
+            thread_id=thread_id,
+            canonical_artifact=canonical_artifact,
+        )
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         stats.errors.append(f"mark-done failed for {context}: {exc}")
         logger.warning("mark_thread_done failed for %s: %s", context, exc)
+        _ledger_record_clear_result(
+            ledger,
+            dry_run=dry_run,
+            thread_id=thread_id,
+            canonical_artifact=canonical_artifact,
+            error=exc,
+        )
         return False
 
 
@@ -1923,7 +1952,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Preview decisions; do not call gh mutating endpoints or write todo.yml.",
+        help="Preview decisions; do not call gh mutating endpoints, write todo.yml, or update the ledger.",
+    )
+    parser.add_argument(
+        "--ledger-file",
+        type=Path,
+        default=DEFAULT_LEDGER_PATH,
+        help=f"Path to the durable notification ledger (default: {DEFAULT_LEDGER_PATH}).",
+    )
+    parser.add_argument(
+        "--health-file",
+        type=Path,
+        default=DEFAULT_HEALTH_FILE,
+        help=f"Path to the machine-readable health file (default: {DEFAULT_HEALTH_FILE}).",
     )
     parser.add_argument(
         "--no-copilot-subagent",
@@ -1952,6 +1993,125 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Enable debug logging.",
     )
     return parser.parse_args(argv)
+
+
+def _ledger_capture(
+    ledger: NotificationLedger | None,
+    *,
+    dry_run: bool,
+    thread_id: str | None,
+    canonical_artifact: str | None,
+    classification: str,
+    worker: str,
+    title: str = "",
+    reason: str = "",
+    repo: str = "",
+    tracker_item_id: str | None = None,
+    tracker_section: str | None = None,
+    terminal_disposition: str | None = None,
+    queue_clear: bool = False,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    if ledger is None or dry_run:
+        return
+    ledger.capture(
+        source_type="github",
+        source_id=thread_id,
+        canonical_artifact=canonical_artifact,
+        classification=classification,
+        worker=worker,
+        title=title,
+        reason=reason,
+        repo=repo,
+        payload=payload,
+    )
+    if tracker_item_id and tracker_section:
+        ledger.link_tracker(
+            source_type="github",
+            source_id=thread_id,
+            canonical_artifact=canonical_artifact,
+            tracker_item_id=tracker_item_id,
+            tracker_section=tracker_section,
+        )
+    if terminal_disposition:
+        ledger.record_terminal(
+            source_type="github",
+            source_id=thread_id,
+            canonical_artifact=canonical_artifact,
+            terminal_disposition=terminal_disposition,
+        )
+    if queue_clear:
+        ledger.queue_clear(
+            source_type="github",
+            source_id=thread_id,
+            canonical_artifact=canonical_artifact,
+        )
+
+
+def _ledger_record_clear_result(
+    ledger: NotificationLedger | None,
+    *,
+    dry_run: bool,
+    thread_id: str,
+    canonical_artifact: str | None,
+    error: BaseException | None = None,
+) -> None:
+    if ledger is None or dry_run:
+        return
+    if error is None:
+        ledger.record_clear_success(
+            source_type="github",
+            source_id=thread_id,
+            canonical_artifact=canonical_artifact,
+        )
+        return
+    ledger.record_clear_failure(
+        source_type="github",
+        source_id=thread_id,
+        canonical_artifact=canonical_artifact,
+        error=str(error),
+    )
+
+
+def write_health_snapshot(
+    args: argparse.Namespace,
+    *,
+    stats: TriageStats,
+    ledger: NotificationLedger | None,
+) -> None:
+    health_file = getattr(args, "health_file", DEFAULT_HEALTH_FILE)
+    clear_failures = ledger.rows_with_clear_failures() if ledger is not None else []
+    update_health_file(
+        health_file,
+        worker="triage-dependabot",
+        had_errors=bool(stats.errors),
+        summary={
+            "fetched": stats.fetched,
+            "unread": stats.unread,
+            "dependabot": stats.dependabot,
+            "merged": stats.merged,
+            "labeled_and_merged": stats.labeled_and_merged,
+            "rebased": stats.rebased,
+            "flagged": stats.flagged,
+            "closed_prerelease": stats.closed_prerelease,
+            "skipped": stats.skipped,
+            "skipped_dependency": stats.skipped_dependency,
+            "cooldown": stats.cooldown,
+            "already_tracked": stats.already_tracked,
+            "stale_removed": stats.stale_removed,
+            "ledger_rows": stats.ledger_rows,
+            "clear_failures": len(clear_failures),
+            "errors": list(stats.errors),
+        },
+        details={
+            "current_github_notifications": {
+                "all": stats.fetched,
+                "unread": stats.unread,
+                "read": max(stats.fetched - stats.unread, 0),
+            },
+            "clear_failures": clear_failures,
+        },
+    )
 
 
 def _cleanup_stale_entries(
@@ -2029,6 +2189,10 @@ def _record_stale_cleanup(
 def run(args: argparse.Namespace) -> TriageStats:
     """Main entrypoint. Returns stats so tests can assert behaviour."""
     stats = TriageStats()
+    ledger_path = getattr(args, "ledger_file", DEFAULT_LEDGER_PATH)
+    ledger: NotificationLedger | None = None
+    if not args.dry_run or ledger_path.exists():
+        ledger = NotificationLedger(ledger_path)
     try:
         my_login = get_my_login()
     except (
@@ -2050,6 +2214,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         stats.errors.append(f"failed to fetch notifications: {exc}")
         return stats
     stats.fetched = len(notifications)
+    stats.unread = sum(1 for notif in notifications if notif.get("unread"))
     logger.info("fetched %d notification(s)", stats.fetched)
 
     state = load_state(args.state_file)
@@ -2082,11 +2247,27 @@ def run(args: argparse.Namespace) -> TriageStats:
             continue
         if not is_dependabot_pr(pr):
             continue
+        thread_id = str(notif.get("id") or "")
+        pr_url = pr.get("url") or ""
+        reason = (notif.get("reason") or "").lower()
+        title = str(pr.get("title") or "")
+
         if is_archived_repo(repo):
-            thread_id = str(notif.get("id") or "")
-            pr_url = pr.get("url") or ""
             logger.info("%s#%d -> skipping archived repo %s", repo, number, repo)
             stats.skipped_archived += 1
+            _ledger_capture(
+                ledger,
+                dry_run=args.dry_run,
+                thread_id=thread_id or None,
+                canonical_artifact=pr_url,
+                classification="policy_drop",
+                worker="dependabot-archived-repo",
+                title=title,
+                reason=reason,
+                repo=repo,
+                terminal_disposition="completed",
+                queue_clear=bool(thread_id),
+            )
             if pr_url:
                 state[pr_url] = now
             if thread_id:
@@ -2095,6 +2276,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     dry_run=args.dry_run,
                     stats=stats,
                     context=f"archived repo {pr_url}",
+                    ledger=ledger,
+                    canonical_artifact=pr_url,
                 ):
                     _record_stale_cleanup(
                         mutations,
@@ -2106,8 +2289,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
             continue
         if not is_owned_repo(repo):
-            thread_id = str(notif.get("id") or "")
-            pr_url = pr.get("url") or ""
             owner = repo_owner(repo) or "unknown"
             logger.info(
                 "%s#%d -> skipping unowned repo owner %s",
@@ -2116,7 +2297,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 owner,
             )
             stats.skipped += 1
-            reason = (notif.get("reason") or "").lower()
             cleared = True
             if thread_id and reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS:
                 logger.info(
@@ -2125,11 +2305,26 @@ def run(args: argparse.Namespace) -> TriageStats:
                     number,
                     reason,
                 )
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id,
+                    canonical_artifact=pr_url,
+                    classification="policy_drop",
+                    worker="dependabot-unowned-repo",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                    terminal_disposition="irrelevant",
+                    queue_clear=True,
+                )
                 cleared = _safe_mark_thread_done(
                     thread_id,
                     dry_run=args.dry_run,
                     stats=stats,
                     context=f"unowned repo {pr_url}",
+                    ledger=ledger,
+                    canonical_artifact=pr_url,
                 )
                 if cleared:
                     _record_stale_cleanup(
@@ -2147,14 +2342,23 @@ def run(args: argparse.Namespace) -> TriageStats:
                     number,
                     reason or "unknown",
                 )
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id,
+                    canonical_artifact=pr_url,
+                    classification="dependabot_handoff",
+                    worker="dependabot-unowned-repo",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                )
             if pr_url and cleared:
                 state[pr_url] = now
             continue
         skipped_dep = skipped_dependency_match(pr) or skipped_repo_match(repo)
         if skipped_dep:
             pr_state = (pr.get("state") or "").lower()
-            thread_id = str(notif.get("id") or "")
-            pr_url = pr.get("url") or ""
             if pr_state in {"closed", "merged"}:
                 logger.info(
                     "%s#%d -> excluded dependency %s already %s, clearing notification",
@@ -2164,9 +2368,28 @@ def run(args: argparse.Namespace) -> TriageStats:
                     pr_state,
                 )
                 stats.skipped_dependency += 1
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                    classification="policy_drop",
+                    worker="dependabot-excluded-dependency",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                    terminal_disposition="completed",
+                    queue_clear=bool(thread_id),
+                )
                 if thread_id:
-                    try:
-                        mark_thread_done(thread_id, dry_run=args.dry_run)
+                    if _safe_mark_thread_done(
+                        thread_id,
+                        dry_run=args.dry_run,
+                        stats=stats,
+                        context=f"closed excluded-dep {pr_url}",
+                        ledger=ledger,
+                        canonical_artifact=pr_url,
+                    ):
                         _record_stale_cleanup(
                             mutations,
                             stats,
@@ -2174,14 +2397,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                             thread_id=thread_id,
                             pr_url=pr_url,
                             dry_run=args.dry_run,
-                        )
-                    except (
-                        subprocess.CalledProcessError,
-                        subprocess.TimeoutExpired,
-                    ) as exc:
-                        stats.errors.append(
-                            f"mark-done failed for closed excluded-dep "
-                            f"{pr_url}: {exc}"
                         )
                 continue
             logger.info(
@@ -2191,7 +2406,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 skipped_dep,
             )
             stats.skipped_dependency += 1
-            reason = (notif.get("reason") or "").lower()
             cleared = True
             if thread_id and reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS:
                 logger.info(
@@ -2200,8 +2414,28 @@ def run(args: argparse.Namespace) -> TriageStats:
                     number,
                     reason,
                 )
-                try:
-                    mark_thread_done(thread_id, dry_run=args.dry_run)
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id,
+                    canonical_artifact=pr_url,
+                    classification="policy_drop",
+                    worker="dependabot-excluded-dependency",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                    terminal_disposition="irrelevant",
+                    queue_clear=True,
+                )
+                cleared = _safe_mark_thread_done(
+                    thread_id,
+                    dry_run=args.dry_run,
+                    stats=stats,
+                    context=f"excluded-dep {pr_url}",
+                    ledger=ledger,
+                    canonical_artifact=pr_url,
+                )
+                if cleared:
                     _record_stale_cleanup(
                         mutations,
                         stats,
@@ -2210,27 +2444,28 @@ def run(args: argparse.Namespace) -> TriageStats:
                         pr_url=pr_url,
                         dry_run=args.dry_run,
                     )
-                except (
-                    subprocess.CalledProcessError,
-                    subprocess.TimeoutExpired,
-                ) as exc:
-                    stats.errors.append(
-                        f"mark-done failed for excluded-dep {pr_url}: {exc}"
-                    )
-                    cleared = False
+            else:
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                    classification="dependabot_handoff",
+                    worker="dependabot-excluded-dependency",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                )
             if pr_url and cleared:
                 state[pr_url] = now
             continue
         stats.dependabot += 1
-        thread_id = str(notif.get("id") or "")
-        pr_url = pr.get("url") or ""
 
         if pr_url and in_cooldown(state, pr_url, now=now):
             stats.cooldown += 1
             logger.info("cooldown active for %s, skipping", pr_url)
             continue
 
-        reason = (notif.get("reason") or "").lower()
         decision = decide(
             pr,
             my_login=my_login,
@@ -2258,11 +2493,26 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
                 stats.merged += 1
                 state[pr_url] = now
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                    classification="policy_drop",
+                    worker="dependabot-merge",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                    terminal_disposition="completed",
+                    queue_clear=bool(thread_id),
+                )
                 _safe_mark_thread_done(
                     thread_id,
                     dry_run=args.dry_run,
                     stats=stats,
                     context=f"merged {pr_url}",
+                    ledger=ledger,
+                    canonical_artifact=pr_url,
                 )
                 _record_stale_cleanup(
                     mutations,
@@ -2285,11 +2535,26 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
                 stats.labeled_and_merged += 1
                 state[pr_url] = now
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                    classification="policy_drop",
+                    worker="dependabot-label-and-merge",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                    terminal_disposition="completed",
+                    queue_clear=bool(thread_id),
+                )
                 _safe_mark_thread_done(
                     thread_id,
                     dry_run=args.dry_run,
                     stats=stats,
                     context=f"labeled-and-merged {pr_url}",
+                    ledger=ledger,
+                    canonical_artifact=pr_url,
                 )
                 _record_stale_cleanup(
                     mutations,
@@ -2303,15 +2568,42 @@ def run(args: argparse.Namespace) -> TriageStats:
                 do_rebase_comment(repo, number, dry_run=args.dry_run)
                 stats.rebased += 1
                 state[pr_url] = now
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                    classification="dependabot_handoff",
+                    worker="dependabot-rebase",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                    payload={"outcome": decision.outcome},
+                )
             elif decision.outcome == OUTCOME_CLOSE_PRERELEASE:
                 do_dependabot_close(repo, number, dry_run=args.dry_run)
                 stats.closed_prerelease += 1
                 state[pr_url] = now
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                    classification="policy_drop",
+                    worker="dependabot-close-prerelease",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                    terminal_disposition="irrelevant",
+                    queue_clear=bool(thread_id),
+                )
                 _safe_mark_thread_done(
                     thread_id,
                     dry_run=args.dry_run,
                     stats=stats,
                     context=f"closed-prerelease {pr_url}",
+                    ledger=ledger,
+                    canonical_artifact=pr_url,
                 )
                 _record_stale_cleanup(
                     mutations,
@@ -2322,6 +2614,18 @@ def run(args: argparse.Namespace) -> TriageStats:
                     dry_run=args.dry_run,
                 )
             elif decision.outcome == OUTCOME_FLAG:
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                    classification="actionable",
+                    worker="dependabot-flag",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                    payload={"outcome": decision.outcome, "bump": decision.bump},
+                )
                 mutations.flags.append(
                     FlagTodoDelta(
                         entry=build_flag_entry(pr, repo, notif, decision),
@@ -2332,11 +2636,26 @@ def run(args: argparse.Namespace) -> TriageStats:
                 if decision.terminal and thread_id:
                     if pr_url:
                         state[pr_url] = now
+                    _ledger_capture(
+                        ledger,
+                        dry_run=args.dry_run,
+                        thread_id=thread_id,
+                        canonical_artifact=pr_url,
+                        classification="policy_drop",
+                        worker="dependabot-terminal-skip",
+                        title=title,
+                        reason=reason,
+                        repo=repo,
+                        terminal_disposition="completed",
+                        queue_clear=True,
+                    )
                     _safe_mark_thread_done(
                         thread_id,
                         dry_run=args.dry_run,
                         stats=stats,
                         context=f"terminal-skip {pr_url}",
+                        ledger=ledger,
+                        canonical_artifact=pr_url,
                     )
                     _record_stale_cleanup(
                         mutations,
@@ -2360,17 +2679,26 @@ def run(args: argparse.Namespace) -> TriageStats:
                 bump=decision.bump,
                 is_security=decision.is_security,
             )
+            _ledger_capture(
+                ledger,
+                dry_run=args.dry_run,
+                thread_id=thread_id or None,
+                canonical_artifact=pr_url,
+                classification="actionable",
+                worker="dependabot-branch-protection",
+                title=title,
+                reason=reason,
+                repo=repo,
+                terminal_disposition="tracked_elsewhere",
+                queue_clear=bool(thread_id),
+                payload={"outcome": OUTCOME_FLAG, "marker": exc.marker},
+            )
             mutations.flags.append(
                 FlagTodoDelta(
                     entry=build_flag_entry(pr, repo, notif, bp_decision),
                     pr_url=pr_url,
                 )
             )
-            # Extend the cooldown to ~24h so the cron stops re-approving
-            # and re-trying the same blocked PR every hour. The standard
-            # in_cooldown() checks elapsed seconds against ACTION_COOLDOWN_SECONDS,
-            # so storing a future timestamp keeps the entry "in cooldown"
-            # for the offset interval.
             if pr_url:
                 cooldown_offset = BRANCH_PROTECTION_COOLDOWN_SECONDS
                 cooldown_offset -= ACTION_COOLDOWN_SECONDS
@@ -2381,6 +2709,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     dry_run=args.dry_run,
                     stats=stats,
                     context=f"branch-protected {pr_url}",
+                    ledger=ledger,
+                    canonical_artifact=pr_url,
                 )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             stats.errors.append(f"action {decision.outcome} failed for {pr_url}: {exc}")
@@ -2400,12 +2730,24 @@ def run(args: argparse.Namespace) -> TriageStats:
                 state[added_pr_url] = now
         if applied["changed"]:
             commit_todo_changes(args.todo_file, "Record Dependabot triage todo updates")
+        for entry in added_flag_entries:
+            notif_meta = entry.get("notification")
+            if not isinstance(notif_meta, dict):
+                continue
+            _ledger_capture(
+                ledger,
+                dry_run=args.dry_run,
+                thread_id=str(notif_meta.get("thread_id") or "") or None,
+                canonical_artifact=str(notif_meta.get("url") or "") or None,
+                classification="actionable",
+                worker="dependabot-tracker-link",
+                title=str(entry.get("title") or ""),
+                reason=str(notif_meta.get("reason") or "").lower(),
+                repo=str(notif_meta.get("repo") or ""),
+                tracker_item_id=str(entry.get("id") or "") or None,
+                tracker_section="prioritized.q1_do_first",
+            )
     elif mutations.flags and args.dry_run:
-        # Dry-run preview: mirror the real dedup so flagged / already_tracked
-        # match what a live run would record. apply_todo_mutations only
-        # mutates the in-memory copy; nothing is written. Prunes are already
-        # counted into stale_removed by _record_stale_cleanup on dry runs, so
-        # mutations.prunes is empty here and is left untouched.
         try:
             preview = load_todo(args.todo_file)
         except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
@@ -2430,6 +2772,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 str(notif_meta.get("url") or ""),
             )
 
+    stats.ledger_rows = ledger.row_count() if ledger is not None else 0
     return stats
 
 
@@ -2437,18 +2780,23 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)s %(message)s",
+        format="%(asctime)s %(levelname)s %(message)s",
     )
     stats = run(args)
+    ledger_path = getattr(args, "ledger_file", DEFAULT_LEDGER_PATH)
+    ledger: NotificationLedger | None = None
+    if ledger_path.exists():
+        ledger = NotificationLedger(ledger_path)
+        stats.ledger_rows = ledger.row_count()
+    write_health_snapshot(args, stats=stats, ledger=ledger)
     print(
-        f"fetched={stats.fetched} dependabot={stats.dependabot} "
+        f"fetched={stats.fetched} unread={stats.unread} dependabot={stats.dependabot} "
         f"merged={stats.merged} labeled={stats.labeled_and_merged} "
         f"rebased={stats.rebased} flagged={stats.flagged} "
-        f"closed_prerelease={stats.closed_prerelease} "
-        f"skipped={stats.skipped} skipped_dependency={stats.skipped_dependency} "
-        f"skipped_archived={stats.skipped_archived} "
+        f"closed_prerelease={stats.closed_prerelease} skipped={stats.skipped} "
+        f"skipped_dependency={stats.skipped_dependency} skipped_archived={stats.skipped_archived} "
         f"cooldown={stats.cooldown} already_tracked={stats.already_tracked} "
-        f"stale_removed={stats.stale_removed}"
+        f"stale_removed={stats.stale_removed} ledger_rows={stats.ledger_rows}"
     )
     for err in stats.errors:
         print(f"ERROR: {err}", file=sys.stderr)

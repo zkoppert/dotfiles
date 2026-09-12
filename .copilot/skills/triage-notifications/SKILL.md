@@ -1,6 +1,6 @@
 ---
 name: triage-notifications
-description: Triggers when the user says "triage my notifications", "run notification triage", "what GitHub notifications need attention", "clear my notifications", or any similar request to process their unread GitHub notifications. Runs the dotfiles triage tool which aggressively bulk-triages each notification, dropping passive noise (subscribed, team_mention, comments, CI runs, super-linter posts, state changes) and clearing those GitHub notifications, while keeping only personal-action items (mentions, assignments, security alerts, review requests, my own PRs) plus AoR-matched items, routing them into ~/repos/zkoppert-todo/todo.yml. Dependabot bumps are dropped from the inbox but left unread for triage-dependabot. Safe to re-run (deduped by thread_id).
+description: Triggers when the user says "triage my notifications", "run notification triage", "what GitHub notifications need attention", "clear my notifications", or any similar request to process their GitHub notifications. Runs the dotfiles triage tool which aggressively bulk-triages each notification, dropping passive noise (subscribed, team_mention, comments, CI runs, super-linter posts, state changes) and clearing those GitHub notifications only after the local notification ledger records the decision, while keeping direct asks urgent in Q1, ordinary review requests scheduled in Q2 with age escalation, and my own PR status items in the tracker. Dependabot bumps are dropped from the inbox but left unread for triage-dependabot. Safe to re-run (deduped by thread_id / canonical URL).
 ---
 
 # Triage GitHub Notifications
@@ -24,11 +24,12 @@ This is an aggressive "bulk triage": passive subscription noise is
 dropped and cleared from GitHub, and only personal-action items survive.
 
 1. Fetches all notifications via `gh api /notifications?all=true --paginate`.
-2. Classifies each one into DROP / Q1 / INBOX based on the rules in
+2. Classifies each one into DROP / Q1 / Q2 / INBOX based on the rules in
    `triage.py`:
    - **KEEP_REASONS** (`review_requested`, `assign`, `author`, `mention`,
      `security_alert`) survive: mention/assign/security_alert → Q1,
-     review_requested from a NUX teammate → Q1, otherwise → INBOX.
+     review_requested → Q2 with one-business-day escalation if it remains
+     untouched, `author` → INBOX.
    - **Everything else** (`subscribed`, `team_mention`, `comment`,
      `state_change`, `ci_activity`, `manual`, ...) is passive noise and
      **drops** (marked done on GitHub).
@@ -43,27 +44,28 @@ dropped and cleared from GitHub, and only personal-action items survive.
    - **Dependabot bumps** drop from the inbox but are **left unread on
      GitHub** (never marked done) so the separate `triage-dependabot`
      tool can consume them.
-3. Adds Q1 and INBOX entries to `~/repos/zkoppert-todo/todo.yml`
+3. Adds Q1, Q2, and INBOX entries to `~/repos/zkoppert-todo/todo.yml`
    (deduped by `notification.thread_id`; an INBOX entry is also
    suppressed when the notification's PR/issue URL is already tracked as
    a `link` or `artifact` on another item, and the suppressed thread is
    marked done on GitHub so it stops re-adding). Writes take an exclusive
    `todo.yml.lock`, re-read the file, apply only the computed deltas, and
    use an atomic replace so concurrent manual edits are preserved.
-4. Marks DROP threads done on GitHub (no human confirmation), which
-   removes them from the inbox (except Dependabot bumps, which stay
-   unread).
+4. Records DROP decisions in the local ledger, then marks DROP threads
+   done on GitHub (no human confirmation), which removes them from the
+   inbox (except Dependabot bumps, which stay unread).
 5. Scans the todo file for items previously created by this tool that
-   have moved to `status: done` and marks those notifications done.
+   have moved to `status: done`, `status: dropped`, or Q4 and marks those
+   notifications done only after the ledger records the terminal
+   disposition.
 6. Commits any resulting `todo.yml` change in the todo repo, then tries
    a best-effort pull and push. Git failures are logged as warnings.
 7. Sends one clickable macOS notification for each newly added direct
    mention. Selecting it opens the GitHub subject URL. Other actionable
    reasons, already tracked items, no-op runs, and dry runs stay silent.
 
-A launchd job (`com.zkoppert.notification-triage.plist`) runs this every
-two hours on weekdays at 8/10/12/14/16/18. This skill is for ad-hoc
-runs in between.
+A launchd job (`com.zkoppert.notification-triage.plist`) runs this hourly,
+24x7. This skill is for ad-hoc runs in between.
 
 ## How to run
 
@@ -71,20 +73,20 @@ Default writes to `~/repos/zkoppert-todo/todo.yml` and sends clickable
 macOS alerts only for newly added direct mentions:
 
 ```bash
-python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py
+~/repos/dotfiles/bin/notification-triage
 ```
 
 Preview without writing or calling DELETE:
 
 ```bash
-python3 ~/repos/dotfiles/.copilot/skills/triage-notifications/triage.py \
-  --dry-run --verbose
+~/repos/dotfiles/bin/notification-triage --dry-run --verbose
 ```
 
 ## After running
 
-1. Read the printed summary line (`fetched=N added_q2=N added_inbox=N
-   dropped=N ... left_for_dependabot=N pruned_stale=N`).
+1. Read the printed summary line (`fetched=N unread=N added_q1=N
+   added_q2=N added_inbox=N dropped=N ... left_for_dependabot=N
+   pruned_stale=N ledger_rows=N`).
 2. If anything landed in Q1, tell the user the count and the titles so
    they know what they're being asked to do.
 3. If `errors` lines appear on stderr, surface them so the user can

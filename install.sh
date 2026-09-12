@@ -2,9 +2,87 @@
 # Dotfiles install script - runs automatically in GitHub Codespaces
 # and can be run manually on any machine.
 
-set -e
+set -euo pipefail
 
 DOTFILES_DIR="$(cd "$(dirname "$0")" && pwd)"
+NOTIFICATION_RUNTIME_ROOT="${DOTFILES_NOTIFICATION_RUNTIME_ROOT:-$HOME/.local/share/dotfiles/notification-workers}"
+NOTIFICATION_RUNTIME_VENV="$NOTIFICATION_RUNTIME_ROOT/venv"
+NOTIFICATION_RUNTIME_PYTHON="$NOTIFICATION_RUNTIME_VENV/bin/python3"
+NOTIFICATION_REQUIREMENTS="$DOTFILES_DIR/python/notification-worker-requirements.txt"
+NOTIFICATION_REQUIREMENTS_STAMP="$NOTIFICATION_RUNTIME_ROOT/requirements.sha256"
+
+pick_notification_bootstrap_python() {
+  local candidates=()
+  if [ -n "${DOTFILES_NOTIFICATION_BOOTSTRAP_PYTHON:-}" ]; then
+    candidates+=("$DOTFILES_NOTIFICATION_BOOTSTRAP_PYTHON")
+  fi
+  candidates+=(
+    "/opt/homebrew/bin/python3.13"
+    "/opt/homebrew/bin/python3.12"
+    "/opt/homebrew/bin/python3.11"
+    "python3"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    [ -n "$candidate" ] || continue
+    if ! command -v "$candidate" >/dev/null 2>&1 && [ ! -x "$candidate" ]; then
+      continue
+    fi
+    if "$candidate" - <<'PY' >/dev/null 2>&1
+import sys
+sys.exit(0 if sys.version_info >= (3, 11) else 1)
+PY
+    then
+      command -v "$candidate" 2>/dev/null || printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+notification_requirements_hash() {
+  shasum -a 256 "$NOTIFICATION_REQUIREMENTS" | awk '{print $1}'
+}
+
+notification_runtime_is_healthy() {
+  [ -x "$NOTIFICATION_RUNTIME_PYTHON" ] || return 1
+  "$NOTIFICATION_RUNTIME_PYTHON" - <<'PY' >/dev/null 2>&1
+import yaml, ruamel.yaml
+PY
+}
+
+ensure_notification_worker_runtime() {
+  if [ ! -f "$NOTIFICATION_REQUIREMENTS" ]; then
+    echo "⚠ Notification worker requirements file is missing at $NOTIFICATION_REQUIREMENTS"
+    return 1
+  fi
+
+  local requirements_hash
+  requirements_hash="$(notification_requirements_hash)"
+  if notification_runtime_is_healthy && [ -f "$NOTIFICATION_REQUIREMENTS_STAMP" ] && [ "$(cat "$NOTIFICATION_REQUIREMENTS_STAMP")" = "$requirements_hash" ]; then
+    echo "✓ Notification worker runtime already provisioned"
+    return 0
+  fi
+
+  local bootstrap_python
+  if ! bootstrap_python="$(pick_notification_bootstrap_python)"; then
+    echo "⚠ Python 3.11+ is required to provision notification workers"
+    return 1
+  fi
+
+  mkdir -p "$NOTIFICATION_RUNTIME_ROOT"
+  "$bootstrap_python" -m venv "$NOTIFICATION_RUNTIME_VENV"
+  "$NOTIFICATION_RUNTIME_PYTHON" -m pip install --upgrade pip >/dev/null
+  "$NOTIFICATION_RUNTIME_PYTHON" -m pip install --requirement "$NOTIFICATION_REQUIREMENTS" >/dev/null
+
+  if ! notification_runtime_is_healthy; then
+    echo "⚠ Notification worker runtime preflight failed at $NOTIFICATION_RUNTIME_PYTHON"
+    return 1
+  fi
+
+  printf '%s\n' "$requirements_hash" > "$NOTIFICATION_REQUIREMENTS_STAMP"
+  echo "✓ Provisioned notification worker runtime at $NOTIFICATION_RUNTIME_VENV"
+}
 
 # Symlink copilot instructions for Copilot CLI
 if [ -f "$DOTFILES_DIR/.github/copilot-instructions.md" ]; then
@@ -150,10 +228,17 @@ if [ -f "$BABYSIT_PLIST" ] && [ "$(uname)" = "Darwin" ]; then
   fi
 fi
 
+NOTIFICATION_RUNTIME_READY=0
+if ensure_notification_worker_runtime; then
+  NOTIFICATION_RUNTIME_READY=1
+else
+  echo "⚠ Notification worker runtime is not ready; wrappers will fail preflight until ./install.sh can provision PyYAML and ruamel.yaml"
+fi
+
 # Install notification-triage launchd agent (macOS only).
 # The wrapper itself goes in ~/.local/bin so it stays on PATH for ad-hoc runs,
 # and the plist gets symlinked into ~/Library/LaunchAgents so launchctl can
-# pick it up on a cron-like schedule (every 2h, 08:00-18:00, Mon-Fri).
+# pick it up on an hourly 24x7 cadence.
 if [ "$(uname)" = "Darwin" ] && ! command -v terminal-notifier >/dev/null 2>&1; then
   echo "⚠ terminal-notifier is missing - run 'brew install terminal-notifier' to enable clickable triage alerts"
 fi
@@ -174,17 +259,52 @@ if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ]; then
     mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
     PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.notification-triage.plist"
     if [ -L "$PLIST_TARGET" ] || [ ! -e "$PLIST_TARGET" ]; then
-      # launchctl bootstrap (modern) or load -w (legacy) both work fine here;
-      # unload first so re-runs are consistent (no error if it isn't loaded).
       launchctl unload "$PLIST_TARGET" >/dev/null 2>&1 || true
       ln -sfn "$TRIAGE_PLIST" "$PLIST_TARGET"
-      if launchctl load "$PLIST_TARGET" 2>/dev/null; then
-        echo "✓ Loaded launchd agent com.zkoppert.notification-triage"
+      if [ "$NOTIFICATION_RUNTIME_READY" -eq 1 ]; then
+        if launchctl load "$PLIST_TARGET" 2>/dev/null; then
+          echo "✓ Loaded launchd agent com.zkoppert.notification-triage"
+        else
+          echo "⚠ launchctl load failed for $PLIST_TARGET - check 'launchctl error' and ~/Library/Logs/notification-triage.log"
+        fi
       else
-        echo "⚠ launchctl load failed for $PLIST_TARGET - check 'launchctl error' and ~/Library/Logs/notification-triage.log"
+        echo "⚠ Linked com.zkoppert.notification-triage but did not load it because the notification worker runtime is not healthy"
       fi
     else
       echo "⚠ $PLIST_TARGET exists and is not a symlink - skipping (delete it manually if you want the dotfiles version)"
+    fi
+  fi
+fi
+
+DEPENDABOT_WRAPPER="$DOTFILES_DIR/bin/triage-dependabot"
+DEPENDABOT_PLIST="$DOTFILES_DIR/LaunchAgents/com.zkoppert.triage-dependabot.plist"
+if [ -x "$DEPENDABOT_WRAPPER" ] && [ "$(uname)" = "Darwin" ]; then
+  mkdir -p "$HOME/.local/bin"
+  DEPENDABOT_BIN_TARGET="$HOME/.local/bin/triage-dependabot"
+  if [ -L "$DEPENDABOT_BIN_TARGET" ] || [ ! -e "$DEPENDABOT_BIN_TARGET" ]; then
+    ln -sfn "$DEPENDABOT_WRAPPER" "$DEPENDABOT_BIN_TARGET"
+    echo "✓ Linked triage-dependabot → ~/.local/bin/triage-dependabot"
+  else
+    echo "⚠ $DEPENDABOT_BIN_TARGET exists and is not a symlink - skipping"
+  fi
+
+  if [ -f "$DEPENDABOT_PLIST" ]; then
+    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+    DEPENDABOT_PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist"
+    if [ -L "$DEPENDABOT_PLIST_TARGET" ] || [ ! -e "$DEPENDABOT_PLIST_TARGET" ]; then
+      launchctl unload "$DEPENDABOT_PLIST_TARGET" >/dev/null 2>&1 || true
+      ln -sfn "$DEPENDABOT_PLIST" "$DEPENDABOT_PLIST_TARGET"
+      if [ "$NOTIFICATION_RUNTIME_READY" -eq 1 ]; then
+        if launchctl load "$DEPENDABOT_PLIST_TARGET" 2>/dev/null; then
+          echo "✓ Loaded launchd agent com.zkoppert.triage-dependabot"
+        else
+          echo "⚠ launchctl load failed for $DEPENDABOT_PLIST_TARGET - check ~/Library/Logs/triage-dependabot.log"
+        fi
+      else
+        echo "⚠ Linked com.zkoppert.triage-dependabot but did not load it because the notification worker runtime is not healthy"
+      fi
+    else
+      echo "⚠ $DEPENDABOT_PLIST_TARGET exists and is not a symlink - skipping"
     fi
   fi
 fi
