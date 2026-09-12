@@ -65,12 +65,11 @@ A series of early-exit drops fire before reason routing, in this order:
 4. **Repo-level overrides** (`repo_override`) - per-repo policies, often
    stricter than the global KEEP_REASONS. A safety carve-out runs first:
    a direct `mention`, a direct `assign`, or a `security_alert` always
-   survives these gates (except on the fully tuned-out repos), because a
+    survives these gates, because a
    personal ping or a vulnerability alert is too important to silently
    drop on a title or subscription miss.
    - `github/.github` plus private config entries (`ALWAYS_DROP_REPOS`):
-     fully tuned out, dropping **every** notification, including direct
-     pings and security alerts.
+      drop unprotected notification reasons.
    - `github/curated-data`: drop everything except the carve-out (direct
      pings and security alerts).
    - `github/markup`: keep security-related titles (security / vuln /

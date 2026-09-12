@@ -54,6 +54,8 @@ from notification_worker_common import (
     DEFAULT_DEPENDABOT_HEALTH_FILE,
     DEFAULT_LEDGER_FILE,
     NotificationLedger,
+    ledger_capture as _ledger_capture,
+    ledger_record_clear_result as _ledger_record_clear_result,
     update_health_file,
 )
 from ruamel.yaml import YAML
@@ -1993,84 +1995,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Enable debug logging.",
     )
     return parser.parse_args(argv)
-
-
-def _ledger_capture(
-    ledger: NotificationLedger | None,
-    *,
-    dry_run: bool,
-    thread_id: str | None,
-    canonical_artifact: str | None,
-    classification: str,
-    worker: str,
-    title: str = "",
-    reason: str = "",
-    repo: str = "",
-    tracker_item_id: str | None = None,
-    tracker_section: str | None = None,
-    terminal_disposition: str | None = None,
-    queue_clear: bool = False,
-    payload: dict[str, Any] | None = None,
-) -> None:
-    if ledger is None or dry_run:
-        return
-    ledger.capture(
-        source_type="github",
-        source_id=thread_id,
-        canonical_artifact=canonical_artifact,
-        classification=classification,
-        worker=worker,
-        title=title,
-        reason=reason,
-        repo=repo,
-        payload=payload,
-    )
-    if tracker_item_id and tracker_section:
-        ledger.link_tracker(
-            source_type="github",
-            source_id=thread_id,
-            canonical_artifact=canonical_artifact,
-            tracker_item_id=tracker_item_id,
-            tracker_section=tracker_section,
-        )
-    if terminal_disposition:
-        ledger.record_terminal(
-            source_type="github",
-            source_id=thread_id,
-            canonical_artifact=canonical_artifact,
-            terminal_disposition=terminal_disposition,
-        )
-    if queue_clear:
-        ledger.queue_clear(
-            source_type="github",
-            source_id=thread_id,
-            canonical_artifact=canonical_artifact,
-        )
-
-
-def _ledger_record_clear_result(
-    ledger: NotificationLedger | None,
-    *,
-    dry_run: bool,
-    thread_id: str,
-    canonical_artifact: str | None,
-    error: BaseException | None = None,
-) -> None:
-    if ledger is None or dry_run:
-        return
-    if error is None:
-        ledger.record_clear_success(
-            source_type="github",
-            source_id=thread_id,
-            canonical_artifact=canonical_artifact,
-        )
-        return
-    ledger.record_clear_failure(
-        source_type="github",
-        source_id=thread_id,
-        canonical_artifact=canonical_artifact,
-        error=str(error),
-    )
 
 
 def write_health_snapshot(

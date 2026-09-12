@@ -4177,10 +4177,11 @@ def test_private_aor_non_aor_direct_ping_survives(private_aor_filter):
 # --- always-drop repos ---
 
 
-def test_dot_github_repo_always_drops():
-    """github/.github is fully tuned out - drop every reason, including
-    direct pings and security alerts."""
-    for reason in ("mention", "assign", "review_requested", "subscribed", "security_alert"):
+def test_dot_github_repo_preserves_protected_reasons():
+    for reason in ("mention", "assign", "security_alert"):
+        c = _classify(_repo_notif(reason, repo="github/.github"))
+        assert c.bucket == triage.BUCKET_Q1, reason
+    for reason in ("review_requested", "subscribed"):
         c = _classify(_repo_notif(reason, repo="github/.github"))
         assert c.bucket == triage.BUCKET_DROP, reason
 
@@ -4197,9 +4198,11 @@ def private_always_drop_repo(monkeypatch):
     )
 
 
-def test_private_always_drop_repo_always_drops(private_always_drop_repo):
-    """Private always-drop repos drop every reason, including directed pings."""
-    for reason in ("mention", "assign", "review_requested", "subscribed", "security_alert"):
+def test_private_always_drop_repo_preserves_protected_reasons(private_always_drop_repo):
+    for reason in ("mention", "assign", "security_alert"):
+        c = _classify(_repo_notif(reason, repo=PRIVATE_ALWAYS_DROP_REPO))
+        assert c.bucket == triage.BUCKET_Q1, reason
+    for reason in ("review_requested", "subscribed"):
         c = _classify(_repo_notif(reason, repo=PRIVATE_ALWAYS_DROP_REPO))
         assert c.bucket == triage.BUCKET_DROP, reason
 
@@ -4462,6 +4465,53 @@ def test_ledger_first_thread_claims_canonical_tracker_row(todo_file: Path):
     assert second_id == rows[1]["id"]
     assert rows[1]["source_id"] == "thread-b"
     assert rows[1]["tracker_item_id"] is None
+
+
+def test_ledger_actionable_thread_does_not_claim_terminal_canonical_row(todo_file: Path):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/1"
+    ledger.capture(
+        source_type="github",
+        source_id=None,
+        canonical_artifact=artifact,
+        classification="q4",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_type="github",
+        source_id=None,
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+    )
+    ledger.queue_clear(
+        source_type="github",
+        source_id=None,
+        canonical_artifact=artifact,
+    )
+
+    thread_id = ledger.capture(
+        source_type="github",
+        source_id="thread-a",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+    )
+
+    rows = ledger._rows(
+        """
+        SELECT id, source_id, terminal_disposition, clear_state
+          FROM notifications
+         ORDER BY id
+        """
+    )
+    assert len(rows) == 2
+    assert rows[0]["source_id"] is None
+    assert rows[0]["terminal_disposition"] == "irrelevant"
+    assert rows[0]["clear_state"] == "pending"
+    assert thread_id == rows[1]["id"]
+    assert rows[1]["source_id"] == "thread-a"
+    assert rows[1]["terminal_disposition"] is None
+    assert rows[1]["clear_state"] == "not_applicable"
 
 
 def test_run_policy_drop_records_ledger_before_clear(todo_file: Path):

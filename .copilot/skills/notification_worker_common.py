@@ -300,10 +300,12 @@ class NotificationLedger:
              WHERE id = (
                        SELECT MIN(id)
                          FROM notifications
-                        WHERE source_type = ?
-                          AND canonical_artifact = ?
-                          AND (source_id IS NULL OR source_id = '')
-                       HAVING COUNT(*) = 1
+                         WHERE source_type = ?
+                           AND canonical_artifact = ?
+                           AND (source_id IS NULL OR source_id = '')
+                           AND terminal_disposition IS NULL
+                           AND clear_state = 'not_applicable'
+                        HAVING COUNT(*) = 1
                    )
                AND NOT EXISTS (
                        SELECT 1
@@ -683,6 +685,84 @@ class NotificationLedger:
         with self._connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM notifications").fetchone()
         return int(row["count"] if row else 0)
+
+
+def ledger_capture(
+    ledger: NotificationLedger | None,
+    *,
+    dry_run: bool,
+    thread_id: str | None,
+    canonical_artifact: str | None,
+    classification: str,
+    worker: str,
+    title: str = "",
+    reason: str = "",
+    repo: str = "",
+    tracker_item_id: str | None = None,
+    tracker_section: str | None = None,
+    terminal_disposition: str | None = None,
+    queue_clear: bool = False,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    if ledger is None or dry_run:
+        return
+    ledger.capture(
+        source_type="github",
+        source_id=thread_id,
+        canonical_artifact=canonical_artifact,
+        classification=classification,
+        worker=worker,
+        title=title,
+        reason=reason,
+        repo=repo,
+        payload=payload,
+    )
+    if tracker_item_id and tracker_section:
+        ledger.link_tracker(
+            source_type="github",
+            source_id=thread_id,
+            canonical_artifact=canonical_artifact,
+            tracker_item_id=tracker_item_id,
+            tracker_section=tracker_section,
+        )
+    if terminal_disposition:
+        ledger.record_terminal(
+            source_type="github",
+            source_id=thread_id,
+            canonical_artifact=canonical_artifact,
+            terminal_disposition=terminal_disposition,
+        )
+    if queue_clear:
+        ledger.queue_clear(
+            source_type="github",
+            source_id=thread_id,
+            canonical_artifact=canonical_artifact,
+        )
+
+
+def ledger_record_clear_result(
+    ledger: NotificationLedger | None,
+    *,
+    dry_run: bool,
+    thread_id: str,
+    canonical_artifact: str | None,
+    error: BaseException | None = None,
+) -> None:
+    if ledger is None or dry_run:
+        return
+    if error is None:
+        ledger.record_clear_success(
+            source_type="github",
+            source_id=thread_id,
+            canonical_artifact=canonical_artifact,
+        )
+        return
+    ledger.record_clear_failure(
+        source_type="github",
+        source_id=thread_id,
+        canonical_artifact=canonical_artifact,
+        error=str(error),
+    )
 
 
 def update_health_file(

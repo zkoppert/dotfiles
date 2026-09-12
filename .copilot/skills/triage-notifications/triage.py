@@ -54,6 +54,8 @@ from notification_worker_common import (
     DEFAULT_LEDGER_FILE,
     DEFAULT_NOTIFICATION_HEALTH_FILE,
     NotificationLedger,
+    ledger_capture as _ledger_capture,
+    ledger_record_clear_result as _ledger_record_clear_result,
     parse_iso_datetime,
     review_request_escalates_at,
     update_health_file,
@@ -494,18 +496,16 @@ def repo_override(repo_full: str, reason: str, title: str) -> Classification | N
     """
     repo_lc = (repo_full or "").lower()
 
-    # Fully tuned-out repos: drop every notification, even direct pings and
-    # security alerts. These are repos I've unsubscribed from entirely.
-    if repo_lc in ALWAYS_DROP_REPOS:
-        return Classification(
-            BUCKET_DROP, f"{repo_full}: always-drop repo (unsubscribed)"
-        )
-
     # Safety carve-out: a direct @-mention, a direct assignment, or a
     # security alert always survives the relevance/priority gates below -
     # they're too important to silently drop on a title/subscription miss.
     if reason in REPO_OVERRIDE_PROTECTED_REASONS:
         return None
+
+    if repo_lc in ALWAYS_DROP_REPOS:
+        return Classification(
+            BUCKET_DROP, f"{repo_full}: always-drop repo (unsubscribed)"
+        )
 
     # AoR-title filters keep only titles about NUX's area of responsibility.
     # AoR-matched titles route normally and still go through KEEP_REASONS.
@@ -1962,84 +1962,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Enable debug logging.",
     )
     return parser.parse_args(argv)
-
-
-def _ledger_capture(
-    ledger: NotificationLedger | None,
-    *,
-    dry_run: bool,
-    thread_id: str | None,
-    canonical_artifact: str | None,
-    classification: str,
-    worker: str,
-    title: str = "",
-    reason: str = "",
-    repo: str = "",
-    tracker_item_id: str | None = None,
-    tracker_section: str | None = None,
-    terminal_disposition: str | None = None,
-    queue_clear: bool = False,
-    payload: dict[str, Any] | None = None,
-) -> None:
-    if ledger is None or dry_run:
-        return
-    ledger.capture(
-        source_type="github",
-        source_id=thread_id,
-        canonical_artifact=canonical_artifact,
-        classification=classification,
-        worker=worker,
-        title=title,
-        reason=reason,
-        repo=repo,
-        payload=payload,
-    )
-    if tracker_item_id and tracker_section:
-        ledger.link_tracker(
-            source_type="github",
-            source_id=thread_id,
-            canonical_artifact=canonical_artifact,
-            tracker_item_id=tracker_item_id,
-            tracker_section=tracker_section,
-        )
-    if terminal_disposition:
-        ledger.record_terminal(
-            source_type="github",
-            source_id=thread_id,
-            canonical_artifact=canonical_artifact,
-            terminal_disposition=terminal_disposition,
-        )
-    if queue_clear:
-        ledger.queue_clear(
-            source_type="github",
-            source_id=thread_id,
-            canonical_artifact=canonical_artifact,
-        )
-
-
-def _ledger_record_clear_result(
-    ledger: NotificationLedger | None,
-    *,
-    dry_run: bool,
-    thread_id: str,
-    canonical_artifact: str | None,
-    error: BaseException | None = None,
-) -> None:
-    if ledger is None or dry_run:
-        return
-    if error is None:
-        ledger.record_clear_success(
-            source_type="github",
-            source_id=thread_id,
-            canonical_artifact=canonical_artifact,
-        )
-        return
-    ledger.record_clear_failure(
-        source_type="github",
-        source_id=thread_id,
-        canonical_artifact=canonical_artifact,
-        error=str(error),
-    )
 
 
 def collect_review_request_escalations(data: dict[str, Any]) -> list[EscalationDelta]:
