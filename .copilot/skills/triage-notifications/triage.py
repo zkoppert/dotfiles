@@ -402,7 +402,6 @@ class TriageStats:
     pruned_stale: int = 0
     pruned_by_reason: dict[str, int] = field(default_factory=dict)
     archived_to_done: int = 0
-    ledger_rows: int = 0
     # Dependabot bumps dropped from the inbox but left unread on GitHub for
     # triage-dependabot to consume.
     left_for_dependabot: int = 0
@@ -1207,7 +1206,10 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
         return False
 
     quadrant = candidate_section.removeprefix("prioritized.")
-    if candidate_section in {"in_progress", "blocked", "in_review"}:
+    if (
+        candidate_section in {"in_progress", "blocked", "in_review"}
+        and not delta.reopen_terminal
+    ):
         return False
     if delta.escalated_at and (
         candidate_section not in {"inbox", "prioritized.q2_schedule"}
@@ -1217,7 +1219,13 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
         return False
     if quadrant == "q1_do_first" and not delta.reopen_terminal:
         return False
-    if candidate_section in {"inbox", "done"}:
+    if candidate_section in {
+        "inbox",
+        "done",
+        "in_progress",
+        "blocked",
+        "in_review",
+    }:
         data[candidate_section][:] = [
             item for item in data[candidate_section] if item is not candidate
         ]
@@ -2210,7 +2218,6 @@ def reconcile_tracker_rows_to_ledger(
             repo=repo,
             tracker_item_id=str(item.get("id") or "") or None,
             tracker_section=section,
-            payload={"source": item.get("source")},
         )
         disposition = tracker_terminal_disposition(item, section)
         if disposition:
@@ -2444,7 +2451,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 if (
                     renewed
                     and tracked
-                    and tracked[0] not in {"in_progress", "blocked", "in_review"}
                 ):
                     mutations.escalate.append(
                         EscalationDelta(
@@ -2607,10 +2613,6 @@ def run(args: argparse.Namespace) -> TriageStats:
             title=title,
             reason=reason,
             repo=repo,
-            payload={
-                "bucket": classification.bucket,
-                "direct_mention": classification.direct_mention,
-            },
         )
         if classification.direct_mention and thread_id:
             direct_mention_thread_ids.add(thread_id)
@@ -2823,7 +2825,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 str(notif_meta.get("url") or ""),
             )
 
-    stats.ledger_rows = ledger.row_count() if ledger is not None else 0
     return stats
 
 
@@ -2840,8 +2841,7 @@ def main(argv: list[str] | None = None) -> int:
         f"added_inbox={stats.added_inbox} escalated_review_requests={stats.escalated_review_requests} "
         f"dropped={stats.dropped} archived_to_done={stats.archived_to_done} "
         f"already_tracked={stats.already_tracked} marked_done={stats.marked_done} "
-        f"left_for_dependabot={stats.left_for_dependabot} pruned_stale={stats.pruned_stale} "
-        f"ledger_rows={stats.ledger_rows}"
+        f"left_for_dependabot={stats.left_for_dependabot} pruned_stale={stats.pruned_stale}"
     )
     if stats.pruned_by_reason:
         breakdown = ", ".join(

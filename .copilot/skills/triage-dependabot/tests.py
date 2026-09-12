@@ -1247,7 +1247,7 @@ def test_do_merge_dry_run_no_subprocess() -> None:
 
 def test_do_merge_invokes_gh() -> None:
     with mock.patch.object(td, "run_gh") as mocked:
-        td.do_merge("o/r", 1, dry_run=False)
+        merged = td.do_merge("o/r", 1, dry_run=False)
     # Approve first, then enable auto-merge.
     assert mocked.call_count == 2
     approve_call = mocked.call_args_list[0][0][0]
@@ -1257,6 +1257,7 @@ def test_do_merge_invokes_gh() -> None:
     assert "--auto" in merge_call
     assert "--squash" in merge_call
     assert "--delete-branch" in merge_call
+    assert merged is False
 
 
 def test_do_merge_approves_before_merge_on_happy_path() -> None:
@@ -1299,7 +1300,7 @@ def test_do_merge_falls_back_when_auto_merge_disabled() -> None:
         return ""
 
     with mock.patch.object(td, "run_gh", side_effect=fake_run_gh):
-        td.do_merge("o/r", 7, dry_run=False)
+        merged = td.do_merge("o/r", 7, dry_run=False)
 
     # approve -> merge --auto (fails) -> synchronous merge.
     assert len(call_log) == 3
@@ -1308,6 +1309,7 @@ def test_do_merge_falls_back_when_auto_merge_disabled() -> None:
     assert "--auto" in auto_call
     assert "merge" in plain_merge_call and "--auto" not in plain_merge_call
     assert "--squash" in plain_merge_call and "--delete-branch" in plain_merge_call
+    assert merged is True
 
 
 def test_do_merge_propagates_other_errors() -> None:
@@ -1614,6 +1616,93 @@ def test_run_end_to_end_merges_and_flags(tmp_path: Path) -> None:
     state = td.load_state(args.state_file)
     assert "https://github.com/o/r1/pull/1" in state
     assert "https://github.com/o/r2/pull/2" in state
+
+
+@pytest.mark.parametrize("reason", ["mention", "assign"])
+def test_run_hands_direct_asks_to_general_triage(tmp_path: Path, reason: str) -> None:
+    notif = {
+        "id": "thread-direct",
+        "reason": reason,
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/1",
+        },
+    }
+    pr = _base_pr(number=1, url="https://github.com/o/r1/pull/1")
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "do_merge"
+    ) as merge_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_done_mock:
+        stats = td.run(args)
+
+    assert stats.skipped == 1
+    assert stats.dependabot == 0
+    merge_mock.assert_not_called()
+    mark_done_mock.assert_not_called()
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    rows = ledger._rows(
+        "SELECT classification, reason, clear_state FROM notifications WHERE source_id = ?",
+        ("thread-direct",),
+    )
+    assert rows == [
+        {
+            "classification": "actionable",
+            "reason": reason,
+            "clear_state": "not_applicable",
+        }
+    ]
+
+
+def test_run_keeps_notification_when_auto_merge_is_only_enabled(tmp_path: Path) -> None:
+    notif = {
+        "id": "thread-auto-merge",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/1",
+        },
+    }
+    pr = _base_pr(number=1, url="https://github.com/o/r1/pull/1")
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=95
+    ), mock.patch.object(
+        td, "do_merge", return_value=False
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_done_mock:
+        stats = td.run(args)
+
+    assert stats.merged == 0
+    mark_done_mock.assert_not_called()
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    rows = ledger._rows(
+        "SELECT classification, terminal_disposition, clear_state FROM notifications WHERE source_id = ?",
+        ("thread-auto-merge",),
+    )
+    assert rows == [
+        {
+            "classification": "dependabot_handoff",
+            "terminal_disposition": None,
+            "clear_state": "not_applicable",
+        }
+    ]
 
 
 def test_run_cleans_stale_inbox_entries_on_merge(tmp_path: Path) -> None:

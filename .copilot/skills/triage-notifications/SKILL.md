@@ -86,7 +86,7 @@ Preview without writing or calling DELETE:
 
 1. Read the printed summary line (`fetched=N unread=N added_q1=N
    added_q2=N added_inbox=N dropped=N ... left_for_dependabot=N
-   pruned_stale=N ledger_rows=N`).
+   pruned_stale=N`).
 2. If anything landed in Q1, tell the user the count and the titles so
    they know what they're being asked to do.
 3. If `errors` lines appear on stderr, surface them so the user can

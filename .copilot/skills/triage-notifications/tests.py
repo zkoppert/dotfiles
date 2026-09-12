@@ -1301,7 +1301,7 @@ def test_run_reopens_terminal_item_for_direct_mention(
     ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
     rows = ledger._rows(
         """
-        SELECT classification, lifecycle_state, reason, tracker_section,
+        SELECT classification, reason, tracker_section,
                terminal_disposition, clear_state
           FROM notifications
          WHERE source_id = ?
@@ -1311,7 +1311,6 @@ def test_run_reopens_terminal_item_for_direct_mention(
     assert rows == [
         {
             "classification": "actionable",
-            "lifecycle_state": "tracker_linked",
             "reason": "mention",
             "tracker_section": "prioritized.q1_do_first",
             "terminal_disposition": None,
@@ -1737,6 +1736,58 @@ def test_run_preserves_active_item_for_unchanged_direct_mention(
     assert stats.already_tracked == 1
     assert updated[active_section] == [item]
     assert updated["prioritized"]["q1_do_first"] == []
+
+
+@pytest.mark.parametrize("active_section", ["in_progress", "blocked", "in_review"])
+def test_run_reopens_terminal_active_item_for_renewed_direct_mention(
+    todo_file, active_section
+):
+    item = {
+        "id": "active-ask",
+        "title": "Ask previously dropped",
+        "status": "dropped",
+        "notification": {
+            "thread_id": "1001",
+            "reason": "mention",
+            "captured_at": "2026-07-01T12:00:00Z",
+            "terminal_disposition": "irrelevant",
+        },
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {"q1_do_first": [], "q2_schedule": []},
+        "in_progress": [],
+        "blocked": [],
+        "in_review": [],
+        "done": [],
+    }
+    data[active_section].append(item)
+    todo_file.write_text(yaml.safe_dump(data))
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps(
+            [_notif("mention", updated_at="2026-07-02T12:00:00Z")]
+        ),
+    }
+    delete_calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(tuple(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return _gh_returns(responses)(cmd, *args, **kwargs)
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    updated = yaml.safe_load(todo_file.read_text())
+    reopened = updated["prioritized"]["q1_do_first"]
+    assert updated[active_section] == []
+    assert reopened[0]["id"] == "active-ask"
+    assert reopened[0]["status"] == "pending"
+    assert reopened[0]["notification"]["reason"] == "mention"
+    assert "terminal_disposition" not in reopened[0]["notification"]
+    assert delete_calls == []
 
 
 def test_run_links_assignment_to_prioritized_canonical_artifact(todo_file):
@@ -5124,7 +5175,8 @@ def test_ledger_tracks_distinct_threads_for_same_artifact(todo_file: Path):
         worker="test",
     )
     assert first_id != second_id
-    assert ledger.row_count() == 2
+    rows = ledger._rows("SELECT source_id FROM notifications ORDER BY source_id")
+    assert rows == [{"source_id": "thread-a"}, {"source_id": "thread-b"}]
 
 
 def test_ledger_first_thread_claims_canonical_tracker_row(todo_file: Path):

@@ -94,7 +94,7 @@ classification):
 
 1. Read the printed summary
    (`fetched=N unread=N dependabot=N merged=N labeled=N rebased=N
-   flagged=N skipped=N cooldown=N already_tracked=N ledger_rows=N`).
+   flagged=N skipped=N cooldown=N already_tracked=N`).
 2. If any PRs were flagged, tell the user which repos and why so they
    know what awaits review.
 3. If `ERROR:` lines appear on stderr, surface them (most commonly an

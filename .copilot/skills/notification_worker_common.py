@@ -8,7 +8,6 @@ wrappers can rely on it after the pinned runtime passes import preflight.
 from __future__ import annotations
 
 import datetime as _dt
-import json
 import os
 import sqlite3
 from pathlib import Path
@@ -139,7 +138,6 @@ class NotificationLedger:
                   classification TEXT NOT NULL DEFAULT '',
                   tracker_item_id TEXT,
                   tracker_section TEXT,
-                  lifecycle_state TEXT NOT NULL DEFAULT 'captured',
                   terminal_disposition TEXT,
                   clear_state TEXT NOT NULL DEFAULT 'not_applicable',
                   last_clear_error TEXT,
@@ -150,11 +148,18 @@ class NotificationLedger:
                   terminal_recorded_at TEXT,
                   clear_attempted_at TEXT,
                   cleared_at TEXT,
-                  worker TEXT NOT NULL DEFAULT '',
-                  payload_json TEXT NOT NULL DEFAULT '{}'
+                  worker TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
+            columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(notifications)")
+            }
+            for obsolete_column in ("lifecycle_state", "payload_json"):
+                if obsolete_column in columns:
+                    conn.execute(
+                        f"ALTER TABLE notifications DROP COLUMN {obsolete_column}"
+                    )
             conn.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_source
@@ -213,7 +218,6 @@ class NotificationLedger:
         title: str = "",
         reason: str = "",
         repo: str = "",
-        payload_json: str = "{}",
         now: str | None = None,
     ) -> int:
         timestamp = now or utcnow_iso()
@@ -221,9 +225,9 @@ class NotificationLedger:
             """
             INSERT INTO notifications (
               source_type, source_id, canonical_artifact, title, reason, repo,
-              classification, lifecycle_state, clear_state, first_seen_at,
-              last_seen_at, classified_at, worker, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'captured', 'not_applicable', ?, ?, ?, ?, ?)
+              classification, clear_state, first_seen_at,
+              last_seen_at, classified_at, worker
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'not_applicable', ?, ?, ?, ?)
             """,
             (
                 source_type,
@@ -237,7 +241,6 @@ class NotificationLedger:
                 timestamp,
                 timestamp,
                 worker,
-                payload_json,
             ),
         )
         return int(cur.lastrowid)
@@ -295,11 +298,9 @@ class NotificationLedger:
         title: str = "",
         reason: str = "",
         repo: str = "",
-        payload: dict[str, Any] | None = None,
     ) -> int:
         now = utcnow_iso()
         canonical_artifact = normalize_github_url(canonical_artifact) or canonical_artifact
-        payload_json = json.dumps(payload or {}, sort_keys=True)
         with self._connect() as conn:
             row_id = self._find_row_id(
                 conn,
@@ -325,7 +326,6 @@ class NotificationLedger:
                     title=title,
                     reason=reason,
                     repo=repo,
-                    payload_json=payload_json,
                     now=now,
                 )
                 conn.commit()
@@ -338,11 +338,10 @@ class NotificationLedger:
                        title = CASE WHEN ? != '' THEN ? ELSE title END,
                        reason = CASE WHEN ? != '' THEN ? ELSE reason END,
                        repo = CASE WHEN ? != '' THEN ? ELSE repo END,
-                       classification = ?,
-                       last_seen_at = ?,
-                       classified_at = ?,
-                       worker = ?,
-                       payload_json = ?
+                        classification = ?,
+                        last_seen_at = ?,
+                        classified_at = ?,
+                        worker = ?
                  WHERE id = ?
                 """,
                 (
@@ -358,7 +357,6 @@ class NotificationLedger:
                     now,
                     now,
                     worker,
-                    payload_json,
                     row_id,
                 ),
             )
@@ -397,8 +395,7 @@ class NotificationLedger:
                 """
                 UPDATE notifications
                    SET tracker_item_id = ?,
-                       tracker_section = ?,
-                       lifecycle_state = 'tracker_linked',
+                        tracker_section = ?,
                        tracker_linked_at = COALESCE(tracker_linked_at, ?),
                        last_seen_at = ?
                  WHERE id = ?
@@ -421,7 +418,6 @@ class NotificationLedger:
                 """
                 UPDATE notifications
                    SET classification = 'actionable',
-                       lifecycle_state = 'tracker_linked',
                        reason = ?,
                        tracker_section = ?,
                        terminal_disposition = NULL,
@@ -470,11 +466,7 @@ class NotificationLedger:
                 """
                 UPDATE notifications
                    SET terminal_disposition = ?,
-                       terminal_recorded_at = COALESCE(terminal_recorded_at, ?),
-                       lifecycle_state = CASE
-                           WHEN clear_state = 'succeeded' THEN 'cleared'
-                           ELSE 'terminal_recorded'
-                       END,
+                        terminal_recorded_at = COALESCE(terminal_recorded_at, ?),
                        last_seen_at = ?
                  WHERE id = ?
                 """,
@@ -515,11 +507,7 @@ class NotificationLedger:
                            WHEN clear_state = 'succeeded' THEN clear_state
                            WHEN clear_state = 'failed' THEN clear_state
                            ELSE 'pending'
-                       END,
-                       lifecycle_state = CASE
-                           WHEN clear_state = 'succeeded' THEN 'cleared'
-                           ELSE 'clear_pending'
-                       END,
+                        END,
                        last_seen_at = ?
                  WHERE id = ?
                 """,
@@ -557,7 +545,6 @@ class NotificationLedger:
                 """
                 UPDATE notifications
                    SET clear_state = 'succeeded',
-                       lifecycle_state = 'cleared',
                        last_clear_error = NULL,
                        clear_attempted_at = ?,
                        cleared_at = ?,
@@ -599,7 +586,6 @@ class NotificationLedger:
                 """
                 UPDATE notifications
                    SET clear_state = 'failed',
-                       lifecycle_state = 'clear_pending',
                        last_clear_error = ?,
                        clear_attempted_at = ?,
                        last_seen_at = ?
@@ -628,12 +614,6 @@ class NotificationLedger:
             """
         )
 
-    def row_count(self) -> int:
-        with self._connect() as conn:
-            row = conn.execute("SELECT COUNT(*) AS count FROM notifications").fetchone()
-        return int(row["count"] if row else 0)
-
-
 def ledger_capture(
     ledger: NotificationLedger | None,
     *,
@@ -649,7 +629,6 @@ def ledger_capture(
     tracker_section: str | None = None,
     terminal_disposition: str | None = None,
     queue_clear: bool = False,
-    payload: dict[str, Any] | None = None,
 ) -> None:
     if ledger is None or dry_run:
         return
@@ -662,7 +641,6 @@ def ledger_capture(
         title=title,
         reason=reason,
         repo=repo,
-        payload=payload,
     )
     if tracker_item_id and tracker_section:
         ledger.link_tracker(

@@ -263,7 +263,6 @@ class TriageStats:
     cooldown: int = 0
     already_tracked: int = 0
     stale_removed: int = 0
-    ledger_rows: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -1069,7 +1068,7 @@ def do_merge(
     dry_run: bool,
     my_login: str | None = None,
     head_sha: str | None = None,
-) -> None:
+) -> bool:
     """Approve a PR, then merge it (squash + delete branch).
 
     We always submit an approving review *before* attempting the merge.
@@ -1105,7 +1104,7 @@ def do_merge(
     """
     if dry_run:
         logger.info("dry-run: would approve and auto-merge %s#%d", repo, number)
-        return
+        return True
 
     if my_login and head_sha and has_existing_approval(repo, number, my_login, head_sha):
         logger.info(
@@ -1132,7 +1131,7 @@ def do_merge(
             ],
             timeout=60,
         )
-        return
+        return False
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr or ""
         if _is_branch_protection_error(stderr):
@@ -1171,6 +1170,7 @@ def do_merge(
                 marker=_match_branch_protection_marker(stderr) or stderr.strip()[:120],
             ) from exc
         raise
+    return True
 
 
 _AUTO_MERGE_DISABLED_MARKERS = (
@@ -2326,6 +2326,20 @@ def run(args: argparse.Namespace) -> TriageStats:
             if pr_url and cleared:
                 state[pr_url] = now
             continue
+        if reason in {"mention", "assign"}:
+            _ledger_capture(
+                ledger,
+                dry_run=args.dry_run,
+                thread_id=thread_id or None,
+                canonical_artifact=pr_url,
+                classification="actionable",
+                worker="dependabot-direct-ask-handoff",
+                title=title,
+                reason=reason,
+                repo=repo,
+            )
+            stats.skipped += 1
+            continue
         stats.dependabot += 1
 
         if pr_url and in_cooldown(state, pr_url, now=now):
@@ -2351,15 +2365,28 @@ def run(args: argparse.Namespace) -> TriageStats:
 
         try:
             if decision.outcome == OUTCOME_MERGE:
-                do_merge(
+                merged = do_merge(
                     repo,
                     number,
                     dry_run=args.dry_run,
                     my_login=my_login,
                     head_sha=pr.get("headRefOid"),
                 )
-                stats.merged += 1
                 state[pr_url] = now
+                if not merged:
+                    _ledger_capture(
+                        ledger,
+                        dry_run=args.dry_run,
+                        thread_id=thread_id or None,
+                        canonical_artifact=pr_url,
+                        classification="dependabot_handoff",
+                        worker="dependabot-auto-merge-pending",
+                        title=title,
+                        reason=reason,
+                        repo=repo,
+                    )
+                    continue
+                stats.merged += 1
                 _ledger_capture(
                     ledger,
                     dry_run=args.dry_run,
@@ -2393,15 +2420,28 @@ def run(args: argparse.Namespace) -> TriageStats:
                 labels = fetch_repo_labels(repo)
                 if "release" in labels:
                     do_add_label(repo, number, "release", dry_run=args.dry_run)
-                do_merge(
+                merged = do_merge(
                     repo,
                     number,
                     dry_run=args.dry_run,
                     my_login=my_login,
                     head_sha=pr.get("headRefOid"),
                 )
-                stats.labeled_and_merged += 1
                 state[pr_url] = now
+                if not merged:
+                    _ledger_capture(
+                        ledger,
+                        dry_run=args.dry_run,
+                        thread_id=thread_id or None,
+                        canonical_artifact=pr_url,
+                        classification="dependabot_handoff",
+                        worker="dependabot-auto-merge-pending",
+                        title=title,
+                        reason=reason,
+                        repo=repo,
+                    )
+                    continue
+                stats.labeled_and_merged += 1
                 _ledger_capture(
                     ledger,
                     dry_run=args.dry_run,
@@ -2445,7 +2485,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                     title=title,
                     reason=reason,
                     repo=repo,
-                    payload={"outcome": decision.outcome},
                 )
             elif decision.outcome == OUTCOME_CLOSE_PRERELEASE:
                 do_dependabot_close(repo, number, dry_run=args.dry_run)
@@ -2491,7 +2530,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                     title=title,
                     reason=reason,
                     repo=repo,
-                    payload={"outcome": decision.outcome, "bump": decision.bump},
                 )
                 mutations.flags.append(
                     FlagTodoDelta(
@@ -2558,7 +2596,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 repo=repo,
                 terminal_disposition="tracked_elsewhere",
                 queue_clear=bool(thread_id),
-                payload={"outcome": OUTCOME_FLAG, "marker": exc.marker},
             )
             mutations.flags.append(
                 FlagTodoDelta(
@@ -2639,7 +2676,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 str(notif_meta.get("url") or ""),
             )
 
-    stats.ledger_rows = ledger.row_count() if ledger is not None else 0
     return stats
 
 
@@ -2657,7 +2693,7 @@ def main(argv: list[str] | None = None) -> int:
         f"closed_prerelease={stats.closed_prerelease} skipped={stats.skipped} "
         f"skipped_dependency={stats.skipped_dependency} skipped_archived={stats.skipped_archived} "
         f"cooldown={stats.cooldown} already_tracked={stats.already_tracked} "
-        f"stale_removed={stats.stale_removed} ledger_rows={stats.ledger_rows}"
+        f"stale_removed={stats.stale_removed}"
     )
     for err in stats.errors:
         print(f"ERROR: {err}", file=sys.stderr)
