@@ -52,13 +52,11 @@ if str(_SKILLS_DIR) not in sys.path:
 import yaml
 from notification_worker_common import (
     DEFAULT_LEDGER_FILE,
-    DEFAULT_NOTIFICATION_HEALTH_FILE,
     NotificationLedger,
     ledger_capture as _ledger_capture,
     ledger_record_clear_result as _ledger_record_clear_result,
     parse_iso_datetime,
     review_request_escalates_at,
-    update_health_file,
     utcnow_iso,
 )
 from ruamel.yaml import YAML
@@ -363,7 +361,6 @@ SECURITY_TITLE_PATTERN: re.Pattern[str] = re.compile(
 
 DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
 DEFAULT_LEDGER_PATH = DEFAULT_LEDGER_FILE
-DEFAULT_HEALTH_FILE = DEFAULT_NOTIFICATION_HEALTH_FILE
 
 # Buckets the classifier can return.
 BUCKET_DROP = "DROP"
@@ -2118,12 +2115,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Classify and report, but do not modify todo.yml, the ledger, or call DELETE.",
     )
     parser.add_argument(
-        "--health-file",
-        type=Path,
-        default=DEFAULT_HEALTH_FILE,
-        help=f"Path to the machine-readable health file (default: {DEFAULT_HEALTH_FILE}).",
-    )
-    parser.add_argument(
         "--no-notify",
         action="store_true",
         help="Skip clickable macOS alerts for new direct mentions.",
@@ -2344,55 +2335,6 @@ def retry_pending_github_clears(
                 canonical_artifact=canonical,
                 error=exc,
             )
-
-
-def write_health_snapshot(
-    args: argparse.Namespace,
-    *,
-    stats: TriageStats,
-    ledger: NotificationLedger | None,
-) -> None:
-    health_file = getattr(args, "health_file", DEFAULT_HEALTH_FILE)
-    actionable_without_tracker = (
-        ledger.rows_missing_tracker_links() if ledger is not None else []
-    )
-    clear_failures = ledger.rows_with_clear_failures() if ledger is not None else []
-    stale_dropped = (
-        ledger.rows_with_stale_irrelevant_items() if ledger is not None else []
-    )
-    stats.ledger_rows = ledger.row_count() if ledger is not None else 0
-    update_health_file(
-        health_file,
-        worker="notification-triage",
-        had_errors=bool(stats.errors),
-        summary={
-            "fetched": stats.fetched,
-            "unread": stats.unread,
-            "added_q1": stats.added_q1,
-            "added_q2": stats.added_q2,
-            "added_inbox": stats.added_inbox,
-            "escalated_review_requests": stats.escalated_review_requests,
-            "dropped": stats.dropped,
-            "marked_done": stats.marked_done,
-            "pruned_stale": stats.pruned_stale,
-            "left_for_dependabot": stats.left_for_dependabot,
-            "ledger_rows": stats.ledger_rows,
-            "actionable_without_tracker_links": len(actionable_without_tracker),
-            "clear_failures": len(clear_failures),
-            "stale_dropped_items": len(stale_dropped),
-            "errors": list(stats.errors),
-        },
-        details={
-            "current_github_notifications": {
-                "all": stats.fetched,
-                "unread": stats.unread,
-                "read": max(stats.fetched - stats.unread, 0),
-            },
-            "actionable_items_without_tracker_links": actionable_without_tracker,
-            "clear_failures": clear_failures,
-            "stale_dropped_items": stale_dropped,
-        },
-    )
 
 
 def run(args: argparse.Namespace) -> TriageStats:
@@ -2892,10 +2834,6 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     stats = run(args)
-    ledger: NotificationLedger | None = None
-    if DEFAULT_LEDGER_PATH.exists():
-        ledger = NotificationLedger(DEFAULT_LEDGER_PATH)
-    write_health_snapshot(args, stats=stats, ledger=ledger)
     print(
         f"fetched={stats.fetched} unread={stats.unread} "
         f"added_q1={stats.added_q1} added_q2={stats.added_q2} "

@@ -225,10 +225,12 @@ if [ -f "$BABYSIT_PLIST" ] && [ "$(uname)" = "Darwin" ]; then
 fi
 
 NOTIFICATION_RUNTIME_READY=0
-if ensure_notification_worker_runtime; then
-  NOTIFICATION_RUNTIME_READY=1
-else
-  echo "⚠ Notification worker runtime is not ready; wrappers will fail preflight until ./install.sh can provision PyYAML and ruamel.yaml"
+if [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
+  if ensure_notification_worker_runtime; then
+    NOTIFICATION_RUNTIME_READY=1
+  else
+    echo "⚠ Notification worker runtime is not ready; wrappers will fail preflight until ./install.sh can provision PyYAML and ruamel.yaml"
+  fi
 fi
 
 # Install notification-triage launchd agent (macOS only).
@@ -241,7 +243,7 @@ fi
 
 TRIAGE_WRAPPER="$DOTFILES_DIR/bin/notification-triage"
 TRIAGE_PLIST="$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"
-if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ]; then
+if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
   mkdir -p "$HOME/.local/bin"
   TRIAGE_BIN_TARGET="$HOME/.local/bin/notification-triage"
   if [ -L "$TRIAGE_BIN_TARGET" ] || [ ! -e "$TRIAGE_BIN_TARGET" ]; then
@@ -274,7 +276,7 @@ fi
 
 DEPENDABOT_WRAPPER="$DOTFILES_DIR/bin/triage-dependabot"
 DEPENDABOT_PLIST="$DOTFILES_DIR/LaunchAgents/com.zkoppert.triage-dependabot.plist"
-if [ -x "$DEPENDABOT_WRAPPER" ] && [ "$(uname)" = "Darwin" ]; then
+if [ -x "$DEPENDABOT_WRAPPER" ] && [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
   mkdir -p "$HOME/.local/bin"
   DEPENDABOT_BIN_TARGET="$HOME/.local/bin/triage-dependabot"
   if [ -L "$DEPENDABOT_BIN_TARGET" ] || [ ! -e "$DEPENDABOT_BIN_TARGET" ]; then

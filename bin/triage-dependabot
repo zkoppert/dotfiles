@@ -19,5 +19,4 @@ bin_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
 exec "$bin_dir/run-notification-worker" \
   triage-dependabot \
   .copilot/skills/triage-dependabot/triage_dependabot.py \
-  triage-dependabot-health.json \
   "$@"

@@ -11,29 +11,14 @@ import datetime as _dt
 import json
 import os
 import sqlite3
-import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
 
-def _path_from_env(name: str, default: Path) -> Path:
-    value = os.environ.get(name)
-    return Path(value).expanduser() if value else default
-
-
 HOME = Path.home()
 DEFAULT_SUPPORT_DIR = HOME / "Library" / "Application Support" / "notification-workers"
-DEFAULT_LOG_DIR = HOME / "Library" / "Logs"
 DEFAULT_LEDGER_FILE = DEFAULT_SUPPORT_DIR / "ledger.sqlite"
-DEFAULT_NOTIFICATION_HEALTH_FILE = _path_from_env(
-    "DOTFILES_NOTIFICATION_HEALTH_FILE",
-    DEFAULT_LOG_DIR / "notification-triage-health.json",
-)
-DEFAULT_DEPENDABOT_HEALTH_FILE = _path_from_env(
-    "DOTFILES_DEPENDABOT_HEALTH_FILE",
-    DEFAULT_LOG_DIR / "triage-dependabot-health.json",
-)
 
 
 def utcnow() -> _dt.datetime:
@@ -59,33 +44,6 @@ def parse_iso_datetime(value: str | None) -> _dt.datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=_dt.timezone.utc)
     return parsed.astimezone(_dt.timezone.utc)
-
-
-def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-        temp_name = handle.name
-    os.replace(temp_name, path)
-
-
-def load_json(path: Path) -> dict[str, Any]:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except json.JSONDecodeError:
-        return {}
-    except OSError:
-        return {}
 
 
 def normalize_github_url(url: str | None) -> str | None:
@@ -796,32 +754,3 @@ def ledger_record_clear_result(
         canonical_artifact=canonical_artifact,
         error=str(error),
     )
-
-
-def update_health_file(
-    path: Path,
-    *,
-    worker: str,
-    had_errors: bool,
-    summary: dict[str, Any],
-    details: dict[str, Any],
-) -> None:
-    now = utcnow_iso()
-    previous = load_json(path)
-    payload: dict[str, Any] = {
-        "worker": worker,
-        "status": "error" if had_errors else "ok",
-        "last_run_at": now,
-        "last_success_at": previous.get("last_success_at"),
-        "last_error_at": previous.get("last_error_at"),
-        "last_error": previous.get("last_error"),
-        "summary": summary,
-        "details": details,
-    }
-    if had_errors:
-        errors = summary.get("errors") or []
-        payload["last_error_at"] = now
-        payload["last_error"] = errors[0] if errors else f"{worker} run failed"
-    else:
-        payload["last_success_at"] = now
-    write_json_atomic(path, payload)

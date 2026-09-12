@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import datetime
 import json
-import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -24,7 +23,6 @@ import triage
 @pytest.fixture(autouse=True)
 def _isolate_notification_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(triage, "DEFAULT_LEDGER_PATH", tmp_path / "ledger.sqlite")
-    monkeypatch.setattr(triage, "DEFAULT_HEALTH_FILE", tmp_path / "health.json")
 
 
 # ----------------------------------------------------------------------
@@ -5064,7 +5062,7 @@ def test_run_dependabot_bump_not_added_to_todo(todo_file):
 
 
 # ----------------------------------------------------------------------
-# Ledger, health, runtime preflight
+# Ledger and runtime preflight
 # ----------------------------------------------------------------------
 
 
@@ -5083,7 +5081,7 @@ def test_ledger_uses_private_filesystem_permissions(tmp_path: Path):
     assert sidecar.stat().st_mode & 0o777 == 0o600
 
 
-def test_runtime_preflight_wrapper_writes_health_on_missing_python_modules(tmp_path: Path):
+def test_runtime_preflight_wrapper_fails_on_missing_python_modules(tmp_path: Path):
     home = tmp_path / "home"
     runtime = home / ".local/share/dotfiles/notification-workers/venv/bin/python3"
     runtime.parent.mkdir(parents=True)
@@ -5097,17 +5095,13 @@ def test_runtime_preflight_wrapper_writes_health_on_missing_python_modules(tmp_p
         encoding="utf-8",
     )
     runtime.chmod(0o755)
-    health_file = home / "Library/Logs/notification-triage-health.json"
     wrapper = Path(__file__).resolve().parents[3] / "bin" / "notification-triage"
-    env = os.environ.copy()
-    env["HOME"] = str(home)
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin"}
 
     result = subprocess.run([str(wrapper), "--help"], capture_output=True, text=True, env=env)
 
     assert result.returncode == 1
-    payload = json.loads(health_file.read_text(encoding="utf-8"))
-    assert payload["status"] == "error"
-    assert "import preflight" in payload["last_error"]
+    assert "import preflight" in result.stderr
     assert "yaml" in result.stderr
 
 
@@ -5475,65 +5469,6 @@ def test_run_retries_pending_clear_without_duplicating_tracker_item(todo_file: P
     data = yaml.safe_load(todo_file.read_text())
     assert len(data["prioritized"]["q4_eliminate"]) == 1
     assert data["prioritized"]["q4_eliminate"][0]["id"] == "existing-dropped"
-
-
-def test_health_snapshot_reports_actionable_gaps_and_clear_failures(todo_file: Path):
-    ledger_file = todo_file.parent / "ledger.sqlite"
-    health_file = todo_file.parent / "health.json"
-    ledger = triage.NotificationLedger(ledger_file)
-    ledger.capture(
-        source_type="github",
-        source_id="health-actionable",
-        canonical_artifact="https://github.com/o/r/pull/10",
-        classification="actionable",
-        worker="test",
-    )
-    ledger.capture(
-        source_type="github",
-        source_id="health-failed",
-        canonical_artifact="https://github.com/o/r/pull/11",
-        classification="policy_drop",
-        worker="test",
-    )
-    ledger.record_terminal(
-        source_type="github",
-        source_id="health-failed",
-        canonical_artifact="https://github.com/o/r/pull/11",
-        terminal_disposition="irrelevant",
-    )
-    ledger.queue_clear(
-        source_type="github",
-        source_id="health-failed",
-        canonical_artifact="https://github.com/o/r/pull/11",
-    )
-    ledger.record_clear_failure(
-        source_type="github",
-        source_id="health-failed",
-        canonical_artifact="https://github.com/o/r/pull/11",
-        error="HTTP 500",
-    )
-
-    responses = {
-        "/user": json.dumps({"login": "zkoppert"}),
-        "/notifications?all=true": "[]",
-    }
-    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
-        rc = triage.main(
-            [
-                "--todo-file",
-                str(todo_file),
-                "--health-file",
-                str(health_file),
-                "--dry-run",
-                "--no-notify",
-            ]
-        )
-    assert rc == 0
-    payload = json.loads(health_file.read_text(encoding="utf-8"))
-    assert payload["summary"]["actionable_without_tracker_links"] == 1
-    assert payload["summary"]["clear_failures"] == 1
-    assert payload["summary"]["stale_dropped_items"] == 1
-    assert payload["details"]["current_github_notifications"]["all"] == 0
 
 
 def test_run_clears_dependabot_tracked_item_when_dropped(todo_file: Path):

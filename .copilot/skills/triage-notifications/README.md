@@ -153,8 +153,7 @@ When you move the todo to `status: done`, or move a GitHub-backed item to
 ## Schedule
 
 A launchd plist runs the tool every hour on the hour, 24x7. Logs land in
-`~/Library/Logs/notification-triage.log`, and machine-readable worker health
-lands in `~/Library/Logs/notification-triage-health.json`.
+`~/Library/Logs/notification-triage.log`.
 
 To pause: `launchctl unload ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist`
 To resume: `launchctl load ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist`
@@ -219,8 +218,7 @@ installed by `./install.sh` into a dotfiles-owned runtime at
 `~/.local/share/dotfiles/notification-workers/venv`.
 
 The wrapper fails fast with a preflight error when that runtime cannot import
-`PyYAML` and `ruamel.yaml`, and writes the failure to
-`~/Library/Logs/notification-triage-health.json` before any GitHub call.
+`PyYAML` and `ruamel.yaml`.
 
 GitHub access:
 
@@ -244,11 +242,10 @@ pytest tests.py -v
 ## Failure modes
 
 - **Pinned runtime missing modules**: the wrapper exits before loading
-  `triage.py`, prints the preflight failure, and writes an error snapshot to
-  `~/Library/Logs/notification-triage-health.json`.
+  `triage.py` and prints the preflight failure.
 - **`gh auth` expired**: classifier prints `ERROR: failed to fetch /user`
   and exits with code 1. The launchd job will surface this in
-  `~/Library/Logs/notification-triage.log` and the health file.
+  `~/Library/Logs/notification-triage.log`.
 - **`todo.yml` missing**: script exits with code 1. Re-create the file
   (or check that `~/repos/zkoppert-todo` is still cloned).
 - **A new GitHub notification reason appears**: under the aggressive

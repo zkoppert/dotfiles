@@ -185,8 +185,7 @@ To unload:
 launchctl unload -w "$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist"
 ```
 
-Logs go to `~/Library/Logs/triage-dependabot.log`, and machine-readable
-worker health goes to `~/Library/Logs/triage-dependabot-health.json`.
+Logs go to `~/Library/Logs/triage-dependabot.log`.
 
 ## Ad-hoc usage
 
@@ -215,8 +214,8 @@ worker health goes to `~/Library/Logs/triage-dependabot-health.json`.
 - The pinned notification-worker runtime provisioned by `./install.sh` at
   `~/.local/share/dotfiles/notification-workers/venv`, using
   `python/notification-worker-requirements.txt` (`PyYAML` and
-  `ruamel.yaml`). The wrapper fails fast and writes health red when that
-  runtime is missing dependencies.
+  `ruamel.yaml`). The wrapper fails fast when that runtime is missing
+  dependencies.
 - `terminal-notifier` on `PATH` for clickable macOS alerts. Install it
   with `brew install terminal-notifier`.
 

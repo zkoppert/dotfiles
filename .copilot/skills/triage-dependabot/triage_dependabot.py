@@ -51,12 +51,10 @@ if str(_SKILLS_DIR) not in sys.path:
 
 import yaml
 from notification_worker_common import (
-    DEFAULT_DEPENDABOT_HEALTH_FILE,
     DEFAULT_LEDGER_FILE,
     NotificationLedger,
     ledger_capture as _ledger_capture,
     ledger_record_clear_result as _ledger_record_clear_result,
-    update_health_file,
 )
 from ruamel.yaml import YAML
 from ruamel.yaml import YAMLError as _RuamelYAMLError
@@ -71,7 +69,6 @@ logger = logging.getLogger("triage-dependabot")
 DEFAULT_TODO_FILE = Path.home() / "repos" / "zkoppert-todo" / "todo.yml"
 DEFAULT_STATE_FILE = Path.home() / "Library" / "Logs" / "triage-dependabot-state.json"
 DEFAULT_LEDGER_PATH = DEFAULT_LEDGER_FILE
-DEFAULT_HEALTH_FILE = DEFAULT_DEPENDABOT_HEALTH_FILE
 PRIVATE_TRIAGE_REPOS_PATH = Path.home() / ".copilot" / "private" / "triage-repos.yml"
 OWNED_OWNERS: frozenset[str] = frozenset(
     {"github", "github-community-projects", "zkoppert"}
@@ -1957,12 +1954,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Preview decisions; do not call gh mutating endpoints, write todo.yml, or update the ledger.",
     )
     parser.add_argument(
-        "--health-file",
-        type=Path,
-        default=DEFAULT_HEALTH_FILE,
-        help=f"Path to the machine-readable health file (default: {DEFAULT_HEALTH_FILE}).",
-    )
-    parser.add_argument(
         "--no-copilot-subagent",
         action="store_true",
         help="Disable Copilot CLI sub-agent for security classification; use regex only.",
@@ -1989,47 +1980,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Enable debug logging.",
     )
     return parser.parse_args(argv)
-
-
-def write_health_snapshot(
-    args: argparse.Namespace,
-    *,
-    stats: TriageStats,
-    ledger: NotificationLedger | None,
-) -> None:
-    health_file = getattr(args, "health_file", DEFAULT_HEALTH_FILE)
-    clear_failures = ledger.rows_with_clear_failures() if ledger is not None else []
-    update_health_file(
-        health_file,
-        worker="triage-dependabot",
-        had_errors=bool(stats.errors),
-        summary={
-            "fetched": stats.fetched,
-            "unread": stats.unread,
-            "dependabot": stats.dependabot,
-            "merged": stats.merged,
-            "labeled_and_merged": stats.labeled_and_merged,
-            "rebased": stats.rebased,
-            "flagged": stats.flagged,
-            "closed_prerelease": stats.closed_prerelease,
-            "skipped": stats.skipped,
-            "skipped_dependency": stats.skipped_dependency,
-            "cooldown": stats.cooldown,
-            "already_tracked": stats.already_tracked,
-            "stale_removed": stats.stale_removed,
-            "ledger_rows": stats.ledger_rows,
-            "clear_failures": len(clear_failures),
-            "errors": list(stats.errors),
-        },
-        details={
-            "current_github_notifications": {
-                "all": stats.fetched,
-                "unread": stats.unread,
-                "read": max(stats.fetched - stats.unread, 0),
-            },
-            "clear_failures": clear_failures,
-        },
-    )
 
 
 def _cleanup_stale_entries(
@@ -2700,11 +2650,6 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     stats = run(args)
-    ledger: NotificationLedger | None = None
-    if DEFAULT_LEDGER_PATH.exists():
-        ledger = NotificationLedger(DEFAULT_LEDGER_PATH)
-        stats.ledger_rows = ledger.row_count()
-    write_health_snapshot(args, stats=stats, ledger=ledger)
     print(
         f"fetched={stats.fetched} unread={stats.unread} dependabot={stats.dependabot} "
         f"merged={stats.merged} labeled={stats.labeled_and_merged} "
