@@ -157,8 +157,25 @@ class NotificationLedger:
 
     def __init__(self, path: Path = DEFAULT_LEDGER_FILE):
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.path.parent.chmod(0o700)
+        fd = os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+        self._secure_files()
         self._ensure_schema()
+        self._secure_files()
+
+    def _secure_files(self) -> None:
+        for path in (
+            self.path,
+            Path(f"{self.path}-journal"),
+            Path(f"{self.path}-wal"),
+            Path(f"{self.path}-shm"),
+        ):
+            try:
+                path.chmod(0o600)
+            except FileNotFoundError:
+                pass
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30)

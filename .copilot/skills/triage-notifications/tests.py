@@ -1248,6 +1248,42 @@ def test_run_reopens_terminal_item_for_direct_mention(
     ]
 
 
+@pytest.mark.parametrize("active_section", ["in_progress", "blocked", "in_review"])
+def test_run_preserves_active_item_for_unchanged_direct_mention(
+    todo_file, active_section
+):
+    item = {
+        "id": "active-ask",
+        "title": "Ask already being handled",
+        "status": active_section,
+        "notification": {"thread_id": "1001", "reason": "mention"},
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {"q1_do_first": [], "q2_schedule": []},
+        "in_progress": [],
+        "blocked": [],
+        "in_review": [],
+        "done": [],
+    }
+    data[active_section].append(item)
+    todo_file.write_text(yaml.safe_dump(data))
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([_notif("mention")]),
+    }
+
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
+        stats = triage.run(
+            triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        )
+
+    updated = yaml.safe_load(todo_file.read_text())
+    assert stats.already_tracked == 1
+    assert updated[active_section] == [item]
+    assert updated["prioritized"]["q1_do_first"] == []
+
+
 def test_run_drops_inbox_notification_when_url_is_prioritized_artifact(todo_file):
     todo_file.write_text(
         yaml.safe_dump(
@@ -4442,6 +4478,21 @@ def test_run_dependabot_bump_not_added_to_todo(todo_file):
 # ----------------------------------------------------------------------
 # Ledger, health, runtime preflight
 # ----------------------------------------------------------------------
+
+
+def test_ledger_uses_private_filesystem_permissions(tmp_path: Path):
+    ledger_dir = tmp_path / "notification-workers"
+    ledger_dir.mkdir(mode=0o755)
+    ledger_file = ledger_dir / "ledger.sqlite"
+    ledger_file.touch(mode=0o644)
+    sidecar = Path(f"{ledger_file}-wal")
+    sidecar.touch(mode=0o644)
+
+    triage.NotificationLedger(ledger_file)
+
+    assert ledger_dir.stat().st_mode & 0o777 == 0o700
+    assert ledger_file.stat().st_mode & 0o777 == 0o600
+    assert sidecar.stat().st_mode & 0o777 == 0o600
 
 
 def test_runtime_preflight_wrapper_writes_health_on_missing_python_modules(tmp_path: Path):

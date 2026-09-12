@@ -2311,15 +2311,27 @@ def run(args: argparse.Namespace) -> TriageStats:
 
         if thread_id and thread_id in seen_ids:
             if classification.bucket == BUCKET_Q1:
-                mutations.escalate.append(
-                    EscalationDelta(
-                        item_id="",
-                        thread_id=thread_id,
-                        reopen_terminal=True,
-                        reason=reason,
-                    )
+                tracked = next(
+                    (
+                        (section, item)
+                        for section, item in _iter_notification_items_with_sections(data)
+                        if _item_thread_id(item) == thread_id
+                    ),
+                    None,
                 )
-                reopened_thread_ids.add(thread_id)
+                if tracked and tracked[0] not in {"in_progress", "blocked", "in_review"}:
+                    mutations.escalate.append(
+                        EscalationDelta(
+                            item_id="",
+                            thread_id=thread_id,
+                            reopen_terminal=bool(
+                                tracker_terminal_disposition(tracked[1], tracked[0])
+                            ),
+                            reason=reason,
+                        )
+                    )
+                    if tracker_terminal_disposition(tracked[1], tracked[0]):
+                        reopened_thread_ids.add(thread_id)
             stats.already_tracked += 1
             continue
 
