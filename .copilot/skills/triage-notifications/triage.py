@@ -1192,9 +1192,17 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
         return False
 
     quadrant = candidate_section.removeprefix("prioritized.")
+    if candidate_section in {"in_progress", "blocked", "in_review"}:
+        return False
+    if delta.escalated_at and (
+        candidate_section not in {"inbox", "prioritized.q2_schedule"}
+        or str(candidate.get("status") or "pending").lower()
+        not in {"", "pending", "not_started"}
+    ):
+        return False
     if quadrant == "q1_do_first" and not delta.reopen_terminal:
         return False
-    if candidate_section in {"inbox", "done", "in_progress", "blocked", "in_review"}:
+    if candidate_section in {"inbox", "done"}:
         data[candidate_section][:] = [
             item for item in data[candidate_section] if item is not candidate
         ]

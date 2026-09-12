@@ -1673,6 +1673,43 @@ def test_collect_review_request_escalations_promotes_stale_items_to_q1():
     assert q1[0]["notification"]["review_requested_escalated_at"] == "2026-07-07T12:00:00Z"
 
 
+@pytest.mark.parametrize("active_section", ["in_progress", "blocked", "in_review"])
+def test_stale_review_escalation_preserves_fresh_active_item(active_section):
+    item = {
+        "id": "review-1",
+        "title": "Review request",
+        "status": active_section,
+        "notification": {
+            "thread_id": "thr-1",
+            "reason": "review_requested",
+            "captured_at": "2026-07-03T12:00:00Z",
+            "escalates_at": "2026-07-04T12:00:00Z",
+        },
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {"q1_do_first": [], "q2_schedule": []},
+        "in_progress": [],
+        "blocked": [],
+        "in_review": [],
+        "done": [],
+    }
+    data[active_section].append(item)
+    delta = triage.EscalationDelta(
+        item_id="review-1",
+        thread_id="thr-1",
+        escalated_at="2026-07-07T12:00:00Z",
+    )
+
+    applied = triage.apply_todo_mutations(
+        data, triage.TodoMutations(escalate=[delta])
+    )
+
+    assert applied["changed"] is False
+    assert data[active_section] == [item]
+    assert data["prioritized"]["q1_do_first"] == []
+
+
 def test_run_marks_done_on_completed(todo_file):
     todo_file.write_text(
         yaml.safe_dump(
