@@ -696,7 +696,6 @@ def classify(
     notif: dict[str, Any],
     *,
     my_login: str,
-    q1_logins: set[str] | None = None,
     state_fetcher=fetch_thread_state,
     comment_fetcher=fetch_latest_comment,
     subject_author_fetcher=fetch_subject_author,

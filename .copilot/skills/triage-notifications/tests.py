@@ -101,7 +101,6 @@ def test_classify_mention_goes_to_q1():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -114,7 +113,6 @@ def test_classify_assign_goes_to_q1():
     c = triage.classify(
         _notif("assign"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -126,7 +124,6 @@ def test_classify_security_alert_goes_to_q1():
     c = triage.classify(
         _notif("security_alert"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
     )
@@ -137,7 +134,6 @@ def test_classify_assign_on_my_own_pr_goes_to_q1():
     c = triage.classify(
         _notif("assign"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
@@ -149,7 +145,6 @@ def test_classify_mention_on_my_own_pr_goes_to_q1():
     c = triage.classify(
         _notif("mention"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "ZKoppert",
@@ -164,7 +159,6 @@ def test_classify_security_alert_on_my_own_pr_still_goes_to_q1():
     c = triage.classify(
         _notif("security_alert"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
@@ -190,7 +184,6 @@ def test_classify_self_assign_on_non_pr_still_goes_to_q1():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=fetcher,
@@ -205,71 +198,30 @@ def test_classify_manual_drops():
     c = triage.classify(
         _notif("manual"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
     )
     assert c.bucket == triage.BUCKET_DROP
 
 
-def test_review_requested_from_teammate_goes_to_q2():
+def test_review_requested_goes_to_q2_without_author_lookup():
+    author_lookups = []
     c = triage.classify(
         _notif("review_requested"),
         my_login="zkoppert",
-        q1_logins={"iansan5653"},
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
-        subject_author_fetcher=lambda _: "iansan5653",
+        subject_author_fetcher=lambda notif: author_lookups.append(notif),
     )
     assert c.bucket == triage.BUCKET_Q2
     assert c.reason == "review_requested - scheduled review"
-
-
-def test_review_requested_from_outsider_goes_to_q2():
-    c = triage.classify(
-        _notif("review_requested"),
-        my_login="zkoppert",
-        q1_logins={"iansan5653"},
-        state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
-        subject_author_fetcher=lambda _: "somerandomperson",
-    )
-    assert c.bucket == triage.BUCKET_Q2
-
-
-def test_review_requested_unknown_author_still_goes_to_q2():
-    c = triage.classify(
-        _notif("review_requested"),
-        my_login="zkoppert",
-        q1_logins={"iansan5653"},
-        state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
-        subject_author_fetcher=lambda _: None,
-    )
-    assert c.bucket == triage.BUCKET_Q2
-
-
-def test_review_requested_ignores_latest_comment_author():
-    # Even if the latest commenter is a teammate, the classifier should
-    # look at the PR author (subject_author_fetcher), not the comment
-    # author. This guards against a regression that previously routed
-    # bot-noise comments to Q1.
-    c = triage.classify(
-        _notif("review_requested"),
-        my_login="zkoppert",
-        q1_logins={"iansan5653"},
-        state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: ("iansan5653", "drive-by comment"),
-        subject_author_fetcher=lambda _: "outsider",
-    )
-    assert c.bucket == triage.BUCKET_Q2
+    assert author_lookups == []
 
 
 def test_comment_on_closed_thread_drops():
     c = triage.classify(
         _notif("comment"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: ("someone", "hi"),
     )
@@ -281,7 +233,6 @@ def test_comment_on_merged_thread_drops():
     c = triage.classify(
         _notif("comment"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "merged",
         comment_fetcher=lambda _: ("someone", "hi"),
     )
@@ -292,7 +243,6 @@ def test_comment_with_mention_goes_to_q1():
     c = triage.classify(
         _notif("comment"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: ("teammate", "hey @zkoppert can you look?"),
     )
@@ -304,7 +254,6 @@ def test_super_linter_without_mention_drops():
     c = triage.classify(
         _notif("comment"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (
             "super-linter[bot]",
@@ -319,7 +268,6 @@ def test_super_linter_with_mention_still_goes_to_q1():
     c = triage.classify(
         _notif("comment"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (
             "super-linter[bot]",
@@ -333,7 +281,6 @@ def test_ci_activity_drops():
     c = triage.classify(
         _notif("ci_activity"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
     )
@@ -346,7 +293,6 @@ def test_subscribed_open_drops():
     c = triage.classify(
         _notif("subscribed"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
     )
@@ -357,7 +303,6 @@ def test_subscribed_closed_drops():
     c = triage.classify(
         _notif("subscribed"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: (None, None),
     )
@@ -370,7 +315,6 @@ def test_unknown_reason_drops():
     c = triage.classify(
         _notif("invitation"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
     )
@@ -2785,7 +2729,6 @@ def test_classify_drops_review_requested_on_closed_pr():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -2798,7 +2741,6 @@ def test_classify_drops_review_requested_on_merged_pr():
     c = triage.classify(
         _notif("review_requested"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "merged",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -2810,7 +2752,6 @@ def test_classify_drops_mention_on_closed_pr():
     c = triage.classify(
         _notif("mention"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -2831,7 +2772,6 @@ def test_classify_drops_assign_on_closed_issue():
     c = triage.classify(
         issue_notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -2843,7 +2783,6 @@ def test_classify_drops_manual_on_closed_subject():
     c = triage.classify(
         _notif("manual"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -2856,7 +2795,6 @@ def test_classify_keeps_mention_on_open_subject():
     c = triage.classify(
         _notif("mention"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -2869,7 +2807,6 @@ def test_classify_keeps_review_requested_on_open_pr():
     c = triage.classify(
         _notif("review_requested"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -2884,7 +2821,6 @@ def test_classify_keeps_assign_when_state_unknown():
     c = triage.classify(
         _notif("assign"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: None,
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -2909,7 +2845,6 @@ def test_classify_skips_state_check_for_non_subject_types():
     c = triage.classify(
         sec_notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=fetcher,
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -2937,7 +2872,6 @@ def test_classify_enable_dependabot_author_drops():
     c = triage.classify(
         _enable_dependabot_notif(),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
@@ -2952,7 +2886,6 @@ def test_classify_enable_dependabot_kept_on_mention():
     c = triage.classify(
         _enable_dependabot_notif("mention"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -2975,7 +2908,6 @@ def test_classify_enable_dependabot_title_match_is_case_insensitive():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
@@ -2998,7 +2930,6 @@ def test_classify_does_not_drop_unrelated_author_pr():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
@@ -3045,7 +2976,6 @@ def test_classify_watch_only_dependabot_bump_drops_and_marks_done(
     c = triage.classify(
         _watch_only_dependabot_notif(),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "dependabot[bot]",
@@ -3061,7 +2991,6 @@ def test_classify_watch_only_dependabot_mention_still_surfaces(
     c = triage.classify(
         _watch_only_dependabot_notif("mention"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3075,7 +3004,6 @@ def test_classify_watch_only_dependabot_review_requested_still_surfaces(
     c = triage.classify(
         _watch_only_dependabot_notif("review_requested"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "dependabot[bot]",
@@ -3142,7 +3070,6 @@ def test_classify_drops_intermittent_test_failure_team_mention():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3157,7 +3084,6 @@ def test_classify_drops_flaky_test_subscribed():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3171,7 +3097,6 @@ def test_classify_drops_test_flake_team_mention():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3185,7 +3110,6 @@ def test_classify_drops_title_match_is_case_insensitive():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3203,7 +3127,6 @@ def test_classify_keeps_intermittent_test_failure_when_at_mentioned():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3220,7 +3143,6 @@ def test_classify_keeps_intermittent_test_failure_when_assigned():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3240,7 +3162,6 @@ def test_classify_title_drop_does_not_match_unrelated_titles():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3265,7 +3186,6 @@ def test_classify_title_drop_does_not_match_phrase_as_substring():
         c = triage.classify(
             notif,
             my_login="zkoppert",
-            q1_logins=set(),
             state_fetcher=lambda _: "open",
             comment_fetcher=lambda _: (None, None),
             subject_author_fetcher=lambda _: "someone-else",
@@ -3285,7 +3205,6 @@ def test_classify_title_drop_matches_bracketed_prefix():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3330,7 +3249,6 @@ def test_classify_read_open_notification_routes_like_unread():
     unread["unread"] = True
     kwargs = dict(
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3347,7 +3265,6 @@ def test_classify_read_closed_pr_still_drops_via_state_check():
     c = triage.classify(
         _read_notif("author"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3362,7 +3279,6 @@ def test_classify_drop_sets_archive_to_done_when_zack_is_pr_author():
     c = triage.classify(
         _read_notif("author"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "merged",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
@@ -3377,7 +3293,6 @@ def test_classify_drop_does_not_archive_when_zack_is_not_author():
     c = triage.classify(
         _read_notif("assign"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andimiya",
@@ -3395,7 +3310,6 @@ def test_classify_drop_does_not_archive_for_issues():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
@@ -3418,7 +3332,6 @@ def test_classify_drop_does_not_call_author_fetcher_for_issues():
     triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=fetcher,
@@ -3547,7 +3460,6 @@ def test_classify_read_ci_activity_still_drops():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3564,7 +3476,6 @@ def test_classify_read_comment_on_closed_pr_still_drops():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "closed",
         comment_fetcher=lambda _: ("someone", "body"),
         subject_author_fetcher=lambda _: "andi",
@@ -3579,7 +3490,6 @@ def test_classify_read_subscribed_on_closed_pr_still_drops():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "merged",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3593,7 +3503,6 @@ def test_classify_read_super_linter_comment_still_drops():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: ("super-linter", "lint failed"),
         subject_author_fetcher=lambda _: "andi",
@@ -3610,7 +3519,6 @@ def test_classify_read_inbox_routing_now_returns_inbox():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andi",
@@ -3625,7 +3533,6 @@ def test_classify_read_q1_mention_now_returns_q1():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andi",
@@ -3832,7 +3739,6 @@ def test_classify_private_subscription_subscribed_drops(private_subscription_fil
     c = triage.classify(
         _private_subscription_notif("subscribed"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3847,7 +3753,6 @@ def test_classify_private_subscription_comment_drops(private_subscription_filter
     c = triage.classify(
         _private_subscription_notif("comment"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: ("andimiya", "lgtm"),
         subject_author_fetcher=lambda _: "andimiya",
@@ -3862,7 +3767,6 @@ def test_classify_private_subscription_ci_activity_drops(private_subscription_fi
     c = triage.classify(
         _private_subscription_notif("ci_activity"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3876,7 +3780,6 @@ def test_classify_private_subscription_author_drops(private_subscription_filter)
     c = triage.classify(
         _private_subscription_notif("author"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
@@ -3892,7 +3795,6 @@ def test_classify_private_subscription_mention_still_routes_normally(
     c = triage.classify(
         _private_subscription_notif("mention"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andimiya",
@@ -3907,7 +3809,6 @@ def test_classify_private_subscription_assign_still_routes_normally(
     c = triage.classify(
         _private_subscription_notif("assign"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andimiya",
@@ -3922,7 +3823,6 @@ def test_classify_private_subscription_review_requested_still_routes_normally(
     c = triage.classify(
         _private_subscription_notif("review_requested"),
         my_login="zkoppert",
-        q1_logins={"andimiya"},
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andimiya",
@@ -3937,7 +3837,6 @@ def test_classify_private_subscription_team_mention_drops(private_subscription_f
     c = triage.classify(
         _private_subscription_notif("team_mention"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "andimiya",
@@ -3955,7 +3854,6 @@ def test_classify_non_filtered_repo_subscribed_drops():
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -3973,7 +3871,6 @@ def test_classify_private_subscription_filter_runs_after_closed_state_drop(
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "merged",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "zkoppert",
@@ -3994,7 +3891,6 @@ def test_classify_private_subscription_subscribed_drops_regardless_of_read_state
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -4010,7 +3906,6 @@ def test_classify_private_subscription_security_alert_still_routes_to_q1(
     c = triage.classify(
         _private_subscription_notif("security_alert"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -4026,7 +3921,6 @@ def test_classify_subscription_filter_is_case_insensitive(private_subscription_f
     c = triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
@@ -4067,7 +3961,6 @@ def test_classify_super_linter_repo_subscribed_drops():
     c = triage.classify(
         _superlinter_notif("subscribed"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "maintainer",
@@ -4082,7 +3975,6 @@ def test_classify_super_linter_repo_mention_routes_to_q1():
     c = triage.classify(
         _superlinter_notif("mention"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: ("maintainer", "@zkoppert thoughts?"),
         subject_author_fetcher=lambda _: "maintainer",
@@ -4097,7 +3989,6 @@ def test_classify_super_linter_github_fork_subscribed_drops():
     c = triage.classify(
         _superlinter_notif("subscribed", owner="github"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "maintainer",
@@ -4112,7 +4003,6 @@ def test_classify_super_linter_github_fork_review_requested_drops():
     c = triage.classify(
         _superlinter_notif("review_requested", owner="github"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "maintainer",
@@ -4126,7 +4016,6 @@ def test_classify_super_linter_github_fork_mention_kept():
     c = triage.classify(
         _superlinter_notif("mention", owner="github"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "maintainer",
@@ -4141,7 +4030,6 @@ def test_classify_super_linter_security_alert_survives():
     c = triage.classify(
         _superlinter_notif("security_alert", owner="github"),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "maintainer",
@@ -4159,7 +4047,6 @@ def test_classify_super_linter_fork_dependabot_bump_left_unread():
             "subscribed", owner="github", title="chore(deps): bump foo from 1 to 2"
         ),
         my_login="zkoppert",
-        q1_logins=set(),
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "dependabot[bot]",
@@ -4198,12 +4085,11 @@ def _repo_notif(
     }
 
 
-def _classify(notif, *, q1_logins=None, author="someone-else", state="open"):
+def _classify(notif, *, author="someone-else", state="open"):
     """Classify with non-network stub fetchers."""
     return triage.classify(
         notif,
         my_login="zkoppert",
-        q1_logins=q1_logins or set(),
         state_fetcher=lambda _: state,
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: author,
@@ -4237,13 +4123,7 @@ def test_author_random_repo_kept_in_inbox():
 
 def test_review_requested_random_repo_kept():
     """review_requested survives as scheduled work in Q2."""
-    inbox = _classify(_repo_notif("review_requested", repo="some-org/x"))
-    assert inbox.bucket == triage.BUCKET_Q2
-    q2 = _classify(
-        _repo_notif("review_requested", repo="some-org/x"),
-        q1_logins={"andimiya"},
-        author="andimiya",
-    )
+    q2 = _classify(_repo_notif("review_requested", repo="some-org/x"))
     assert q2.bucket == triage.BUCKET_Q2
 
 
@@ -4506,6 +4386,40 @@ def test_runtime_preflight_wrapper_writes_health_on_missing_python_modules(tmp_p
     assert payload["status"] == "error"
     assert "import preflight" in payload["last_error"]
     assert "yaml" in result.stderr
+
+
+def test_ledger_tracks_distinct_threads_for_same_artifact(todo_file: Path):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/1"
+
+    first_id = ledger.capture(
+        source_type="github",
+        source_id="thread-a",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+    )
+    second_id = ledger.capture(
+        source_type="github",
+        source_id="thread-b",
+        canonical_artifact=artifact,
+        classification="policy_drop",
+        worker="test",
+    )
+    ledger.record_clear_failure(
+        source_type="github",
+        source_id="thread-b",
+        canonical_artifact=artifact,
+        error="HTTP 500",
+    )
+
+    assert first_id != second_id
+    assert ledger.row_count() == 2
+    failures = ledger.rows_with_clear_failures()
+    assert len(failures) == 1
+    assert failures[0]["source_id"] == "thread-b"
+    assert failures[0]["canonical_artifact"] == artifact
+    assert failures[0]["last_clear_error"] == "HTTP 500"
 
 
 def test_run_policy_drop_records_ledger_before_clear(todo_file: Path):

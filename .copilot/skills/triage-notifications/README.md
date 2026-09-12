@@ -104,10 +104,6 @@ The reason table (after the early-exit drops above):
 | `comment`          | Q1 if the body @-mentions me; else DROP         |
 | anything else      | DROP (passive subscription noise)               |
 
-The NUX teammate allowlist is still hardcoded in `triage.py` as
-`NUX_TEAM_LOGINS_Q1`. It now only affects the human-readable review-request
-reason string; ordinary review requests stay in Q2 regardless of author.
-
 ## How it integrates with zkoppert-todo
 
 Each new entry carries a `notification` block:

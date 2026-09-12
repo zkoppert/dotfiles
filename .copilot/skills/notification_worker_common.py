@@ -203,9 +203,10 @@ class NotificationLedger:
                 WHERE source_id IS NOT NULL AND source_id != ''
                 """
             )
+            conn.execute("DROP INDEX IF EXISTS idx_notifications_canonical")
             conn.execute(
                 """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_canonical
+                CREATE INDEX IF NOT EXISTS idx_notifications_canonical
                 ON notifications (source_type, canonical_artifact)
                 WHERE canonical_artifact IS NOT NULL AND canonical_artifact != ''
                 """
@@ -227,9 +228,14 @@ class NotificationLedger:
             ).fetchone()
             if row:
                 return int(row["id"])
-        if canonical_artifact:
+        if not source_id and canonical_artifact:
             row = conn.execute(
-                "SELECT id FROM notifications WHERE source_type = ? AND canonical_artifact = ?",
+                """
+                SELECT id FROM notifications
+                 WHERE source_type = ?
+                   AND canonical_artifact = ?
+                   AND (source_id IS NULL OR source_id = '')
+                """,
                 (source_type, canonical_artifact),
             ).fetchone()
             if row:
