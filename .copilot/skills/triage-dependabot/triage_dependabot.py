@@ -1957,12 +1957,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Preview decisions; do not call gh mutating endpoints, write todo.yml, or update the ledger.",
     )
     parser.add_argument(
-        "--ledger-file",
-        type=Path,
-        default=DEFAULT_LEDGER_PATH,
-        help=f"Path to the durable notification ledger (default: {DEFAULT_LEDGER_PATH}).",
-    )
-    parser.add_argument(
         "--health-file",
         type=Path,
         default=DEFAULT_HEALTH_FILE,
@@ -2113,10 +2107,9 @@ def _record_stale_cleanup(
 def run(args: argparse.Namespace) -> TriageStats:
     """Main entrypoint. Returns stats so tests can assert behaviour."""
     stats = TriageStats()
-    ledger_path = getattr(args, "ledger_file", DEFAULT_LEDGER_PATH)
     ledger: NotificationLedger | None = None
-    if not args.dry_run or ledger_path.exists():
-        ledger = NotificationLedger(ledger_path)
+    if not args.dry_run or DEFAULT_LEDGER_PATH.exists():
+        ledger = NotificationLedger(DEFAULT_LEDGER_PATH)
     try:
         my_login = get_my_login()
     except (
@@ -2707,10 +2700,9 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     stats = run(args)
-    ledger_path = getattr(args, "ledger_file", DEFAULT_LEDGER_PATH)
     ledger: NotificationLedger | None = None
-    if ledger_path.exists():
-        ledger = NotificationLedger(ledger_path)
+    if DEFAULT_LEDGER_PATH.exists():
+        ledger = NotificationLedger(DEFAULT_LEDGER_PATH)
         stats.ledger_rows = ledger.row_count()
     write_health_snapshot(args, stats=stats, ledger=ledger)
     print(

@@ -5200,8 +5200,6 @@ def test_run_policy_drop_records_ledger_before_clear(todo_file: Path):
             [
                 "--todo-file",
                 str(todo_file),
-                "--ledger-file",
-                str(ledger_file),
                 "--no-notify",
             ]
         )
@@ -5269,8 +5267,6 @@ def test_run_q4_item_records_irrelevant_and_clears_notification(todo_file: Path)
             [
                 "--todo-file",
                 str(todo_file),
-                "--ledger-file",
-                str(ledger_file),
                 "--no-notify",
             ]
         )
@@ -5334,8 +5330,6 @@ def test_run_preserves_clear_failure_for_dropped_item(todo_file: Path):
             [
                 "--todo-file",
                 str(todo_file),
-                "--ledger-file",
-                str(ledger_file),
                 "--no-notify",
             ]
         )
@@ -5416,8 +5410,6 @@ def test_run_retries_pending_clear_without_duplicating_tracker_item(todo_file: P
             [
                 "--todo-file",
                 str(todo_file),
-                "--ledger-file",
-                str(ledger_file),
                 "--no-notify",
             ]
         )
@@ -5475,8 +5467,6 @@ def test_health_snapshot_reports_actionable_gaps_and_clear_failures(todo_file: P
             [
                 "--todo-file",
                 str(todo_file),
-                "--ledger-file",
-                str(ledger_file),
                 "--health-file",
                 str(health_file),
                 "--dry-run",
@@ -5538,8 +5528,6 @@ def test_run_clears_dependabot_tracked_item_when_dropped(todo_file: Path):
             [
                 "--todo-file",
                 str(todo_file),
-                "--ledger-file",
-                str(ledger_file),
                 "--no-notify",
             ]
         )

@@ -1535,7 +1535,6 @@ def _make_args(tmp_path: Path, **overrides: Any) -> argparse.Namespace:
     defaults = dict(
         todo_file=todo_file,
         state_file=tmp_path / "state.json",
-        ledger_file=tmp_path / "ledger.sqlite",
         health_file=tmp_path / "health.json",
         dry_run=False,
         no_copilot_subagent=True,

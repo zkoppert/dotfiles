@@ -2118,12 +2118,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Classify and report, but do not modify todo.yml, the ledger, or call DELETE.",
     )
     parser.add_argument(
-        "--ledger-file",
-        type=Path,
-        default=DEFAULT_LEDGER_PATH,
-        help=f"Path to the durable notification ledger (default: {DEFAULT_LEDGER_PATH}).",
-    )
-    parser.add_argument(
         "--health-file",
         type=Path,
         default=DEFAULT_HEALTH_FILE,
@@ -2404,10 +2398,9 @@ def write_health_snapshot(
 def run(args: argparse.Namespace) -> TriageStats:
     """Main entrypoint - returns stats so tests can assert behaviour."""
     stats = TriageStats()
-    ledger_path = getattr(args, "ledger_file", DEFAULT_LEDGER_PATH)
     ledger: NotificationLedger | None = None
-    if not args.dry_run or ledger_path.exists():
-        ledger = NotificationLedger(ledger_path)
+    if not args.dry_run or DEFAULT_LEDGER_PATH.exists():
+        ledger = NotificationLedger(DEFAULT_LEDGER_PATH)
 
     try:
         my_login = get_my_login()
@@ -2899,10 +2892,9 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     stats = run(args)
-    ledger_path = getattr(args, "ledger_file", DEFAULT_LEDGER_PATH)
     ledger: NotificationLedger | None = None
-    if ledger_path.exists():
-        ledger = NotificationLedger(ledger_path)
+    if DEFAULT_LEDGER_PATH.exists():
+        ledger = NotificationLedger(DEFAULT_LEDGER_PATH)
     write_health_snapshot(args, stats=stats, ledger=ledger)
     print(
         f"fetched={stats.fetched} unread={stats.unread} "

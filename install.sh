@@ -12,11 +12,7 @@ NOTIFICATION_REQUIREMENTS="$DOTFILES_DIR/python/notification-worker-requirements
 NOTIFICATION_REQUIREMENTS_STAMP="$NOTIFICATION_RUNTIME_ROOT/requirements.sha256"
 
 pick_notification_bootstrap_python() {
-  local candidates=()
-  if [ -n "${DOTFILES_NOTIFICATION_BOOTSTRAP_PYTHON:-}" ]; then
-    candidates+=("$DOTFILES_NOTIFICATION_BOOTSTRAP_PYTHON")
-  fi
-  candidates+=(
+  local candidates=(
     "/opt/homebrew/bin/python3.13"
     "/opt/homebrew/bin/python3.12"
     "/opt/homebrew/bin/python3.11"
