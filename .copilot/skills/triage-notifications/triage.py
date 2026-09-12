@@ -922,19 +922,26 @@ def build_todo_entry(
 
 
 def notification_has_new_activity(
-    notif: dict[str, Any], tracked_item: dict[str, Any]
+    notif: dict[str, Any],
+    tracked_item: dict[str, Any],
+    *,
+    allow_reason_change_without_timestamp: bool = True,
 ) -> bool:
     tracked = tracked_item.get("notification")
     if not isinstance(tracked, dict):
         return True
-    reason = str(notif.get("reason") or "").lower()
-    if reason != str(tracked.get("reason") or "").lower():
-        return True
+    reason_changed = str(notif.get("reason") or "").lower() != str(
+        tracked.get("reason") or ""
+    ).lower()
     updated_at = parse_iso_datetime(notif.get("updated_at"))
     captured_at = parse_iso_datetime(tracked.get("captured_at"))
     if captured_at is None:
-        return bool(tracked.get("marked_done"))
-    return bool(updated_at and updated_at > captured_at)
+        return bool(tracked.get("marked_done")) or (
+            reason_changed and allow_reason_change_without_timestamp
+        )
+    if updated_at and updated_at > captured_at:
+        return True
+    return reason_changed and allow_reason_change_without_timestamp
 
 
 def build_done_archive_entry(notif: dict[str, Any]) -> dict[str, Any]:
@@ -1741,6 +1748,13 @@ def _reconcile_canonical_entry(
         item["notification"] = dict(notification)
         active_sections = {"in_progress", "blocked", "in_review"}
         current_quadrant = section.removeprefix("prioritized.")
+        if terminal:
+            item["status"] = "pending"
+            item.pop("completed", None)
+            if isinstance(item["notification"], dict):
+                item["notification"].pop("marked_done", None)
+                item["notification"].pop("marked_done_at", None)
+                item["notification"].pop("terminal_disposition", None)
         if not terminal and (
             section in active_sections or current_quadrant == "q1_do_first"
         ):
@@ -1759,9 +1773,6 @@ def _reconcile_canonical_entry(
         if target_quadrant == "q1_do_first":
             item["urgency"] = "high"
             item["importance"] = "high"
-        if terminal:
-            item["status"] = "pending"
-            item.pop("completed", None)
         data["prioritized"][target_quadrant].append(item)
         return item, f"prioritized.{target_quadrant}"
     return None
@@ -2424,10 +2435,25 @@ def run(args: argparse.Namespace) -> TriageStats:
                 ),
                 None,
             )
-            renewed = bool(tracked and notification_has_new_activity(notif, tracked[1]))
-            tracked_nonterminal = bool(
-                tracked and not tracker_terminal_disposition(tracked[1], tracked[0])
+            tracked_terminal = bool(
+                tracked and tracker_terminal_disposition(tracked[1], tracked[0])
             )
+            tracked_marked_done = bool(
+                tracked
+                and isinstance(tracked[1].get("notification"), dict)
+                and tracked[1]["notification"].get("marked_done")
+            )
+            renewed = bool(
+                tracked
+                and notification_has_new_activity(
+                    notif,
+                    tracked[1],
+                    allow_reason_change_without_timestamp=(
+                        not tracked_terminal or tracked_marked_done
+                    ),
+                )
+            )
+            tracked_nonterminal = bool(tracked and not tracked_terminal)
             tracked_urgent = bool(
                 tracked_nonterminal
                 and tracked

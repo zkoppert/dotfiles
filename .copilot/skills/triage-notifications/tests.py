@@ -1666,7 +1666,9 @@ def test_run_preserves_scheduled_review_reclassified_as_passive_noise(todo_file)
             }
         )(cmd, *args, **kwargs)
 
-    with patch("triage.subprocess.run", side_effect=fake_run):
+    with patch("triage.subprocess.run", side_effect=fake_run), patch(
+        "triage.utcnow_iso", return_value="2026-07-01T12:30:00Z"
+    ):
         triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
 
     updated = yaml.safe_load(todo_file.read_text())

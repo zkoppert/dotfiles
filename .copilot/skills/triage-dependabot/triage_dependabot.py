@@ -2120,18 +2120,43 @@ def run(args: argparse.Namespace) -> TriageStats:
         title = str(pr.get("title") or "")
 
         if reason in {"mention", "assign", "comment"}:
-            _ledger_capture(
-                ledger,
-                dry_run=args.dry_run,
-                thread_id=thread_id or None,
-                canonical_artifact=pr_url,
-                classification="actionable",
-                worker="dependabot-direct-ask-handoff",
-                title=title,
-                reason=reason,
-                repo=repo,
+            skipped_dep = is_owned_repo(repo) and (
+                skipped_dependency_match(pr) or skipped_repo_match(repo)
             )
-            stats.skipped += 1
+            if skipped_dep:
+                logger.info(
+                    "%s#%d -> skipping excluded dependency %s",
+                    repo,
+                    number,
+                    skipped_dep,
+                )
+                stats.skipped_dependency += 1
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                    classification="dependabot_handoff",
+                    worker="dependabot-excluded-dependency",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                )
+                if pr_url:
+                    state[pr_url] = now
+            else:
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                    classification="actionable",
+                    worker="dependabot-direct-ask-handoff",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                )
+                stats.skipped += 1
             continue
 
         if is_archived_repo(repo):
