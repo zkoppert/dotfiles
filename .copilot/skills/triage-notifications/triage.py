@@ -431,6 +431,8 @@ class EscalationDelta:
     item_id: str
     thread_id: str | None = None
     escalated_at: str = ""
+    reopen_terminal: bool = False
+    reason: str = ""
 
 
 @dataclass
@@ -471,6 +473,7 @@ class AppliedTodoMutations(TypedDict):
     pruned: int
     pruned_by_reason: dict[str, int]
     url_deduped: list[dict[str, str]]
+    reopened_threads: list[dict[str, str]]
     added_entries: list[dict[str, Any]]
     changed: bool
 
@@ -1198,7 +1201,7 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
     candidate: dict[str, Any] | None = None
     candidate_section = ""
     for section, item in _iter_notification_items_with_sections(data):
-        if tracker_terminal_disposition(item, section):
+        if tracker_terminal_disposition(item, section) and not delta.reopen_terminal:
             continue
         if item.get("id") != delta.item_id and _item_thread_id(item) != delta.thread_id:
             continue
@@ -1209,10 +1212,12 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
         return False
 
     quadrant = candidate_section.removeprefix("prioritized.")
-    if quadrant == "q1_do_first":
+    if quadrant == "q1_do_first" and not delta.reopen_terminal:
         return False
-    if candidate_section == "inbox":
-        data["inbox"][:] = [item for item in data["inbox"] if item is not candidate]
+    if candidate_section in {"inbox", "done", "in_progress", "blocked", "in_review"}:
+        data[candidate_section][:] = [
+            item for item in data[candidate_section] if item is not candidate
+        ]
     elif quadrant in PRUNE_QUADRANTS:
         prioritized[quadrant][:] = [
             item for item in prioritized[quadrant] if item is not candidate
@@ -1222,10 +1227,21 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
     candidate["urgency"] = "high"
     candidate["importance"] = "high"
     candidate["quadrant"] = "q1_do_first"
-    candidate["status"] = candidate.get("status") or "pending"
+    candidate["status"] = (
+        "pending" if delta.reopen_terminal else candidate.get("status") or "pending"
+    )
+    if delta.reopen_terminal:
+        candidate.pop("completed", None)
     notif = candidate.get("notification")
-    if isinstance(notif, dict) and delta.escalated_at:
-        notif["review_requested_escalated_at"] = delta.escalated_at
+    if isinstance(notif, dict):
+        if delta.escalated_at:
+            notif["review_requested_escalated_at"] = delta.escalated_at
+        if delta.reopen_terminal:
+            notif.pop("marked_done", None)
+            notif.pop("marked_done_at", None)
+            notif.pop("terminal_disposition", None)
+            if delta.reason:
+                notif["reason"] = delta.reason
     q1.append(candidate)
     return True
 
@@ -1239,6 +1255,7 @@ def apply_todo_mutations(
     changed = False
     pruned_by_reason: dict[str, int] = {}
     added_entries: list[dict[str, Any]] = []
+    reopened_threads: list[dict[str, str]] = []
     applied: AppliedTodoMutations = {
         "added_q1": 0,
         "added_q2": 0,
@@ -1250,6 +1267,7 @@ def apply_todo_mutations(
         "pruned": 0,
         "pruned_by_reason": pruned_by_reason,
         "url_deduped": [],
+        "reopened_threads": reopened_threads,
         "added_entries": added_entries,
         "changed": False,
     }
@@ -1278,6 +1296,13 @@ def apply_todo_mutations(
     for escalation_delta in mutations.escalate:
         if _escalate_review_request(data, escalation_delta):
             applied["escalated_review_requests"] += 1
+            if escalation_delta.reopen_terminal and escalation_delta.thread_id:
+                reopened_threads.append(
+                    {
+                        "thread_id": escalation_delta.thread_id,
+                        "reason": escalation_delta.reason,
+                    }
+                )
             changed = True
 
     for entry in mutations.add_done:
@@ -2262,6 +2287,7 @@ def run(args: argparse.Namespace) -> TriageStats:
     seen_ids = existing_thread_ids(data)
     mutations = TodoMutations()
     direct_mention_thread_ids: set[str] = set()
+    reopened_thread_ids: set[str] = set()
     attempted_thread_ids: set[str] = set()
 
     for notif in notifications:
@@ -2286,8 +2312,14 @@ def run(args: argparse.Namespace) -> TriageStats:
         if thread_id and thread_id in seen_ids:
             if classification.bucket == BUCKET_Q1:
                 mutations.escalate.append(
-                    EscalationDelta(item_id="", thread_id=thread_id)
+                    EscalationDelta(
+                        item_id="",
+                        thread_id=thread_id,
+                        reopen_terminal=True,
+                        reason=reason,
+                    )
                 )
+                reopened_thread_ids.add(thread_id)
             stats.already_tracked += 1
             continue
 
@@ -2381,6 +2413,8 @@ def run(args: argparse.Namespace) -> TriageStats:
     for item, section, disposition in items_ready_for_clear(data):
         notif_meta = item["notification"]
         thread_id = str(notif_meta["thread_id"])
+        if thread_id in reopened_thread_ids:
+            continue
         canonical_url = str(notif_meta.get("url") or item.get("link") or "") or None
         _ledger_capture(
             ledger,
@@ -2522,6 +2556,14 @@ def run(args: argparse.Namespace) -> TriageStats:
                 ledger=ledger,
                 dry_run=args.dry_run,
             )
+            if ledger is not None:
+                for reopened in applied["reopened_threads"]:
+                    ledger.reopen_actionable(
+                        source_type="github",
+                        source_id=reopened["thread_id"],
+                        reason=reopened["reason"],
+                        tracker_section="prioritized.q1_do_first",
+                    )
         reconcile_stats_from_applied(stats, applied)
         if not args.dry_run:
             added_entries = applied["added_entries"]

@@ -1167,6 +1167,87 @@ def test_run_dedupes_already_tracked(todo_file):
     notify_mock.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("terminal_section", "terminal_status"),
+    [("done", "done"), ("q4_eliminate", "dropped")],
+)
+def test_run_reopens_terminal_item_for_direct_mention(
+    todo_file, terminal_section, terminal_status
+):
+    item = {
+        "id": "old",
+        "title": "Previously closed ask",
+        "status": terminal_status,
+        "completed": "2026-07-01",
+        "notification": {
+            "thread_id": "1001",
+            "reason": "subscribed",
+            "marked_done": True,
+            "marked_done_at": "2026-07-01",
+            "terminal_disposition": "completed",
+        },
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {
+            "q1_do_first": [],
+            "q2_schedule": [],
+            "q3_delegate": [],
+            "q4_eliminate": [],
+        },
+        "done": [],
+    }
+    if terminal_section == "done":
+        data["done"].append(item)
+    else:
+        data["prioritized"][terminal_section].append(item)
+    todo_file.write_text(yaml.safe_dump(data))
+
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([_notif("mention")]),
+    }
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        stats = triage.run(args)
+
+    assert stats.already_tracked == 1
+    updated = yaml.safe_load(todo_file.read_text())
+    reopened = updated["prioritized"]["q1_do_first"]
+    assert len(reopened) == 1
+    assert reopened[0]["id"] == "old"
+    assert reopened[0]["status"] == "pending"
+    assert "completed" not in reopened[0]
+    assert reopened[0]["notification"] == {
+        "thread_id": "1001",
+        "reason": "mention",
+    }
+    assert updated["done"] == []
+    assert updated["prioritized"]["q4_eliminate"] == []
+    ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
+    rows = ledger._rows(
+        """
+        SELECT classification, lifecycle_state, reason, tracker_section,
+               terminal_disposition, clear_state
+          FROM notifications
+         WHERE source_id = ?
+        """,
+        ("1001",),
+    )
+    assert rows == [
+        {
+            "classification": "actionable",
+            "lifecycle_state": "tracker_linked",
+            "reason": "mention",
+            "tracker_section": "prioritized.q1_do_first",
+            "terminal_disposition": None,
+            "clear_state": "not_applicable",
+        }
+    ]
+
+
 def test_run_drops_inbox_notification_when_url_is_prioritized_artifact(todo_file):
     todo_file.write_text(
         yaml.safe_dump(

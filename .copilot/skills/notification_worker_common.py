@@ -448,6 +448,38 @@ class NotificationLedger:
             )
             conn.commit()
 
+    def reopen_actionable(
+        self,
+        *,
+        source_type: str,
+        source_id: str,
+        reason: str,
+        tracker_section: str,
+    ) -> None:
+        now = utcnow_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE notifications
+                   SET classification = 'actionable',
+                       lifecycle_state = 'tracker_linked',
+                       reason = ?,
+                       tracker_section = ?,
+                       terminal_disposition = NULL,
+                       terminal_recorded_at = NULL,
+                       clear_state = 'not_applicable',
+                       clear_attempted_at = NULL,
+                       cleared_at = NULL,
+                       last_clear_error = NULL,
+                       last_seen_at = ?,
+                       classified_at = ?
+                 WHERE source_type = ?
+                   AND source_id = ?
+                """,
+                (reason, tracker_section, now, now, source_type, source_id),
+            )
+            conn.commit()
+
     def record_terminal(
         self,
         *,
