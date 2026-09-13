@@ -2729,6 +2729,19 @@ def run(args: argparse.Namespace) -> TriageStats:
         )
 
         try:
+            fresh_pr = fetch_pr(repo, number)
+            if fresh_pr is None:
+                stats.errors.append(f"failed to refresh {pr_url} before action")
+                continue
+            pr = fresh_pr
+            decision = decide(
+                pr,
+                my_login=my_login,
+                repo=repo,
+                coverage_lookup=coverage_lookup,
+                use_copilot=use_copilot,
+                notif_reason=reason,
+            )
             if decision.outcome == OUTCOME_MERGE:
                 merged = do_merge(
                     repo,

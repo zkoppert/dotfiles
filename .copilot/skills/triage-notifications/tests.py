@@ -3659,7 +3659,13 @@ def test_run_marks_done_on_completed(todo_file):
                             "id": "doneone",
                             "title": "x",
                             "status": "done",
-                            "notification": {"thread_id": "777"},
+                            "notification": {
+                                "thread_id": "777",
+                                "reason": "subscribed",
+                                "url": "https://github.com/o/r/pull/777",
+                                "repo": "o/r",
+                                "updated_at": "2026-07-01T12:00:00Z",
+                            },
                         },
                     ],
                 },
@@ -3669,6 +3675,17 @@ def test_run_marks_done_on_completed(todo_file):
     )
 
     delete_paths: list[str] = []
+    current_notif = {
+        "id": "777",
+        "reason": "subscribed",
+        "updated_at": "2026-07-01T12:00:00Z",
+        "subject": {
+            "title": "stale PR",
+            "url": "https://api.github.com/repos/o/r/pulls/777",
+            "type": "PullRequest",
+        },
+        "repository": {"full_name": "o/r"},
+    }
 
     def fake_run(cmd, *args, **kwargs):
         if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
@@ -3677,7 +3694,7 @@ def test_run_marks_done_on_completed(todo_file):
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         responses = {
             "/user": json.dumps({"login": "zkoppert"}),
-            "/notifications?all=true": json.dumps([]),
+            "/notifications?all=true": json.dumps([current_notif]),
         }
         idx = cmd.index("api")
         after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
@@ -3693,14 +3710,9 @@ def test_run_marks_done_on_completed(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
 
-    assert stats.marked_done == 1
+    assert stats.dropped == 1
+    assert stats.marked_done == 0
     assert any("/notifications/threads/777" in p for p in delete_paths)
-    data = yaml.safe_load(todo_file.read_text())
-    entry = data["prioritized"]["q1_do_first"][0]
-    assert entry["notification"]["marked_done"] is True
-    assert entry["notification"]["marked_done_at"] == (
-        datetime.date.today().isoformat()
-    )
 
 
 def test_run_handles_empty_notifications(todo_file):
@@ -5820,6 +5832,39 @@ def test_build_done_archive_entry_from_tracked_carries_thread_id():
     assert entry["title"] == "Cleanup script (github/example)"
 
 
+def test_build_done_archive_entry_from_tracked_carries_terminal_boundary():
+    tracked = {
+        "id": "pr-merged",
+        "title": "Cleanup script (github/example)",
+        "source": "github-notification",
+        "notification": {
+            "thread_id": "tid-123",
+            "url": "https://api.github.com/repos/github/example/pulls/42",
+            "reason": "author",
+            "repo": "github/example",
+            "captured_at": "2026-07-01T12:34:56Z",
+            "marked_done_at": "2026-07-03T12:34:56Z",
+            "terminal_recorded_at": "2026-07-03T12:34:56Z",
+        },
+    }
+    entry = triage.build_done_archive_entry_from_tracked(tracked)
+    assert entry["notification"]["terminal_recorded_at"] == "2026-07-03T12:34:56Z"
+
+
+def test_reset_terminal_notification_clears_terminal_recorded_at():
+    notification = {
+        "marked_done": True,
+        "marked_done_at": "2026-07-03T12:34:56Z",
+        "terminal_recorded_at": "2026-07-03T12:34:56Z",
+        "terminal_disposition": "completed",
+    }
+    triage._reset_terminal_notification(notification)
+    assert "marked_done" not in notification
+    assert "marked_done_at" not in notification
+    assert "terminal_recorded_at" not in notification
+    assert "terminal_disposition" not in notification
+
+
 def test_notification_has_new_activity_uses_archive_captured_at():
     notif = {
         "id": "55555",
@@ -5903,6 +5948,36 @@ def test_notification_has_new_activity_prefers_terminal_recorded_at():
         )
         is True
     )
+
+
+def test_current_notification_is_clearable_allows_newer_passive_event(todo_file):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/1"
+    ledger.capture(
+        source_id="thread-passive",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    ledger.record_terminal(
+        source_id="thread-passive",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    current = _notif("subscribed", id="thread-passive", updated_at="2026-07-02T12:00:00Z")
+    current["subject"].pop("latest_comment_url", None)
+    current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/1"
+    current["repository"] = {"full_name": "o/r"}
+    with patch("triage.fetch_notifications", return_value=[current]):
+        assert triage._current_notification_is_clearable(
+            url=artifact,
+            thread_id="thread-passive",
+            reason="subscribed",
+            ledger=ledger,
+            my_login="zkoppert",
+        )
 
 
 def _stale_self_authored_entry(entry_id: str, pr_number: int) -> dict:
@@ -6889,6 +6964,41 @@ def test_ledger_record_terminal_keeps_newer_boundary(todo_file: Path):
          WHERE source_id = ?
         """,
         ("thread-a",),
+    )
+    assert rows == [{"terminal_recorded_at": "2026-07-03T12:00:00Z"}]
+
+
+def test_reconcile_tracker_rows_to_ledger_uses_terminal_recorded_at(todo_file: Path):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    tracked = {
+        "id": "done-1",
+        "title": "Cleanup script (github/example)",
+        "source": "github-notification",
+        "notification": {
+            "thread_id": "thread-done",
+            "url": "https://github.com/o/r/pull/1",
+            "reason": "author",
+            "repo": "o/r",
+            "captured_at": "2026-07-01T12:00:00Z",
+            "marked_done_at": "2026-07-03T12:00:00Z",
+            "terminal_recorded_at": "2026-07-03T12:00:00Z",
+        },
+    }
+    data = {"inbox": [], "done": [tracked], "prioritized": {}}
+    triage.reconcile_tracker_rows_to_ledger(
+        data,
+        ledger=ledger,
+        dry_run=False,
+        stats=triage.TriageStats(),
+    )
+
+    rows = ledger._rows(
+        """
+        SELECT terminal_recorded_at
+          FROM notifications
+         WHERE source_id = ?
+        """,
+        ("thread-done",),
     )
     assert rows == [{"terminal_recorded_at": "2026-07-03T12:00:00Z"}]
 

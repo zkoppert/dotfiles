@@ -1027,7 +1027,7 @@ def _current_notification_is_clearable(
     if record is None or boundary is None:
         if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
             return False
-    elif current_updated_at is not None and current_updated_at > boundary:
+    elif current_updated_at is not None and current_updated_at < boundary:
         return False
     subject = current.get("subject") or {}
     latest_url = str(subject.get("latest_comment_url") or "")
@@ -1181,6 +1181,21 @@ def build_done_archive_entry_from_tracked(entry: dict[str, Any]) -> dict[str, An
     """
     notif = entry.get("notification") or {}
     today = datetime.date.today().isoformat()
+    notification = {
+        "thread_id": str(notif.get("thread_id") or ""),
+        "url": notif.get("url") or "",
+        "reason": notif.get("reason") or "author",
+        "repo": notif.get("repo") or "unknown",
+        "captured_at": str(
+            notif.get("captured_at") or entry.get("added") or utcnow_iso()
+        ),
+    }
+    marked_done_at = notif.get("marked_done_at")
+    if marked_done_at:
+        notification["marked_done_at"] = str(marked_done_at)
+    terminal_recorded_at = notif.get("terminal_recorded_at") or marked_done_at
+    if terminal_recorded_at:
+        notification["terminal_recorded_at"] = str(terminal_recorded_at)
     return {
         "id": entry.get("id") or "archived-notification",
         "title": entry.get("title") or "Auto-archived PR",
@@ -1199,15 +1214,7 @@ def build_done_archive_entry_from_tracked(entry: dict[str, Any]) -> dict[str, An
         "completed": today,
         "link": notif.get("url") or "",
         "notes": "",
-        "notification": {
-            "thread_id": str(notif.get("thread_id") or ""),
-            "url": notif.get("url") or "",
-            "reason": notif.get("reason") or "author",
-            "repo": notif.get("repo") or "unknown",
-            "captured_at": str(
-                notif.get("captured_at") or entry.get("added") or utcnow_iso()
-            ),
-        },
+        "notification": notification,
     }
 
 
@@ -1971,6 +1978,7 @@ def _remove_item_from_current_section(
 def _reset_terminal_notification(notification: dict[str, Any]) -> None:
     notification.pop("marked_done", None)
     notification.pop("marked_done_at", None)
+    notification.pop("terminal_recorded_at", None)
     notification.pop("terminal_disposition", None)
 
 
@@ -2498,7 +2506,13 @@ def reconcile_tracker_rows_to_ledger(
                 worker="tracker-reconcile",
                 terminal_disposition=disposition,
                 queue_clear=not bool(notif.get("marked_done")),
-                event_at=str(notif.get("captured_at") or notif.get("updated_at") or utcnow_iso()),
+                event_at=str(
+                    notif.get("terminal_recorded_at")
+                    or notif.get("marked_done_at")
+                    or notif.get("captured_at")
+                    or notif.get("updated_at")
+                    or utcnow_iso()
+                ),
             )
 
 
@@ -3092,11 +3106,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         mark_done_delta = MarkDoneDelta(
             item_id=str(item.get("id") or ""),
             thread_id=thread_id,
-            marked_done_at=str(
-                notif_meta.get("updated_at")
-                or notif_meta.get("captured_at")
-                or datetime.date.today().isoformat()
-            ),
+            marked_done_at=datetime.date.today().isoformat(),
             terminal_recorded_at=utcnow_iso(),
             terminal_disposition=disposition,
         )
