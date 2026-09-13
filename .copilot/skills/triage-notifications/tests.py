@@ -2123,10 +2123,11 @@ def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 1
+    assert stats.added_q1 == 0
+    assert stats.added_inbox == 1
     data = yaml.safe_load(todo_file.read_text())
-    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
-    notify_mock.assert_called_once()
+    assert data["inbox"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_not_called()
 
 
 def test_run_preserves_direct_mention_across_pr_issue_and_review_comments(todo_file):
@@ -2167,10 +2168,11 @@ def test_run_preserves_direct_mention_across_pr_issue_and_review_comments(todo_f
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 1
+    assert stats.added_q1 == 0
+    assert stats.added_inbox == 1
     data = yaml.safe_load(todo_file.read_text())
-    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
-    notify_mock.assert_called_once()
+    assert data["inbox"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_not_called()
 
 
 def test_run_routes_dependabot_comment_mention_to_q1(todo_file):
@@ -5040,9 +5042,8 @@ def test_classify_super_linter_github_fork_subscribed_drops():
     assert "subscription allowlist" in c.reason
 
 
-def test_classify_super_linter_github_fork_review_requested_drops():
-    """review_requested on the `github/super-linter` fork drops - I only
-    care about direct mentions there, not review traffic."""
+def test_classify_super_linter_github_fork_review_requested_goes_to_q2():
+    """review_requested on the `github/super-linter` fork stays scheduled."""
     c = triage.classify(
         _superlinter_notif("review_requested", owner="github"),
         my_login="zkoppert",
@@ -5050,8 +5051,19 @@ def test_classify_super_linter_github_fork_review_requested_drops():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "maintainer",
     )
-    assert c.bucket == triage.BUCKET_DROP
-    assert "subscription allowlist" in c.reason
+    assert c.bucket == triage.BUCKET_Q2
+
+
+@pytest.mark.parametrize("title", ["Flaky test: widget", "Enable Dependabot"])
+def test_review_requested_survives_title_drop_patterns(title):
+    c = triage.classify(
+        _repo_notif("review_requested", repo="some-org/x", title=title),
+        my_login="zkoppert",
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_super_linter_github_fork_mention_kept():

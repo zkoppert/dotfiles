@@ -669,13 +669,17 @@ def _comment_collection_paths(subject: dict[str, Any], latest_path: str) -> list
     return list(dict.fromkeys(paths))
 
 
+_COMMENT_HISTORY_INCOMPLETE = object()
+
+
 def fetch_latest_comment(
     notif: dict[str, Any],
-) -> tuple[str | None, str | None]:
-    """Return the latest author and bodies of comments relevant to a notification.
+    *,
+    my_login: str | None = None,
+) -> tuple[str | None, Any]:
+    """Return the latest author and comment body relevant to a notification.
 
-    Returns (None, None) if unavailable. Used to detect super-linter posts
-    and bot-noise comments that don't @-mention the user.
+    Returns (None, None) if unavailable.
     """
     subject = notif.get("subject") or {}
     latest = subject.get("latest_comment_url")
@@ -684,12 +688,13 @@ def fetch_latest_comment(
     path = latest.replace("https://api.github.com", "")
     collection_paths = _comment_collection_paths(subject, path)
     collected: list[tuple[str, int, int, int, dict[str, Any]]] = []
+    last_read_at = notif.get("last_read_at")
     for collection_index, collection_path in enumerate(collection_paths):
         try:
-            out = run_gh(
-                ["api", collection_path, "--method", "GET", "--paginate", "--slurp"],
-                timeout=20,
-            )
+            command = ["api", collection_path, "--method", "GET", "--paginate", "--slurp"]
+            if last_read_at:
+                command[4:4] = ["-f", f"since={last_read_at}"]
+            out = run_gh(command, timeout=20)
             pages = json.loads(out)
             pages_list = pages if isinstance(pages, list) else [pages]
             for page_index, page in enumerate(pages_list):
@@ -697,7 +702,9 @@ def fetch_latest_comment(
                 for comment_index, comment in enumerate(comments):
                     if not isinstance(comment, dict):
                         continue
-                    stamp = str(comment.get("updated_at") or comment.get("created_at") or "")
+                    stamp = str(
+                        comment.get("updated_at") or comment.get("created_at") or ""
+                    )
                     collected.append(
                         (stamp, collection_index, page_index, comment_index, comment)
                     )
@@ -711,15 +718,23 @@ def fetch_latest_comment(
     if collected:
         collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]))
         comments = [entry[4] for entry in collected]
-        author = (comments[-1].get("user") or {}).get("login")
-        bodies = "\n".join(str(comment.get("body") or "") for comment in comments)
-        return author, bodies
+        latest_comment = comments[-1]
+        author = (latest_comment.get("user") or {}).get("login")
+        latest_body = str(latest_comment.get("body") or "")
+        if last_read_at:
+            bodies = "\n".join(str(comment.get("body") or "") for comment in comments)
+            return author, bodies
+        if len(comments) == 1:
+            return author, latest_body
+        if my_login and mentions_me(latest_body, my_login):
+            return author, latest_body
+        return None, _COMMENT_HISTORY_INCOMPLETE
 
     try:
         out = run_gh(["api", path], timeout=20)
         data = json.loads(out)
         author = (data.get("user") or {}).get("login")
-        body = data.get("body") or ""
+        body = str(data.get("body") or "")
         return author, body
     except (
         subprocess.CalledProcessError,
@@ -775,13 +790,27 @@ def classify(
         state = state_fetcher(notif)
         if state in CLOSED_STATES:
             return Classification(BUCKET_DROP, f"comment on {state} {subject_type}")
-        author, body = comment_fetcher(notif)
+        if comment_fetcher is fetch_latest_comment:
+            author, body = comment_fetcher(notif, my_login=my_login)
+        else:
+            author, body = comment_fetcher(notif)
+        if body is _COMMENT_HISTORY_INCOMPLETE:
+            return Classification(BUCKET_INBOX, "comment history incomplete")
         if mentions_me(body, my_login):
             return Classification(
                 BUCKET_Q1,
                 f"@mention in comment by @{author}",
                 direct_mention=True,
             )
+        if is_super_linter(author, body):
+            return Classification(BUCKET_DROP, "super-linter comment without @mention")
+        return Classification(BUCKET_DROP, "comment without a direct @mention")
+
+    if reason == "review_requested":
+        state = state_fetcher(notif)
+        if state in CLOSED_STATES:
+            return Classification(BUCKET_DROP, f"review_requested on {state} {subject_type}")
+        return Classification(BUCKET_Q2, "review_requested - scheduled review")
 
     # Title-pattern drop: repetitive system-generated noise (flaky-test
     # reports) and routine `Enable Dependabot` config PRs. Mention/assign
@@ -851,8 +880,6 @@ def classify(
     # read and unread notifications route identically; the DROP rules above
     # already fire for read notifications too, so noise gets cleaned up
     # regardless of read status.
-    if reason == "review_requested":
-        return Classification(BUCKET_Q2, "review_requested - scheduled review")
 
     if reason in Q1_REASONS:  # mention, assign, security_alert
         return Classification(
@@ -866,14 +893,6 @@ def classify(
         # and archive via the closed-state check above). Keep as an inbox
         # status item so I can see my own in-flight work.
         return Classification(BUCKET_INBOX, "author - open PR/issue I opened")
-
-    if reason == "comment":
-        # Under aggressive triage a plain comment is noise UNLESS the body
-        # @-mentions me directly (GitHub occasionally files a direct ping
-        # as `comment`). Closed/merged threads and super-linter posts drop.
-        if is_super_linter(author, body):
-            return Classification(BUCKET_DROP, "super-linter comment without @mention")
-        return Classification(BUCKET_DROP, "comment without a direct @mention")
 
     # Defensive: any KEEP reason not explicitly routed above surfaces for
     # human triage rather than dropping (future-proofing if KEEP_REASONS
