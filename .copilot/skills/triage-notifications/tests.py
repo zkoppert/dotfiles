@@ -117,7 +117,7 @@ def test_classify_assign_goes_to_q1():
     assert c.bucket == triage.BUCKET_Q1
 
 
-def test_classify_security_alert_goes_to_q1():
+def test_classify_security_alert_goes_to_q2():
     c = triage.classify(
         _notif("security_alert"),
         my_login="zkoppert",
@@ -150,7 +150,7 @@ def test_classify_mention_on_my_own_pr_goes_to_q1():
     assert c.direct_mention is True
 
 
-def test_classify_security_alert_on_my_own_pr_still_goes_to_q1():
+def test_classify_security_alert_on_my_own_pr_still_goes_to_q2():
     """The signal in a security_alert is the vulnerability, not the
     assignment, so authorship shouldn't downgrade it."""
     c = triage.classify(
@@ -4643,7 +4643,7 @@ def test_classify_keeps_assign_when_state_unknown():
 def test_classify_skips_state_check_for_non_subject_types():
     """A security_alert subject (RepositoryVulnerabilityAlert) has no
     PR/issue state - classifier must not even call state_fetcher and must
-    route normally to Q1."""
+    route normally to Q2."""
     sec_notif = _notif(
         "security_alert",
         subject={
@@ -5786,7 +5786,7 @@ def test_classify_private_subscription_subscribed_drops_regardless_of_read_state
     assert c.bucket == triage.BUCKET_DROP
 
 
-def test_classify_private_subscription_security_alert_still_routes_to_q1(
+def test_classify_private_subscription_security_alert_still_routes_to_q2(
     private_subscription_filter,
 ):
     """security_alert on the private filtered repo must still reach Q2 - vulnerabilities

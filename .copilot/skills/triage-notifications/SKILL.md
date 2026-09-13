@@ -27,9 +27,9 @@ dropped and cleared from GitHub, and only personal-action items survive.
 2. Classifies each one into DROP / Q1 / Q2 / INBOX based on the rules in
    `triage.py`:
    - **KEEP_REASONS** (`review_requested`, `assign`, `author`, `mention`,
-     `security_alert`) survive: mention/assign/security_alert → Q1,
-     review_requested → Q2 with one-business-day escalation if it remains
-     untouched, `author` → INBOX.
+     `security_alert`) survive: mention/assign → Q1,
+     security_alert → Q2 with one-business-day escalation if it remains
+     untouched, review_requested → Q2, `author` → INBOX.
    - **Everything else** (`subscribed`, `team_mention`, `comment`,
      `state_change`, `ci_activity`, `manual`, ...) is passive noise and
      **drops** (marked done on GitHub).
