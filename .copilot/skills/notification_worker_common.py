@@ -331,6 +331,8 @@ def comment_notification_snapshot(
         )
     )
     latest_entry = relevant[-1]
+    latest_body = str(latest_entry[5].get("body") or "")
+    latest_is_direct = bool(pattern and latest_body and re.search(pattern, latest_body, re.IGNORECASE))
     if watermarks:
         direct_entries = [
             entry
@@ -339,9 +341,11 @@ def comment_notification_snapshot(
             and str(entry[5].get("body") or "")
             and re.search(pattern, str(entry[5].get("body") or ""), re.IGNORECASE)
         ]
+    elif len(relevant) > 1 and not latest_is_direct:
+        history_incomplete = True
+        direct_entries = []
     else:
-        latest_body = str(latest_entry[5].get("body") or "")
-        direct_entries = [latest_entry] if pattern and latest_body and re.search(pattern, latest_body, re.IGNORECASE) else []
+        direct_entries = [latest_entry] if latest_is_direct else []
     latest_by_stream: dict[str, tuple[_dt.datetime | None, int]] = {}
     for entry in relevant:
         latest_by_stream[entry[1]] = (entry[0], entry[2])
@@ -606,13 +610,7 @@ class NotificationLedger:
                         classification = ?,
                         last_seen_at = ?,
                         classified_at = ?,
-                        worker = ?,
-                        terminal_disposition = CASE WHEN ? = 'actionable' THEN NULL ELSE terminal_disposition END,
-                        terminal_recorded_at = CASE WHEN ? = 'actionable' THEN NULL ELSE terminal_recorded_at END,
-                        clear_state = CASE WHEN ? = 'actionable' THEN 'not_applicable' ELSE clear_state END,
-                        clear_attempted_at = CASE WHEN ? = 'actionable' THEN NULL ELSE clear_attempted_at END,
-                        cleared_at = CASE WHEN ? = 'actionable' THEN NULL ELSE cleared_at END,
-                        last_clear_error = CASE WHEN ? = 'actionable' THEN NULL ELSE last_clear_error END
+                        worker = ?
                  WHERE id = ?
                 """,
                 (
@@ -628,12 +626,6 @@ class NotificationLedger:
                     now,
                     now,
                     worker,
-                    classification,
-                    classification,
-                    classification,
-                    classification,
-                    classification,
-                    classification,
                     row_id,
                 ),
             )
@@ -667,16 +659,48 @@ class NotificationLedger:
                     worker="tracker-reconcile",
                     now=now,
                 )
+            current = conn.execute(
+                """
+                SELECT reason, terminal_disposition, clear_state
+                  FROM notifications
+                 WHERE id = ?
+                """,
+                (row_id,),
+            ).fetchone()
+            reactivate = bool(current and current["terminal_disposition"] is not None)
             conn.execute(
                 """
                 UPDATE notifications
                    SET tracker_item_id = ?,
                         tracker_section = ?,
                        tracker_linked_at = COALESCE(tracker_linked_at, ?),
-                       last_seen_at = ?
+                       last_seen_at = ?,
+                       classification = CASE WHEN ? THEN 'actionable' ELSE classification END,
+                       reason = CASE WHEN ? THEN ? ELSE reason END,
+                       terminal_disposition = CASE WHEN ? THEN NULL ELSE terminal_disposition END,
+                       terminal_recorded_at = CASE WHEN ? THEN NULL ELSE terminal_recorded_at END,
+                       clear_state = CASE WHEN ? THEN 'not_applicable' ELSE clear_state END,
+                       clear_attempted_at = CASE WHEN ? THEN NULL ELSE clear_attempted_at END,
+                       cleared_at = CASE WHEN ? THEN NULL ELSE cleared_at END,
+                       last_clear_error = CASE WHEN ? THEN NULL ELSE last_clear_error END
                  WHERE id = ?
                 """,
-                (tracker_item_id, tracker_section, now, now, row_id),
+                (
+                    tracker_item_id,
+                    tracker_section,
+                    now,
+                    now,
+                    reactivate,
+                    reactivate,
+                    str(current["reason"] or "actionable") if current else "actionable",
+                    reactivate,
+                    reactivate,
+                    reactivate,
+                    reactivate,
+                    reactivate,
+                    reactivate,
+                    row_id,
+                ),
             )
             conn.commit()
 
@@ -706,6 +730,38 @@ class NotificationLedger:
                  WHERE source_id = ?
                 """,
                 (reason, tracker_section, now, now, source_id),
+            )
+            conn.commit()
+
+    def suspend_pending_clear(
+        self,
+        *,
+        source_id: str | None,
+        canonical_artifact: str | None,
+    ) -> None:
+        canonical_artifact = (
+            normalize_github_url(canonical_artifact) or canonical_artifact
+        )
+        now = utcnow_iso()
+        with self._connect() as conn:
+            row_id = self._find_row_id(
+                conn,
+                source_id=source_id,
+                canonical_artifact=canonical_artifact,
+            )
+            if row_id is None:
+                return
+            conn.execute(
+                """
+                UPDATE notifications
+                   SET clear_state = 'not_applicable',
+                       clear_attempted_at = NULL,
+                       cleared_at = NULL,
+                       last_clear_error = NULL,
+                       last_seen_at = ?
+                 WHERE id = ?
+                """,
+                (now, row_id),
             )
             conn.commit()
 

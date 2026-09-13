@@ -310,7 +310,9 @@ def test_comment_history_reports_earlier_mention_when_complete():
 
     assert author == "teammate"
     assert body == "ordinary follow-up"
-    assert c.bucket == triage.BUCKET_DROP
+    assert snapshot.direct is None
+    assert snapshot.history_complete is False
+    assert c.bucket == triage.BUCKET_INBOX
     assert c.direct_mention is False
 
 
@@ -2486,14 +2488,11 @@ def test_run_preserves_direct_mention_followed_by_newer_comment(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 1
+    assert stats.added_q1 == 0
     assert stats.added_inbox == 0
     assert stats.dropped == 0
-    notify_mock.assert_called_once_with(
-        "GitHub mention",
-        "Sample PR (zkoppert/example)",
-        "https://github.com/zkoppert/example/pull/42",
-    )
+    assert stats.unread == 1
+    notify_mock.assert_not_called()
 
 
 def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
@@ -2696,6 +2695,76 @@ def test_run_comment_history_incomplete_defers_until_recovery(todo_file):
     data = yaml.safe_load(todo_file.read_text())
     assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
     notify_mock.assert_called_once()
+
+
+def test_run_comment_history_incomplete_suspends_pending_clear(todo_file):
+    notif = _notif("comment")
+    ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
+    ledger.capture(
+        source_id="1001",
+        canonical_artifact=triage.web_url(notif),
+        classification="policy_drop",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_id="1001",
+        canonical_artifact=triage.web_url(notif),
+        terminal_disposition="irrelevant",
+    )
+    ledger.queue_clear(
+        source_id="1001",
+        canonical_artifact=triage.web_url(notif),
+    )
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+        "/repos/zkoppert/example/pulls/42": json.dumps({"state": "open"}),
+        "/repos/zkoppert/example/issues/42/comments": json.dumps(
+            [
+                [
+                    {
+                        "user": {"login": "teammate"},
+                        "body": "Could you investigate this?",
+                    }
+                ]
+            ]
+        ),
+        "/repos/zkoppert/example/pulls/42/reviews": json.dumps([]),
+    }
+
+    delete_calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        joined = " ".join(cmd)
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(joined)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if "/repos/zkoppert/example/pulls/42/comments" in joined:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=20)
+        return _gh_returns(responses)(cmd, *args, **kwargs)
+    with patch("triage.subprocess.run", side_effect=fake_run), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
+    assert stats.unread == 1
+    assert stats.added_q1 == 0
+    assert stats.added_inbox == 0
+    assert delete_calls == []
+    notify_mock.assert_not_called()
+    rows = ledger._rows(
+        "SELECT clear_state, clear_attempted_at, cleared_at, last_clear_error FROM notifications WHERE source_id = ?",
+        ("1001",),
+    )
+    assert rows == [
+        {
+            "clear_state": "not_applicable",
+            "clear_attempted_at": None,
+            "cleared_at": None,
+            "last_clear_error": None,
+        }
+    ]
 
 
 def test_run_routes_dependabot_comment_mention_to_q1(todo_file):
@@ -6253,7 +6322,7 @@ def test_ledger_actionable_thread_does_not_claim_terminal_canonical_row(
     assert rows[1]["clear_state"] == "not_applicable"
 
 
-def test_ledger_actionable_capture_reactivates_terminal_row(todo_file: Path):
+def test_ledger_actionable_link_tracker_reactivates_terminal_row(todo_file: Path):
     ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
     artifact = "https://github.com/o/r/pull/1"
     ledger.capture(
@@ -6278,7 +6347,6 @@ def test_ledger_actionable_capture_reactivates_terminal_row(todo_file: Path):
         classification="actionable",
         worker="test",
     )
-
     rows = ledger._rows("""
         SELECT classification, terminal_disposition, clear_state
           FROM notifications
@@ -6287,8 +6355,30 @@ def test_ledger_actionable_capture_reactivates_terminal_row(todo_file: Path):
     assert rows == [
         {
             "classification": "actionable",
+            "terminal_disposition": "irrelevant",
+            "clear_state": "pending",
+        }
+    ]
+
+    ledger.link_tracker(
+        source_id="thread-a",
+        canonical_artifact=artifact,
+        tracker_item_id="todo-1",
+        tracker_section="prioritized.q1_do_first",
+    )
+
+    rows = ledger._rows("""
+        SELECT classification, terminal_disposition, clear_state, tracker_item_id, tracker_section
+          FROM notifications
+         WHERE source_id = ?
+        """, ("thread-a",))
+    assert rows == [
+        {
+            "classification": "actionable",
             "terminal_disposition": None,
             "clear_state": "not_applicable",
+            "tracker_item_id": "todo-1",
+            "tracker_section": "prioritized.q1_do_first",
         }
     ]
 

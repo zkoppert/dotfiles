@@ -2505,6 +2505,11 @@ def run(args: argparse.Namespace) -> TriageStats:
             )
             if comment_snapshot is not None and not comment_snapshot.history_complete:
                 if comment_snapshot.direct is not True:
+                    if ledger is not None and thread_id:
+                        ledger.suspend_pending_clear(
+                            source_id=thread_id,
+                            canonical_artifact=canonical_url,
+                        )
                     stats.unread += 1
                     continue
             if (
