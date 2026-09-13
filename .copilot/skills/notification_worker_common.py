@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
@@ -115,19 +116,32 @@ def _comment_collection_paths(subject: dict[str, Any], latest_path: str) -> list
     return list(dict.fromkeys(paths))
 
 
-def comment_notification_directness(
+@dataclass(frozen=True)
+class CommentNotificationSnapshot:
+    author: str | None
+    body: str | None
+    direct: bool | None
+    history_complete: bool
+
+
+def comment_notification_snapshot(
     notif: dict[str, Any],
     *,
     my_login: str,
     run_gh,
     since: str | None = None,
-) -> bool | None:
+) -> CommentNotificationSnapshot | None:
     subject = notif.get("subject") or {}
     latest = subject.get("latest_comment_url")
     if not latest:
         return None
     path = str(latest).replace("https://api.github.com", "")
     since_dt = parse_iso_datetime(since)
+    pattern = (
+        rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
+        if my_login
+        else None
+    )
     collected: list[tuple[str, int, int, int, dict[str, Any]]] = []
     history_incomplete = False
     for collection_index, collection_path in enumerate(_comment_collection_paths(subject, path)):
@@ -167,28 +181,60 @@ def comment_notification_directness(
                 if entry_dt is not None and entry_dt > since_dt:
                     relevant.append(entry)
         if not relevant:
-            return None if history_incomplete else False
-        if history_incomplete:
-            return None
+            if history_incomplete:
+                return CommentNotificationSnapshot(None, None, None, False)
+            return CommentNotificationSnapshot(None, None, False, True)
         latest_comment = relevant[-1][4]
-        body = str(latest_comment.get("body") or "")
-        if not body:
-            return False
-        pattern = rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
-        return re.search(pattern, body, re.IGNORECASE) is not None
+        author = (latest_comment.get("user") or {}).get("login")
+        body = str(latest_comment.get("body") or "") or None
+        direct = False
+        for _stamp, _collection_index, _page_index, _comment_index, comment in relevant:
+            comment_body = str(comment.get("body") or "")
+            if pattern and comment_body and re.search(pattern, comment_body, re.IGNORECASE):
+                direct = True
+                break
+        if history_incomplete:
+            return CommentNotificationSnapshot(author, body, direct if direct else None, False)
+        return CommentNotificationSnapshot(author, body, direct, True)
 
     if since_dt is not None:
-        return None if history_incomplete else False
+        return CommentNotificationSnapshot(None, None, None if history_incomplete else False, False if history_incomplete else True)
     try:
         out = run_gh(["api", path], timeout=20)
         data = json.loads(out)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        if history_incomplete:
+            return CommentNotificationSnapshot(None, None, None, False)
         return None
-    body = str(data.get("body") or "")
-    if not body:
+    author = (data.get("user") or {}).get("login")
+    body = str(data.get("body") or "") or None
+    direct = False
+    if pattern and body and re.search(pattern, body, re.IGNORECASE):
+        direct = True
+    return CommentNotificationSnapshot(
+        author,
+        body,
+        direct if not history_incomplete or direct else None,
+        not history_incomplete,
+    )
+
+
+def comment_notification_directness(
+    notif: dict[str, Any],
+    *,
+    my_login: str,
+    run_gh,
+    since: str | None = None,
+) -> bool | None:
+    snapshot = comment_notification_snapshot(
+        notif,
+        my_login=my_login,
+        run_gh=run_gh,
+        since=since,
+    )
+    if snapshot is None:
         return None
-    pattern = rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
-    return re.search(pattern, body, re.IGNORECASE) is not None
+    return snapshot.direct
 
 
 class NotificationLedger:

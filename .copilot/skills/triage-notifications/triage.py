@@ -59,7 +59,7 @@ from notification_worker_common import (
     ledger_record_clear_result as _ledger_record_clear_result,
 )
 from notification_worker_common import (
-    comment_notification_directness as shared_comment_notification_directness,
+    comment_notification_snapshot as shared_comment_notification_snapshot,
     parse_iso_datetime,
     review_request_escalates_at,
     utcnow_iso,
@@ -685,72 +685,16 @@ def fetch_latest_comment(
 
     Returns (None, None) if unavailable.
     """
-    subject = notif.get("subject") or {}
-    latest = subject.get("latest_comment_url")
-    if not latest:
+    snapshot = shared_comment_notification_snapshot(
+        notif,
+        my_login=my_login or "",
+        run_gh=run_gh,
+    )
+    if snapshot is None:
         return None, None
-    path = latest.replace("https://api.github.com", "")
-
-    def _fetch_comment(api_path: str) -> tuple[str | None, str]:
-        out = run_gh(["api", api_path], timeout=20)
-        data = json.loads(out)
-        author = (data.get("user") or {}).get("login")
-        body = str(data.get("body") or "")
-        return author, body
-
-    collection_paths = _comment_collection_paths(subject, path)
-    collected: list[tuple[str, int, int, int, dict[str, Any]]] = []
-    history_incomplete = False
-    for collection_index, collection_path in enumerate(collection_paths):
-        try:
-            out = run_gh(
-                ["api", collection_path, "--method", "GET", "--paginate", "--slurp"],
-                timeout=20,
-            )
-            pages = json.loads(out)
-            pages_list = pages if isinstance(pages, list) else [pages]
-            for page_index, page in enumerate(pages_list):
-                comments = page if isinstance(page, list) else [page]
-                for comment_index, comment in enumerate(comments):
-                    if not isinstance(comment, dict):
-                        continue
-                    stamp = str(
-                        comment.get("updated_at") or comment.get("created_at") or ""
-                    )
-                    collected.append(
-                        (stamp, collection_index, page_index, comment_index, comment)
-                    )
-        except (
-            subprocess.CalledProcessError,
-            subprocess.TimeoutExpired,
-            json.JSONDecodeError,
-        ) as exc:
-            history_incomplete = True
-            logger.warning(
-                "comment history fetch failed for %s: %s", collection_path, exc
-            )
-
-    if collected:
-        collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]))
-        if history_incomplete:
-            return None, _COMMENT_HISTORY_INCOMPLETE
-        latest_comment = collected[-1][4]
-        author = (latest_comment.get("user") or {}).get("login")
-        body = str(latest_comment.get("body") or "")
-        return author, body
-
-    try:
-        return _fetch_comment(path)
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        json.JSONDecodeError,
-    ) as exc:
-        if history_incomplete:
-            logger.warning("fetch_latest_comment failed for %s: %s", path, exc)
-            return None, _COMMENT_HISTORY_INCOMPLETE
-        logger.warning("fetch_latest_comment failed for %s: %s", path, exc)
-        return None, None
+    if not snapshot.history_complete:
+        return None, _COMMENT_HISTORY_INCOMPLETE
+    return snapshot.author, snapshot.body or ""
 
 
 def is_super_linter(author: str | None, body: str | None) -> bool:
@@ -772,7 +716,7 @@ def mentions_me(body: str | None, my_login: str) -> bool:
 
 def _notification_comment_boundary(tracked_item: dict[str, Any]) -> str | None:
     tracked = tracked_item.get("notification")
-    if not isinstance(tracked, dict):
+    if not isinstance(tracked, dict) or tracked.get("comment_history_incomplete"):
         return None
     for key in ("captured_at", "marked_done_at"):
         value = tracked.get(key)
@@ -791,7 +735,7 @@ def classify(
     my_login: str,
     state_fetcher=fetch_thread_state,
     comment_fetcher=fetch_latest_comment,
-    comment_directness_fetcher=None,
+    comment_snapshot_fetcher=None,
     comment_since: str | None = None,
     subject_author_fetcher=fetch_subject_author,
 ) -> Classification:
@@ -817,6 +761,49 @@ def classify(
         dependabot_bump_author = subject_author_fetcher(notif)
 
     if reason == "comment":
+        snapshot = None
+        if comment_snapshot_fetcher is not None:
+            snapshot = comment_snapshot_fetcher(
+                notif,
+                my_login=my_login,
+                run_gh=run_gh,
+                since=comment_since,
+            )
+        if snapshot is not None:
+            author = snapshot.author
+            body = snapshot.body
+            if snapshot.direct is True:
+                return Classification(
+                    BUCKET_Q1,
+                    f"@mention in comment by @{author}",
+                    direct_mention=True,
+                )
+            if snapshot.direct is None:
+                if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
+                    return Classification(
+                        BUCKET_DROP,
+                        "Dependabot comment history incomplete - left unread for triage-dependabot",
+                        skip_mark_done=True,
+                    )
+                return Classification(BUCKET_INBOX, "comment history incomplete")
+            if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
+                return Classification(
+                    BUCKET_DROP,
+                    "Dependabot comment - left unread for triage-dependabot",
+                    skip_mark_done=True,
+                )
+            if dependabot_bump and dependabot_bump_author is None:
+                return Classification(
+                    BUCKET_DROP,
+                    "Dependabot bump - author lookup unavailable",
+                    skip_mark_done=True,
+                )
+            state = state_fetcher(notif)
+            if state in CLOSED_STATES:
+                return Classification(BUCKET_DROP, f"comment on {state} {subject_type}")
+            if is_super_linter(author, body):
+                return Classification(BUCKET_DROP, "super-linter comment without @mention")
+            return Classification(BUCKET_DROP, "comment without a direct @mention")
         if comment_fetcher is fetch_latest_comment:
             author, body = comment_fetcher(notif, my_login=my_login)
         else:
@@ -829,26 +816,12 @@ def classify(
                     skip_mark_done=True,
                 )
             return Classification(BUCKET_INBOX, "comment history incomplete")
-        direct_comment = None
-        if comment_directness_fetcher is not None:
-            direct_comment = comment_directness_fetcher(
-                notif,
-                my_login=my_login,
-                run_gh=run_gh,
-                since=comment_since,
-            )
-        if direct_comment is True or (
-            direct_comment is None
-            and comment_directness_fetcher is None
-            and mentions_me(body, my_login)
-        ):
+        if mentions_me(body, my_login):
             return Classification(
                 BUCKET_Q1,
                 f"@mention in comment by @{author}",
                 direct_mention=True,
             )
-        if direct_comment is None and comment_directness_fetcher is not None:
-            return Classification(BUCKET_INBOX, "comment history incomplete")
         if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
             return Classification(
                 BUCKET_DROP,
@@ -1024,6 +997,8 @@ def web_url(notif: dict[str, Any]) -> str:
 def build_todo_entry(
     notif: dict[str, Any],
     classification: Classification,
+    *,
+    comment_history_incomplete: bool = False,
 ) -> dict[str, Any]:
     """Construct a todo.yml-shaped entry from a notification."""
     subject = notif.get("subject") or {}
@@ -1050,6 +1025,9 @@ def build_todo_entry(
         },
     }
 
+    if comment_history_incomplete:
+        entry["notification"]["comment_history_incomplete"] = True
+
     if reason == "review_requested":
         escalates_at = review_request_escalates_at(captured_at)
         if escalates_at:
@@ -1068,6 +1046,7 @@ def build_todo_entry(
             }
         )
     return entry
+
 
 
 def notification_has_new_activity(
@@ -2577,6 +2556,7 @@ def run(args: argparse.Namespace) -> TriageStats:
 
     seen_ids = existing_thread_ids(data)
     mutations = TodoMutations()
+    protected_actionable_thread_ids: set[str] = set()
     direct_mention_thread_ids: set[str] = set()
     reopened_thread_ids: set[str] = set()
     attempted_thread_ids: set[str] = set()
@@ -2605,7 +2585,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         classification = classify(
             notif,
             my_login=my_login,
-            comment_directness_fetcher=shared_comment_notification_directness,
+            comment_snapshot_fetcher=shared_comment_notification_snapshot,
             comment_since=comment_since,
         )
         logger.debug(
@@ -2615,6 +2595,8 @@ def run(args: argparse.Namespace) -> TriageStats:
             classification.reason,
         )
         if thread_id and classification.bucket == BUCKET_Q1 and reason in {"mention", "assign", "comment"}:
+            protected_actionable_thread_ids.add(thread_id)
+        if thread_id and classification.direct_mention:
             direct_mention_thread_ids.add(thread_id)
 
         if thread_id and thread_id in seen_ids:
@@ -2683,7 +2665,9 @@ def run(args: argparse.Namespace) -> TriageStats:
             ):
                 stats.already_tracked += 1
                 continue
-            if classification.bucket == BUCKET_Q1 and tracked:
+            if classification.bucket == BUCKET_Q1 and tracked and (
+                tracked_nonterminal or renewed
+            ):
                 mutations.escalate.append(
                     EscalationDelta(
                         item_id="",
@@ -2692,15 +2676,16 @@ def run(args: argparse.Namespace) -> TriageStats:
                             tracker_terminal_disposition(tracked[1], tracked[0])
                         ),
                         reason=reason,
-                        captured_at=str(notif.get("updated_at") or ""),
+                        captured_at=str(notif.get("updated_at") or utcnow_iso()),
                     )
                 )
                 if tracker_terminal_disposition(tracked[1], tracked[0]):
                     reopened_thread_ids.add(thread_id)
             elif (
                 classification.bucket == BUCKET_Q2
-                and tracked_nonterminal
+                and tracked
                 and tracked[0] != "prioritized.q1_do_first"
+                and (tracked_nonterminal or renewed)
             ):
                 mutations.route_existing_q2.append(
                     build_todo_entry(notif, classification)
@@ -2848,7 +2833,13 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
             continue
 
-        entry = build_todo_entry(notif, classification)
+        entry = build_todo_entry(
+            notif,
+            classification,
+            comment_history_incomplete=(
+                reason == "comment" and classification.reason == "comment history incomplete"
+            ),
+        )
         _ledger_capture(
             ledger,
             dry_run=args.dry_run,
@@ -2870,7 +2861,7 @@ def run(args: argparse.Namespace) -> TriageStats:
     for item, section, disposition in items_ready_for_clear(data):
         notif_meta = item["notification"]
         thread_id = str(notif_meta["thread_id"])
-        if thread_id in reopened_thread_ids or thread_id in direct_mention_thread_ids:
+        if thread_id in reopened_thread_ids or thread_id in protected_actionable_thread_ids:
             continue
         terminal_canonical_url: str | None = (
             str(notif_meta.get("url") or item.get("link") or "") or None
@@ -2937,7 +2928,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 not delta.thread_id
                 or (
                     delta.thread_id not in reopened_thread_ids
-                    and delta.thread_id not in direct_mention_thread_ids
+                    and delta.thread_id not in protected_actionable_thread_ids
                 )
             )
         ]

@@ -294,16 +294,20 @@ def test_comment_history_reports_earlier_mention_when_complete():
         raise AssertionError(args)
 
     with patch("triage.run_gh", side_effect=fake_run_gh):
+        author, body = triage.fetch_latest_comment(notif, my_login="zkoppert")
         c = triage.classify(
             notif,
             my_login="zkoppert",
             state_fetcher=lambda _: "open",
             comment_fetcher=triage.fetch_latest_comment,
+            comment_snapshot_fetcher=triage.shared_comment_notification_snapshot,
             subject_author_fetcher=lambda _: "someone-else",
         )
 
-    assert c.bucket == triage.BUCKET_DROP
-    assert c.direct_mention is False
+    assert author == "teammate"
+    assert body == "ordinary follow-up"
+    assert c.bucket == triage.BUCKET_Q1
+    assert c.direct_mention is True
 
 
 def test_comment_history_incomplete_preserves_earlier_mention():
@@ -350,12 +354,14 @@ def test_comment_history_incomplete_preserves_earlier_mention():
             my_login="zkoppert",
             state_fetcher=lambda _: "open",
             comment_fetcher=triage.fetch_latest_comment,
+            comment_snapshot_fetcher=triage.shared_comment_notification_snapshot,
             subject_author_fetcher=lambda _: "someone-else",
         )
 
     assert author is None
     assert body is triage._COMMENT_HISTORY_INCOMPLETE
-    assert c.bucket == triage.BUCKET_INBOX
+    assert c.bucket == triage.BUCKET_Q1
+    assert c.direct_mention is True
 
 
 def test_super_linter_without_mention_drops():
@@ -2361,7 +2367,7 @@ def test_run_preserves_direct_mention_across_pr_issue_and_review_comments(todo_f
     )
 
 
-def test_run_comment_history_failure_keeps_inbox(todo_file):
+def test_run_comment_history_failure_routes_direct_mention_to_q1(todo_file):
     notif = _notif("comment")
     responses = {
         "/user": json.dumps({"login": "zkoppert"}),
@@ -2391,10 +2397,75 @@ def test_run_comment_history_failure_keeps_inbox(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
+    assert stats.added_q1 == 1
+    assert stats.added_inbox == 0
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_called_once()
+
+
+def test_run_comment_history_incomplete_promotes_after_recovery(todo_file):
+    notif = _notif("comment")
+    first_responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+        "/repos/zkoppert/example/pulls/42": json.dumps({"state": "open"}),
+        "/repos/zkoppert/example/issues/42/comments": json.dumps(
+            [
+                [
+                    {
+                        "user": {"login": "teammate"},
+                        "body": "Could you investigate this?",
+                    }
+                ]
+            ]
+        ),
+    }
+    second_responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+        "/repos/zkoppert/example/pulls/42": json.dumps({"state": "open"}),
+        "/repos/zkoppert/example/issues/42/comments": json.dumps(
+            [
+                [
+                    {
+                        "user": {"login": "teammate"},
+                        "body": "Could you investigate this, @zkoppert?",
+                    }
+                ]
+            ]
+        ),
+        "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
+    }
+
+    def first_run(cmd, *args, **kwargs):
+        joined = " ".join(cmd)
+        if "/repos/zkoppert/example/pulls/42/comments" in joined:
+            raise subprocess.CalledProcessError(1, cmd, "", "boom")
+        return _gh_returns(first_responses)(cmd, *args, **kwargs)
+
+    with patch("triage.subprocess.run", side_effect=first_run), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
     assert stats.added_q1 == 0
     assert stats.added_inbox == 1
     data = yaml.safe_load(todo_file.read_text())
-    assert data["inbox"][0]["notification"]["thread_id"] == "1001"
+    assert data["inbox"][0]["notification"]["comment_history_incomplete"] is True
+    notify_mock.assert_not_called()
+
+    with patch("triage.subprocess.run", side_effect=_gh_returns(second_responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
+    assert stats.escalated_review_requests == 1
+    assert stats.added_q1 == 0
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
     notify_mock.assert_not_called()
 
 
