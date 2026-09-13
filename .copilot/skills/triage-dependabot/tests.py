@@ -2649,6 +2649,62 @@ def test_run_skips_super_linter_pr_with_comment_clears_notification(
     mark_mock.assert_called_once_with("thread-super-linter-comment", dry_run=False)
 
 
+def test_run_skips_super_linter_pr_with_stale_comment_keeps_notification(
+    tmp_path: Path,
+) -> None:
+    notif = {
+        "id": "thread-super-linter-stale-comment",
+        "reason": "comment",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/42",
+            "latest_comment_url": "https://api.github.com/repos/o/r/issues/comments/9",
+        },
+    }
+    pr = _base_pr(
+        number=42,
+        url="https://github.com/o/r/pull/42",
+        title="Bump super-linter/super-linter from 7.0.0 to 8.0.0",
+    )
+    args = _make_args(tmp_path)
+    comment_calls = {"count": 0}
+
+    def fake_run_gh(args, *unused_args, **unused_kwargs):
+        path = args[1]
+        if path.endswith("/issues/42/comments"):
+            comment_calls["count"] += 1
+            body = "ordinary follow-up"
+            if comment_calls["count"] > 1:
+                body = "ordinary follow-up @zkoppert"
+            return json.dumps(
+                [[{"body": body, "user": {"login": "teammate"}}]]
+            )
+        if path.endswith("/pulls/42/comments"):
+            return json.dumps([[]])
+        if path.endswith("/pulls/42/reviews"):
+            return json.dumps([[]])
+        raise AssertionError(args)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "run_gh", side_effect=fake_run_gh
+    ), mock.patch.object(
+        td, "do_merge"
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock:
+        stats = td.run(args)
+
+    assert stats.skipped_dependency == 1
+    assert stats.dependabot == 0
+    mark_mock.assert_not_called()
+
+
 def test_run_skips_super_linter_repo_comment_keeps_active_q1_item(
     tmp_path: Path,
 ) -> None:

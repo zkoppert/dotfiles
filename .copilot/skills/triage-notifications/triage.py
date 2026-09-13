@@ -970,6 +970,21 @@ def _notification_activity_boundary(
     return boundary
 
 
+def _is_untouched_q2_review_fallback(
+    tracked_item: dict[str, Any],
+    section: str,
+) -> bool:
+    if section != "prioritized.q2_schedule":
+        return False
+    status = str(tracked_item.get("status") or "pending").lower()
+    if status not in {"", "pending", "not_started"}:
+        return False
+    notification = tracked_item.get("notification")
+    if not isinstance(notification, dict):
+        return False
+    return str(notification.get("reason") or "").lower() == "review_requested"
+
+
 def notification_has_new_activity(
     notif: dict[str, Any],
     tracked_item: dict[str, Any],
@@ -2679,11 +2694,16 @@ def run(args: argparse.Namespace) -> TriageStats:
             ):
                 stats.already_tracked += 1
                 continue
+            allow_dependabot_handoff = bool(
+                classification.skip_mark_done
+                and tracked is not None
+                and _is_untouched_q2_review_fallback(tracked[1], tracked[0])
+            )
             if (
                 tracked_nonterminal
                 and classification.bucket == BUCKET_DROP
                 and not subject_resolved
-                and not classification.skip_mark_done
+                and not allow_dependabot_handoff
             ):
                 stats.already_tracked += 1
                 continue

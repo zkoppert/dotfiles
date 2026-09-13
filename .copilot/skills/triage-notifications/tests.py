@@ -1995,6 +1995,66 @@ def test_run_releases_q2_review_when_dependabot_author_becomes_known(todo_file):
     assert delete_calls == []
 
 
+def test_run_preserves_touched_q2_review_when_dependabot_author_becomes_known(todo_file):
+    item = {
+        "id": "old",
+        "title": "Dependabot review",
+        "status": "in_progress",
+        "quadrant": "q2_schedule",
+        "notification": {
+            "thread_id": "dep-review-1",
+            "reason": "review_requested",
+            "captured_at": "2026-07-01T15:00:00Z",
+            "escalates_at": "2026-07-02T15:00:00Z",
+        },
+    }
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": [], "q2_schedule": [item]},
+                "done": [],
+            }
+        )
+    )
+    notif = _notif(
+        "review_requested",
+        id="dep-review-1",
+        subject={
+            "title": "Bump lodash from 4.17.20 to 4.17.21",
+            "url": "https://api.github.com/repos/some-org/x/pulls/42",
+            "type": "PullRequest",
+        },
+        repository={"full_name": "some-org/x"},
+    )
+    delete_calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        joined = " ".join(cmd)
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(joined)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        responses = {
+            "/user": json.dumps({"login": "zkoppert"}),
+            "/notifications?all=true": json.dumps([notif]),
+            "/repos/some-org/x/pulls/42": json.dumps(
+                {"state": "open", "user": {"login": "dependabot[bot]"}}
+            ),
+        }
+        idx = cmd.index("api")
+        after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
+        path = after[0] if after else ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=responses.get(path, ""), stderr="")
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        stats = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    updated = yaml.safe_load(todo_file.read_text())
+    assert stats.left_for_dependabot == 0
+    assert updated["prioritized"]["q2_schedule"][0]["status"] == "in_progress"
+    assert delete_calls == []
+
+
 def test_run_preserves_existing_review_escalation_deadline(todo_file):
     item = {
         "id": "old",

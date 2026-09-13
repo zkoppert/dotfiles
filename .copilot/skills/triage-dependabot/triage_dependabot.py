@@ -1438,6 +1438,8 @@ def _safe_mark_thread_done(
     context: str,
     ledger: NotificationLedger | None = None,
     canonical_artifact: str | None = None,
+    notif: dict[str, Any] | None = None,
+    my_login: str | None = None,
 ) -> bool:
     """Best-effort wrapper around ``mark_thread_done`` for post-action cleanup.
 
@@ -1459,6 +1461,24 @@ def _safe_mark_thread_done(
     """
     if not thread_id:
         return True
+    if notif is not None and my_login:
+        if not _comment_notification_still_clearable(
+            notif,
+            ledger=ledger,
+            my_login=my_login,
+            thread_id=thread_id,
+            pr_url=canonical_artifact or "",
+        ):
+            logger.info(
+                "skipping mark-done for %s because the current comment is no longer clearable",
+                context,
+            )
+            if ledger is not None and not dry_run:
+                ledger.suspend_pending_clear(
+                    source_id=thread_id,
+                    canonical_artifact=canonical_artifact,
+                )
+            return False
     try:
         mark_thread_done(thread_id, dry_run=dry_run)
         _ledger_record_clear_result(
@@ -1713,11 +1733,38 @@ def _todo_has_active_matching_entry_in_data(
 
 
 
+def _comment_notification_still_clearable(
+    notif: dict[str, Any],
+    *,
+    ledger: NotificationLedger | None,
+    my_login: str,
+    thread_id: str,
+    pr_url: str,
+) -> bool:
+    if (notif.get("reason") or "").lower() != "comment":
+        return True
+    comment_since = None
+    if ledger is not None:
+        comment_since = ledger.comment_watermark(
+            source_id=thread_id or None,
+            canonical_artifact=pr_url,
+        )
+    snapshot = shared_comment_notification_snapshot(
+        notif,
+        my_login=my_login,
+        run_gh=run_gh,
+        since=comment_since,
+    )
+    return bool(snapshot is not None and snapshot.history_complete and snapshot.direct is False)
+
+
 def _clear_dependabot_notification(
     *,
     args: argparse.Namespace,
     ledger: NotificationLedger | None,
     stats: TriageStats,
+    notif: dict[str, Any],
+    my_login: str,
     thread_id: str,
     pr_url: str,
     repo: str,
@@ -1734,6 +1781,18 @@ def _clear_dependabot_notification(
                 data, thread_id=thread_id, pr_url=pr_url
             ):
                 return False
+            if not _comment_notification_still_clearable(
+                notif,
+                ledger=ledger,
+                my_login=my_login,
+                thread_id=thread_id,
+                pr_url=pr_url,
+            ):
+                logger.info(
+                    "skipping clear for %s because the current comment is no longer clearable",
+                    f"{worker} {pr_url}",
+                )
+                return False
             if dry_run:
                 if not _safe_mark_thread_done(
                     thread_id,
@@ -1742,6 +1801,8 @@ def _clear_dependabot_notification(
                     context=f"{worker} {pr_url}",
                     ledger=ledger,
                     canonical_artifact=pr_url,
+                    notif=notif,
+                    my_login=my_login,
                 ):
                     return False
                 stats.stale_removed += _cleanup_stale_entries(
@@ -1771,6 +1832,8 @@ def _clear_dependabot_notification(
                 context=f"{worker} {pr_url}",
                 ledger=ledger,
                 canonical_artifact=pr_url,
+                notif=notif,
+                my_login=my_login,
             ):
                 return False
             removed = remove_stale_entries(
@@ -2224,7 +2287,7 @@ def run(args: argparse.Namespace) -> TriageStats:
     now = datetime.datetime.now(datetime.timezone.utc).timestamp()
     mutations = TodoMutations()
     added_flag_entries: list[dict[str, Any]] = []
-    branch_protection_handoffs: list[FlagTodoDelta] = []
+    branch_protection_handoffs: list[tuple[FlagTodoDelta, dict[str, Any]]] = []
     use_copilot = not args.no_copilot_subagent
     allowed = set(args.allowed_repo)
     coverage_cache: dict[str, int | None] = {}
@@ -2392,6 +2455,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     context=f"archived repo {pr_url}",
                     ledger=ledger,
                     canonical_artifact=pr_url,
+                    notif=notif,
+                    my_login=my_login,
                 ):
                     _record_stale_cleanup(
                         mutations,
@@ -2425,6 +2490,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     args=args,
                     ledger=ledger,
                     stats=stats,
+                    notif=notif,
+                    my_login=my_login,
                     thread_id=thread_id,
                     pr_url=pr_url,
                     repo=repo,
@@ -2488,6 +2555,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                         context=f"closed excluded-dep {pr_url}",
                         ledger=ledger,
                         canonical_artifact=pr_url,
+                        notif=notif,
+                        my_login=my_login,
                     ):
                         _record_stale_cleanup(
                             mutations,
@@ -2519,6 +2588,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     args=args,
                     ledger=ledger,
                     stats=stats,
+                    notif=notif,
+                    my_login=my_login,
                     thread_id=thread_id,
                     pr_url=pr_url,
                     repo=repo,
@@ -2610,6 +2681,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     context=f"merged {pr_url}",
                     ledger=ledger,
                     canonical_artifact=pr_url,
+                    notif=notif,
+                    my_login=my_login,
                 )
                 _record_stale_cleanup(
                     mutations,
@@ -2665,6 +2738,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     context=f"labeled-and-merged {pr_url}",
                     ledger=ledger,
                     canonical_artifact=pr_url,
+                    notif=notif,
+                    my_login=my_login,
                 )
                 _record_stale_cleanup(
                     mutations,
@@ -2713,6 +2788,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     context=f"closed-prerelease {pr_url}",
                     ledger=ledger,
                     canonical_artifact=pr_url,
+                    notif=notif,
+                    my_login=my_login,
                 )
                 _record_stale_cleanup(
                     mutations,
@@ -2764,6 +2841,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                         context=f"terminal-skip {pr_url}",
                         ledger=ledger,
                         canonical_artifact=pr_url,
+                        notif=notif,
+                        my_login=my_login,
                     )
                     _record_stale_cleanup(
                         mutations,
@@ -2803,7 +2882,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 pr_url=pr_url,
             )
             mutations.flags.append(handoff)
-            branch_protection_handoffs.append(handoff)
+            branch_protection_handoffs.append((handoff, notif))
             if pr_url:
                 cooldown_offset = BRANCH_PROTECTION_COOLDOWN_SECONDS
                 cooldown_offset -= ACTION_COOLDOWN_SECONDS
@@ -2844,7 +2923,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 tracker_item_id=str(entry.get("id") or "") or None,
                 tracker_section="prioritized.q1_do_first",
             )
-        for handoff in branch_protection_handoffs:
+        for handoff, handoff_notif in branch_protection_handoffs:
             matched_entry = _matching_entry(active_q1_entries, handoff.entry)
             if matched_entry is None:
                 continue
@@ -2875,6 +2954,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     context=f"branch-protected {handoff.pr_url}",
                     ledger=ledger,
                     canonical_artifact=handoff.pr_url,
+                    notif=handoff_notif,
+                    my_login=my_login,
                 )
     elif mutations.flags and args.dry_run:
         try:
