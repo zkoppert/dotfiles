@@ -1125,6 +1125,39 @@ def test_apply_todo_mutations_reopens_only_fresh_terminal_item():
     assert data["prioritized"]["q1_do_first"] == []
 
 
+def test_apply_todo_mutations_keeps_newer_prune_target():
+    item = {
+        "id": "stale-item",
+        "notification": {
+            "thread_id": "thread-keep",
+            "reason": "subscribed",
+            "captured_at": "2026-07-10T12:00:00Z",
+        },
+    }
+    data = {
+        "inbox": [item],
+        "prioritized": {"q1_do_first": [], "q2_schedule": []},
+        "done": [],
+    }
+    mutations = triage.TodoMutations(
+        prune=[
+            triage.PruneDelta(
+                item_id="stale-item",
+                thread_id="thread-keep",
+                stale_reason="merged",
+                section="inbox",
+                captured_at="2026-07-01T12:00:00Z",
+            )
+        ]
+    )
+
+    applied = triage.apply_todo_mutations(data, mutations)
+
+    assert applied["changed"] is False
+    assert applied["pruned"] == 0
+    assert data["inbox"] == [item]
+
+
 @pytest.mark.parametrize(
     ("target", "expected_section"),
     [("q1_do_first", "q1_do_first"), ("q2_schedule", "q2_schedule")],
@@ -3032,6 +3065,51 @@ def test_run_comment_history_incomplete_suspends_pending_clear(todo_file):
             "last_clear_error": None,
         }
     ]
+
+
+def test_retry_pending_github_clears_keeps_renewed_review_requested(todo_file):
+    notif = _notif(
+        "review_requested",
+        updated_at="2099-01-01T00:00:00Z",
+    )
+    ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
+    canonical = triage.web_url(notif)
+    ledger.capture(
+        source_id=notif["id"],
+        canonical_artifact=canonical,
+        classification="policy_drop",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_id=notif["id"],
+        canonical_artifact=canonical,
+        terminal_disposition="irrelevant",
+    )
+    ledger.queue_clear(source_id=notif["id"], canonical_artifact=canonical)
+    stats = triage.TriageStats()
+    with patch(
+        "triage.fetch_notifications",
+        return_value=[
+            {
+                "id": notif["id"],
+                "reason": notif["reason"],
+                "subject": notif["subject"],
+                "updated_at": notif["updated_at"],
+            }
+        ],
+    ), patch("triage.mark_thread_done") as mark_done, patch(
+        "triage.run_gh", return_value="[]"
+    ):
+        triage.retry_pending_github_clears(
+            ledger,
+            dry_run=False,
+            stats=stats,
+            attempted_thread_ids=set(),
+            protected_thread_ids=set(),
+            my_login="zkoppert",
+        )
+
+    mark_done.assert_not_called()
 
 
 def test_retry_pending_github_clears_keeps_new_direct_comment(todo_file):

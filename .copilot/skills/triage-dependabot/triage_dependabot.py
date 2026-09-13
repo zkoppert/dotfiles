@@ -55,6 +55,7 @@ from notification_worker_common import comment_notification_snapshot as shared_c
 from notification_worker_common import ledger_capture as _ledger_capture
 from notification_worker_common import (
     ledger_record_clear_result as _ledger_record_clear_result,
+    parse_iso_datetime,
 )
 from ruamel.yaml import YAML
 from ruamel.yaml import YAMLError as _RuamelYAMLError
@@ -297,6 +298,7 @@ class PruneTodoDelta:
 
     thread_id: str | None = None
     pr_url: str | None = None
+    captured_at: str = ""
 
 
 @dataclass
@@ -1733,6 +1735,22 @@ def _todo_has_active_matching_entry_in_data(
 
 
 
+def _active_todo_items(data: dict[str, Any]) -> list[Any]:
+    items: list[Any] = []
+    for key in ("inbox", "in_progress", "blocked", "in_review"):
+        value = data.get(key)
+        if isinstance(value, list):
+            items.extend(value)
+    prioritized = data.get("prioritized")
+    if isinstance(prioritized, dict):
+        for quadrant in ("q1_do_first", "q2_schedule", "q3_delegate"):
+            value = prioritized.get(quadrant)
+            if isinstance(value, list):
+                items.extend(value)
+    return items
+
+
+
 def _current_notification_for_clearance(
     *,
     thread_id: str | None,
@@ -1756,6 +1774,19 @@ def _comment_notification_still_clearable(
         return False
     current_reason = str(current.get("reason") or "").lower()
     if current_reason in {"mention", "assign"}:
+        return False
+    record = (
+        ledger.notification_record(source_id=thread_id, canonical_artifact=pr_url)
+        if ledger is not None
+        else None
+    )
+    boundary = None
+    if record is not None:
+        boundary = parse_iso_datetime(
+            str(record.get("terminal_recorded_at") or record.get("first_seen_at") or "")
+        )
+    current_updated_at = parse_iso_datetime(current.get("updated_at"))
+    if boundary is not None and current_updated_at is not None and current_updated_at > boundary:
         return False
     subject = current.get("subject") or {}
     subject_url = str(subject.get("url") or "")
@@ -1905,12 +1936,27 @@ def apply_todo_mutations(
     }
 
     for prune_delta in mutations.prunes:
-        if _todo_has_active_matching_entry_in_data(
-            data,
-            thread_id=prune_delta.thread_id,
-            pr_url=prune_delta.pr_url,
-        ):
-            continue
+        active_entry = _matching_entry(
+            _active_todo_items(data),
+            {
+                "id": prune_delta.thread_id or prune_delta.pr_url or "",
+                "notification": {"thread_id": prune_delta.thread_id or ""},
+            },
+        )
+        if active_entry is not None and prune_delta.captured_at:
+            active_notif = active_entry.get("notification")
+            active_captured_at = None
+            if isinstance(active_notif, dict):
+                active_captured_at = parse_iso_datetime(
+                    str(active_notif.get("captured_at") or "")
+                )
+            prune_boundary = parse_iso_datetime(prune_delta.captured_at)
+            if (
+                active_captured_at is not None
+                and prune_boundary is not None
+                and active_captured_at > prune_boundary
+            ):
+                continue
         removed = remove_stale_entries(
             data,
             thread_id=prune_delta.thread_id,
@@ -2267,6 +2313,7 @@ def _record_stale_cleanup(
     thread_id: str | None,
     pr_url: str | None,
     dry_run: bool,
+    captured_at: str = "",
 ) -> None:
     """Record or preview stale todo entry removal after a PR is resolved."""
     if dry_run:
@@ -2282,7 +2329,9 @@ def _record_stale_cleanup(
             dry_run=True,
         )
         return
-    mutations.prunes.append(PruneTodoDelta(thread_id=thread_id, pr_url=pr_url))
+    mutations.prunes.append(
+        PruneTodoDelta(thread_id=thread_id, pr_url=pr_url, captured_at=captured_at)
+    )
 
 
 def run(args: argparse.Namespace) -> TriageStats:
@@ -2497,6 +2546,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         thread_id=thread_id,
                         pr_url=pr_url,
                         dry_run=args.dry_run,
+                        captured_at=str(notif.get("updated_at") or utcnow_iso()),
                     )
             continue
         if not is_owned_repo(repo):
@@ -2597,6 +2647,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                             thread_id=thread_id,
                             pr_url=pr_url,
                             dry_run=args.dry_run,
+                            captured_at=str(notif.get("updated_at") or utcnow_iso()),
                         )
                 continue
             logger.info(
@@ -2723,6 +2774,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         thread_id=thread_id,
                         pr_url=pr_url,
                         dry_run=args.dry_run,
+                        captured_at=str(notif.get("updated_at") or utcnow_iso()),
                     )
             elif decision.outcome == OUTCOME_LABEL_AND_MERGE:
                 labels = fetch_repo_labels(repo)
@@ -2780,6 +2832,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         thread_id=thread_id,
                         pr_url=pr_url,
                         dry_run=args.dry_run,
+                        captured_at=str(notif.get("updated_at") or utcnow_iso()),
                     )
             elif decision.outcome == OUTCOME_REBASE:
                 do_rebase_comment(repo, number, dry_run=args.dry_run)
@@ -2830,6 +2883,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         thread_id=thread_id,
                         pr_url=pr_url,
                         dry_run=args.dry_run,
+                        captured_at=str(notif.get("updated_at") or utcnow_iso()),
                     )
             elif decision.outcome == OUTCOME_FLAG:
                 _ledger_capture(
@@ -2883,6 +2937,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                             thread_id=thread_id,
                             pr_url=pr_url,
                             dry_run=args.dry_run,
+                            captured_at=str(notif.get("updated_at") or utcnow_iso()),
                         )
                 stats.skipped += 1
         except BranchProtectionBlocked as exc:

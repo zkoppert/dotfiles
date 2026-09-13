@@ -1063,13 +1063,14 @@ def test_apply_todo_mutations_with_lock_preserves_concurrent_manual_edit(
     ]
 
 
-def test_apply_todo_mutations_keeps_active_q1_on_stale_prune() -> None:
+def test_apply_todo_mutations_keeps_newer_active_q1_on_stale_prune() -> None:
     entry = td.build_flag_entry(
         _base_pr(number=7, url="https://github.com/o/r/pull/7"),
         "o/r",
         {"id": "thread-keep", "reason": "subscribed"},
         td.Decision(td.OUTCOME_FLAG, "needs review"),
     )
+    entry["notification"]["captured_at"] = "2026-07-10T12:00:00Z"
     data = {
         "inbox": [],
         "done": [],
@@ -1084,6 +1085,7 @@ def test_apply_todo_mutations_keeps_active_q1_on_stale_prune() -> None:
             td.PruneTodoDelta(
                 thread_id="thread-keep",
                 pr_url="https://github.com/o/r/pull/7",
+                captured_at="2026-07-01T12:00:00Z",
             )
         ]
     )

@@ -752,6 +752,34 @@ class NotificationLedger:
             watermark = row["comment_watermark"]
             return str(watermark) if watermark else None
 
+    def notification_record(
+        self,
+        *,
+        source_id: str | None,
+        canonical_artifact: str | None,
+    ) -> dict[str, Any] | None:
+        canonical_artifact = (
+            normalize_github_url(canonical_artifact) or canonical_artifact
+        )
+        with self._connect() as conn:
+            row_id = self._find_row_id(
+                conn,
+                source_id=source_id,
+                canonical_artifact=canonical_artifact,
+            )
+            if row_id is None:
+                return None
+            row = conn.execute(
+                """
+                SELECT first_seen_at, last_seen_at, terminal_recorded_at,
+                       terminal_disposition, clear_state
+                  FROM notifications
+                 WHERE id = ?
+                """,
+                (row_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def record_comment_watermark(
         self,
         *,

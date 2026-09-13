@@ -441,6 +441,7 @@ class PruneDelta:
     notification_reason: str | None = None
     section: str = ""
     archive_entry: dict[str, Any] | None = None
+    captured_at: str = ""
 
 
 @dataclass
@@ -972,14 +973,12 @@ def _notification_activity_boundary(
 
 def _current_notification_for_clearance(
     *,
-    url: str | None,
     thread_id: str | None,
 ) -> dict[str, Any] | None:
+    if not thread_id:
+        return None
     for current in fetch_notifications():
-        current_thread_id = str(current.get("id") or "")
-        if thread_id and current_thread_id == thread_id:
-            return current
-        if url and web_url(current) == url:
+        if str(current.get("id") or "") == thread_id:
             return current
     return None
 
@@ -992,8 +991,11 @@ def _current_notification_is_clearable(
     ledger: NotificationLedger | None,
     my_login: str,
 ) -> bool:
-    current = _current_notification_for_clearance(url=url, thread_id=thread_id)
+    current = _current_notification_for_clearance(thread_id=thread_id)
     if current is None:
+        return False
+    current_reason = str(current.get("reason") or "").lower()
+    if current_reason in {"mention", "assign"}:
         return False
     comment_since = None
     if ledger is not None and thread_id:
@@ -1001,18 +1003,28 @@ def _current_notification_is_clearable(
             source_id=thread_id,
             canonical_artifact=url,
         )
-    classification = classify(
-        current,
-        my_login=my_login,
-        comment_snapshot_fetcher=shared_comment_notification_snapshot,
-        comment_since=comment_since,
+    record = (
+        ledger.notification_record(source_id=thread_id, canonical_artifact=url)
+        if ledger is not None
+        else None
     )
-    if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
+    boundary = None
+    if record is not None:
+        boundary = parse_iso_datetime(
+            str(record.get("terminal_recorded_at") or record.get("first_seen_at") or "")
+        )
+    current_updated_at = parse_iso_datetime(current.get("updated_at"))
+    if boundary is not None and current_updated_at is not None and current_updated_at > boundary:
         return False
     subject = current.get("subject") or {}
-    if subject.get("latest_comment_url"):
+    latest_url = str(subject.get("latest_comment_url") or "")
+    if latest_url:
+        probe = dict(current)
+        probe_subject = dict(subject)
+        probe_subject["latest_comment_url"] = latest_url
+        probe["subject"] = probe_subject
         snapshot = shared_comment_notification_snapshot(
-            current,
+            probe,
             my_login=my_login,
             run_gh=run_gh,
             since=comment_since,
@@ -1021,6 +1033,8 @@ def _current_notification_is_clearable(
             not snapshot.history_complete or snapshot.direct is True
         ):
             return False
+    elif current_reason == "comment":
+        return False
     return True
 
 
@@ -1456,6 +1470,33 @@ def apply_todo_mutations(
     }
 
     for prune_delta in [*mutations.prune, *mutations.route_existing_drop]:
+        active_match = None
+        for _, bucket in _active_notification_buckets(data):
+            for item in bucket:
+                if not isinstance(item, dict):
+                    continue
+                if prune_delta.item_id and item.get("id") == prune_delta.item_id:
+                    active_match = item
+                    break
+                if prune_delta.thread_id and _item_thread_id(item) == prune_delta.thread_id:
+                    active_match = item
+                    break
+            if active_match is not None:
+                break
+        if active_match is not None and prune_delta.captured_at:
+            active_notif = active_match.get("notification")
+            active_captured_at = None
+            if isinstance(active_notif, dict):
+                active_captured_at = parse_iso_datetime(
+                    str(active_notif.get("captured_at") or "")
+                )
+            prune_boundary = parse_iso_datetime(prune_delta.captured_at)
+            if (
+                active_captured_at is not None
+                and prune_boundary is not None
+                and active_captured_at > prune_boundary
+            ):
+                continue
         removed = _remove_pruned_entry(data, prune_delta)
         if removed:
             applied["pruned"] += removed
@@ -2282,6 +2323,7 @@ def _stale_notification_prune_delta(
         notification_reason=notification_reason or None,
         section=section,
         archive_entry=archive_entry,
+        captured_at=str(notif.get("captured_at") or notif.get("updated_at") or ""),
     )
 
 
@@ -2868,6 +2910,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         stale_reason=classification.reason,
                         notification_reason=reason,
                         section=tracked[0],
+                        captured_at=str(notif.get("updated_at") or utcnow_iso()),
                     )
                 )
                 if classification.skip_mark_done:
