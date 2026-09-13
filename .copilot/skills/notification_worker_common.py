@@ -129,7 +129,6 @@ class NotificationLedger:
                 """
                 CREATE TABLE IF NOT EXISTS notifications (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  source_type TEXT NOT NULL,
                   source_id TEXT,
                   canonical_artifact TEXT,
                   title TEXT NOT NULL DEFAULT '',
@@ -155,7 +154,9 @@ class NotificationLedger:
             columns = {
                 str(row[1]) for row in conn.execute("PRAGMA table_info(notifications)")
             }
-            for obsolete_column in ("lifecycle_state", "payload_json"):
+            conn.execute("DROP INDEX IF EXISTS idx_notifications_source")
+            conn.execute("DROP INDEX IF EXISTS idx_notifications_canonical")
+            for obsolete_column in ("source_type", "lifecycle_state", "payload_json"):
                 if obsolete_column in columns:
                     conn.execute(
                         f"ALTER TABLE notifications DROP COLUMN {obsolete_column}"
@@ -163,15 +164,14 @@ class NotificationLedger:
             conn.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_source
-                ON notifications (source_type, source_id)
+                ON notifications (source_id)
                 WHERE source_id IS NOT NULL AND source_id != ''
                 """
             )
-            conn.execute("DROP INDEX IF EXISTS idx_notifications_canonical")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_notifications_canonical
-                ON notifications (source_type, canonical_artifact)
+                ON notifications (canonical_artifact)
                 WHERE canonical_artifact IS NOT NULL AND canonical_artifact != ''
                 """
             )
@@ -181,14 +181,13 @@ class NotificationLedger:
         self,
         conn: sqlite3.Connection,
         *,
-        source_type: str,
         source_id: str | None,
         canonical_artifact: str | None,
     ) -> int | None:
         if source_id:
             row = conn.execute(
-                "SELECT id FROM notifications WHERE source_type = ? AND source_id = ?",
-                (source_type, source_id),
+                "SELECT id FROM notifications WHERE source_id = ?",
+                (source_id,),
             ).fetchone()
             if row:
                 return int(row["id"])
@@ -196,11 +195,10 @@ class NotificationLedger:
             row = conn.execute(
                 """
                 SELECT id FROM notifications
-                 WHERE source_type = ?
-                   AND canonical_artifact = ?
+                 WHERE canonical_artifact = ?
                    AND (source_id IS NULL OR source_id = '')
                 """,
-                (source_type, canonical_artifact),
+                (canonical_artifact,),
             ).fetchone()
             if row:
                 return int(row["id"])
@@ -210,7 +208,6 @@ class NotificationLedger:
         self,
         conn: sqlite3.Connection,
         *,
-        source_type: str,
         source_id: str | None,
         canonical_artifact: str | None,
         classification: str,
@@ -224,13 +221,12 @@ class NotificationLedger:
         cur = conn.execute(
             """
             INSERT INTO notifications (
-              source_type, source_id, canonical_artifact, title, reason, repo,
+              source_id, canonical_artifact, title, reason, repo,
               classification, clear_state, first_seen_at,
               last_seen_at, classified_at, worker
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'not_applicable', ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 'not_applicable', ?, ?, ?, ?)
             """,
             (
-                source_type,
                 source_id,
                 canonical_artifact,
                 title,
@@ -249,7 +245,6 @@ class NotificationLedger:
         self,
         conn: sqlite3.Connection,
         *,
-        source_type: str,
         source_id: str,
         canonical_artifact: str | None,
     ) -> int | None:
@@ -262,8 +257,7 @@ class NotificationLedger:
              WHERE id = (
                        SELECT MIN(id)
                          FROM notifications
-                         WHERE source_type = ?
-                           AND canonical_artifact = ?
+                         WHERE canonical_artifact = ?
                            AND (source_id IS NULL OR source_id = '')
                            AND terminal_disposition IS NULL
                            AND clear_state = 'not_applicable'
@@ -272,16 +266,13 @@ class NotificationLedger:
                AND NOT EXISTS (
                        SELECT 1
                          FROM notifications
-                        WHERE source_type = ?
-                          AND source_id = ?
+                        WHERE source_id = ?
                    )
             RETURNING id
             """,
             (
                 source_id,
-                source_type,
                 canonical_artifact,
-                source_type,
                 source_id,
             ),
         ).fetchone()
@@ -290,7 +281,6 @@ class NotificationLedger:
     def capture(
         self,
         *,
-        source_type: str,
         source_id: str | None,
         canonical_artifact: str | None,
         classification: str,
@@ -304,22 +294,19 @@ class NotificationLedger:
         with self._connect() as conn:
             row_id = self._find_row_id(
                 conn,
-                source_type=source_type,
                 source_id=source_id,
                 canonical_artifact=canonical_artifact,
             )
             if row_id is None and source_id:
                 row_id = self._claim_canonical_row(
                     conn,
-                    source_type=source_type,
-                    source_id=source_id,
+                        source_id=source_id,
                     canonical_artifact=canonical_artifact,
                 )
             if row_id is None:
                 row_id = self._insert_row(
                     conn,
-                    source_type=source_type,
-                    source_id=source_id,
+                        source_id=source_id,
                     canonical_artifact=canonical_artifact,
                     classification=classification,
                     worker=worker,
@@ -366,7 +353,6 @@ class NotificationLedger:
     def link_tracker(
         self,
         *,
-        source_type: str,
         source_id: str | None,
         canonical_artifact: str | None,
         tracker_item_id: str,
@@ -377,15 +363,13 @@ class NotificationLedger:
         with self._connect() as conn:
             row_id = self._find_row_id(
                 conn,
-                source_type=source_type,
                 source_id=source_id,
                 canonical_artifact=canonical_artifact,
             )
             if row_id is None:
                 row_id = self._insert_row(
                     conn,
-                    source_type=source_type,
-                    source_id=source_id,
+                        source_id=source_id,
                     canonical_artifact=canonical_artifact,
                     classification="actionable",
                     worker="tracker-reconcile",
@@ -407,7 +391,6 @@ class NotificationLedger:
     def reopen_actionable(
         self,
         *,
-        source_type: str,
         source_id: str,
         reason: str,
         tracker_section: str,
@@ -428,17 +411,15 @@ class NotificationLedger:
                        last_clear_error = NULL,
                        last_seen_at = ?,
                        classified_at = ?
-                 WHERE source_type = ?
-                   AND source_id = ?
+                 WHERE source_id = ?
                 """,
-                (reason, tracker_section, now, now, source_type, source_id),
+                (reason, tracker_section, now, now, source_id),
             )
             conn.commit()
 
     def record_terminal(
         self,
         *,
-        source_type: str,
         source_id: str | None,
         canonical_artifact: str | None,
         terminal_disposition: str,
@@ -448,15 +429,13 @@ class NotificationLedger:
         with self._connect() as conn:
             row_id = self._find_row_id(
                 conn,
-                source_type=source_type,
                 source_id=source_id,
                 canonical_artifact=canonical_artifact,
             )
             if row_id is None:
                 row_id = self._insert_row(
                     conn,
-                    source_type=source_type,
-                    source_id=source_id,
+                        source_id=source_id,
                     canonical_artifact=canonical_artifact,
                     classification="actionable",
                     worker="tracker-reconcile",
@@ -477,7 +456,6 @@ class NotificationLedger:
     def queue_clear(
         self,
         *,
-        source_type: str,
         source_id: str | None,
         canonical_artifact: str | None,
     ) -> None:
@@ -486,15 +464,13 @@ class NotificationLedger:
         with self._connect() as conn:
             row_id = self._find_row_id(
                 conn,
-                source_type=source_type,
                 source_id=source_id,
                 canonical_artifact=canonical_artifact,
             )
             if row_id is None:
                 row_id = self._insert_row(
                     conn,
-                    source_type=source_type,
-                    source_id=source_id,
+                        source_id=source_id,
                     canonical_artifact=canonical_artifact,
                     classification="policy_drop",
                     worker="clear-queue",
@@ -518,7 +494,6 @@ class NotificationLedger:
     def record_clear_success(
         self,
         *,
-        source_type: str,
         source_id: str | None,
         canonical_artifact: str | None,
     ) -> None:
@@ -527,15 +502,13 @@ class NotificationLedger:
         with self._connect() as conn:
             row_id = self._find_row_id(
                 conn,
-                source_type=source_type,
                 source_id=source_id,
                 canonical_artifact=canonical_artifact,
             )
             if row_id is None:
                 row_id = self._insert_row(
                     conn,
-                    source_type=source_type,
-                    source_id=source_id,
+                        source_id=source_id,
                     canonical_artifact=canonical_artifact,
                     classification="policy_drop",
                     worker="clear-success",
@@ -558,7 +531,6 @@ class NotificationLedger:
     def record_clear_failure(
         self,
         *,
-        source_type: str,
         source_id: str | None,
         canonical_artifact: str | None,
         error: str,
@@ -568,15 +540,13 @@ class NotificationLedger:
         with self._connect() as conn:
             row_id = self._find_row_id(
                 conn,
-                source_type=source_type,
                 source_id=source_id,
                 canonical_artifact=canonical_artifact,
             )
             if row_id is None:
                 row_id = self._insert_row(
                     conn,
-                    source_type=source_type,
-                    source_id=source_id,
+                        source_id=source_id,
                     canonical_artifact=canonical_artifact,
                     classification="policy_drop",
                     worker="clear-failure",
@@ -606,8 +576,7 @@ class NotificationLedger:
             SELECT source_id, canonical_artifact, classification, reason, repo,
                    terminal_disposition, clear_state
               FROM notifications
-             WHERE source_type = 'github'
-               AND source_id IS NOT NULL
+             WHERE source_id IS NOT NULL
                AND source_id != ''
                AND clear_state IN ('pending', 'failed')
              ORDER BY first_seen_at ASC
@@ -633,7 +602,6 @@ def ledger_capture(
     if ledger is None or dry_run:
         return
     ledger.capture(
-        source_type="github",
         source_id=thread_id,
         canonical_artifact=canonical_artifact,
         classification=classification,
@@ -644,7 +612,6 @@ def ledger_capture(
     )
     if tracker_item_id and tracker_section:
         ledger.link_tracker(
-            source_type="github",
             source_id=thread_id,
             canonical_artifact=canonical_artifact,
             tracker_item_id=tracker_item_id,
@@ -652,14 +619,12 @@ def ledger_capture(
         )
     if terminal_disposition:
         ledger.record_terminal(
-            source_type="github",
             source_id=thread_id,
             canonical_artifact=canonical_artifact,
             terminal_disposition=terminal_disposition,
         )
     if queue_clear:
         ledger.queue_clear(
-            source_type="github",
             source_id=thread_id,
             canonical_artifact=canonical_artifact,
         )
@@ -677,13 +642,11 @@ def ledger_record_clear_result(
         return
     if error is None:
         ledger.record_clear_success(
-            source_type="github",
             source_id=thread_id,
             canonical_artifact=canonical_artifact,
         )
         return
     ledger.record_clear_failure(
-        source_type="github",
         source_id=thread_id,
         canonical_artifact=canonical_artifact,
         error=str(error),

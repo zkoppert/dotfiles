@@ -688,13 +688,13 @@ def fetch_latest_comment(
     path = latest.replace("https://api.github.com", "")
     collection_paths = _comment_collection_paths(subject, path)
     collected: list[tuple[str, int, int, int, dict[str, Any]]] = []
-    last_read_at = notif.get("last_read_at")
+    history_incomplete = False
     for collection_index, collection_path in enumerate(collection_paths):
         try:
-            command = ["api", collection_path, "--method", "GET", "--paginate", "--slurp"]
-            if last_read_at:
-                command[4:4] = ["-f", f"since={last_read_at}"]
-            out = run_gh(command, timeout=20)
+            out = run_gh(
+                ["api", collection_path, "--method", "GET", "--paginate", "--slurp"],
+                timeout=20,
+            )
             pages = json.loads(out)
             pages_list = pages if isinstance(pages, list) else [pages]
             for page_index, page in enumerate(pages_list):
@@ -713,22 +713,18 @@ def fetch_latest_comment(
             subprocess.TimeoutExpired,
             json.JSONDecodeError,
         ) as exc:
+            history_incomplete = True
             logger.warning("comment history fetch failed for %s: %s", collection_path, exc)
 
+    if history_incomplete:
+        return None, _COMMENT_HISTORY_INCOMPLETE
     if collected:
         collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]))
         comments = [entry[4] for entry in collected]
         latest_comment = comments[-1]
         author = (latest_comment.get("user") or {}).get("login")
-        latest_body = str(latest_comment.get("body") or "")
-        if last_read_at:
-            bodies = "\n".join(str(comment.get("body") or "") for comment in comments)
-            return author, bodies
-        if len(comments) == 1:
-            return author, latest_body
-        if my_login and mentions_me(latest_body, my_login):
-            return author, latest_body
-        return None, _COMMENT_HISTORY_INCOMPLETE
+        bodies = "\n".join(str(comment.get("body") or "") for comment in comments)
+        return author, bodies
 
     try:
         out = run_gh(["api", path], timeout=20)
@@ -806,23 +802,6 @@ def classify(
             return Classification(BUCKET_DROP, "super-linter comment without @mention")
         return Classification(BUCKET_DROP, "comment without a direct @mention")
 
-    if reason == "review_requested":
-        state = state_fetcher(notif)
-        if state in CLOSED_STATES:
-            return Classification(BUCKET_DROP, f"review_requested on {state} {subject_type}")
-        return Classification(BUCKET_Q2, "review_requested - scheduled review")
-
-    # Title-pattern drop: repetitive system-generated noise (flaky-test
-    # reports) and routine `Enable Dependabot` config PRs. Mention/assign
-    # reasons skip this so a direct human ping always reaches the inbox.
-    if reason not in TITLE_DROP_PROTECTED_REASONS:
-        for pattern in TITLE_DROP_PATTERNS:
-            if pattern.search(title):
-                return Classification(
-                    BUCKET_DROP,
-                    f"title matches drop pattern /{pattern.pattern}/",
-                )
-
     # Dependabot version-bump PRs: drop from the inbox but normally NEVER
     # mark the GitHub notification done - triage-dependabot consumes those
     # threads and needs them unread. Watch-only repos from private config
@@ -842,6 +821,23 @@ def classify(
                 "Dependabot version bump - left unread for triage-dependabot",
                 skip_mark_done=True,
             )
+
+    if reason == "review_requested":
+        state = state_fetcher(notif)
+        if state in CLOSED_STATES:
+            return Classification(BUCKET_DROP, f"review_requested on {state} {subject_type}")
+        return Classification(BUCKET_Q2, "review_requested - scheduled review")
+
+    # Title-pattern drop: repetitive system-generated noise (flaky-test
+    # reports) and routine `Enable Dependabot` config PRs. Mention/assign
+    # reasons skip this so a direct human ping always reaches the inbox.
+    if reason not in TITLE_DROP_PROTECTED_REASONS:
+        for pattern in TITLE_DROP_PATTERNS:
+            if pattern.search(title):
+                return Classification(
+                    BUCKET_DROP,
+                    f"title matches drop pattern /{pattern.pattern}/",
+                )
 
     # Cheap early drop: if the subject is already closed/merged when the
     # notification first lands, there is nothing left to do. Only check
@@ -2881,7 +2877,6 @@ def run(args: argparse.Namespace) -> TriageStats:
             if ledger is not None:
                 for reopened in applied["reopened_threads"]:
                     ledger.reopen_actionable(
-                        source_type="github",
                         source_id=reopened["thread_id"],
                         reason=reopened["reason"],
                         tracker_section=reopened.get(

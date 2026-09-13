@@ -2032,11 +2032,15 @@ def test_run_notifies_for_direct_mention_in_comment(todo_file):
         "/user": json.dumps({"login": "zkoppert"}),
         "/notifications?all=true": json.dumps([notif]),
         "/repos/zkoppert/example/pulls/42": json.dumps({"state": "open"}),
-        "/repos/zkoppert/example/issues/comments/9": json.dumps(
-            {
-                "user": {"login": "teammate"},
-                "body": "Can you take a look, @zkoppert?",
-            }
+        "/repos/zkoppert/example/issues/42/comments": json.dumps(
+            [
+                [
+                    {
+                        "user": {"login": "teammate"},
+                        "body": "Can you take a look, @zkoppert?",
+                    }
+                ]
+            ]
         ),
         "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
     }
@@ -2123,11 +2127,11 @@ def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 0
-    assert stats.added_inbox == 1
+    assert stats.added_q1 == 1
+    assert stats.added_inbox == 0
     data = yaml.safe_load(todo_file.read_text())
-    assert data["inbox"][0]["notification"]["thread_id"] == "1001"
-    notify_mock.assert_not_called()
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_called_once()
 
 
 def test_run_preserves_direct_mention_across_pr_issue_and_review_comments(todo_file):
@@ -2168,6 +2172,43 @@ def test_run_preserves_direct_mention_across_pr_issue_and_review_comments(todo_f
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
+    assert stats.added_q1 == 1
+    assert stats.added_inbox == 0
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_called_once()
+
+
+def test_run_comment_history_failure_keeps_inbox(todo_file):
+    notif = _notif("comment")
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+        "/repos/zkoppert/example/pulls/42": json.dumps({"state": "open"}),
+        "/repos/zkoppert/example/issues/42/comments": json.dumps(
+            [
+                [
+                    {
+                        "user": {"login": "teammate"},
+                        "body": "Could you investigate this, @zkoppert?",
+                    }
+                ]
+            ]
+        ),
+    }
+
+    def fake_run(cmd, *args, **kwargs):
+        joined = " ".join(cmd)
+        if "/repos/zkoppert/example/pulls/42/comments" in joined:
+            raise subprocess.CalledProcessError(1, cmd, "", "boom")
+        return _gh_returns(responses)(cmd, *args, **kwargs)
+
+    with patch("triage.subprocess.run", side_effect=fake_run), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
     assert stats.added_q1 == 0
     assert stats.added_inbox == 1
     data = yaml.safe_load(todo_file.read_text())
@@ -2182,11 +2223,15 @@ def test_run_routes_dependabot_comment_mention_to_q1(todo_file):
         "/user": json.dumps({"login": "zkoppert"}),
         "/notifications?all=true": json.dumps([notif]),
         "/repos/zkoppert/example/pulls/42": json.dumps({"state": "open"}),
-        "/repos/zkoppert/example/issues/comments/9": json.dumps(
-            {
-                "user": {"login": "teammate"},
-                "body": "@zkoppert can you review this update?",
-            }
+        "/repos/zkoppert/example/issues/42/comments": json.dumps(
+            [
+                [
+                    {
+                        "user": {"login": "teammate"},
+                        "body": "@zkoppert can you review this update?",
+                    }
+                ]
+            ]
         ),
         "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
     }
@@ -5182,6 +5227,19 @@ def test_review_requested_random_repo_kept():
     assert q2.bucket == triage.BUCKET_Q2
 
 
+@pytest.mark.parametrize("title", ["Bump urllib3 from 2.0.0 to 2.1.0", "chore(deps): bump foo from 1 to 2"])
+def test_dependabot_review_requested_stays_out_of_q2(title):
+    c = triage.classify(
+        _repo_notif("review_requested", repo="some-org/x", title=title),
+        my_login="zkoppert",
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "dependabot[bot]",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert c.skip_mark_done is True
+
+
 def test_assign_and_mention_random_repo_kept_q1():
     """assign and mention survive to Q1."""
     for reason in ("assign", "mention"):
@@ -5462,14 +5520,12 @@ def test_ledger_tracks_distinct_threads_for_same_artifact(todo_file: Path):
     artifact = "https://github.com/o/r/pull/1"
 
     first_id = ledger.capture(
-        source_type="github",
         source_id="thread-a",
         canonical_artifact=artifact,
         classification="actionable",
         worker="test",
     )
     second_id = ledger.capture(
-        source_type="github",
         source_id="thread-b",
         canonical_artifact=artifact,
         classification="policy_drop",
@@ -5484,7 +5540,6 @@ def test_ledger_first_thread_claims_canonical_tracker_row(todo_file: Path):
     ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
     artifact = "https://github.com/o/r/pull/1"
     ledger.link_tracker(
-        source_type="github",
         source_id=None,
         canonical_artifact=artifact,
         tracker_item_id="existing-item",
@@ -5492,14 +5547,12 @@ def test_ledger_first_thread_claims_canonical_tracker_row(todo_file: Path):
     )
 
     first_id = ledger.capture(
-        source_type="github",
         source_id="thread-a",
         canonical_artifact=artifact,
         classification="actionable",
         worker="test",
     )
     second_id = ledger.capture(
-        source_type="github",
         source_id="thread-b",
         canonical_artifact=artifact,
         classification="actionable",
@@ -5526,26 +5579,22 @@ def test_ledger_actionable_thread_does_not_claim_terminal_canonical_row(todo_fil
     ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
     artifact = "https://github.com/o/r/pull/1"
     ledger.capture(
-        source_type="github",
         source_id=None,
         canonical_artifact=artifact,
         classification="q4",
         worker="test",
     )
     ledger.record_terminal(
-        source_type="github",
         source_id=None,
         canonical_artifact=artifact,
         terminal_disposition="irrelevant",
     )
     ledger.queue_clear(
-        source_type="github",
         source_id=None,
         canonical_artifact=artifact,
     )
 
     thread_id = ledger.capture(
-        source_type="github",
         source_id="thread-a",
         canonical_artifact=artifact,
         classification="actionable",
@@ -5764,20 +5813,17 @@ def test_run_retries_pending_clear_without_duplicating_tracker_item(todo_file: P
     ledger_file = todo_file.parent / "ledger.sqlite"
     ledger = triage.NotificationLedger(ledger_file)
     ledger.capture(
-        source_type="github",
         source_id="retry-1",
         canonical_artifact="https://github.com/o/r/pull/9",
         classification="actionable",
         worker="test",
     )
     ledger.record_terminal(
-        source_type="github",
         source_id="retry-1",
         canonical_artifact="https://github.com/o/r/pull/9",
         terminal_disposition="irrelevant",
     )
     ledger.queue_clear(
-        source_type="github",
         source_id="retry-1",
         canonical_artifact="https://github.com/o/r/pull/9",
     )
