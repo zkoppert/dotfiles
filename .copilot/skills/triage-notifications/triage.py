@@ -995,8 +995,6 @@ def _current_notification_is_clearable(
     if current is None:
         return False
     current_reason = str(current.get("reason") or "").lower()
-    if current_reason in {"mention", "assign"}:
-        return False
     comment_since = None
     if ledger is not None and thread_id:
         comment_since = ledger.comment_watermark(
@@ -1014,7 +1012,10 @@ def _current_notification_is_clearable(
             str(record.get("terminal_recorded_at") or record.get("first_seen_at") or "")
         )
     current_updated_at = parse_iso_datetime(current.get("updated_at"))
-    if boundary is not None and current_updated_at is not None and current_updated_at > boundary:
+    if current_reason in {"mention", "assign"}:
+        if boundary is None or current_updated_at is None or current_updated_at > boundary:
+            return False
+    elif boundary is not None and current_updated_at is not None and current_updated_at > boundary:
         return False
     subject = current.get("subject") or {}
     latest_url = str(subject.get("latest_comment_url") or "")
@@ -2482,6 +2483,7 @@ def reconcile_tracker_rows_to_ledger(
                 worker="tracker-reconcile",
                 terminal_disposition=disposition,
                 queue_clear=not bool(notif.get("marked_done")),
+                event_at=str(notif.get("captured_at") or notif.get("updated_at") or utcnow_iso()),
             )
 
 
@@ -2524,6 +2526,9 @@ def clear_url_deduped_threads(
                 current, url, exclude_thread_id=thread_id
             ):
                 continue
+            current_notif = _current_notification_for_clearance(thread_id=thread_id)
+            if current_notif is None:
+                continue
             if not _current_notification_is_clearable(
                 url=url,
                 thread_id=thread_id,
@@ -2542,6 +2547,7 @@ def clear_url_deduped_threads(
                 reason="url_deduped",
                 terminal_disposition="tracked_elsewhere",
                 queue_clear=True,
+                event_at=str(current_notif.get("captured_at") or current_notif.get("updated_at") or utcnow_iso()),
             )
             try:
                 mark_thread_done(thread_id)
@@ -2902,6 +2908,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         None if classification.skip_mark_done else disposition
                     ),
                     queue_clear=not classification.skip_mark_done,
+                    event_at=str(notif.get("captured_at") or notif.get("updated_at") or utcnow_iso()),
                 )
                 mutations.route_existing_drop.append(
                     PruneDelta(
@@ -2943,6 +2950,15 @@ def run(args: argparse.Namespace) -> TriageStats:
             continue
 
         if classification.bucket == BUCKET_DROP:
+            if not _current_notification_is_clearable(
+                url=canonical_url,
+                thread_id=thread_id,
+                reason=reason,
+                ledger=ledger,
+                my_login=my_login,
+            ):
+                stats.already_tracked += 1
+                continue
             stats.dropped += 1
             disposition = (
                 "completed"
@@ -2970,6 +2986,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     None if classification.skip_mark_done else disposition
                 ),
                 queue_clear=not classification.skip_mark_done,
+                event_at=str(notif.get("captured_at") or notif.get("updated_at") or utcnow_iso()),
             )
             if classification.archive_to_done:
                 mutations.add_done.append(build_done_archive_entry(notif))
@@ -3055,6 +3072,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             tracker_section=section,
             terminal_disposition=disposition,
             queue_clear=True,
+            event_at=str(notif_meta.get("captured_at") or notif_meta.get("updated_at") or utcnow_iso()),
         )
         mark_done_delta = MarkDoneDelta(
             item_id=str(item.get("id") or ""),
@@ -3110,6 +3128,14 @@ def run(args: argparse.Namespace) -> TriageStats:
         for delta in mutations.prune:
             if delta.thread_id and delta.thread_id in attempted_thread_ids:
                 continue
+            if not _current_notification_is_clearable(
+                url=None,
+                thread_id=delta.thread_id,
+                reason=delta.stale_reason,
+                ledger=ledger,
+                my_login=my_login,
+            ):
+                continue
             _ledger_capture(
                 ledger,
                 dry_run=args.dry_run,
@@ -3122,6 +3148,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 tracker_section=delta.section or None,
                 terminal_disposition="completed",
                 queue_clear=True,
+                event_at=delta.captured_at or utcnow_iso(),
             )
             if not args.dry_run:
                 try:

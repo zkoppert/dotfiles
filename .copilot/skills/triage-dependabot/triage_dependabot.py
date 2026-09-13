@@ -56,6 +56,7 @@ from notification_worker_common import ledger_capture as _ledger_capture
 from notification_worker_common import (
     ledger_record_clear_result as _ledger_record_clear_result,
     parse_iso_datetime,
+    utcnow_iso,
 )
 from ruamel.yaml import YAML
 from ruamel.yaml import YAMLError as _RuamelYAMLError
@@ -1773,8 +1774,6 @@ def _comment_notification_still_clearable(
     if current is None:
         return False
     current_reason = str(current.get("reason") or "").lower()
-    if current_reason in {"mention", "assign"}:
-        return False
     record = (
         ledger.notification_record(source_id=thread_id, canonical_artifact=pr_url)
         if ledger is not None
@@ -1786,7 +1785,10 @@ def _comment_notification_still_clearable(
             str(record.get("terminal_recorded_at") or record.get("first_seen_at") or "")
         )
     current_updated_at = parse_iso_datetime(current.get("updated_at"))
-    if boundary is not None and current_updated_at is not None and current_updated_at > boundary:
+    if current_reason in {"mention", "assign"}:
+        if boundary is None or current_updated_at is None or current_updated_at > boundary:
+            return False
+    elif boundary is not None and current_updated_at is not None and current_updated_at > boundary:
         return False
     subject = current.get("subject") or {}
     subject_url = str(subject.get("url") or "")
@@ -1881,6 +1883,7 @@ def _clear_dependabot_notification(
                 repo=repo,
                 terminal_disposition=terminal_disposition,
                 queue_clear=True,
+                event_at=str(notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()),
             )
             if not _safe_mark_thread_done(
                 thread_id,
@@ -2525,6 +2528,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 repo=repo,
                 terminal_disposition="completed",
                 queue_clear=bool(thread_id),
+                event_at=str(notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()),
             )
             if pr_url:
                 state[pr_url] = now
@@ -2628,6 +2632,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     repo=repo,
                     terminal_disposition="completed",
                     queue_clear=bool(thread_id),
+                    event_at=str(notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()),
                 )
                 if thread_id:
                     if _safe_mark_thread_done(
@@ -2756,6 +2761,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     repo=repo,
                     terminal_disposition="completed",
                     queue_clear=bool(thread_id),
+                    event_at=str(notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()),
                 )
                 if _safe_mark_thread_done(
                     thread_id,
@@ -2814,6 +2820,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     repo=repo,
                     terminal_disposition="completed",
                     queue_clear=bool(thread_id),
+                    event_at=str(notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()),
                 )
                 if _safe_mark_thread_done(
                     thread_id,
@@ -2865,6 +2872,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     repo=repo,
                     terminal_disposition="irrelevant",
                     queue_clear=bool(thread_id),
+                    event_at=str(notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()),
                 )
                 if _safe_mark_thread_done(
                     thread_id,
@@ -2919,6 +2927,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         repo=repo,
                         terminal_disposition="completed",
                         queue_clear=True,
+                        event_at=str(notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()),
                     )
                     if _safe_mark_thread_done(
                         thread_id,
@@ -3032,6 +3041,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 tracker_section="prioritized.q1_do_first",
                 terminal_disposition="tracked_elsewhere",
                 queue_clear=bool(handoff_thread_id),
+                event_at=str(handoff_notif.get("captured_at") or handoff_notif.get("updated_at") or utcnow_iso()),
             )
             if handoff_thread_id:
                 _safe_mark_thread_done(

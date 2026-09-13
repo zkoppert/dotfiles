@@ -560,6 +560,7 @@ class NotificationLedger:
         title: str = "",
         reason: str = "",
         repo: str = "",
+        event_at: str | None = None,
     ) -> int:
         now = utcnow_iso()
         canonical_artifact = (
@@ -590,6 +591,15 @@ class NotificationLedger:
                     repo=repo,
                     now=now,
                 )
+                if event_at:
+                    conn.execute(
+                        """
+                        UPDATE notifications
+                           SET terminal_recorded_at = COALESCE(?, terminal_recorded_at)
+                         WHERE id = ?
+                        """,
+                        (event_at, row_id),
+                    )
                 conn.commit()
                 return row_id
             conn.execute(
@@ -603,7 +613,8 @@ class NotificationLedger:
                         classification = ?,
                         last_seen_at = ?,
                         classified_at = ?,
-                        worker = ?
+                        worker = ?,
+                       terminal_recorded_at = COALESCE(?, terminal_recorded_at)
                  WHERE id = ?
                 """,
                 (
@@ -619,6 +630,7 @@ class NotificationLedger:
                     now,
                     now,
                     worker,
+                    event_at,
                     row_id,
                 ),
             )
@@ -842,8 +854,10 @@ class NotificationLedger:
         source_id: str | None,
         canonical_artifact: str | None,
         terminal_disposition: str,
+        event_at: str | None = None,
     ) -> None:
         now = utcnow_iso()
+        terminal_at = event_at or now
         canonical_artifact = (
             normalize_github_url(canonical_artifact) or canonical_artifact
         )
@@ -866,11 +880,11 @@ class NotificationLedger:
                 """
                 UPDATE notifications
                    SET terminal_disposition = ?,
-                        terminal_recorded_at = COALESCE(terminal_recorded_at, ?),
+                        terminal_recorded_at = COALESCE(?, terminal_recorded_at),
                        last_seen_at = ?
                  WHERE id = ?
                 """,
-                (terminal_disposition, now, now, row_id),
+                (terminal_disposition, terminal_at, now, row_id),
             )
             conn.commit()
 
@@ -1057,6 +1071,7 @@ def ledger_capture(
     tracker_section: str | None = None,
     terminal_disposition: str | None = None,
     queue_clear: bool = False,
+    event_at: str | None = None,
 ) -> None:
     if ledger is None or dry_run:
         return
@@ -1068,6 +1083,7 @@ def ledger_capture(
         title=title,
         reason=reason,
         repo=repo,
+        event_at=event_at,
     )
     if tracker_item_id and tracker_section:
         ledger.link_tracker(
@@ -1092,6 +1108,7 @@ def ledger_capture(
             source_id=thread_id,
             canonical_artifact=canonical_artifact,
             terminal_disposition=terminal_disposition,
+            event_at=event_at,
         )
     if queue_clear:
         ledger.queue_clear(
