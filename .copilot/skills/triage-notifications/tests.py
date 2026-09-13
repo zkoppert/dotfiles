@@ -3113,6 +3113,47 @@ def test_route_existing_terminal_review_request_reopens_active_work_to_q2(
     assert "terminal_disposition" not in item["notification"]
 
 
+def test_route_existing_q2_notification_keeps_schedule_order():
+    item = {
+        "id": "review-3",
+        "status": "pending",
+        "quadrant": "q2_schedule",
+        "notification": {
+            "thread_id": "thr-4",
+            "reason": "review_requested",
+            "captured_at": "2026-07-07T11:00:00Z",
+            "escalates_at": "2026-07-08T11:00:00Z",
+        },
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {"q1_do_first": [], "q2_schedule": [item]},
+        "in_progress": [],
+        "blocked": [],
+        "in_review": [],
+        "done": [],
+    }
+    refreshed = {
+        "id": "review-3",
+        "notification": {
+            "thread_id": "thr-4",
+            "reason": "review_requested",
+            "captured_at": "2026-07-09T11:00:00Z",
+            "escalates_at": "2026-07-10T11:00:00Z",
+        },
+    }
+
+    applied = triage.apply_todo_mutations(
+        data, triage.TodoMutations(route_existing_q2=[refreshed])
+    )
+
+    assert applied["changed"] is False
+    assert data["prioritized"]["q2_schedule"] == [item]
+    assert item["notification"]["captured_at"] == "2026-07-07T11:00:00Z"
+    assert item["notification"]["escalates_at"] == "2026-07-08T11:00:00Z"
+    assert applied["tracker_links"] == []
+
+
 @pytest.mark.parametrize("active_section", ["in_progress", "blocked", "in_review"])
 def test_route_existing_terminal_inbox_notification_reopens_active_work_to_inbox(
     active_section,

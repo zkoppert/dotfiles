@@ -331,23 +331,13 @@ def comment_notification_snapshot(
         )
     )
     latest_entry = relevant[-1]
-    latest_body = str(latest_entry[5].get("body") or "")
-    if watermarks:
-        direct_entries = [
-            entry
-            for entry in relevant
-            if pattern
-            and str(entry[5].get("body") or "")
-            and re.search(pattern, str(entry[5].get("body") or ""), re.IGNORECASE)
-        ]
-    else:
-        direct_entries = [
-            entry
-            for entry in relevant
-            if pattern
-            and str(entry[5].get("body") or "")
-            and re.search(pattern, str(entry[5].get("body") or ""), re.IGNORECASE)
-        ]
+    direct_entries = [
+        entry
+        for entry in relevant
+        if pattern
+        and str(entry[5].get("body") or "")
+        and re.search(pattern, str(entry[5].get("body") or ""), re.IGNORECASE)
+    ]
     latest_by_stream: dict[str, tuple[_dt.datetime | None, int]] = {}
     for entry in relevant:
         latest_by_stream[entry[1]] = (entry[0], entry[2])
