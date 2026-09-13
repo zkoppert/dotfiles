@@ -2249,6 +2249,43 @@ def test_run_routes_dependabot_comment_mention_to_q1(todo_file):
     notify_mock.assert_called_once()
 
 
+def test_run_leaves_dependabot_comment_without_mention_unread(todo_file):
+    notif = _notif("comment")
+    notif["subject"]["title"] = "Bump urllib3 from 2.0.0 to 2.1.0"
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+        "/repos/zkoppert/example/pulls/42": json.dumps({
+            "state": "open",
+            "user": {"login": "dependabot[bot]"},
+        }),
+        "/repos/zkoppert/example/issues/42/comments": json.dumps(
+            [
+                [
+                    {
+                        "user": {"login": "teammate"},
+                        "body": "Looks good to me",
+                    }
+                ]
+            ]
+        ),
+        "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
+    }
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
+    assert stats.added_q1 == 0
+    assert stats.left_for_dependabot == 1
+    assert stats.dropped == 1
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["inbox"] == []
+    assert data["prioritized"]["q1_do_first"] == []
+    notify_mock.assert_not_called()
+
+
 def test_run_notifies_commit_mention_with_commit_url(todo_file):
     notif = _notif(
         "mention",
@@ -3839,7 +3876,7 @@ def test_classify_drops_review_requested_on_merged_pr():
     assert c.bucket == triage.BUCKET_DROP
 
 
-def test_classify_drops_mention_on_closed_pr():
+def test_classify_mention_on_closed_pr_goes_to_q1():
     c = triage.classify(
         _notif("mention"),
         my_login="zkoppert",
@@ -3847,10 +3884,11 @@ def test_classify_drops_mention_on_closed_pr():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
     )
-    assert c.bucket == triage.BUCKET_DROP
+    assert c.bucket == triage.BUCKET_Q1
+    assert c.direct_mention is True
 
 
-def test_classify_drops_assign_on_closed_issue():
+def test_classify_assign_on_closed_issue_goes_to_q1():
     issue_notif = _notif(
         "assign",
         subject={
@@ -3867,7 +3905,7 @@ def test_classify_drops_assign_on_closed_issue():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
     )
-    assert c.bucket == triage.BUCKET_DROP
+    assert c.bucket == triage.BUCKET_Q1
 
 
 def test_classify_drops_manual_on_closed_subject():
@@ -4573,6 +4611,18 @@ def test_classify_read_comment_on_closed_pr_still_drops():
     )
     assert c.bucket == triage.BUCKET_DROP
     assert "closed" in c.reason
+
+
+def test_classify_comment_mention_on_closed_pr_goes_to_q1():
+    notif = _read_notif("comment")
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        state_fetcher=lambda _: "closed",
+        comment_fetcher=lambda _: ("someone", "Please review this, @zkoppert"),
+        subject_author_fetcher=lambda _: "andi",
+    )
+    assert c.bucket == triage.BUCKET_Q1
 
 
 def test_classify_read_subscribed_on_closed_pr_still_drops():

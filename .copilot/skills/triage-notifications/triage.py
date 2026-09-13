@@ -48,6 +48,9 @@ from urllib.parse import urlparse
 _SKILLS_DIR = Path(__file__).resolve().parents[1]
 if str(_SKILLS_DIR) not in sys.path:
     sys.path.insert(0, str(_SKILLS_DIR))
+_TRIAGE_DEPENDABOT_DIR = _SKILLS_DIR / "triage-dependabot"
+if str(_TRIAGE_DEPENDABOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_TRIAGE_DEPENDABOT_DIR))
 
 import yaml
 from notification_worker_common import (
@@ -59,6 +62,7 @@ from notification_worker_common import (
     review_request_escalates_at,
     utcnow_iso,
 )
+from triage_dependabot import DEPENDABOT_LOGINS
 from ruamel.yaml import YAML
 from ruamel.yaml import YAMLError as _RuamelYAMLError
 
@@ -477,14 +481,6 @@ class AppliedTodoMutations(TypedDict):
     changed: bool
 
 
-DEPENDABOT_AUTHOR_LOGINS: set[str] = {
-    "dependabot[bot]",
-    "dependabot-preview[bot]",
-    "app/dependabot",
-    "app/dependabot-preview",
-}
-
-
 def is_dependabot_bump(title: str) -> bool:
     """Return True if `title` looks like a Dependabot version-bump PR."""
     text = title or ""
@@ -494,7 +490,7 @@ def is_dependabot_bump(title: str) -> bool:
 def is_dependabot_author(login: str | None) -> bool:
     if not login:
         return False
-    return login.lower() in DEPENDABOT_AUTHOR_LOGINS
+    return login.lower() in DEPENDABOT_LOGINS
 
 
 def is_security_title(title: str) -> bool:
@@ -802,15 +798,22 @@ def classify(
     title = subject.get("title") or ""
     repo_full = (notif.get("repository") or {}).get("full_name") or ""
 
+    dependabot_bump_author = None
+    if subject_type == "pullrequest" and is_dependabot_bump(title):
+        dependabot_bump_author = subject_author_fetcher(notif)
+
     if reason == "comment":
-        state = state_fetcher(notif)
-        if state in CLOSED_STATES:
-            return Classification(BUCKET_DROP, f"comment on {state} {subject_type}")
         if comment_fetcher is fetch_latest_comment:
             author, body = comment_fetcher(notif, my_login=my_login)
         else:
             author, body = comment_fetcher(notif)
         if body is _COMMENT_HISTORY_INCOMPLETE:
+            if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
+                return Classification(
+                    BUCKET_DROP,
+                    "Dependabot comment history incomplete - left unread for triage-dependabot",
+                    skip_mark_done=True,
+                )
             return Classification(BUCKET_INBOX, "comment history incomplete")
         if mentions_me(body, my_login):
             return Classification(
@@ -818,13 +821,25 @@ def classify(
                 f"@mention in comment by @{author}",
                 direct_mention=True,
             )
+        if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
+            return Classification(
+                BUCKET_DROP,
+                "Dependabot comment - left unread for triage-dependabot",
+                skip_mark_done=True,
+            )
+        state = state_fetcher(notif)
+        if state in CLOSED_STATES:
+            return Classification(BUCKET_DROP, f"comment on {state} {subject_type}")
         if is_super_linter(author, body):
             return Classification(BUCKET_DROP, "super-linter comment without @mention")
         return Classification(BUCKET_DROP, "comment without a direct @mention")
 
-    dependabot_bump_author = None
-    if subject_type == "pullrequest" and is_dependabot_bump(title):
-        dependabot_bump_author = subject_author_fetcher(notif)
+    if reason in Q1_REASONS:
+        return Classification(
+            BUCKET_Q1,
+            f"{reason} → Q1",
+            direct_mention=reason == "mention",
+        )
 
     if reason == "review_requested":
         state = state_fetcher(notif)
