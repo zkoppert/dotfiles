@@ -124,7 +124,7 @@ def test_classify_security_alert_goes_to_q1():
         state_fetcher=lambda _: None,
         comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_assign_on_my_own_pr_goes_to_q1():
@@ -160,7 +160,7 @@ def test_classify_security_alert_on_my_own_pr_still_goes_to_q1():
         comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "zkoppert",
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_self_assign_on_non_pr_still_goes_to_q1():
@@ -4562,7 +4562,7 @@ def test_classify_skips_state_check_for_non_subject_types():
         subject_author_fetcher=lambda _: "someone-else",
     )
     fetcher.assert_not_called()
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def _enable_dependabot_notif(reason: str = "author") -> dict:
@@ -5360,6 +5360,34 @@ def test_notification_has_new_activity_uses_archive_captured_at():
     )
 
 
+def test_notification_has_new_activity_uses_marked_done_boundary():
+    tracked = {
+        "notification": {
+            "captured_at": "2026-07-01T12:00:00Z",
+            "marked_done": True,
+            "marked_done_at": "2026-07-03T12:00:00Z",
+        }
+    }
+    renewed = _notif("mention", updated_at="2026-07-02T12:00:00Z")
+    later = _notif("mention", updated_at="2026-07-04T12:00:00Z")
+    assert (
+        triage.notification_has_new_activity(
+            renewed,
+            tracked,
+            allow_reason_change_without_timestamp=False,
+        )
+        is False
+    )
+    assert (
+        triage.notification_has_new_activity(
+            later,
+            tracked,
+            allow_reason_change_without_timestamp=False,
+        )
+        is True
+    )
+
+
 def _stale_self_authored_entry(entry_id: str, pr_number: int) -> dict:
     """Tracked entry for a PR I authored, ready to be archived on prune."""
     return {
@@ -5661,7 +5689,7 @@ def test_classify_private_subscription_subscribed_drops_regardless_of_read_state
 def test_classify_private_subscription_security_alert_still_routes_to_q1(
     private_subscription_filter,
 ):
-    """security_alert on the private filtered repo must still reach Q1 - vulnerabilities
+    """security_alert on the private filtered repo must still reach Q2 - vulnerabilities
     and secret scans are too important to silently drop."""
     c = triage.classify(
         _private_subscription_notif("security_alert"),
@@ -5670,7 +5698,7 @@ def test_classify_private_subscription_security_alert_still_routes_to_q1(
         comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_subscription_filter_is_case_insensitive(private_subscription_filter):
@@ -5804,7 +5832,7 @@ def test_classify_super_linter_security_alert_survives():
         comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "maintainer",
     )
-    assert c.bucket == triage.BUCKET_Q1
+    assert c.bucket == triage.BUCKET_Q2
 
 
 def test_classify_super_linter_fork_dependabot_bump_left_unread():
@@ -5960,11 +5988,16 @@ def test_private_aor_title_kept(private_aor_filter):
 
 def test_private_aor_non_aor_title_drops(private_aor_filter):
     """A private AoR repo notification unrelated to our area drops."""
-    for reason in ("review_requested", "subscribed", "team_mention"):
+    expected = {
+        "review_requested": triage.BUCKET_Q2,
+        "subscribed": triage.BUCKET_DROP,
+        "team_mention": triage.BUCKET_DROP,
+    }
+    for reason, bucket in expected.items():
         c = _classify(
             _repo_notif(reason, repo=PRIVATE_AOR_REPO, title="Refactor merge queue")
         )
-        assert c.bucket == triage.BUCKET_DROP, reason
+        assert c.bucket == bucket, reason
 
 
 def test_private_aor_non_aor_direct_ping_survives(private_aor_filter):
@@ -5983,19 +6016,21 @@ def test_private_aor_non_aor_direct_ping_survives(private_aor_filter):
             "security_alert", repo=PRIVATE_AOR_REPO, title="Refactor merge queue"
         )
     )
-    assert sec.bucket == triage.BUCKET_Q1
+    assert sec.bucket == triage.BUCKET_Q2
 
 
 # --- always-drop repos ---
 
 
 def test_dot_github_repo_preserves_protected_reasons():
-    for reason in ("mention", "assign", "security_alert"):
+    expected = {"mention": triage.BUCKET_Q1, "assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q2}
+    for reason, bucket in expected.items():
         c = _classify(_repo_notif(reason, repo="github/.github"))
-        assert c.bucket == triage.BUCKET_Q1, reason
+        assert c.bucket == bucket, reason
     for reason in ("review_requested", "subscribed"):
         c = _classify(_repo_notif(reason, repo="github/.github"))
-        assert c.bucket == triage.BUCKET_DROP, reason
+        expected = triage.BUCKET_Q2 if reason == "review_requested" else triage.BUCKET_DROP
+        assert c.bucket == expected, reason
 
 
 PRIVATE_ALWAYS_DROP_REPO = "acme/always-drop"
@@ -6011,12 +6046,14 @@ def private_always_drop_repo(monkeypatch):
 
 
 def test_private_always_drop_repo_preserves_protected_reasons(private_always_drop_repo):
-    for reason in ("mention", "assign", "security_alert"):
+    expected = {"mention": triage.BUCKET_Q1, "assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q2}
+    for reason, bucket in expected.items():
         c = _classify(_repo_notif(reason, repo=PRIVATE_ALWAYS_DROP_REPO))
-        assert c.bucket == triage.BUCKET_Q1, reason
+        assert c.bucket == bucket, reason
     for reason in ("review_requested", "subscribed"):
         c = _classify(_repo_notif(reason, repo=PRIVATE_ALWAYS_DROP_REPO))
-        assert c.bucket == triage.BUCKET_DROP, reason
+        expected = triage.BUCKET_Q2 if reason == "review_requested" else triage.BUCKET_DROP
+        assert c.bucket == expected, reason
 
 
 # --- github/curated-data: direct-ping / security only ---
@@ -6035,7 +6072,7 @@ def test_curated_data_subscribed_drops():
 def test_curated_data_assign_and_security_alert_survive():
     """Carve-out applies to curated-data too: a direct assignment or a
     security alert gets in even though only `mention` was listed."""
-    expected = {"assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q1}
+    expected = {"assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q2}
     for reason in ("assign", "security_alert"):
         c = _classify(_repo_notif(reason, repo="github/curated-data"))
         assert c.bucket == expected[reason], reason
@@ -6067,7 +6104,7 @@ def test_markup_assign_and_security_alert_survive():
     """Carve-out: a direct assignment or a security alert on markup
     survives even with a non-security title (low-priority repo, but a
     direct ping still matters)."""
-    expected = {"assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q1}
+    expected = {"assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q2}
     for reason in ("assign", "security_alert"):
         c = _classify(
             _repo_notif(reason, repo="github/markup", title="Bump rendering perf")
@@ -6076,13 +6113,13 @@ def test_markup_assign_and_security_alert_survive():
 
 
 def test_markup_normal_title_drops():
-    """A non-security, non-ping markup notification drops (low priority)."""
+    """A non-security, non-ping markup review request stays scheduled."""
     c = _classify(
         _repo_notif(
             "review_requested", repo="github/markup", title="Bump rendering perf"
         )
     )
-    assert c.bucket == triage.BUCKET_DROP
+    assert c.bucket == triage.BUCKET_Q2
 
 
 # --- dependabot bump: dropped from inbox, NOT marked done ---
@@ -6377,7 +6414,33 @@ def test_ledger_actionable_link_tracker_preserves_then_reactivates_terminal_row(
         thread_id="thread-a",
         canonical_artifact=artifact,
         classification="actionable",
-        worker="test",
+        worker="tracker-reconcile",
+        tracker_item_id="todo-1",
+        tracker_section="prioritized.q1_do_first",
+    )
+
+    rows = ledger._rows("""
+        SELECT classification, terminal_disposition, clear_state, tracker_item_id, tracker_section
+          FROM notifications
+         WHERE source_id = ?
+        """, ("thread-a",))
+    assert rows == [
+        {
+            "classification": "actionable",
+            "terminal_disposition": "irrelevant",
+            "clear_state": "pending",
+            "tracker_item_id": "todo-1",
+            "tracker_section": "prioritized.q1_do_first",
+        }
+    ]
+
+    triage._ledger_capture(
+        ledger,
+        dry_run=False,
+        thread_id="thread-a",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="tracker-link",
         tracker_item_id="todo-1",
         tracker_section="prioritized.q1_do_first",
     )

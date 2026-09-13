@@ -83,7 +83,6 @@ logger = logging.getLogger("triage")
 Q1_REASONS: set[str] = {
     "mention",
     "assign",
-    "security_alert",
 }
 
 # Aggressive "bulk triage" policy: only directed, personal-action reasons
@@ -99,7 +98,6 @@ KEEP_REASONS: set[str] = {
     "assign",
     "author",
     "mention",
-    "security_alert",
 }
 
 # Subject states that are candidates for the drop bucket.
@@ -775,6 +773,9 @@ def classify(
             )
         return Classification(BUCKET_Q2, "review_requested - scheduled review")
 
+    if reason == "security_alert":
+        return Classification(BUCKET_Q2, "security_alert - scheduled security alert")
+
     if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
         # Dependabot version-bump PRs: drop from the inbox but normally NEVER
         # mark the GitHub notification done - triage-dependabot consumes those
@@ -966,8 +967,10 @@ def notification_has_new_activity(
     )
     updated_at = parse_iso_datetime(notif.get("updated_at"))
     captured_at = parse_iso_datetime(tracked.get("captured_at"))
-    if captured_at is None:
-        captured_at = parse_iso_datetime(tracked.get("marked_done_at"))
+    if tracked.get("marked_done"):
+        terminal_boundary = parse_iso_datetime(tracked.get("marked_done_at"))
+        if terminal_boundary is not None:
+            captured_at = terminal_boundary
     if captured_at is None:
         captured_at = parse_iso_datetime(str(tracked_item.get("completed") or ""))
     if captured_at is None:
@@ -2543,8 +2546,6 @@ def run(args: argparse.Namespace) -> TriageStats:
             classification.bucket,
             classification.reason,
         )
-        if thread_id and classification.bucket == BUCKET_Q1 and reason in {"mention", "assign", "comment"}:
-            protected_actionable_thread_ids.add(thread_id)
         if thread_id and classification.direct_mention:
             direct_mention_thread_ids.add(thread_id)
 

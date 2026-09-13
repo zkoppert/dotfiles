@@ -1058,7 +1058,8 @@ def ledger_capture(
             tracker_section=tracker_section,
         )
         if (
-            classification == "actionable"
+            worker == "tracker-link"
+            and classification == "actionable"
             and terminal_disposition is None
             and thread_id
         ):
