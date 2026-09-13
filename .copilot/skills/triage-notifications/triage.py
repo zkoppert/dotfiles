@@ -674,21 +674,12 @@ def fetch_latest_comment(
         collection_path = f"{subject_path}/comments"
 
     last_read_at = notif.get("last_read_at")
-    if collection_path and last_read_at:
+    if collection_path:
         try:
-            out = run_gh(
-                [
-                    "api",
-                    collection_path,
-                    "--method",
-                    "GET",
-                    "-f",
-                    f"since={last_read_at}",
-                    "--paginate",
-                    "--slurp",
-                ],
-                timeout=20,
-            )
+            cmd = ["api", collection_path, "--method", "GET", "--paginate", "--slurp"]
+            if last_read_at:
+                cmd[4:4] = ["-f", f"since={last_read_at}"]
+            out = run_gh(cmd, timeout=20)
             pages = json.loads(out)
             comments = [
                 comment
@@ -763,6 +754,18 @@ def classify(
     title = subject.get("title") or ""
     repo_full = (notif.get("repository") or {}).get("full_name") or ""
 
+    if reason == "comment":
+        state = state_fetcher(notif)
+        if state in CLOSED_STATES:
+            return Classification(BUCKET_DROP, f"comment on {state} {subject_type}")
+        author, body = comment_fetcher(notif)
+        if mentions_me(body, my_login):
+            return Classification(
+                BUCKET_Q1,
+                f"@mention in comment by @{author}",
+                direct_mention=True,
+            )
+
     # Title-pattern drop: repetitive system-generated noise (flaky-test
     # reports) and routine `Enable Dependabot` config PRs. Mention/assign
     # reasons skip this so a direct human ping always reaches the inbox.
@@ -780,15 +783,6 @@ def classify(
     # are the exception: passive bump notifications should be marked done
     # instead of handed off.
     if subject_type == "pullrequest" and is_dependabot_bump(title):
-        if reason == "comment":
-            state = state_fetcher(notif)
-            author, body = comment_fetcher(notif)
-            if state not in CLOSED_STATES and mentions_me(body, my_login):
-                return Classification(
-                    BUCKET_Q1,
-                    f"@mention in comment by @{author}",
-                    direct_mention=True,
-                )
         repo_lc = repo_full.lower()
         if repo_lc in WATCH_ONLY_DEPENDABOT_MARK_DONE_REPOS:
             if reason not in DIRECTED_REPO_REASONS:
@@ -860,16 +854,6 @@ def classify(
         # Under aggressive triage a plain comment is noise UNLESS the body
         # @-mentions me directly (GitHub occasionally files a direct ping
         # as `comment`). Closed/merged threads and super-linter posts drop.
-        state = state_fetcher(notif)
-        if state in CLOSED_STATES:
-            return Classification(BUCKET_DROP, f"comment on {state} {subject_type}")
-        author, body = comment_fetcher(notif)
-        if mentions_me(body, my_login):
-            return Classification(
-                BUCKET_Q1,
-                f"@mention in comment by @{author}",
-                direct_mention=True,
-            )
         if is_super_linter(author, body):
             return Classification(BUCKET_DROP, "super-linter comment without @mention")
         return Classification(BUCKET_DROP, "comment without a direct @mention")
