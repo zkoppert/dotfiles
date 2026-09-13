@@ -332,7 +332,6 @@ def comment_notification_snapshot(
     )
     latest_entry = relevant[-1]
     latest_body = str(latest_entry[5].get("body") or "")
-    latest_is_direct = bool(pattern and latest_body and re.search(pattern, latest_body, re.IGNORECASE))
     if watermarks:
         direct_entries = [
             entry
@@ -341,11 +340,14 @@ def comment_notification_snapshot(
             and str(entry[5].get("body") or "")
             and re.search(pattern, str(entry[5].get("body") or ""), re.IGNORECASE)
         ]
-    elif len(relevant) > 1 and not latest_is_direct:
-        history_incomplete = True
-        direct_entries = []
     else:
-        direct_entries = [latest_entry] if latest_is_direct else []
+        direct_entries = [
+            entry
+            for entry in relevant
+            if pattern
+            and str(entry[5].get("body") or "")
+            and re.search(pattern, str(entry[5].get("body") or ""), re.IGNORECASE)
+        ]
     latest_by_stream: dict[str, tuple[_dt.datetime | None, int]] = {}
     for entry in relevant:
         latest_by_stream[entry[1]] = (entry[0], entry[2])
@@ -659,48 +661,16 @@ class NotificationLedger:
                     worker="tracker-reconcile",
                     now=now,
                 )
-            current = conn.execute(
-                """
-                SELECT reason, terminal_disposition, clear_state
-                  FROM notifications
-                 WHERE id = ?
-                """,
-                (row_id,),
-            ).fetchone()
-            reactivate = bool(current and current["terminal_disposition"] is not None)
             conn.execute(
                 """
                 UPDATE notifications
                    SET tracker_item_id = ?,
                         tracker_section = ?,
                        tracker_linked_at = COALESCE(tracker_linked_at, ?),
-                       last_seen_at = ?,
-                       classification = CASE WHEN ? THEN 'actionable' ELSE classification END,
-                       reason = CASE WHEN ? THEN ? ELSE reason END,
-                       terminal_disposition = CASE WHEN ? THEN NULL ELSE terminal_disposition END,
-                       terminal_recorded_at = CASE WHEN ? THEN NULL ELSE terminal_recorded_at END,
-                       clear_state = CASE WHEN ? THEN 'not_applicable' ELSE clear_state END,
-                       clear_attempted_at = CASE WHEN ? THEN NULL ELSE clear_attempted_at END,
-                       cleared_at = CASE WHEN ? THEN NULL ELSE cleared_at END,
-                       last_clear_error = CASE WHEN ? THEN NULL ELSE last_clear_error END
+                       last_seen_at = ?
                  WHERE id = ?
                 """,
-                (
-                    tracker_item_id,
-                    tracker_section,
-                    now,
-                    now,
-                    reactivate,
-                    reactivate,
-                    str(current["reason"] or "actionable") if current else "actionable",
-                    reactivate,
-                    reactivate,
-                    reactivate,
-                    reactivate,
-                    reactivate,
-                    reactivate,
-                    row_id,
-                ),
+                (tracker_item_id, tracker_section, now, now, row_id),
             )
             conn.commit()
 
@@ -1087,6 +1057,16 @@ def ledger_capture(
             tracker_item_id=tracker_item_id,
             tracker_section=tracker_section,
         )
+        if (
+            classification == "actionable"
+            and terminal_disposition is None
+            and thread_id
+        ):
+            ledger.reopen_actionable(
+                source_id=thread_id,
+                reason=reason or "actionable",
+                tracker_section=tracker_section,
+            )
     if terminal_disposition:
         ledger.record_terminal(
             source_id=thread_id,

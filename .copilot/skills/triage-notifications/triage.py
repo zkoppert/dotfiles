@@ -2393,13 +2393,18 @@ def retry_pending_github_clears(
     dry_run: bool,
     stats: TriageStats,
     attempted_thread_ids: set[str],
+    protected_thread_ids: set[str],
 ) -> None:
     if ledger is None:
         return
     for row in ledger.pending_github_clears():
         thread_id = str(row.get("source_id") or "")
         canonical = row.get("canonical_artifact")
-        if not thread_id or thread_id in attempted_thread_ids:
+        if (
+            not thread_id
+            or thread_id in attempted_thread_ids
+            or thread_id in protected_thread_ids
+        ):
             continue
         try:
             if not dry_run:
@@ -2505,6 +2510,8 @@ def run(args: argparse.Namespace) -> TriageStats:
             )
             if comment_snapshot is not None and not comment_snapshot.history_complete:
                 if comment_snapshot.direct is not True:
+                    if thread_id:
+                        protected_actionable_thread_ids.add(thread_id)
                     if ledger is not None and thread_id:
                         ledger.suspend_pending_clear(
                             source_id=thread_id,
@@ -3010,6 +3017,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         dry_run=args.dry_run,
         stats=stats,
         attempted_thread_ids=attempted_thread_ids,
+        protected_thread_ids=protected_actionable_thread_ids,
     )
 
     if not args.no_notify and not args.dry_run:

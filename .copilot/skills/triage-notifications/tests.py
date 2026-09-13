@@ -310,10 +310,12 @@ def test_comment_history_reports_earlier_mention_when_complete():
 
     assert author == "teammate"
     assert body == "ordinary follow-up"
-    assert snapshot.direct is None
-    assert snapshot.history_complete is False
-    assert c.bucket == triage.BUCKET_INBOX
-    assert c.direct_mention is False
+    assert snapshot.direct is True
+    assert snapshot.history_complete is True
+    assert snapshot.comment_cursors is not None
+    assert set(snapshot.comment_cursors) == {"issue_comments"}
+    assert c.bucket == triage.BUCKET_Q1
+    assert c.direct_mention is True
 
 
 def test_comment_snapshot_uses_comment_id_watermark_for_same_second_mentions():
@@ -2488,11 +2490,15 @@ def test_run_preserves_direct_mention_followed_by_newer_comment(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 0
+    assert stats.added_q1 == 1
     assert stats.added_inbox == 0
     assert stats.dropped == 0
-    assert stats.unread == 1
-    notify_mock.assert_not_called()
+    assert stats.unread == 0
+    notify_mock.assert_called_once_with(
+        "GitHub mention",
+        "Sample PR (zkoppert/example)",
+        "https://github.com/zkoppert/example/pull/42",
+    )
 
 
 def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
@@ -6322,7 +6328,9 @@ def test_ledger_actionable_thread_does_not_claim_terminal_canonical_row(
     assert rows[1]["clear_state"] == "not_applicable"
 
 
-def test_ledger_actionable_link_tracker_reactivates_terminal_row(todo_file: Path):
+def test_ledger_actionable_link_tracker_preserves_then_reactivates_terminal_row(
+    todo_file: Path,
+):
     ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
     artifact = "https://github.com/o/r/pull/1"
     ledger.capture(
@@ -6341,28 +6349,35 @@ def test_ledger_actionable_link_tracker_reactivates_terminal_row(todo_file: Path
         canonical_artifact=artifact,
     )
 
-    ledger.capture(
+    ledger.link_tracker(
         source_id="thread-a",
         canonical_artifact=artifact,
-        classification="actionable",
-        worker="test",
+        tracker_item_id="todo-1",
+        tracker_section="prioritized.q1_do_first",
     )
+
     rows = ledger._rows("""
-        SELECT classification, terminal_disposition, clear_state
+        SELECT classification, terminal_disposition, clear_state, tracker_item_id, tracker_section
           FROM notifications
          WHERE source_id = ?
         """, ("thread-a",))
     assert rows == [
         {
-            "classification": "actionable",
+            "classification": "policy_drop",
             "terminal_disposition": "irrelevant",
             "clear_state": "pending",
+            "tracker_item_id": "todo-1",
+            "tracker_section": "prioritized.q1_do_first",
         }
     ]
 
-    ledger.link_tracker(
-        source_id="thread-a",
+    triage._ledger_capture(
+        ledger,
+        dry_run=False,
+        thread_id="thread-a",
         canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
         tracker_item_id="todo-1",
         tracker_section="prioritized.q1_do_first",
     )
