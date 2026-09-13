@@ -5950,31 +5950,61 @@ def test_notification_has_new_activity_prefers_terminal_recorded_at():
     )
 
 
-def test_current_notification_is_clearable_allows_newer_passive_event(todo_file):
+def test_notification_has_new_activity_uses_completed_boundary():
+    tracked = {
+        "completed": "2026-07-03T12:00:00Z",
+        "notification": {
+            "captured_at": "2026-07-01T12:00:00Z",
+        },
+    }
+    renewed = _notif("mention", updated_at="2026-07-02T12:00:00Z")
+    later = _notif("mention", updated_at="2026-07-04T12:00:00Z")
+    assert (
+        triage.notification_has_new_activity(
+            renewed,
+            tracked,
+            allow_reason_change_without_timestamp=False,
+        )
+        is False
+    )
+    assert (
+        triage.notification_has_new_activity(
+            later,
+            tracked,
+            allow_reason_change_without_timestamp=False,
+        )
+        is True
+    )
+
+
+def test_current_notification_is_clearable_allows_older_actionable_event_after_terminal_boundary(todo_file):
     ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
     artifact = "https://github.com/o/r/pull/1"
     ledger.capture(
-        source_id="thread-passive",
+        source_id="thread-actionable",
         canonical_artifact=artifact,
         classification="actionable",
         worker="test",
         event_at="2026-07-01T12:00:00Z",
     )
     ledger.record_terminal(
-        source_id="thread-passive",
+        source_id="thread-actionable",
         canonical_artifact=artifact,
         terminal_disposition="irrelevant",
-        event_at="2026-07-01T12:00:00Z",
+        event_at="2026-07-03T12:00:00Z",
     )
-    current = _notif("subscribed", id="thread-passive", updated_at="2026-07-02T12:00:00Z")
+    current = _notif("review_requested", id="thread-actionable", updated_at="2026-07-02T12:00:00Z")
     current["subject"].pop("latest_comment_url", None)
     current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/1"
     current["repository"] = {"full_name": "o/r"}
-    with patch("triage.fetch_notifications", return_value=[current]):
+    with (
+        patch("triage.fetch_notifications", return_value=[current]),
+        patch("triage.fetch_thread_state", return_value="open"),
+    ):
         assert triage._current_notification_is_clearable(
             url=artifact,
-            thread_id="thread-passive",
-            reason="subscribed",
+            thread_id="thread-actionable",
+            reason="review_requested",
             ledger=ledger,
             my_login="zkoppert",
         )
@@ -7001,6 +7031,46 @@ def test_reconcile_tracker_rows_to_ledger_uses_terminal_recorded_at(todo_file: P
         ("thread-done",),
     )
     assert rows == [{"terminal_recorded_at": "2026-07-03T12:00:00Z"}]
+
+
+def test_reconcile_tracker_rows_to_ledger_records_date_only_completion_as_observation(
+    todo_file: Path,
+):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    tracked = {
+        "id": "done-2",
+        "title": "Cleanup script (github/example)",
+        "source": "github-notification",
+        "completed": "2026-07-03",
+        "notification": {
+            "thread_id": "thread-done-2",
+            "url": "https://github.com/o/r/pull/2",
+            "reason": "author",
+            "repo": "o/r",
+            "captured_at": "2026-07-01T12:00:00Z",
+        },
+    }
+    data = {"inbox": [], "done": [tracked], "prioritized": {}}
+    with patch("triage.utcnow_iso", return_value="2026-07-03T12:34:56Z"):
+        triage.reconcile_tracker_rows_to_ledger(
+            data,
+            ledger=ledger,
+            dry_run=False,
+            stats=triage.TriageStats(),
+        )
+
+    rows = ledger._rows(
+        """
+        SELECT terminal_recorded_at
+          FROM notifications
+         WHERE source_id = ?
+        """,
+        ("thread-done-2",),
+    )
+    assert rows == [{"terminal_recorded_at": "2026-07-03T12:34:56Z"}]
+    assert data["done"][0]["notification"]["terminal_recorded_at"] == (
+        "2026-07-03T12:34:56Z"
+    )
 
 
 def test_ledger_actionable_thread_does_not_claim_terminal_canonical_row(

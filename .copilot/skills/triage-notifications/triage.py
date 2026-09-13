@@ -966,9 +966,9 @@ def _notification_activity_boundary(
         if terminal_boundary is not None:
             boundary = terminal_boundary
     if boundary is None:
-        boundary = parse_iso_datetime(tracked.get("captured_at"))
-    if boundary is None:
         boundary = parse_iso_datetime(str(tracked_item.get("completed") or ""))
+    if boundary is None:
+        boundary = parse_iso_datetime(tracked.get("captured_at"))
     if boundary is None:
         boundary = parse_iso_datetime(str(tracked_item.get("added") or ""))
     return boundary
@@ -1007,14 +1007,29 @@ def _current_notification_is_clearable(
             source_id=thread_id,
             canonical_artifact=url,
         )
+    record = (
+        ledger.notification_record(source_id=thread_id, canonical_artifact=url)
+        if ledger is not None
+        else None
+    )
+    boundary = None
+    if record is not None:
+        boundary = parse_iso_datetime(
+            str(record.get("terminal_recorded_at") or record.get("first_seen_at") or "")
+        )
     classification = classify(
         current,
         my_login=my_login,
         comment_snapshot_fetcher=shared_comment_notification_snapshot,
         comment_since=comment_since,
     )
-    if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
-        return False
+    if record is None or boundary is None:
+        if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
+            return False
+    else:
+        current_updated_at = parse_iso_datetime(current.get("updated_at"))
+        if current_updated_at is not None and current_updated_at > boundary:
+            return False
     subject = current.get("subject") or {}
     latest_url = str(subject.get("latest_comment_url") or "")
     if latest_url:
@@ -2481,6 +2496,18 @@ def reconcile_tracker_rows_to_ledger(
         )
         disposition = tracker_terminal_disposition(item, section)
         if disposition:
+            terminal_recorded_at = str(
+                notif.get("terminal_recorded_at")
+                or notif.get("marked_done_at")
+                or (
+                    item.get("completed")
+                    if isinstance(item.get("completed"), str)
+                    and "T" in str(item.get("completed"))
+                    else ""
+                )
+                or utcnow_iso()
+            )
+            notif["terminal_recorded_at"] = terminal_recorded_at
             _ledger_capture(
                 ledger,
                 dry_run=dry_run,
@@ -2490,12 +2517,7 @@ def reconcile_tracker_rows_to_ledger(
                 worker="tracker-reconcile",
                 terminal_disposition=disposition,
                 queue_clear=not bool(notif.get("marked_done")),
-                event_at=str(
-                    item.get("completed")
-                    or notif.get("terminal_recorded_at")
-                    or notif.get("marked_done_at")
-                    or utcnow_iso()
-                ),
+                event_at=terminal_recorded_at,
             )
 
 

@@ -1763,7 +1763,6 @@ def test_run_refreshes_pr_decision_before_merging(tmp_path: Path) -> None:
             "url": "https://api.github.com/repos/o/r1/pulls/1",
         },
     }
-    stale_pr = _base_pr(number=1, url="https://github.com/o/r1/pull/1")
     fresh_pr = _base_pr(
         number=1,
         url="https://github.com/o/r1/pull/1",
@@ -1784,7 +1783,7 @@ def test_run_refreshes_pr_decision_before_merging(tmp_path: Path) -> None:
     ), mock.patch.object(
         td, "fetch_notifications", side_effect=fake_fetch_notifications
     ), mock.patch.object(
-        td, "fetch_pr", side_effect=[stale_pr, fresh_pr]
+        td, "fetch_pr", return_value=fresh_pr
     ) as fetch_pr_mock, mock.patch.object(
         td, "detect_repo_coverage", return_value=95
     ), mock.patch.object(
@@ -1797,6 +1796,46 @@ def test_run_refreshes_pr_decision_before_merging(tmp_path: Path) -> None:
     assert stats.dependabot == 1
     assert stats.flagged == 1
     assert stats.merged == 0
+    fetch_pr_mock.assert_has_calls([mock.call("o/r1", 1), mock.call("o/r1", 1)])
+    merge_mock.assert_not_called()
+    mark_mock.assert_not_called()
+
+
+def test_run_skips_when_notification_becomes_assigned_before_action(tmp_path: Path) -> None:
+    notif_initial = {
+        "id": "thread-merge-refresh",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/1",
+        },
+    }
+    notif_fresh = {
+        "id": "thread-merge-refresh",
+        "reason": "assign",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/1",
+        },
+    }
+    pr = _base_pr(number=1, url="https://github.com/o/r1/pull/1")
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", side_effect=[[notif_initial], [notif_fresh]]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ) as fetch_pr_mock, mock.patch.object(
+        td, "do_merge"
+    ) as merge_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock:
+        stats = td.run(args)
+
+    assert stats.dependabot == 1
+    assert stats.skipped == 1
     fetch_pr_mock.assert_has_calls([mock.call("o/r1", 1), mock.call("o/r1", 1)])
     merge_mock.assert_not_called()
     mark_mock.assert_not_called()
