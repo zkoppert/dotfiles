@@ -213,6 +213,23 @@ def test_review_requested_goes_to_q2_without_author_lookup():
     assert author_lookups == []
 
 
+def test_review_requested_with_direct_comment_history_goes_to_q1():
+    c = triage.classify(
+        _notif("review_requested"),
+        my_login="zkoppert",
+        state_fetcher=lambda _: (_ for _ in ()).throw(AssertionError("state lookup should not run")),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(
+            "someone",
+            "hey @zkoppert please review this",
+            True,
+            True,
+        ),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_Q1
+    assert c.direct_mention is True
+
+
 def test_dependabot_bump_with_unknown_author_is_preserved():
     notif = _notif(
         "subscribed",

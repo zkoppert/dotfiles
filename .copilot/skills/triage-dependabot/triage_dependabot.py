@@ -1109,8 +1109,6 @@ def do_merge(
         logger.info("dry-run: would approve and auto-merge %s#%d", repo, number)
         return True
 
-    if action_guard is not None and action_guard() is not None:
-        return False
     if (
         my_login
         and head_sha
@@ -1124,6 +1122,8 @@ def do_merge(
             head_sha,
         )
     else:
+        if action_guard is not None and action_guard() is not None:
+            return False
         do_approve(repo, number, dry_run=False)
 
     if action_guard is not None and action_guard() is not None:
@@ -1323,10 +1323,18 @@ def do_approve(repo: str, number: int, *, dry_run: bool) -> None:
     )
 
 
-def do_rebase_comment(repo: str, number: int, *, dry_run: bool) -> None:
+def do_rebase_comment(
+    repo: str,
+    number: int,
+    *,
+    dry_run: bool,
+    action_guard: Callable[[], str | None] | None = None,
+) -> None:
     """Post the ``@dependabot rebase`` comment."""
     if dry_run:
         logger.info("dry-run: would comment rebase on %s#%d", repo, number)
+        return
+    if action_guard is not None and action_guard() is not None:
         return
     run_gh(
         [
@@ -1342,9 +1350,18 @@ def do_rebase_comment(repo: str, number: int, *, dry_run: bool) -> None:
     )
 
 
-def do_add_label(repo: str, number: int, label: str, *, dry_run: bool) -> None:
+def do_add_label(
+    repo: str,
+    number: int,
+    label: str,
+    *,
+    dry_run: bool,
+    action_guard: Callable[[], str | None] | None = None,
+) -> None:
     if dry_run:
         logger.info("dry-run: would add label %s to %s#%d", label, repo, number)
+        return
+    if action_guard is not None and action_guard() is not None:
         return
     run_gh(
         [
@@ -1379,7 +1396,13 @@ def _is_already_closed_stderr(stderr: str) -> bool:
     )
 
 
-def do_dependabot_close(repo: str, number: int, *, dry_run: bool) -> None:
+def do_dependabot_close(
+    repo: str,
+    number: int,
+    *,
+    dry_run: bool,
+    action_guard: Callable[[], str | None] | None = None,
+) -> None:
     """Force-close a prerelease bump PR via the GitHub API.
 
     Calls ``gh pr close --delete-branch`` to shut the PR directly. We
@@ -1405,6 +1428,8 @@ def do_dependabot_close(repo: str, number: int, *, dry_run: bool) -> None:
     """
     if dry_run:
         logger.info("dry-run: would force-close %s#%d", repo, number)
+        return
+    if action_guard is not None and action_guard() is not None:
         return
     try:
         run_gh(
@@ -1799,7 +1824,8 @@ def _comment_notification_still_clearable(
         boundary is not None
         and current_updated_at is not None
         and current_updated_at > boundary
-        and current_reason not in {"comment", "subscribed", "ci_activity"}
+        and current_reason not in EXCLUDED_DEP_AUTO_CLEAR_REASONS
+        and current_reason != "comment"
     ):
         return False
     subject = current.get("subject") or {}
@@ -2771,6 +2797,36 @@ def run(args: argparse.Namespace) -> TriageStats:
                 stats.errors.append(f"notification disappeared before action for {pr_url}")
                 continue
             current_notif = latest_notif or fresh_notif or notif
+
+            def mutation_guard_reason() -> str | None:
+                guarded_notif = _current_notification_for_clearance(
+                    thread_id=thread_id or None
+                )
+                if thread_id and guarded_notif is None:
+                    return f"notification disappeared before action for {pr_url}"
+                if thread_id and not _comment_notification_still_clearable(
+                    guarded_notif or current_notif,
+                    ledger=ledger,
+                    my_login=my_login,
+                    thread_id=thread_id,
+                    pr_url=pr_url,
+                ):
+                    return "notification no longer clearable"
+                if ledger is not None and ledger.has_active_actionable_notification(
+                    source_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                ):
+                    return "preserving active actionable notification"
+                try:
+                    action_todo = load_todo(args.todo_file)
+                except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+                    return f"failed to reload todo before action for {pr_url}: {exc}"
+                if _todo_has_active_matching_entry_in_data(
+                    action_todo, thread_id=thread_id or None, pr_url=pr_url
+                ):
+                    return "preserving active todo ownership"
+                return None
+
             if thread_id and not _comment_notification_still_clearable(
                 current_notif,
                 ledger=ledger,
@@ -3040,7 +3096,13 @@ def run(args: argparse.Namespace) -> TriageStats:
                         )
                         stats.skipped += 1
                         continue
-                    do_add_label(repo, number, "release", dry_run=args.dry_run)
+                    do_add_label(
+                        repo,
+                        number,
+                        "release",
+                        dry_run=args.dry_run,
+                        action_guard=mutation_guard_reason,
+                    )
                 final_notif = _current_notification_for_clearance(thread_id=thread_id or None)
                 if thread_id and final_notif is None:
                     stats.errors.append(f"notification disappeared before action for {pr_url}")
@@ -3088,6 +3150,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     dry_run=args.dry_run,
                     my_login=my_login,
                     head_sha=pr.get("headRefOid"),
+                    action_guard=mutation_guard_reason,
                 )
                 state[pr_url] = now
                 if not merged:
@@ -3179,7 +3242,12 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                     stats.skipped += 1
                     continue
-                do_rebase_comment(repo, number, dry_run=args.dry_run)
+                do_rebase_comment(
+                    repo,
+                    number,
+                    dry_run=args.dry_run,
+                    action_guard=mutation_guard_reason,
+                )
                 stats.rebased += 1
                 state[pr_url] = now
                 _ledger_capture(
@@ -3235,7 +3303,12 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                     stats.skipped += 1
                     continue
-                do_dependabot_close(repo, number, dry_run=args.dry_run)
+                do_dependabot_close(
+                    repo,
+                    number,
+                    dry_run=args.dry_run,
+                    action_guard=mutation_guard_reason,
+                )
                 stats.closed_prerelease += 1
                 state[pr_url] = now
                 _ledger_capture(

@@ -1332,6 +1332,38 @@ def test_do_merge_rechecks_guard_before_each_mutation() -> None:
     assert not any("--auto" not in args and "merge" in args for args in call_log)
 
 
+def test_do_merge_rechecks_guard_after_approval_lookup() -> None:
+    lookup_finished = False
+
+    def fake_has_existing_approval(
+        repo: str, number: int, my_login: str, head_sha: str
+    ) -> bool:
+        nonlocal lookup_finished
+        lookup_finished = True
+        return False
+
+    def action_guard() -> str | None:
+        return "stale" if lookup_finished else None
+
+    with mock.patch.object(
+        td, "has_existing_approval", side_effect=fake_has_existing_approval
+    ), mock.patch.object(td, "do_approve") as approve_mock, mock.patch.object(
+        td, "run_gh"
+    ) as run_gh_mock:
+        merged = td.do_merge(
+            "o/r",
+            1,
+            dry_run=False,
+            my_login="zkoppert",
+            head_sha="abc123",
+            action_guard=action_guard,
+        )
+
+    assert merged is False
+    approve_mock.assert_not_called()
+    run_gh_mock.assert_not_called()
+
+
 def test_do_merge_approves_before_merge_on_happy_path() -> None:
     """Regression: auto-merge must be preceded by an approval.
 
@@ -2995,7 +3027,7 @@ def test_comment_notification_still_clearable_allows_newer_passive_subscribed_up
         )
 
 
-def test_comment_notification_still_clearable_rejects_newer_review_requested_update(
+def test_comment_notification_still_clearable_allows_newer_review_requested_update(
     tmp_path: Path,
 ) -> None:
     ledger = td.NotificationLedger(tmp_path / "ledger.sqlite")
@@ -3023,16 +3055,16 @@ def test_comment_notification_still_clearable_rejects_newer_review_requested_upd
         },
         "repository": {"full_name": "o/r"},
     }
-    with mock.patch.object(td, "fetch_notifications", return_value=[current]):
-        assert (
-            td._comment_notification_still_clearable(
-                current,
-                ledger=ledger,
-                my_login="zkoppert",
-                thread_id="thread-review",
-                pr_url=artifact,
-            )
-            is False
+    snapshot = mock.Mock(history_complete=True, direct=False)
+    with mock.patch.object(td, "fetch_notifications", return_value=[current]), mock.patch.object(
+        td, "shared_comment_notification_snapshot", return_value=snapshot
+    ):
+        assert td._comment_notification_still_clearable(
+            current,
+            ledger=ledger,
+            my_login="zkoppert",
+            thread_id="thread-review",
+            pr_url=artifact,
         )
 
 

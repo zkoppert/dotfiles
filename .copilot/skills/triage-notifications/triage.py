@@ -702,9 +702,25 @@ def classify(
     if dependabot_bump:
         dependabot_bump_author = subject_author_fetcher(notif)
 
+    snapshot = None
+    snapshot_loaded = False
+    if comment_snapshot_fetcher is not None and subject.get("latest_comment_url"):
+        snapshot = comment_snapshot_fetcher(
+            notif,
+            my_login=my_login,
+            run_gh=run_gh,
+            since=comment_since,
+        )
+        snapshot_loaded = True
+        if snapshot is not None and snapshot.direct is True:
+            return Classification(
+                BUCKET_Q1,
+                f"@mention in comment by @{snapshot.author}",
+                direct_mention=True,
+            )
+
     if reason == "comment":
-        snapshot = None
-        if comment_snapshot_fetcher is not None:
+        if not snapshot_loaded and comment_snapshot_fetcher is not None:
             snapshot = comment_snapshot_fetcher(
                 notif,
                 my_login=my_login,
