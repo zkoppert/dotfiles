@@ -697,13 +697,6 @@ def mentions_me(body: str | None, my_login: str) -> bool:
     return re.search(pattern, body, re.IGNORECASE) is not None
 
 
-def _notification_comment_boundary(tracked_item: dict[str, Any]) -> str | None:
-    tracked = tracked_item.get("notification")
-    if not isinstance(tracked, dict):
-        return None
-    return str(tracked.get("captured_at") or "") or None
-
-
 def _snapshot_from_comment_fetcher(
     notif: dict[str, Any],
     *,
@@ -2551,8 +2544,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 source_id=thread_id,
                 canonical_artifact=canonical_url,
             )
-        if comment_since is None and tracked:
-            comment_since = _notification_comment_boundary(tracked[1])
 
         comment_snapshot = None
         if reason == "comment":
@@ -2562,6 +2553,10 @@ def run(args: argparse.Namespace) -> TriageStats:
                 run_gh=run_gh,
                 since=comment_since,
             )
+            if comment_snapshot is not None and not comment_snapshot.history_complete:
+                if comment_snapshot.direct is not True:
+                    stats.unread += 1
+                    continue
             if (
                 thread_id
                 and comment_snapshot is not None

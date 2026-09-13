@@ -156,27 +156,13 @@ def _parse_comment_cursor(
     except json.JSONDecodeError:
         payload = None
     if isinstance(payload, dict):
-        stamp = parse_iso_datetime(str(payload.get("ts") or payload.get("stamp") or ""))
-        collection_index_value = payload.get("ci")
-        if collection_index_value is None:
-            collection_index_value = payload.get("collection_index")
-        if collection_index_value is None:
-            collection_index = -1
-        else:
-            collection_index = int(collection_index_value)
-        comment_id_value = payload.get("id")
-        if comment_id_value is None:
-            comment_id_value = payload.get("comment_id")
-        if comment_id_value is None:
-            comment_id = -1
-        else:
-            comment_id = int(comment_id_value)
+        stamp = parse_iso_datetime(str(payload.get("ts") or ""))
+        collection_index = int(payload.get("ci") or -1)
+        comment_id = int(payload.get("id") or -1)
         return stamp, collection_index, comment_id
     stamp = parse_iso_datetime(text)
     if stamp is not None:
         return stamp, -1, -1
-    if text.isdigit():
-        return None, -1, int(text)
     return None
 
 
@@ -263,26 +249,24 @@ def comment_notification_snapshot(
                 if cursor_ts is not None:
                     if entry_ts is None:
                         continue
-                    if (
-                        entry_ts > cursor_ts
-                        or (
-                            entry_ts == cursor_ts
-                            and (
-                                entry_collection > cursor_collection
-                                or (
-                                    entry_collection == cursor_collection
-                                    and entry_comment_id > cursor_comment_id
-                                )
-                            )
-                        )
-                    ):
+                    if entry_ts > cursor_ts:
                         relevant.append(entry)
+                    elif entry_ts == cursor_ts:
+                        if entry_collection != cursor_collection or entry_comment_id > cursor_comment_id:
+                            relevant.append(entry)
                 elif entry_comment_id > cursor_comment_id:
                     relevant.append(entry)
         if not relevant:
             if history_incomplete:
                 return CommentNotificationSnapshot(None, None, None, False)
             return CommentNotificationSnapshot(None, None, False, True, None, None)
+        direct_entries = [
+            entry
+            for entry in relevant
+            if pattern
+            and str(entry[5].get("body") or "")
+            and re.search(pattern, str(entry[5].get("body") or ""), re.IGNORECASE)
+        ]
         latest_entry = relevant[-1]
         latest_comment = latest_entry[5]
         author = (latest_comment.get("user") or {}).get("login")
@@ -297,12 +281,7 @@ def comment_notification_snapshot(
         else:
             latest_comment_id_str = None
             latest_comment_id_num = -1
-        direct = False
-        for _stamp, _collection_index, _comment_id, _page_index, _comment_index, comment in relevant:
-            comment_body = str(comment.get("body") or "")
-            if pattern and comment_body and re.search(pattern, comment_body, re.IGNORECASE):
-                direct = True
-                break
+        direct = bool(direct_entries)
         if history_incomplete:
             return CommentNotificationSnapshot(
                 author,
@@ -353,24 +332,6 @@ def comment_notification_snapshot(
         latest_comment_id_str,
         _comment_cursor_from_parts(parse_iso_datetime(str(data.get("updated_at") or data.get("submitted_at") or data.get("created_at") or "")), 0, latest_comment_id_num),
     )
-
-
-def comment_notification_directness(
-    notif: dict[str, Any],
-    *,
-    my_login: str,
-    run_gh,
-    since: str | None = None,
-) -> bool | None:
-    snapshot = comment_notification_snapshot(
-        notif,
-        my_login=my_login,
-        run_gh=run_gh,
-        since=since,
-    )
-    if snapshot is None:
-        return None
-    return snapshot.direct
 
 
 class NotificationLedger:

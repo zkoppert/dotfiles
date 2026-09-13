@@ -293,6 +293,8 @@ def test_comment_history_reports_earlier_mention_when_complete():
             )
         if "--paginate" in args and path.endswith("/pulls/42/comments"):
             return "[]"
+        if "--paginate" in args and path.endswith("/pulls/42/reviews"):
+            return "[]"
         raise AssertionError(args)
 
     with patch("triage.run_gh", side_effect=fake_run_gh):
@@ -347,7 +349,7 @@ def test_comment_snapshot_uses_comment_id_watermark_for_same_second_mentions():
             notif,
             my_login="zkoppert",
             run_gh=triage.run_gh,
-            since="10",
+            since=json.dumps({"ts": "2026-07-01T10:00:00Z", "ci": 0, "id": 10}),
         )
 
     assert snapshot is not None
@@ -399,6 +401,63 @@ def test_comment_snapshot_detects_review_body_mentions():
     assert snapshot is not None
     assert snapshot.direct is True
     assert snapshot.comment_cursor is not None
+    assert snapshot.history_complete is True
+
+
+def test_comment_snapshot_prefers_issue_mentions_over_same_second_review_bodies():
+    notif = _notif(
+        "comment",
+        subject={
+            "title": "Sample PR",
+            "url": "https://api.github.com/repos/zkoppert/example/pulls/42",
+            "latest_comment_url": "https://api.github.com/repos/zkoppert/example/pulls/42/reviews/11",
+            "type": "PullRequest",
+        },
+    )
+
+    def fake_run_gh(args, *, timeout=60):
+        path = args[1]
+        if "--paginate" in args and path.endswith("/issues/42/comments"):
+            return json.dumps(
+                [
+                    [
+                        {
+                            "id": 12,
+                            "user": {"login": "teammate"},
+                            "body": "please take a look, @zkoppert",
+                            "updated_at": "2026-07-01T12:00:00Z",
+                        }
+                    ]
+                ]
+            )
+        if "--paginate" in args and path.endswith("/pulls/42/comments"):
+            return "[]"
+        if "--paginate" in args and path.endswith("/pulls/42/reviews"):
+            return json.dumps(
+                [
+                    [
+                        {
+                            "id": 22,
+                            "user": {"login": "reviewer"},
+                            "body": "looks good",
+                            "submitted_at": "2026-07-01T12:00:00Z",
+                        }
+                    ]
+                ]
+            )
+        raise AssertionError(args)
+
+    with patch("triage.run_gh", side_effect=fake_run_gh):
+        snapshot = triage.shared_comment_notification_snapshot(
+            notif,
+            my_login="zkoppert",
+            run_gh=triage.run_gh,
+            since=json.dumps({"ts": "2026-07-01T12:00:00Z", "ci": 2, "id": 22}),
+        )
+
+    assert snapshot is not None
+    assert snapshot.direct is True
+    assert snapshot.comment_id == "12"
     assert snapshot.history_complete is True
 
 
@@ -2496,7 +2555,7 @@ def test_run_comment_history_failure_routes_direct_mention_to_q1(todo_file):
     notify_mock.assert_called_once()
 
 
-def test_run_comment_history_incomplete_promotes_after_recovery(todo_file):
+def test_run_comment_history_incomplete_defers_until_recovery(todo_file):
     notif = _notif("comment", updated_at="2026-07-01T09:00:00Z")
     first_responses = {
         "/user": json.dumps({"login": "zkoppert"}),
@@ -2553,9 +2612,10 @@ def test_run_comment_history_incomplete_promotes_after_recovery(todo_file):
         stats = triage.run(args)
 
     assert stats.added_q1 == 0
-    assert stats.added_inbox == 1
+    assert stats.added_inbox == 0
+    assert stats.unread == 1
     data = yaml.safe_load(todo_file.read_text())
-    assert "comment_watermark" not in data["inbox"][0]["notification"]
+    assert data["inbox"] == []
     notify_mock.assert_not_called()
 
     with patch("triage.subprocess.run", side_effect=_gh_returns(second_responses)), patch(
@@ -2564,11 +2624,11 @@ def test_run_comment_history_incomplete_promotes_after_recovery(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.escalated_review_requests == 1
-    assert stats.added_q1 == 0
+    assert stats.added_q1 == 1
+    assert stats.added_inbox == 0
     data = yaml.safe_load(todo_file.read_text())
     assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
-    notify_mock.assert_not_called()
+    notify_mock.assert_called_once()
 
 
 def test_run_routes_dependabot_comment_mention_to_q1(todo_file):
