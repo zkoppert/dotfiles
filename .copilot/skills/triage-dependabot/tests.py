@@ -1747,7 +1747,15 @@ def test_run_keeps_notification_when_auto_merge_is_only_enabled(tmp_path: Path) 
 
 
 def test_run_refreshes_pr_decision_before_merging(tmp_path: Path) -> None:
-    notif = {
+    notif_initial = {
+        "id": "thread-merge-refresh",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/1",
+        },
+    }
+    notif_fresh = {
         "id": "thread-merge-refresh",
         "reason": "subscribed",
         "subject": {
@@ -1756,24 +1764,30 @@ def test_run_refreshes_pr_decision_before_merging(tmp_path: Path) -> None:
         },
     }
     stale_pr = _base_pr(number=1, url="https://github.com/o/r1/pull/1")
-    fresh_pr = _base_pr(number=1, url="https://github.com/o/r1/pull/1")
+    fresh_pr = _base_pr(
+        number=1,
+        url="https://github.com/o/r1/pull/1",
+        reviews=[{"author": {"login": "alice"}}],
+    )
     args = _make_args(tmp_path)
+
+    fetch_notifications_calls = [
+        [notif_initial],
+        [notif_fresh],
+    ]
+
+    def fake_fetch_notifications():
+        return fetch_notifications_calls.pop(0) if fetch_notifications_calls else [notif_fresh]
 
     with mock.patch.object(
         td, "get_my_login", return_value="zkoppert"
     ), mock.patch.object(
-        td, "fetch_notifications", return_value=[notif]
+        td, "fetch_notifications", side_effect=fake_fetch_notifications
     ), mock.patch.object(
         td, "fetch_pr", side_effect=[stale_pr, fresh_pr]
     ) as fetch_pr_mock, mock.patch.object(
         td, "detect_repo_coverage", return_value=95
     ), mock.patch.object(
-        td, "decide",
-        side_effect=[
-            td.Decision(td.OUTCOME_MERGE, "stale decision"),
-            td.Decision(td.OUTCOME_FLAG, "fresh human activity"),
-        ],
-    ) as decide_mock, mock.patch.object(
         td, "do_merge"
     ) as merge_mock, mock.patch.object(
         td, "mark_thread_done"
@@ -1783,11 +1797,7 @@ def test_run_refreshes_pr_decision_before_merging(tmp_path: Path) -> None:
     assert stats.dependabot == 1
     assert stats.flagged == 1
     assert stats.merged == 0
-    fetch_pr_mock.assert_has_calls([
-        mock.call("o/r1", 1),
-        mock.call("o/r1", 1),
-    ])
-    assert decide_mock.call_count == 2
+    fetch_pr_mock.assert_has_calls([mock.call("o/r1", 1), mock.call("o/r1", 1)])
     merge_mock.assert_not_called()
     mark_mock.assert_not_called()
 

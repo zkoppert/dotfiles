@@ -2712,23 +2712,11 @@ def run(args: argparse.Namespace) -> TriageStats:
             logger.info("cooldown active for %s, skipping", pr_url)
             continue
 
-        decision = decide(
-            pr,
-            my_login=my_login,
-            repo=repo,
-            coverage_lookup=coverage_lookup,
-            use_copilot=use_copilot,
-            notif_reason=reason,
-        )
-        logger.info(
-            "%s#%d -> %s (%s)",
-            repo,
-            number,
-            decision.outcome,
-            decision.reason,
-        )
-
         try:
+            fresh_notif = _current_notification_for_clearance(thread_id=thread_id or None)
+            if thread_id and fresh_notif is None:
+                stats.errors.append(f"notification disappeared before action for {pr_url}")
+                continue
             fresh_pr = fetch_pr(repo, number)
             if fresh_pr is None:
                 stats.errors.append(f"failed to refresh {pr_url} before action")
@@ -2740,7 +2728,14 @@ def run(args: argparse.Namespace) -> TriageStats:
                 repo=repo,
                 coverage_lookup=coverage_lookup,
                 use_copilot=use_copilot,
-                notif_reason=reason,
+                notif_reason=str((fresh_notif or notif).get("reason") or reason),
+            )
+            logger.info(
+                "%s#%d -> %s (%s)",
+                repo,
+                number,
+                decision.outcome,
+                decision.reason,
             )
             if decision.outcome == OUTCOME_MERGE:
                 merged = do_merge(

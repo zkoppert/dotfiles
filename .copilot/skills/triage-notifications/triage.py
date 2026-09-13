@@ -1007,27 +1007,13 @@ def _current_notification_is_clearable(
             source_id=thread_id,
             canonical_artifact=url,
         )
-    record = (
-        ledger.notification_record(source_id=thread_id, canonical_artifact=url)
-        if ledger is not None
-        else None
-    )
-    boundary = None
-    if record is not None:
-        boundary = parse_iso_datetime(
-            str(record.get("terminal_recorded_at") or record.get("first_seen_at") or "")
-        )
-    current_updated_at = parse_iso_datetime(current.get("updated_at"))
     classification = classify(
         current,
         my_login=my_login,
         comment_snapshot_fetcher=shared_comment_notification_snapshot,
         comment_since=comment_since,
     )
-    if record is None or boundary is None:
-        if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
-            return False
-    elif current_updated_at is not None and current_updated_at < boundary:
+    if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
         return False
     subject = current.get("subject") or {}
     latest_url = str(subject.get("latest_comment_url") or "")
@@ -1457,9 +1443,7 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
         if delta.captured_at:
             notif["captured_at"] = delta.captured_at
         if delta.reopen_terminal:
-            notif.pop("marked_done", None)
-            notif.pop("marked_done_at", None)
-            notif.pop("terminal_disposition", None)
+            _reset_terminal_notification(notif)
     q1.append(candidate)
     return True
 
@@ -2507,10 +2491,9 @@ def reconcile_tracker_rows_to_ledger(
                 terminal_disposition=disposition,
                 queue_clear=not bool(notif.get("marked_done")),
                 event_at=str(
-                    notif.get("terminal_recorded_at")
+                    item.get("completed")
+                    or notif.get("terminal_recorded_at")
                     or notif.get("marked_done_at")
-                    or notif.get("captured_at")
-                    or notif.get("updated_at")
                     or utcnow_iso()
                 ),
             )
