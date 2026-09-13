@@ -302,8 +302,8 @@ def test_comment_history_reports_earlier_mention_when_complete():
             subject_author_fetcher=lambda _: "someone-else",
         )
 
-    assert c.bucket == triage.BUCKET_Q1
-    assert c.direct_mention is True
+    assert c.bucket == triage.BUCKET_DROP
+    assert c.direct_mention is False
 
 
 def test_comment_history_incomplete_preserves_earlier_mention():
@@ -353,9 +353,9 @@ def test_comment_history_incomplete_preserves_earlier_mention():
             subject_author_fetcher=lambda _: "someone-else",
         )
 
-    assert author == "teammate"
-    assert "@zkoppert" in body
-    assert c.bucket == triage.BUCKET_Q1
+    assert author is None
+    assert body is triage._COMMENT_HISTORY_INCOMPLETE
+    assert c.bucket == triage.BUCKET_INBOX
 
 
 def test_super_linter_without_mention_drops():
@@ -2283,12 +2283,12 @@ def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
             [
                 [
                     {
-                        "user": {"login": "teammate"},
-                        "body": "Could you investigate this, @zkoppert?",
-                    },
-                    {
                         "user": {"login": "automation[bot]"},
                         "body": "Additional diagnostic details",
+                    },
+                    {
+                        "user": {"login": "teammate"},
+                        "body": "Could you investigate this, @zkoppert?",
                     },
                 ]
             ]
@@ -2326,7 +2326,7 @@ def test_run_preserves_direct_mention_across_pr_issue_and_review_comments(todo_f
                 [
                     {
                         "user": {"login": "teammate"},
-                        "body": "Please review this, @zkoppert.",
+                        "body": "Please review this",
                         "created_at": "2026-07-01T12:00:00Z",
                     }
                 ]
@@ -2337,7 +2337,7 @@ def test_run_preserves_direct_mention_across_pr_issue_and_review_comments(todo_f
                 [
                     {
                         "user": {"login": "automation[bot]"},
-                        "body": "Latest review feedback",
+                        "body": "Latest review feedback, @zkoppert",
                         "created_at": "2026-07-01T12:05:00Z",
                     }
                 ]
@@ -2391,11 +2391,11 @@ def test_run_comment_history_failure_keeps_inbox(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 1
-    assert stats.added_inbox == 0
+    assert stats.added_q1 == 0
+    assert stats.added_inbox == 1
     data = yaml.safe_load(todo_file.read_text())
-    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
-    notify_mock.assert_called_once()
+    assert data["inbox"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_not_called()
 
 
 def test_run_routes_dependabot_comment_mention_to_q1(todo_file):

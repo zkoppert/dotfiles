@@ -120,12 +120,14 @@ def comment_notification_directness(
     *,
     my_login: str,
     run_gh,
+    since: str | None = None,
 ) -> bool | None:
     subject = notif.get("subject") or {}
     latest = subject.get("latest_comment_url")
     if not latest:
         return None
     path = str(latest).replace("https://api.github.com", "")
+    since_dt = parse_iso_datetime(since)
     collected: list[tuple[str, int, int, int, dict[str, Any]]] = []
     history_incomplete = False
     for collection_index, collection_path in enumerate(_comment_collection_paths(subject, path)):
@@ -155,21 +157,28 @@ def comment_notification_directness(
             history_incomplete = True
     if collected:
         collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]))
-        for _stamp, _collection_index, _page_index, _comment_index, comment in reversed(
-            collected
-        ):
-            body = str(comment.get("body") or "")
-            pattern = rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
-            if body and re.search(pattern, body, re.IGNORECASE):
-                return True
+        relevant = collected
+        if since_dt is not None:
+            relevant = []
+            for entry in collected:
+                entry_dt = parse_iso_datetime(entry[4].get("updated_at")) or parse_iso_datetime(
+                    entry[4].get("created_at")
+                )
+                if entry_dt is not None and entry_dt > since_dt:
+                    relevant.append(entry)
+        if not relevant:
+            return None if history_incomplete else False
         if history_incomplete:
             return None
-        latest_comment = collected[-1][4]
+        latest_comment = relevant[-1][4]
         body = str(latest_comment.get("body") or "")
         if not body:
-            return None
+            return False
         pattern = rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
         return re.search(pattern, body, re.IGNORECASE) is not None
+
+    if since_dt is not None:
+        return None if history_incomplete else False
     try:
         out = run_gh(["api", path], timeout=20)
         data = json.loads(out)

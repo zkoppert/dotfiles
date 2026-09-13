@@ -59,6 +59,7 @@ from notification_worker_common import (
     ledger_record_clear_result as _ledger_record_clear_result,
 )
 from notification_worker_common import (
+    comment_notification_directness as shared_comment_notification_directness,
     parse_iso_datetime,
     review_request_escalates_at,
     utcnow_iso,
@@ -731,13 +732,6 @@ def fetch_latest_comment(
 
     if collected:
         collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]))
-        for _stamp, _collection_index, _page_index, _comment_index, comment in reversed(
-            collected
-        ):
-            body = str(comment.get("body") or "")
-            if my_login and mentions_me(body, my_login):
-                author = (comment.get("user") or {}).get("login")
-                return author, body
         if history_incomplete:
             return None, _COMMENT_HISTORY_INCOMPLETE
         latest_comment = collected[-1][4]
@@ -776,12 +770,29 @@ def mentions_me(body: str | None, my_login: str) -> bool:
     return re.search(pattern, body, re.IGNORECASE) is not None
 
 
+def _notification_comment_boundary(tracked_item: dict[str, Any]) -> str | None:
+    tracked = tracked_item.get("notification")
+    if not isinstance(tracked, dict):
+        return None
+    for key in ("captured_at", "marked_done_at"):
+        value = tracked.get(key)
+        if value:
+            return str(value)
+    for key in ("completed", "added"):
+        value = tracked_item.get(key)
+        if value:
+            return str(value)
+    return None
+
+
 def classify(
     notif: dict[str, Any],
     *,
     my_login: str,
     state_fetcher=fetch_thread_state,
     comment_fetcher=fetch_latest_comment,
+    comment_directness_fetcher=None,
+    comment_since: str | None = None,
     subject_author_fetcher=fetch_subject_author,
 ) -> Classification:
     """Decide which bucket a notification belongs in.
@@ -818,12 +829,26 @@ def classify(
                     skip_mark_done=True,
                 )
             return Classification(BUCKET_INBOX, "comment history incomplete")
-        if mentions_me(body, my_login):
+        direct_comment = None
+        if comment_directness_fetcher is not None:
+            direct_comment = comment_directness_fetcher(
+                notif,
+                my_login=my_login,
+                run_gh=run_gh,
+                since=comment_since,
+            )
+        if direct_comment is True or (
+            direct_comment is None
+            and comment_directness_fetcher is None
+            and mentions_me(body, my_login)
+        ):
             return Classification(
                 BUCKET_Q1,
                 f"@mention in comment by @{author}",
                 direct_mention=True,
             )
+        if direct_comment is None and comment_directness_fetcher is not None:
+            return Classification(BUCKET_INBOX, "comment history incomplete")
         if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
             return Classification(
                 BUCKET_DROP,
@@ -1060,6 +1085,12 @@ def notification_has_new_activity(
     )
     updated_at = parse_iso_datetime(notif.get("updated_at"))
     captured_at = parse_iso_datetime(tracked.get("captured_at"))
+    if captured_at is None:
+        captured_at = parse_iso_datetime(tracked.get("marked_done_at"))
+    if captured_at is None:
+        captured_at = parse_iso_datetime(str(tracked_item.get("completed") or ""))
+    if captured_at is None:
+        captured_at = parse_iso_datetime(str(tracked_item.get("added") or ""))
     if captured_at is None:
         return bool(tracked.get("marked_done")) or (
             reason_changed and allow_reason_change_without_timestamp
@@ -2558,9 +2589,24 @@ def run(args: argparse.Namespace) -> TriageStats:
         repo = str((notif.get("repository") or {}).get("full_name") or "")
         title = str(subject.get("title") or "")
 
+        comment_since = None
+        if thread_id and thread_id in seen_ids:
+            tracked = next(
+                (
+                    (section, item)
+                    for section, item in _iter_notification_items_with_sections(data)
+                    if _item_thread_id(item) == thread_id
+                ),
+                None,
+            )
+            if tracked:
+                comment_since = _notification_comment_boundary(tracked[1])
+
         classification = classify(
             notif,
             my_login=my_login,
+            comment_directness_fetcher=shared_comment_notification_directness,
+            comment_since=comment_since,
         )
         logger.debug(
             "thread %s → %s (%s)",
@@ -2568,7 +2614,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             classification.bucket,
             classification.reason,
         )
-        if classification.direct_mention and thread_id:
+        if thread_id and classification.bucket == BUCKET_Q1 and reason in {"mention", "assign", "comment"}:
             direct_mention_thread_ids.add(thread_id)
 
         if thread_id and thread_id in seen_ids:
@@ -2637,22 +2683,25 @@ def run(args: argparse.Namespace) -> TriageStats:
             ):
                 stats.already_tracked += 1
                 continue
-            if classification.bucket == BUCKET_Q1:
-                if renewed and tracked:
-                    mutations.escalate.append(
-                        EscalationDelta(
-                            item_id="",
-                            thread_id=thread_id,
-                            reopen_terminal=bool(
-                                tracker_terminal_disposition(tracked[1], tracked[0])
-                            ),
-                            reason=reason,
-                            captured_at=str(notif.get("updated_at") or ""),
-                        )
+            if classification.bucket == BUCKET_Q1 and tracked:
+                mutations.escalate.append(
+                    EscalationDelta(
+                        item_id="",
+                        thread_id=thread_id,
+                        reopen_terminal=bool(
+                            tracker_terminal_disposition(tracked[1], tracked[0])
+                        ),
+                        reason=reason,
+                        captured_at=str(notif.get("updated_at") or ""),
                     )
-                    if tracker_terminal_disposition(tracked[1], tracked[0]):
-                        reopened_thread_ids.add(thread_id)
-            elif classification.bucket == BUCKET_Q2 and renewed:
+                )
+                if tracker_terminal_disposition(tracked[1], tracked[0]):
+                    reopened_thread_ids.add(thread_id)
+            elif (
+                classification.bucket == BUCKET_Q2
+                and tracked_nonterminal
+                and tracked[0] != "prioritized.q1_do_first"
+            ):
                 mutations.route_existing_q2.append(
                     build_todo_entry(notif, classification)
                 )
@@ -2881,13 +2930,18 @@ def run(args: argparse.Namespace) -> TriageStats:
         mutations.prune.extend(
             collect_stale_notification_prunes(data, stats, dry_run=args.dry_run)
         )
-        for delta in mutations.prune:
+        mutations.prune = [
+            delta
+            for delta in mutations.prune
             if (
                 not delta.thread_id
-                or delta.thread_id in reopened_thread_ids
-                or delta.thread_id in direct_mention_thread_ids
-            ):
-                continue
+                or (
+                    delta.thread_id not in reopened_thread_ids
+                    and delta.thread_id not in direct_mention_thread_ids
+                )
+            )
+        ]
+        for delta in mutations.prune:
             _ledger_capture(
                 ledger,
                 dry_run=args.dry_run,
