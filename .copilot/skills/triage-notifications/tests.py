@@ -1719,7 +1719,7 @@ def test_run_clears_uncleared_legacy_terminal_direct_mention(todo_file):
             }
         )
     )
-    notification = _notif("mention", updated_at="2026-07-01T12:00:00Z")
+    notification = _notif("mention", unread=True, updated_at="2026-07-01T12:00:00Z")
     delete_calls = []
 
     def fake_run(cmd, *args, **kwargs):
@@ -1741,6 +1741,49 @@ def test_run_clears_uncleared_legacy_terminal_direct_mention(todo_file):
     assert updated["done"][0]["status"] == "done"
     assert updated["done"][0]["notification"]["marked_done"] is True
     assert any("/notifications/threads/1001" in " ".join(call) for call in delete_calls)
+
+
+def test_run_marks_done_ready_terminal_item_without_notifications(todo_file):
+    item = {
+        "id": "old",
+        "title": "Completed ask",
+        "status": "done",
+        "completed": "2026-07-02",
+        "notification": {
+            "thread_id": "done-1",
+            "reason": "author",
+            "url": "https://github.com/o/r/pull/9",
+        },
+    }
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": [], "q2_schedule": []},
+                "done": [item],
+            }
+        )
+    )
+    delete_calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(tuple(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return _gh_returns(
+            {
+                "/user": json.dumps({"login": "zkoppert"}),
+                "/notifications?all=true": "[]",
+            }
+        )(cmd, *args, **kwargs)
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        stats = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    updated = yaml.safe_load(todo_file.read_text())
+    assert stats.marked_done == 1
+    assert updated["done"][0]["notification"]["marked_done"] is True
+    assert any("/notifications/threads/done-1" in " ".join(call) for call in delete_calls)
 
 
 def test_run_reopens_legacy_terminal_item_for_renewed_direct_mention(todo_file):
@@ -1890,6 +1933,66 @@ def test_run_routes_existing_terminal_thread_to_scheduled_review(todo_file):
     assert scheduled[0]["status"] == "pending"
     assert scheduled[0]["notification"]["reason"] == "review_requested"
     assert scheduled[0]["notification"]["escalates_at"] == "2026-07-07T15:00:00Z"
+
+
+def test_run_releases_q2_review_when_dependabot_author_becomes_known(todo_file):
+    item = {
+        "id": "old",
+        "title": "Dependabot review",
+        "status": "pending",
+        "quadrant": "q2_schedule",
+        "notification": {
+            "thread_id": "dep-review-1",
+            "reason": "review_requested",
+            "captured_at": "2026-07-01T15:00:00Z",
+            "escalates_at": "2026-07-02T15:00:00Z",
+        },
+    }
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": [], "q2_schedule": [item]},
+                "done": [],
+            }
+        )
+    )
+    notif = _notif(
+        "review_requested",
+        id="dep-review-1",
+        subject={
+            "title": "Bump lodash from 4.17.20 to 4.17.21",
+            "url": "https://api.github.com/repos/some-org/x/pulls/42",
+            "type": "PullRequest",
+        },
+        repository={"full_name": "some-org/x"},
+    )
+    delete_calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        joined = " ".join(cmd)
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(joined)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        responses = {
+            "/user": json.dumps({"login": "zkoppert"}),
+            "/notifications?all=true": json.dumps([notif]),
+            "/repos/some-org/x/pulls/42": json.dumps(
+                {"state": "open", "user": {"login": "dependabot[bot]"}}
+            ),
+        }
+        idx = cmd.index("api")
+        after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
+        path = after[0] if after else ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=responses.get(path, ""), stderr="")
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        stats = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    updated = yaml.safe_load(todo_file.read_text())
+    assert stats.left_for_dependabot == 1
+    assert updated["prioritized"]["q2_schedule"] == []
+    assert delete_calls == []
 
 
 def test_run_preserves_existing_review_escalation_deadline(todo_file):
@@ -2687,7 +2790,7 @@ def test_run_comment_history_failure_routes_direct_mention_to_q1(todo_file):
 
 
 def test_run_comment_history_incomplete_defers_until_recovery(todo_file):
-    notif = _notif("comment", updated_at="2026-07-01T09:00:00Z")
+    notif = _notif("comment", unread=True, updated_at="2026-07-01T09:00:00Z")
     first_responses = {
         "/user": json.dumps({"login": "zkoppert"}),
         "/notifications?all=true": json.dumps([notif]),
@@ -2763,7 +2866,7 @@ def test_run_comment_history_incomplete_defers_until_recovery(todo_file):
 
 
 def test_run_comment_history_incomplete_suspends_pending_clear(todo_file):
-    notif = _notif("comment")
+    notif = _notif("comment", unread=True)
     ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
     ledger.capture(
         source_id="1001",

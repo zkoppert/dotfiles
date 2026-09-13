@@ -1813,6 +1813,22 @@ def _tracked_pr_issue_url_exists_elsewhere(
     return False
 
 
+def _find_todo_item_by_canonical_url(
+    data: dict[str, Any],
+    url: str,
+) -> tuple[str, dict[str, Any]] | None:
+    target = _canonical_pr_issue_url_key(url)
+    if target is None:
+        return None
+    for section, item in _iter_notification_items_with_sections(data):
+        if any(
+            _canonical_pr_issue_url_key(reference_url) == target
+            for reference_url in _item_reference_urls(item)
+        ):
+            return section, item
+    return None
+
+
 def _remove_item_from_current_section(
     data: dict[str, Any], section: str, item: dict[str, Any]
 ) -> bool:
@@ -2535,6 +2551,11 @@ def run(args: argparse.Namespace) -> TriageStats:
                 ),
                 None,
             )
+        canonical_tracked = (
+            None
+            if tracked is not None
+            else _find_todo_item_by_canonical_url(data, canonical_url)
+        )
         comment_since = None
         if ledger is not None and thread_id:
             comment_since = ledger.comment_watermark(
@@ -2543,6 +2564,8 @@ def run(args: argparse.Namespace) -> TriageStats:
             )
         if comment_since is None and tracked is not None:
             comment_since = _bootstrap_comment_since(notif, tracked[1])
+        if comment_since is None and canonical_tracked is not None:
+            comment_since = _bootstrap_comment_since(notif, canonical_tracked[1])
 
         comment_snapshot = None
         if reason == "comment":
@@ -2561,7 +2584,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                             source_id=thread_id,
                             canonical_artifact=canonical_url,
                         )
-                    stats.unread += 1
                     continue
             if (
                 thread_id
@@ -2661,6 +2683,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 tracked_nonterminal
                 and classification.bucket == BUCKET_DROP
                 and not subject_resolved
+                and not classification.skip_mark_done
             ):
                 stats.already_tracked += 1
                 continue
@@ -2857,7 +2880,11 @@ def run(args: argparse.Namespace) -> TriageStats:
     for item, section, disposition in items_ready_for_clear(data):
         notif_meta = item["notification"]
         thread_id = str(notif_meta["thread_id"])
-        if thread_id in reopened_thread_ids or thread_id in protected_actionable_thread_ids:
+        if (
+            thread_id in reopened_thread_ids
+            or thread_id in protected_actionable_thread_ids
+            or thread_id in attempted_thread_ids
+        ):
             continue
         terminal_canonical_url: str | None = (
             str(notif_meta.get("url") or item.get("link") or "") or None
@@ -2892,7 +2919,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     ledger,
                     dry_run=args.dry_run,
                     thread_id=thread_id,
-                    canonical_artifact=canonical_url,
+                    canonical_artifact=terminal_canonical_url,
                 )
             except (
                 subprocess.CalledProcessError,
@@ -2905,7 +2932,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     ledger,
                     dry_run=args.dry_run,
                     thread_id=thread_id,
-                    canonical_artifact=canonical_url,
+                    canonical_artifact=terminal_canonical_url,
                     error=exc,
                 )
         else:
@@ -2929,6 +2956,8 @@ def run(args: argparse.Namespace) -> TriageStats:
             )
         ]
         for delta in mutations.prune:
+            if delta.thread_id and delta.thread_id in attempted_thread_ids:
+                continue
             _ledger_capture(
                 ledger,
                 dry_run=args.dry_run,

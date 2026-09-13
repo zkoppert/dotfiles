@@ -67,9 +67,18 @@ ensure_notification_worker_runtime() {
   fi
 
   mkdir -p "$NOTIFICATION_RUNTIME_ROOT"
-  "$bootstrap_python" -m venv "$NOTIFICATION_RUNTIME_VENV"
-  "$NOTIFICATION_RUNTIME_PYTHON" -m pip install --upgrade pip >/dev/null
-  "$NOTIFICATION_RUNTIME_PYTHON" -m pip install --requirement "$NOTIFICATION_REQUIREMENTS" >/dev/null
+  "$bootstrap_python" -m venv "$NOTIFICATION_RUNTIME_VENV" || {
+    echo "⚠ Failed to create notification worker virtualenv at $NOTIFICATION_RUNTIME_VENV"
+    return 1
+  }
+  "$NOTIFICATION_RUNTIME_PYTHON" -m pip install --upgrade pip >/dev/null || {
+    echo "⚠ Failed to upgrade pip in notification worker runtime"
+    return 1
+  }
+  "$NOTIFICATION_RUNTIME_PYTHON" -m pip install --requirement "$NOTIFICATION_REQUIREMENTS" >/dev/null || {
+    echo "⚠ Failed to install notification worker requirements"
+    return 1
+  }
 
   if ! notification_runtime_is_healthy; then
     echo "⚠ Notification worker runtime preflight failed at $NOTIFICATION_RUNTIME_PYTHON"
