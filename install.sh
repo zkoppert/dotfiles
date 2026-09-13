@@ -164,7 +164,7 @@ if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
   # over the real gh binary. Cover both zsh (macOS default) and bash (Codespaces,
   # Linux). brew shellenv (in .zprofile) prepends /opt/homebrew/bin, so we add
   # our own prepend AFTER brew runs.
-  PATH_LINE='export PATH="$HOME/.local/bin:$PATH"  # dotfiles: gh wrapper'
+  PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\"  # dotfiles: gh wrapper"
   for shell_rc in "$HOME/.zprofile" "$HOME/.profile" "$HOME/.bashrc"; do
     rc_short="${shell_rc/#$HOME/~}"
     if [ -f "$shell_rc" ] && grep -q "dotfiles: gh wrapper" "$shell_rc"; then

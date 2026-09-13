@@ -3313,6 +3313,7 @@ def test_run_notifies_commit_mention_with_commit_url(todo_file):
 
 def test_run_drops_ci_activity_and_marks_done(todo_file):
     notif = _notif("ci_activity", id="555")
+    notif["subject"].pop("latest_comment_url")
     delete_calls: list[tuple] = []
 
     def fake_run(cmd, *args, **kwargs):
@@ -7558,6 +7559,7 @@ def test_ledger_actionable_link_tracker_preserves_then_reactivates_terminal_row(
 
 def test_run_policy_drop_records_ledger_before_clear(todo_file: Path):
     notif = _notif("ci_activity", id="drop-1")
+    notif["subject"].pop("latest_comment_url")
     ledger_file = todo_file.parent / "ledger.sqlite"
     delete_paths: list[str] = []
 

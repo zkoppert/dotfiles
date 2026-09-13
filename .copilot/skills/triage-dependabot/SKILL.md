@@ -23,8 +23,10 @@ upgrades or seeing a backlog of dependabot notifications.
 1. Fetches all notifications via `gh api /notifications?all=true --paginate`.
 2. Filters to notifications whose subject is a PullRequest authored by
    `dependabot[bot]` (or `dependabot-preview[bot]`).
-3. Hands `mention`, `assign`, and `comment` notifications to general triage
-   before taking any terminal action.
+3. Hands `mention`, `assign`, and directly addressed comment notifications to
+   general triage before taking any terminal action. Verified non-direct
+   comments continue through the Dependabot decision tree; incomplete comment
+   history is retained.
 4. Skips repos whose owner is not `github`, `github-community-projects`,
    or `zkoppert`; passive notifications are marked done, direct pings stay in
    the inbox, and no todo is created.
@@ -45,8 +47,9 @@ upgrades or seeing a backlog of dependabot notifications.
      has historically ignored `@dependabot close` comments for hours.
    - `flag-for-review` - write a Q1 entry to
      `~/repos/zkoppert-todo/todo.yml` for human attention.
-6. Records the source decision in the shared local ledger and then marks
-   the notification done on GitHub when an action runs.
+6. Records terminal source decisions in the shared local ledger and then marks
+   the notification done on GitHub. Rebase notifications remain open for the
+   next Dependabot push.
 7. Persists a per-PR cooldown timestamp in
    `~/Library/Logs/triage-dependabot-state.json` so re-runs within an
    hour do not double-act.

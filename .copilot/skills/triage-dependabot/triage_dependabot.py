@@ -197,9 +197,9 @@ SECURITY_REGEX = re.compile(
 # Dependencies the triage skill must never auto-merge / rebase / label. When
 # a Dependabot PR title or body references one of these, the action is to
 # skip the PR but still clear the notification if the user is not directly
-# being asked to act (reason ∈ EXCLUDED_DEP_AUTO_CLEAR_REASONS). For
-# ``@mention``/``team_mention``/``author`` reasons the notification stays in
-# the inbox so the user can respond directly. Patterns match the action /
+# being asked to act (reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS or a verified
+# non-direct comment). Direct asks and incomplete comment histories stay in the
+# inbox. Patterns match the action /
 # package coordinate (e.g. ``super-linter/super-linter``) rather than a
 # bare name to avoid false positives on repos that legitimately ship files
 # named after the tool.
@@ -210,8 +210,8 @@ SKIPPED_DEPENDENCY_PATTERNS: tuple[re.Pattern[str], ...] = (
 # Repositories from Zack's private config that the triage skill must never
 # auto-merge / rebase / label Dependabot PRs in. Treated identically to
 # SKIPPED_DEPENDENCY_PATTERNS: passive subscription reasons in
-# EXCLUDED_DEP_AUTO_CLEAR_REASONS are cleared, while @mention / team_mention /
-# author reasons leave the notification alone so the user can act directly.
+# EXCLUDED_DEP_AUTO_CLEAR_REASONS and verified non-direct comments are cleared,
+# while direct asks and incomplete comment histories remain for the user.
 # Third-party repos outside OWNED_OWNERS are handled by the unowned-repo branch
 # in run(), not by this private owned-repo skip list.
 SKIPPED_REPOS: set[str] = _private_repo_set(
@@ -221,8 +221,8 @@ SKIPPED_REPOS: set[str] = _private_repo_set(
 # Notification reasons that count as "passive subscription" - if a PR is
 # excluded from action AND we got notified for one of these reasons, mark
 # the thread done so it stops cluttering the inbox. Any other reason
-# (mention, team_mention, author, manual) leaves the notification alone so
-# the user can act directly.
+# leaves the notification alone so the user can act directly. A verified
+# non-direct comment follows the same clear path separately.
 EXCLUDED_DEP_AUTO_CLEAR_REASONS: frozenset[str] = frozenset(
     {"review_requested", "subscribed", "ci_activity"}
 )
