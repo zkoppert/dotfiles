@@ -330,17 +330,21 @@ def comment_notification_snapshot(
             entry[4],
         )
     )
-    direct_entries = [
-        entry
-        for entry in relevant
-        if pattern
-        and str(entry[5].get("body") or "")
-        and re.search(pattern, str(entry[5].get("body") or ""), re.IGNORECASE)
-    ]
+    latest_entry = relevant[-1]
+    if watermarks:
+        direct_entries = [
+            entry
+            for entry in relevant
+            if pattern
+            and str(entry[5].get("body") or "")
+            and re.search(pattern, str(entry[5].get("body") or ""), re.IGNORECASE)
+        ]
+    else:
+        latest_body = str(latest_entry[5].get("body") or "")
+        direct_entries = [latest_entry] if pattern and latest_body and re.search(pattern, latest_body, re.IGNORECASE) else []
     latest_by_stream: dict[str, tuple[_dt.datetime | None, int]] = {}
     for entry in relevant:
         latest_by_stream[entry[1]] = (entry[0], entry[2])
-    latest_entry = relevant[-1]
     latest_comment = latest_entry[5]
     author = (latest_comment.get("user") or {}).get("login")
     body = str(latest_comment.get("body") or "") or None
@@ -602,7 +606,13 @@ class NotificationLedger:
                         classification = ?,
                         last_seen_at = ?,
                         classified_at = ?,
-                        worker = ?
+                        worker = ?,
+                        terminal_disposition = CASE WHEN ? = 'actionable' THEN NULL ELSE terminal_disposition END,
+                        terminal_recorded_at = CASE WHEN ? = 'actionable' THEN NULL ELSE terminal_recorded_at END,
+                        clear_state = CASE WHEN ? = 'actionable' THEN 'not_applicable' ELSE clear_state END,
+                        clear_attempted_at = CASE WHEN ? = 'actionable' THEN NULL ELSE clear_attempted_at END,
+                        cleared_at = CASE WHEN ? = 'actionable' THEN NULL ELSE cleared_at END,
+                        last_clear_error = CASE WHEN ? = 'actionable' THEN NULL ELSE last_clear_error END
                  WHERE id = ?
                 """,
                 (
@@ -618,6 +628,12 @@ class NotificationLedger:
                     now,
                     now,
                     worker,
+                    classification,
+                    classification,
+                    classification,
+                    classification,
+                    classification,
+                    classification,
                     row_id,
                 ),
             )

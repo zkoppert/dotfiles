@@ -310,8 +310,8 @@ def test_comment_history_reports_earlier_mention_when_complete():
 
     assert author == "teammate"
     assert body == "ordinary follow-up"
-    assert c.bucket == triage.BUCKET_Q1
-    assert c.direct_mention is True
+    assert c.bucket == triage.BUCKET_DROP
+    assert c.direct_mention is False
 
 
 def test_comment_snapshot_uses_comment_id_watermark_for_same_second_mentions():
@@ -511,6 +511,7 @@ def test_comment_snapshot_tracks_per_stream_cursors():
             notif,
             my_login="zkoppert",
             run_gh=triage.run_gh,
+            since=json.dumps({"stream": "pull_reviews", "ts": "2026-07-01T12:00:00Z", "id": 22}),
         )
 
     assert snapshot is not None
@@ -547,6 +548,8 @@ def test_comment_history_incomplete_preserves_earlier_mention():
             )
         if path.endswith("/pulls/42/comments"):
             raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        if path.endswith("/pulls/42/reviews"):
+            return "[]"
         if path.endswith("/issues/comments/99"):
             return json.dumps(
                 {
@@ -6248,6 +6251,46 @@ def test_ledger_actionable_thread_does_not_claim_terminal_canonical_row(
     assert rows[1]["source_id"] == "thread-a"
     assert rows[1]["terminal_disposition"] is None
     assert rows[1]["clear_state"] == "not_applicable"
+
+
+def test_ledger_actionable_capture_reactivates_terminal_row(todo_file: Path):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/1"
+    ledger.capture(
+        source_id="thread-a",
+        canonical_artifact=artifact,
+        classification="policy_drop",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_id="thread-a",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+    )
+    ledger.queue_clear(
+        source_id="thread-a",
+        canonical_artifact=artifact,
+    )
+
+    ledger.capture(
+        source_id="thread-a",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+    )
+
+    rows = ledger._rows("""
+        SELECT classification, terminal_disposition, clear_state
+          FROM notifications
+         WHERE source_id = ?
+        """, ("thread-a",))
+    assert rows == [
+        {
+            "classification": "actionable",
+            "terminal_disposition": None,
+            "clear_state": "not_applicable",
+        }
+    ]
 
 
 def test_run_policy_drop_records_ledger_before_clear(todo_file: Path):
