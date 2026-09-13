@@ -1790,6 +1790,65 @@ def test_run_reopens_legacy_terminal_item_for_renewed_direct_mention(todo_file):
     }
 
 
+def test_run_keeps_legacy_terminal_comment_history_before_bootstrap(todo_file):
+    item = {
+        "id": "old",
+        "title": "Completed ask",
+        "status": "done",
+        "completed": "2026-07-02",
+        "notification": {
+            "thread_id": "1001",
+            "reason": "mention",
+            "marked_done": True,
+            "marked_done_at": "2026-07-03T00:00:00Z",
+            "terminal_disposition": "completed",
+        },
+    }
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": [], "q2_schedule": []},
+                "done": [item],
+            }
+        )
+    )
+    notification = _notif("comment", updated_at="2026-07-06T15:00:00Z")
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notification]),
+        "/repos/zkoppert/example/pulls/42": json.dumps(
+            {"state": "open", "user": {"login": "someone-else"}}
+        ),
+        "/repos/zkoppert/example/issues/42/comments": json.dumps(
+            [
+                [
+                    {
+                        "user": {"login": "teammate"},
+                        "body": "old @zkoppert mention",
+                        "updated_at": "2026-07-01T10:00:00Z",
+                    },
+                    {
+                        "user": {"login": "teammate"},
+                        "body": "ordinary follow-up",
+                        "updated_at": "2026-07-06T15:00:00Z",
+                    },
+                ]
+            ]
+        ),
+        "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
+        "/repos/zkoppert/example/pulls/42/reviews": json.dumps([]),
+    }
+
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
+        triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    updated = yaml.safe_load(todo_file.read_text())
+    assert updated["prioritized"]["q1_do_first"] == []
+    assert updated["done"][0]["notification"]["marked_done"] is True
+    assert updated["done"][0]["notification"]["marked_done_at"] == "2026-07-03T00:00:00Z"
+
+
 def test_run_routes_existing_terminal_thread_to_scheduled_review(todo_file):
     item = {
         "id": "old",

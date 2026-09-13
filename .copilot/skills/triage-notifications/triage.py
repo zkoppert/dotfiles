@@ -952,6 +952,24 @@ def build_todo_entry(
 
 
 
+def _notification_activity_boundary(
+    tracked_item: dict[str, Any],
+) -> datetime.datetime | None:
+    tracked = tracked_item.get("notification")
+    if not isinstance(tracked, dict):
+        return None
+    boundary = parse_iso_datetime(tracked.get("captured_at"))
+    if tracked.get("marked_done"):
+        terminal_boundary = parse_iso_datetime(tracked.get("marked_done_at"))
+        if terminal_boundary is not None:
+            boundary = terminal_boundary
+    if boundary is None:
+        boundary = parse_iso_datetime(str(tracked_item.get("completed") or ""))
+    if boundary is None:
+        boundary = parse_iso_datetime(str(tracked_item.get("added") or ""))
+    return boundary
+
+
 def notification_has_new_activity(
     notif: dict[str, Any],
     tracked_item: dict[str, Any],
@@ -966,15 +984,7 @@ def notification_has_new_activity(
         != str(tracked.get("reason") or "").lower()
     )
     updated_at = parse_iso_datetime(notif.get("updated_at"))
-    captured_at = parse_iso_datetime(tracked.get("captured_at"))
-    if tracked.get("marked_done"):
-        terminal_boundary = parse_iso_datetime(tracked.get("marked_done_at"))
-        if terminal_boundary is not None:
-            captured_at = terminal_boundary
-    if captured_at is None:
-        captured_at = parse_iso_datetime(str(tracked_item.get("completed") or ""))
-    if captured_at is None:
-        captured_at = parse_iso_datetime(str(tracked_item.get("added") or ""))
+    captured_at = _notification_activity_boundary(tracked_item)
     if captured_at is None:
         return bool(tracked.get("marked_done")) or (
             reason_changed and allow_reason_change_without_timestamp
@@ -982,6 +992,33 @@ def notification_has_new_activity(
     if updated_at and updated_at > captured_at:
         return True
     return reason_changed and allow_reason_change_without_timestamp
+
+
+def _bootstrap_comment_since(
+    notif: dict[str, Any],
+    tracked_item: dict[str, Any],
+) -> str | None:
+    boundary = _notification_activity_boundary(tracked_item)
+    if boundary is None:
+        return None
+    subject = notif.get("subject") or {}
+    subject_type = (subject.get("type") or "").lower()
+    if subject_type == "pullrequest":
+        streams = ("issue_comments", "pull_comments", "pull_reviews")
+    elif subject_type == "issue":
+        streams = ("issue_comments",)
+    else:
+        streams = ("pull_comments",)
+    stamp = boundary.astimezone(datetime.timezone.utc).replace(microsecond=0)
+    cursor = {
+        "ts": stamp.isoformat().replace("+00:00", "Z"),
+        "id": 0,
+    }
+    return json.dumps(
+        {stream: cursor for stream in streams},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def build_done_archive_entry(notif: dict[str, Any]) -> dict[str, Any]:
@@ -2504,6 +2541,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                 source_id=thread_id,
                 canonical_artifact=canonical_url,
             )
+        if comment_since is None and tracked is not None:
+            comment_since = _bootstrap_comment_since(notif, tracked[1])
 
         comment_snapshot = None
         if reason == "comment":
