@@ -51,7 +51,7 @@ if str(_SKILLS_DIR) not in sys.path:
 
 import yaml
 from notification_worker_common import DEFAULT_LEDGER_FILE, NotificationLedger
-from notification_worker_common import comment_notification_directness as _comment_notification_directness
+from notification_worker_common import comment_notification_snapshot as shared_comment_notification_snapshot
 from notification_worker_common import ledger_capture as _ledger_capture
 from notification_worker_common import (
     ledger_record_clear_result as _ledger_record_clear_result,
@@ -2141,9 +2141,28 @@ def run(args: argparse.Namespace) -> TriageStats:
 
         direct_comment = None
         if reason == "comment":
-            direct_comment = _comment_notification_directness(
-                notif, my_login=my_login, run_gh=run_gh
+            comment_since = ledger.comment_watermark(
+                source_id=thread_id or None,
+                canonical_artifact=pr_url,
             )
+            snapshot = shared_comment_notification_snapshot(
+                notif,
+                my_login=my_login,
+                run_gh=run_gh,
+                since=comment_since,
+            )
+            if (
+                not args.dry_run
+                and snapshot is not None
+                and snapshot.history_complete
+                and snapshot.comment_id
+            ):
+                ledger.record_comment_watermark(
+                    source_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                    comment_watermark=snapshot.comment_id,
+                )
+            direct_comment = snapshot.direct if snapshot is not None else None
             if direct_comment is True:
                 skipped_dep = is_owned_repo(repo) and (
                     skipped_dependency_match(pr) or skipped_repo_match(repo)

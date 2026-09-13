@@ -122,6 +122,7 @@ class CommentNotificationSnapshot:
     body: str | None
     direct: bool | None
     history_complete: bool
+    comment_id: str | None = None
 
 
 def comment_notification_snapshot(
@@ -137,12 +138,15 @@ def comment_notification_snapshot(
         return None
     path = str(latest).replace("https://api.github.com", "")
     since_dt = parse_iso_datetime(since)
+    since_comment_id: int | None = None
+    if since_dt is None and since and since.isdigit():
+        since_comment_id = int(since)
     pattern = (
         rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
         if my_login
         else None
     )
-    collected: list[tuple[str, int, int, int, dict[str, Any]]] = []
+    collected: list[tuple[str, int, int, int, int, dict[str, Any]]] = []
     history_incomplete = False
     for collection_index, collection_path in enumerate(_comment_collection_paths(subject, path)):
         try:
@@ -160,8 +164,15 @@ def comment_notification_snapshot(
                     stamp = str(
                         comment.get("updated_at") or comment.get("created_at") or ""
                     )
+                    comment_id = comment.get("id")
+                    if isinstance(comment_id, int):
+                        numeric_comment_id = comment_id
+                    elif isinstance(comment_id, str) and comment_id.isdigit():
+                        numeric_comment_id = int(comment_id)
+                    else:
+                        numeric_comment_id = -1
                     collected.append(
-                        (stamp, collection_index, page_index, comment_index, comment)
+                        (stamp, numeric_comment_id, collection_index, page_index, comment_index, comment)
                     )
         except (
             subprocess.CalledProcessError,
@@ -170,34 +181,43 @@ def comment_notification_snapshot(
         ):
             history_incomplete = True
     if collected:
-        collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]))
+        collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3], entry[4]))
         relevant = collected
         if since_dt is not None:
             relevant = []
             for entry in collected:
-                entry_dt = parse_iso_datetime(entry[4].get("updated_at")) or parse_iso_datetime(
-                    entry[4].get("created_at")
+                entry_dt = parse_iso_datetime(entry[5].get("updated_at")) or parse_iso_datetime(
+                    entry[5].get("created_at")
                 )
                 if entry_dt is not None and entry_dt > since_dt:
                     relevant.append(entry)
+        elif since_comment_id is not None:
+            relevant = [entry for entry in collected if entry[1] > since_comment_id]
         if not relevant:
             if history_incomplete:
                 return CommentNotificationSnapshot(None, None, None, False)
             return CommentNotificationSnapshot(None, None, False, True)
-        latest_comment = relevant[-1][4]
+        latest_comment = relevant[-1][5]
         author = (latest_comment.get("user") or {}).get("login")
         body = str(latest_comment.get("body") or "") or None
+        latest_comment_id = latest_comment.get("id")
+        if isinstance(latest_comment_id, int):
+            latest_comment_id_str = str(latest_comment_id)
+        elif isinstance(latest_comment_id, str) and latest_comment_id.isdigit():
+            latest_comment_id_str = latest_comment_id
+        else:
+            latest_comment_id_str = None
         direct = False
-        for _stamp, _collection_index, _page_index, _comment_index, comment in relevant:
+        for _stamp, _comment_id, _collection_index, _page_index, _comment_index, comment in relevant:
             comment_body = str(comment.get("body") or "")
             if pattern and comment_body and re.search(pattern, comment_body, re.IGNORECASE):
                 direct = True
                 break
         if history_incomplete:
-            return CommentNotificationSnapshot(author, body, direct if direct else None, False)
-        return CommentNotificationSnapshot(author, body, direct, True)
+            return CommentNotificationSnapshot(author, body, direct if direct else None, False, latest_comment_id_str)
+        return CommentNotificationSnapshot(author, body, direct, True, latest_comment_id_str)
 
-    if since_dt is not None:
+    if since_dt is not None or since_comment_id is not None:
         return CommentNotificationSnapshot(None, None, None if history_incomplete else False, False if history_incomplete else True)
     try:
         out = run_gh(["api", path], timeout=20)
@@ -208,6 +228,13 @@ def comment_notification_snapshot(
         return None
     author = (data.get("user") or {}).get("login")
     body = str(data.get("body") or "") or None
+    latest_comment_id = data.get("id")
+    if isinstance(latest_comment_id, int):
+        latest_comment_id_str = str(latest_comment_id)
+    elif isinstance(latest_comment_id, str) and latest_comment_id.isdigit():
+        latest_comment_id_str = latest_comment_id
+    else:
+        latest_comment_id_str = None
     direct = False
     if pattern and body and re.search(pattern, body, re.IGNORECASE):
         direct = True
@@ -216,6 +243,7 @@ def comment_notification_snapshot(
         body,
         direct if not history_incomplete or direct else None,
         not history_incomplete,
+        latest_comment_id_str,
     )
 
 
@@ -291,6 +319,7 @@ class NotificationLedger:
                   terminal_recorded_at TEXT,
                   clear_attempted_at TEXT,
                   cleared_at TEXT,
+                  comment_watermark TEXT,
                   worker TEXT NOT NULL DEFAULT ''
                 )
                 """)
@@ -304,6 +333,8 @@ class NotificationLedger:
                     conn.execute(
                         f"ALTER TABLE notifications DROP COLUMN {obsolete_column}"
                     )
+            if "comment_watermark" not in columns:
+                conn.execute("ALTER TABLE notifications ADD COLUMN comment_watermark TEXT")
             conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_source
                 ON notifications (source_id)
@@ -559,6 +590,71 @@ class NotificationLedger:
                  WHERE source_id = ?
                 """,
                 (reason, tracker_section, now, now, source_id),
+            )
+            conn.commit()
+
+    def comment_watermark(
+        self,
+        *,
+        source_id: str | None,
+        canonical_artifact: str | None,
+    ) -> str | None:
+        canonical_artifact = (
+            normalize_github_url(canonical_artifact) or canonical_artifact
+        )
+        with self._connect() as conn:
+            row_id = self._find_row_id(
+                conn,
+                source_id=source_id,
+                canonical_artifact=canonical_artifact,
+            )
+            if row_id is None:
+                return None
+            row = conn.execute(
+                "SELECT comment_watermark FROM notifications WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+            if not row:
+                return None
+            watermark = row["comment_watermark"]
+            return str(watermark) if watermark else None
+
+    def record_comment_watermark(
+        self,
+        *,
+        source_id: str | None,
+        canonical_artifact: str | None,
+        comment_watermark: str,
+    ) -> None:
+        if not comment_watermark:
+            return
+        now = utcnow_iso()
+        canonical_artifact = (
+            normalize_github_url(canonical_artifact) or canonical_artifact
+        )
+        with self._connect() as conn:
+            row_id = self._find_row_id(
+                conn,
+                source_id=source_id,
+                canonical_artifact=canonical_artifact,
+            )
+            if row_id is None:
+                row_id = self._insert_row(
+                    conn,
+                    source_id=source_id,
+                    canonical_artifact=canonical_artifact,
+                    classification="actionable",
+                    worker="comment-watermark",
+                    now=now,
+                )
+            conn.execute(
+                """
+                UPDATE notifications
+                   SET comment_watermark = ?,
+                       last_seen_at = ?
+                 WHERE id = ?
+                """,
+                (comment_watermark, now, row_id),
             )
             conn.commit()
 

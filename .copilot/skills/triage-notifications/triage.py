@@ -655,24 +655,6 @@ def fetch_subject_author(notif: dict[str, Any]) -> str | None:
         return None
 
 
-def _comment_collection_paths(subject: dict[str, Any], latest_path: str) -> list[str]:
-    subject_type = (subject.get("type") or "").lower()
-    subject_path = str(subject.get("url") or "").replace("https://api.github.com", "")
-    paths: list[str] = []
-    if subject_type == "pullrequest" and subject_path:
-        issue_path = subject_path.replace("/pulls/", "/issues/")
-        paths.extend([f"{issue_path}/comments", f"{subject_path}/comments"])
-    elif subject_type == "issue" and subject_path:
-        paths.append(f"{subject_path}/comments")
-    elif "/pulls/comments/" in latest_path and "/pulls/" in subject_path:
-        paths.append(f"{subject_path}/comments")
-    elif "/issues/comments/" in latest_path and subject_path:
-        paths.append(f"{subject_path.replace('/pulls/', '/issues/')}/comments")
-    elif "/comments/" in latest_path and subject_path:
-        paths.append(f"{subject_path}/comments")
-    return list(dict.fromkeys(paths))
-
-
 _COMMENT_HISTORY_INCOMPLETE = object()
 
 
@@ -716,16 +698,11 @@ def mentions_me(body: str | None, my_login: str) -> bool:
 
 def _notification_comment_boundary(tracked_item: dict[str, Any]) -> str | None:
     tracked = tracked_item.get("notification")
-    if not isinstance(tracked, dict) or tracked.get("comment_history_incomplete"):
+    if not isinstance(tracked, dict):
         return None
-    for key in ("captured_at", "marked_done_at"):
-        value = tracked.get(key)
-        if value:
-            return str(value)
-    for key in ("completed", "added"):
-        value = tracked_item.get(key)
-        if value:
-            return str(value)
+    watermark = tracked.get("comment_watermark")
+    if watermark:
+        return str(watermark)
     return None
 
 
@@ -998,7 +975,7 @@ def build_todo_entry(
     notif: dict[str, Any],
     classification: Classification,
     *,
-    comment_history_incomplete: bool = False,
+    comment_watermark: str | None = None,
 ) -> dict[str, Any]:
     """Construct a todo.yml-shaped entry from a notification."""
     subject = notif.get("subject") or {}
@@ -1025,8 +1002,8 @@ def build_todo_entry(
         },
     }
 
-    if comment_history_incomplete:
-        entry["notification"]["comment_history_incomplete"] = True
+    if comment_watermark:
+        entry["notification"]["comment_watermark"] = comment_watermark
 
     if reason == "review_requested":
         escalates_at = review_request_escalates_at(captured_at)
@@ -1507,8 +1484,8 @@ def apply_todo_mutations(
         if not terminal:
             existing_notification = item.get("notification")
             if isinstance(existing_notification, dict):
-                for key in ("captured_at", "escalates_at"):
-                    if key in existing_notification:
+                for key in ("captured_at", "escalates_at", "comment_watermark"):
+                    if key in existing_notification and key not in replacement_notification:
                         replacement_notification[key] = existing_notification[key]
         item["notification"] = replacement_notification
         if section not in {"in_progress", "blocked", "in_review"} or terminal:
@@ -1564,7 +1541,13 @@ def apply_todo_mutations(
             continue
         if not _remove_item_from_current_section(data, section, item):
             continue
-        item["notification"] = dict(notification)
+        replacement_notification = dict(notification)
+        existing_notification = item.get("notification")
+        if isinstance(existing_notification, dict):
+            for key in ("captured_at", "comment_watermark"):
+                if key in existing_notification and key not in replacement_notification:
+                    replacement_notification[key] = existing_notification[key]
+        item["notification"] = replacement_notification
         item.pop("quadrant", None)
         item.pop("urgency", None)
         item.pop("importance", None)
@@ -2569,7 +2552,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         repo = str((notif.get("repository") or {}).get("full_name") or "")
         title = str(subject.get("title") or "")
 
-        comment_since = None
+        tracked = None
         if thread_id and thread_id in seen_ids:
             tracked = next(
                 (
@@ -2579,13 +2562,42 @@ def run(args: argparse.Namespace) -> TriageStats:
                 ),
                 None,
             )
-            if tracked:
-                comment_since = _notification_comment_boundary(tracked[1])
+        comment_since = None
+        if thread_id:
+            comment_since = ledger.comment_watermark(
+                source_id=thread_id,
+                canonical_artifact=canonical_url,
+            )
+        if comment_since is None and tracked:
+            comment_since = _notification_comment_boundary(tracked[1])
+
+        comment_snapshot = None
+        if reason == "comment":
+            comment_snapshot = shared_comment_notification_snapshot(
+                notif,
+                my_login=my_login,
+                run_gh=run_gh,
+                since=comment_since,
+            )
+            if (
+                not args.dry_run
+                and thread_id
+                and comment_snapshot is not None
+                and comment_snapshot.history_complete
+                and comment_snapshot.comment_id
+            ):
+                ledger.record_comment_watermark(
+                    source_id=thread_id,
+                    canonical_artifact=canonical_url,
+                    comment_watermark=comment_snapshot.comment_id,
+                )
 
         classification = classify(
             notif,
             my_login=my_login,
-            comment_snapshot_fetcher=shared_comment_notification_snapshot,
+            comment_snapshot_fetcher=(
+                lambda *args, snapshot=comment_snapshot, **kwargs: snapshot
+            ),
             comment_since=comment_since,
         )
         logger.debug(
@@ -2684,8 +2696,11 @@ def run(args: argparse.Namespace) -> TriageStats:
             elif (
                 classification.bucket == BUCKET_Q2
                 and tracked
-                and tracked[0] != "prioritized.q1_do_first"
                 and (tracked_nonterminal or renewed)
+                and (
+                    tracked[0] != "prioritized.q1_do_first"
+                    or tracker_terminal_disposition(tracked[1], tracked[0])
+                )
             ):
                 mutations.route_existing_q2.append(
                     build_todo_entry(notif, classification)
@@ -2836,8 +2851,10 @@ def run(args: argparse.Namespace) -> TriageStats:
         entry = build_todo_entry(
             notif,
             classification,
-            comment_history_incomplete=(
-                reason == "comment" and classification.reason == "comment history incomplete"
+            comment_watermark=(
+                comment_snapshot.comment_id
+                if comment_snapshot and comment_snapshot.history_complete
+                else None
             ),
         )
         _ledger_capture(

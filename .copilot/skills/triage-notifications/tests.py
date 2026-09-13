@@ -277,11 +277,13 @@ def test_comment_history_reports_earlier_mention_when_complete():
                 [
                     [
                         {
+                            "id": 10,
                             "user": {"login": "teammate"},
                             "body": "hey @zkoppert can you look?",
                             "updated_at": "2026-07-01T10:00:00Z",
                         },
                         {
+                            "id": 11,
                             "user": {"login": "teammate"},
                             "body": "ordinary follow-up",
                             "updated_at": "2026-07-01T11:00:00Z",
@@ -308,6 +310,48 @@ def test_comment_history_reports_earlier_mention_when_complete():
     assert body == "ordinary follow-up"
     assert c.bucket == triage.BUCKET_Q1
     assert c.direct_mention is True
+
+
+def test_comment_snapshot_uses_comment_id_watermark_for_same_second_mentions():
+    notif = _notif("comment")
+
+    def fake_run_gh(args, *, timeout=60):
+        path = args[1]
+        if "--paginate" in args and path.endswith("/issues/42/comments"):
+            return json.dumps(
+                [
+                    [
+                        {
+                            "id": 10,
+                            "user": {"login": "teammate"},
+                            "body": "ordinary follow-up",
+                            "updated_at": "2026-07-01T10:00:00Z",
+                        },
+                        {
+                            "id": 11,
+                            "user": {"login": "teammate"},
+                            "body": "hey @zkoppert can you look?",
+                            "updated_at": "2026-07-01T10:00:00Z",
+                        },
+                    ]
+                ]
+            )
+        if "--paginate" in args and path.endswith("/pulls/42/comments"):
+            return "[]"
+        raise AssertionError(args)
+
+    with patch("triage.run_gh", side_effect=fake_run_gh):
+        snapshot = triage.shared_comment_notification_snapshot(
+            notif,
+            my_login="zkoppert",
+            run_gh=triage.run_gh,
+            since="10",
+        )
+
+    assert snapshot is not None
+    assert snapshot.comment_id == "11"
+    assert snapshot.direct is True
+    assert snapshot.history_complete is True
 
 
 def test_comment_history_incomplete_preserves_earlier_mention():
@@ -2453,7 +2497,7 @@ def test_run_comment_history_incomplete_promotes_after_recovery(todo_file):
     assert stats.added_q1 == 0
     assert stats.added_inbox == 1
     data = yaml.safe_load(todo_file.read_text())
-    assert data["inbox"][0]["notification"]["comment_history_incomplete"] is True
+    assert "comment_watermark" not in data["inbox"][0]["notification"]
     notify_mock.assert_not_called()
 
     with patch("triage.subprocess.run", side_effect=_gh_returns(second_responses)), patch(
