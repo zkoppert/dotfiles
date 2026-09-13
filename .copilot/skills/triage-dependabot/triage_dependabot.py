@@ -1670,20 +1670,14 @@ def _entry_exists(data: dict[str, Any], entry: dict[str, Any]) -> bool:
     return _matching_entry(_iter_todo_items(data), entry) is not None
 
 
-def _todo_has_active_matching_entry(
-    path: Path,
+def _todo_has_active_matching_entry_in_data(
+    data: dict[str, Any],
     *,
     thread_id: str | None,
     pr_url: str | None,
 ) -> bool:
     if not thread_id and not pr_url:
         return False
-    try:
-        with _todo_write_lock(path):
-            data = load_todo(path)
-    except (OSError, FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
-        logger.warning("could not inspect todo for active Dependabot entry: %s", exc)
-        return True
 
     def matches(item: Any) -> bool:
         if not isinstance(item, dict):
@@ -1716,6 +1710,81 @@ def _todo_has_active_matching_entry(
             if matches(item):
                 return True
     return False
+
+
+
+def _clear_dependabot_notification(
+    *,
+    args: argparse.Namespace,
+    ledger: NotificationLedger | None,
+    stats: TriageStats,
+    thread_id: str,
+    pr_url: str,
+    repo: str,
+    title: str,
+    reason: str,
+    worker: str,
+    terminal_disposition: str,
+    dry_run: bool,
+) -> bool:
+    try:
+        with _todo_write_lock(args.todo_file):
+            data = load_todo(args.todo_file)
+            if _todo_has_active_matching_entry_in_data(
+                data, thread_id=thread_id, pr_url=pr_url
+            ):
+                return False
+            if dry_run:
+                if not _safe_mark_thread_done(
+                    thread_id,
+                    dry_run=True,
+                    stats=stats,
+                    context=f"{worker} {pr_url}",
+                    ledger=ledger,
+                    canonical_artifact=pr_url,
+                ):
+                    return False
+                stats.stale_removed += _cleanup_stale_entries(
+                    data,
+                    thread_id=thread_id,
+                    pr_url=pr_url,
+                    dry_run=True,
+                )
+                return True
+            _ledger_capture(
+                ledger,
+                dry_run=dry_run,
+                thread_id=thread_id,
+                canonical_artifact=pr_url,
+                classification="policy_drop",
+                worker=worker,
+                title=title,
+                reason=reason,
+                repo=repo,
+                terminal_disposition=terminal_disposition,
+                queue_clear=True,
+            )
+            if not _safe_mark_thread_done(
+                thread_id,
+                dry_run=dry_run,
+                stats=stats,
+                context=f"{worker} {pr_url}",
+                ledger=ledger,
+                canonical_artifact=pr_url,
+            ):
+                return False
+            removed = remove_stale_entries(
+                data,
+                thread_id=thread_id,
+                pr_url=pr_url,
+            )
+            if removed:
+                write_todo_atomic(args.todo_file, data)
+                stats.stale_removed += removed
+            return True
+    except (OSError, FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+        stats.errors.append(f"failed to update todo file: {exc}")
+        return False
 
 
 def apply_todo_mutations(
@@ -2342,17 +2411,9 @@ def run(args: argparse.Namespace) -> TriageStats:
                 owner,
             )
             stats.skipped += 1
-            cleared = True
+            cleared = False
             if thread_id and (
-                reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS
-                or (
-                    clearable_comment
-                    and not _todo_has_active_matching_entry(
-                        args.todo_file,
-                        thread_id=thread_id,
-                        pr_url=pr_url,
-                    )
-                )
+                reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS or clearable_comment
             ):
                 logger.info(
                     "%s#%d -> clearing unowned repo notification (reason=%s)",
@@ -2360,36 +2421,19 @@ def run(args: argparse.Namespace) -> TriageStats:
                     number,
                     reason,
                 )
-                _ledger_capture(
-                    ledger,
-                    dry_run=args.dry_run,
+                cleared = _clear_dependabot_notification(
+                    args=args,
+                    ledger=ledger,
+                    stats=stats,
                     thread_id=thread_id,
-                    canonical_artifact=pr_url,
-                    classification="policy_drop",
-                    worker="dependabot-unowned-repo",
+                    pr_url=pr_url,
+                    repo=repo,
                     title=title,
                     reason=reason,
-                    repo=repo,
+                    worker="dependabot-unowned-repo",
                     terminal_disposition="irrelevant",
-                    queue_clear=True,
-                )
-                cleared = _safe_mark_thread_done(
-                    thread_id,
                     dry_run=args.dry_run,
-                    stats=stats,
-                    context=f"unowned repo {pr_url}",
-                    ledger=ledger,
-                    canonical_artifact=pr_url,
                 )
-                if cleared:
-                    _record_stale_cleanup(
-                        mutations,
-                        stats,
-                        args.todo_file,
-                        thread_id=thread_id,
-                        pr_url=pr_url,
-                        dry_run=args.dry_run,
-                    )
             elif thread_id:
                 logger.info(
                     "%s#%d -> leaving unowned repo notification open (reason=%s)",
@@ -2461,17 +2505,9 @@ def run(args: argparse.Namespace) -> TriageStats:
                 skipped_dep,
             )
             stats.skipped_dependency += 1
-            cleared = True
+            cleared = False
             if thread_id and (
-                reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS
-                or (
-                    clearable_comment
-                    and not _todo_has_active_matching_entry(
-                        args.todo_file,
-                        thread_id=thread_id,
-                        pr_url=pr_url,
-                    )
-                )
+                reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS or clearable_comment
             ):
                 logger.info(
                     "%s#%d -> clearing notification (reason=%s)",
@@ -2479,36 +2515,19 @@ def run(args: argparse.Namespace) -> TriageStats:
                     number,
                     reason,
                 )
-                _ledger_capture(
-                    ledger,
-                    dry_run=args.dry_run,
+                cleared = _clear_dependabot_notification(
+                    args=args,
+                    ledger=ledger,
+                    stats=stats,
                     thread_id=thread_id,
-                    canonical_artifact=pr_url,
-                    classification="policy_drop",
-                    worker="dependabot-excluded-dependency",
+                    pr_url=pr_url,
+                    repo=repo,
                     title=title,
                     reason=reason,
-                    repo=repo,
+                    worker="dependabot-excluded-dependency",
                     terminal_disposition="irrelevant",
-                    queue_clear=True,
-                )
-                cleared = _safe_mark_thread_done(
-                    thread_id,
                     dry_run=args.dry_run,
-                    stats=stats,
-                    context=f"excluded-dep {pr_url}",
-                    ledger=ledger,
-                    canonical_artifact=pr_url,
                 )
-                if cleared:
-                    _record_stale_cleanup(
-                        mutations,
-                        stats,
-                        args.todo_file,
-                        thread_id=thread_id,
-                        pr_url=pr_url,
-                        dry_run=args.dry_run,
-                    )
             else:
                 _ledger_capture(
                     ledger,

@@ -566,6 +566,7 @@ class NotificationLedger:
             normalize_github_url(canonical_artifact) or canonical_artifact
         )
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row_id = self._find_row_id(
                 conn,
                 source_id=source_id,
