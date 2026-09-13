@@ -1031,6 +1031,11 @@ def _current_notification_is_clearable(
     if record is None or boundary is None:
         if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
             return False
+    else:
+        current_updated_at = parse_iso_datetime(current.get("updated_at"))
+        if current_updated_at is not None and current_updated_at > boundary:
+            if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
+                return False
     subject = current.get("subject") or {}
     latest_url = str(subject.get("latest_comment_url") or "")
     if latest_url:

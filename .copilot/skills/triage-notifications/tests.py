@@ -6142,6 +6142,44 @@ def test_current_notification_is_clearable_allows_new_drop_after_terminal_bounda
         )
 
 
+def test_current_notification_is_clearable_rejects_newer_review_requested_after_terminal_boundary(
+    todo_file,
+):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/3"
+    ledger.capture(
+        source_id="thread-review",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    ledger.record_terminal(
+        source_id="thread-review",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-02T12:00:00Z",
+    )
+    current = _notif(
+        "review_requested",
+        id="thread-review",
+        updated_at="2026-07-03T12:00:00Z",
+    )
+    current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/3"
+    current["repository"] = {"full_name": "o/r"}
+    with patch("triage.fetch_notifications", return_value=[current]):
+        assert (
+            triage._current_notification_is_clearable(
+                url=artifact,
+                thread_id="thread-review",
+                reason="review_requested",
+                ledger=ledger,
+                my_login="zkoppert",
+            )
+            is False
+        )
+
+
 def test_run_records_dependabot_handoff_before_clearability_check(todo_file):
     todo_file.write_text(
         yaml.safe_dump(

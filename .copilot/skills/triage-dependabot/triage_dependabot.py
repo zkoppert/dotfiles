@@ -2850,6 +2850,47 @@ def run(args: argparse.Namespace) -> TriageStats:
                 stats.skipped += 1
                 continue
             pr = fresh_pr
+            final_notif = _current_notification_for_clearance(thread_id=thread_id or None)
+            if thread_id and final_notif is None:
+                stats.errors.append(f"notification disappeared before action for {pr_url}")
+                continue
+            if thread_id and not _comment_notification_still_clearable(
+                final_notif or current_notif,
+                ledger=ledger,
+                my_login=my_login,
+                thread_id=thread_id,
+                pr_url=pr_url,
+            ):
+                stats.skipped += 1
+                continue
+            if ledger is not None and ledger.has_active_actionable_notification(
+                source_id=thread_id or None,
+                canonical_artifact=pr_url,
+            ):
+                logger.info(
+                    "%s#%d -> preserving active actionable notification for %s",
+                    repo,
+                    number,
+                    thread_id or pr_url or repo,
+                )
+                stats.skipped += 1
+                continue
+            try:
+                action_todo = load_todo(args.todo_file)
+            except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+                stats.errors.append(f"failed to reload todo before action for {pr_url}: {exc}")
+                continue
+            if _todo_has_active_matching_entry_in_data(
+                action_todo, thread_id=thread_id or None, pr_url=pr_url
+            ):
+                logger.info(
+                    "%s#%d -> preserving active todo ownership for %s",
+                    repo,
+                    number,
+                    thread_id or pr_url or repo,
+                )
+                stats.skipped += 1
+                continue
             if decision.outcome == OUTCOME_MERGE:
                 merged = do_merge(
                     repo,
@@ -2909,7 +2950,89 @@ def run(args: argparse.Namespace) -> TriageStats:
             elif decision.outcome == OUTCOME_LABEL_AND_MERGE:
                 labels = fetch_repo_labels(repo)
                 if "release" in labels:
+                    final_notif = _current_notification_for_clearance(thread_id=thread_id or None)
+                    if thread_id and final_notif is None:
+                        stats.errors.append(f"notification disappeared before action for {pr_url}")
+                        continue
+                    if thread_id and not _comment_notification_still_clearable(
+                        final_notif or current_notif,
+                        ledger=ledger,
+                        my_login=my_login,
+                        thread_id=thread_id,
+                        pr_url=pr_url,
+                    ):
+                        stats.skipped += 1
+                        continue
+                    if ledger is not None and ledger.has_active_actionable_notification(
+                        source_id=thread_id or None,
+                        canonical_artifact=pr_url,
+                    ):
+                        logger.info(
+                            "%s#%d -> preserving active actionable notification for %s",
+                            repo,
+                            number,
+                            thread_id or pr_url or repo,
+                        )
+                        stats.skipped += 1
+                        continue
+                    try:
+                        action_todo = load_todo(args.todo_file)
+                    except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+                        stats.errors.append(f"failed to reload todo before action for {pr_url}: {exc}")
+                        continue
+                    if _todo_has_active_matching_entry_in_data(
+                        action_todo, thread_id=thread_id or None, pr_url=pr_url
+                    ):
+                        logger.info(
+                            "%s#%d -> preserving active todo ownership for %s",
+                            repo,
+                            number,
+                            thread_id or pr_url or repo,
+                        )
+                        stats.skipped += 1
+                        continue
                     do_add_label(repo, number, "release", dry_run=args.dry_run)
+                final_notif = _current_notification_for_clearance(thread_id=thread_id or None)
+                if thread_id and final_notif is None:
+                    stats.errors.append(f"notification disappeared before action for {pr_url}")
+                    continue
+                if thread_id and not _comment_notification_still_clearable(
+                    final_notif or current_notif,
+                    ledger=ledger,
+                    my_login=my_login,
+                    thread_id=thread_id,
+                    pr_url=pr_url,
+                ):
+                    stats.skipped += 1
+                    continue
+                if ledger is not None and ledger.has_active_actionable_notification(
+                    source_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                ):
+                    logger.info(
+                        "%s#%d -> preserving active actionable notification for %s",
+                        repo,
+                        number,
+                        thread_id or pr_url or repo,
+                    )
+                    stats.skipped += 1
+                    continue
+                try:
+                    action_todo = load_todo(args.todo_file)
+                except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+                    stats.errors.append(f"failed to reload todo before action for {pr_url}: {exc}")
+                    continue
+                if _todo_has_active_matching_entry_in_data(
+                    action_todo, thread_id=thread_id or None, pr_url=pr_url
+                ):
+                    logger.info(
+                        "%s#%d -> preserving active todo ownership for %s",
+                        repo,
+                        number,
+                        thread_id or pr_url or repo,
+                    )
+                    stats.skipped += 1
+                    continue
                 merged = do_merge(
                     repo,
                     number,
@@ -2966,6 +3089,47 @@ def run(args: argparse.Namespace) -> TriageStats:
                         captured_at=str(notif.get("updated_at") or utcnow_iso()),
                     )
             elif decision.outcome == OUTCOME_REBASE:
+                final_notif = _current_notification_for_clearance(thread_id=thread_id or None)
+                if thread_id and final_notif is None:
+                    stats.errors.append(f"notification disappeared before action for {pr_url}")
+                    continue
+                if thread_id and not _comment_notification_still_clearable(
+                    final_notif or current_notif,
+                    ledger=ledger,
+                    my_login=my_login,
+                    thread_id=thread_id,
+                    pr_url=pr_url,
+                ):
+                    stats.skipped += 1
+                    continue
+                if ledger is not None and ledger.has_active_actionable_notification(
+                    source_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                ):
+                    logger.info(
+                        "%s#%d -> preserving active actionable notification for %s",
+                        repo,
+                        number,
+                        thread_id or pr_url or repo,
+                    )
+                    stats.skipped += 1
+                    continue
+                try:
+                    action_todo = load_todo(args.todo_file)
+                except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+                    stats.errors.append(f"failed to reload todo before action for {pr_url}: {exc}")
+                    continue
+                if _todo_has_active_matching_entry_in_data(
+                    action_todo, thread_id=thread_id or None, pr_url=pr_url
+                ):
+                    logger.info(
+                        "%s#%d -> preserving active todo ownership for %s",
+                        repo,
+                        number,
+                        thread_id or pr_url or repo,
+                    )
+                    stats.skipped += 1
+                    continue
                 do_rebase_comment(repo, number, dry_run=args.dry_run)
                 stats.rebased += 1
                 state[pr_url] = now
@@ -2981,6 +3145,47 @@ def run(args: argparse.Namespace) -> TriageStats:
                     repo=repo,
                 )
             elif decision.outcome == OUTCOME_CLOSE_PRERELEASE:
+                final_notif = _current_notification_for_clearance(thread_id=thread_id or None)
+                if thread_id and final_notif is None:
+                    stats.errors.append(f"notification disappeared before action for {pr_url}")
+                    continue
+                if thread_id and not _comment_notification_still_clearable(
+                    final_notif or current_notif,
+                    ledger=ledger,
+                    my_login=my_login,
+                    thread_id=thread_id,
+                    pr_url=pr_url,
+                ):
+                    stats.skipped += 1
+                    continue
+                if ledger is not None and ledger.has_active_actionable_notification(
+                    source_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                ):
+                    logger.info(
+                        "%s#%d -> preserving active actionable notification for %s",
+                        repo,
+                        number,
+                        thread_id or pr_url or repo,
+                    )
+                    stats.skipped += 1
+                    continue
+                try:
+                    action_todo = load_todo(args.todo_file)
+                except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+                    stats.errors.append(f"failed to reload todo before action for {pr_url}: {exc}")
+                    continue
+                if _todo_has_active_matching_entry_in_data(
+                    action_todo, thread_id=thread_id or None, pr_url=pr_url
+                ):
+                    logger.info(
+                        "%s#%d -> preserving active todo ownership for %s",
+                        repo,
+                        number,
+                        thread_id or pr_url or repo,
+                    )
+                    stats.skipped += 1
+                    continue
                 do_dependabot_close(repo, number, dry_run=args.dry_run)
                 stats.closed_prerelease += 1
                 state[pr_url] = now
