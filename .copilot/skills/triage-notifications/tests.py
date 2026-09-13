@@ -99,7 +99,7 @@ def test_classify_mention_goes_to_q1():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -111,7 +111,7 @@ def test_classify_assign_goes_to_q1():
         _notif("assign"),
         my_login="zkoppert",
         state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -122,7 +122,7 @@ def test_classify_security_alert_goes_to_q1():
         _notif("security_alert"),
         my_login="zkoppert",
         state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
     )
     assert c.bucket == triage.BUCKET_Q1
 
@@ -132,7 +132,7 @@ def test_classify_assign_on_my_own_pr_goes_to_q1():
         _notif("assign"),
         my_login="zkoppert",
         state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "zkoppert",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -143,7 +143,7 @@ def test_classify_mention_on_my_own_pr_goes_to_q1():
         _notif("mention"),
         my_login="zkoppert",
         state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "ZKoppert",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -157,7 +157,7 @@ def test_classify_security_alert_on_my_own_pr_still_goes_to_q1():
         _notif("security_alert"),
         my_login="zkoppert",
         state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "zkoppert",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -180,7 +180,7 @@ def test_classify_self_assign_on_non_pr_still_goes_to_q1():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=fetcher,
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -194,7 +194,7 @@ def test_classify_manual_drops():
         _notif("manual"),
         my_login="zkoppert",
         state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
     )
     assert c.bucket == triage.BUCKET_DROP
 
@@ -205,7 +205,7 @@ def test_review_requested_goes_to_q2_without_author_lookup():
         _notif("review_requested"),
         my_login="zkoppert",
         state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda notif: author_lookups.append(notif),
     )
     assert c.bucket == triage.BUCKET_Q2
@@ -227,7 +227,7 @@ def test_dependabot_bump_with_unknown_author_is_preserved():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: None,
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -240,7 +240,7 @@ def test_comment_on_closed_thread_drops():
         _notif("comment"),
         my_login="zkoppert",
         state_fetcher=lambda _: "closed",
-        comment_fetcher=lambda _: ("someone", "hi"),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot("someone", "hi", False, True),
     )
     assert c.bucket == triage.BUCKET_DROP
     assert "closed" in c.reason
@@ -251,7 +251,7 @@ def test_comment_on_merged_thread_drops():
         _notif("comment"),
         my_login="zkoppert",
         state_fetcher=lambda _: "merged",
-        comment_fetcher=lambda _: ("someone", "hi"),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot("someone", "hi", False, True),
     )
     assert c.bucket == triage.BUCKET_DROP
 
@@ -261,7 +261,7 @@ def test_comment_with_mention_goes_to_q1():
         _notif("comment"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: ("teammate", "hey @zkoppert can you look?"),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot("teammate", "hey @zkoppert can you look?", True, True),
     )
     assert c.bucket == triage.BUCKET_Q1
     assert c.direct_mention is True
@@ -298,12 +298,12 @@ def test_comment_history_reports_earlier_mention_when_complete():
         raise AssertionError(args)
 
     with patch("triage.run_gh", side_effect=fake_run_gh):
-        author, body = triage.fetch_latest_comment(notif, my_login="zkoppert")
+        snapshot = triage.shared_comment_notification_snapshot(notif, my_login="zkoppert", run_gh=triage.run_gh)
+        author, body = snapshot.author, snapshot.body
         c = triage.classify(
             notif,
             my_login="zkoppert",
             state_fetcher=lambda _: "open",
-            comment_fetcher=triage.fetch_latest_comment,
             comment_snapshot_fetcher=triage.shared_comment_notification_snapshot,
             subject_author_fetcher=lambda _: "someone-else",
         )
@@ -353,8 +353,8 @@ def test_comment_snapshot_uses_comment_id_watermark_for_same_second_mentions():
         )
 
     assert snapshot is not None
-    assert snapshot.comment_id == "11"
-    assert snapshot.comment_cursor is not None
+    assert snapshot.comment_cursors is not None
+    assert snapshot.comment_cursors["issue_comments"] is not None
     assert snapshot.direct is True
     assert snapshot.history_complete is True
 
@@ -400,7 +400,8 @@ def test_comment_snapshot_detects_review_body_mentions():
 
     assert snapshot is not None
     assert snapshot.direct is True
-    assert snapshot.comment_cursor is not None
+    assert snapshot.comment_cursors is not None
+    assert snapshot.comment_cursors["pull_reviews"] is not None
     assert snapshot.history_complete is True
 
 
@@ -457,7 +458,8 @@ def test_comment_snapshot_prefers_issue_mentions_over_same_second_review_bodies(
 
     assert snapshot is not None
     assert snapshot.direct is True
-    assert snapshot.comment_id == "12"
+    assert snapshot.comment_cursors is not None
+    assert snapshot.comment_cursors["issue_comments"] is not None
     assert snapshot.history_complete is True
 
 
@@ -556,18 +558,20 @@ def test_comment_history_incomplete_preserves_earlier_mention():
         raise AssertionError(args)
 
     with patch("triage.run_gh", side_effect=fake_run_gh):
-        author, body = triage.fetch_latest_comment(notif, my_login="zkoppert")
+        snapshot = triage.shared_comment_notification_snapshot(notif, my_login="zkoppert", run_gh=triage.run_gh)
+        author, body = snapshot.author, snapshot.body
         c = triage.classify(
             notif,
             my_login="zkoppert",
             state_fetcher=lambda _: "open",
-            comment_fetcher=triage.fetch_latest_comment,
             comment_snapshot_fetcher=triage.shared_comment_notification_snapshot,
             subject_author_fetcher=lambda _: "someone-else",
         )
 
-    assert author is None
-    assert body is triage._COMMENT_HISTORY_INCOMPLETE
+    assert author == "teammate"
+    assert body == "hey @zkoppert can you look?"
+    assert snapshot.direct is True
+    assert snapshot.history_complete is False
     assert c.bucket == triage.BUCKET_Q1
     assert c.direct_mention is True
 
@@ -577,9 +581,11 @@ def test_super_linter_without_mention_drops():
         _notif("comment"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(
             "super-linter[bot]",
             "Super-linter summary: 3 issues found",
+            False,
+            True,
         ),
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -591,9 +597,11 @@ def test_super_linter_with_mention_still_goes_to_q1():
         _notif("comment"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(
             "super-linter[bot]",
             "Super-linter found issues, @zkoppert please review",
+            True,
+            True,
         ),
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -604,7 +612,7 @@ def test_ci_activity_drops():
         _notif("ci_activity"),
         my_login="zkoppert",
         state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
     )
     assert c.bucket == triage.BUCKET_DROP
 
@@ -616,7 +624,7 @@ def test_subscribed_open_drops():
         _notif("subscribed"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
     )
     assert c.bucket == triage.BUCKET_DROP
 
@@ -626,7 +634,7 @@ def test_subscribed_closed_drops():
         _notif("subscribed"),
         my_login="zkoppert",
         state_fetcher=lambda _: "closed",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
     )
     assert c.bucket == triage.BUCKET_DROP
 
@@ -638,7 +646,7 @@ def test_unknown_reason_drops():
         _notif("invitation"),
         my_login="zkoppert",
         state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
     )
     assert c.bucket == triage.BUCKET_DROP
 
@@ -1657,10 +1665,9 @@ def test_run_reopens_terminal_item_for_direct_mention(
     assert reopened[0]["id"] == "old"
     assert reopened[0]["status"] == "pending"
     assert "completed" not in reopened[0]
-    assert reopened[0]["notification"] == {
-        "thread_id": "1001",
-        "reason": "mention",
-    }
+    assert reopened[0]["notification"]["thread_id"] == "1001"
+    assert reopened[0]["notification"]["reason"] == "mention"
+    assert "captured_at" in reopened[0]["notification"]
     assert updated["done"] == []
     assert updated["prioritized"]["q4_eliminate"] == []
     ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
@@ -4356,7 +4363,7 @@ def test_classify_drops_review_requested_on_closed_pr():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "closed",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4368,7 +4375,7 @@ def test_classify_drops_review_requested_on_merged_pr():
         _notif("review_requested"),
         my_login="zkoppert",
         state_fetcher=lambda _: "merged",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4379,7 +4386,7 @@ def test_classify_mention_on_closed_pr_goes_to_q1():
         _notif("mention"),
         my_login="zkoppert",
         state_fetcher=lambda _: "closed",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -4400,7 +4407,7 @@ def test_classify_assign_on_closed_issue_goes_to_q1():
         issue_notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "closed",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -4411,7 +4418,7 @@ def test_classify_drops_manual_on_closed_subject():
         _notif("manual"),
         my_login="zkoppert",
         state_fetcher=lambda _: "closed",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4423,7 +4430,7 @@ def test_classify_keeps_mention_on_open_subject():
         _notif("mention"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -4435,7 +4442,7 @@ def test_classify_keeps_review_requested_on_open_pr():
         _notif("review_requested"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q2
@@ -4449,7 +4456,7 @@ def test_classify_keeps_assign_when_state_unknown():
         _notif("assign"),
         my_login="zkoppert",
         state_fetcher=lambda _: None,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -4473,7 +4480,7 @@ def test_classify_skips_state_check_for_non_subject_types():
         sec_notif,
         my_login="zkoppert",
         state_fetcher=fetcher,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     fetcher.assert_not_called()
@@ -4500,7 +4507,7 @@ def test_classify_enable_dependabot_author_drops():
         _enable_dependabot_notif(),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "zkoppert",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4514,7 +4521,7 @@ def test_classify_enable_dependabot_kept_on_mention():
         _enable_dependabot_notif("mention"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -4536,7 +4543,7 @@ def test_classify_enable_dependabot_title_match_is_case_insensitive():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "zkoppert",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4558,7 +4565,7 @@ def test_classify_does_not_drop_unrelated_author_pr():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "zkoppert",
     )
     assert c.bucket == triage.BUCKET_INBOX
@@ -4604,7 +4611,7 @@ def test_classify_watch_only_dependabot_bump_drops_and_marks_done(
         _watch_only_dependabot_notif(),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "dependabot[bot]",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4619,7 +4626,7 @@ def test_classify_watch_only_dependabot_mention_still_surfaces(
         _watch_only_dependabot_notif("mention"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -4632,7 +4639,7 @@ def test_classify_watch_only_dependabot_review_requested_still_surfaces(
         _watch_only_dependabot_notif("review_requested"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "dependabot[bot]",
     )
     assert c.bucket == triage.BUCKET_Q2
@@ -4698,7 +4705,7 @@ def test_classify_drops_intermittent_test_failure_team_mention():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4712,7 +4719,7 @@ def test_classify_drops_flaky_test_subscribed():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4725,7 +4732,7 @@ def test_classify_drops_test_flake_team_mention():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4738,7 +4745,7 @@ def test_classify_drops_title_match_is_case_insensitive():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4755,7 +4762,7 @@ def test_classify_keeps_intermittent_test_failure_when_at_mentioned():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -4771,7 +4778,7 @@ def test_classify_keeps_intermittent_test_failure_when_assigned():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -4790,7 +4797,7 @@ def test_classify_title_drop_does_not_match_unrelated_titles():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket != triage.BUCKET_DROP
@@ -4814,7 +4821,7 @@ def test_classify_title_drop_does_not_match_phrase_as_substring():
             notif,
             my_login="zkoppert",
             state_fetcher=lambda _: "open",
-            comment_fetcher=lambda _: (None, None),
+            comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
             subject_author_fetcher=lambda _: "someone-else",
         )
         assert (
@@ -4833,7 +4840,7 @@ def test_classify_title_drop_matches_bracketed_prefix():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4879,7 +4886,7 @@ def test_classify_read_open_notification_routes_like_unread():
     kwargs = dict(
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     c_read = triage.classify(read, **kwargs)
@@ -4895,7 +4902,7 @@ def test_classify_read_closed_pr_still_drops_via_state_check():
         _read_notif("author"),
         my_login="zkoppert",
         state_fetcher=lambda _: "closed",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4909,7 +4916,7 @@ def test_classify_drop_sets_archive_to_done_when_zack_is_pr_author():
         _read_notif("author"),
         my_login="zkoppert",
         state_fetcher=lambda _: "merged",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "zkoppert",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4923,7 +4930,7 @@ def test_classify_drop_does_not_archive_when_zack_is_not_author():
         _read_notif("assign"),
         my_login="zkoppert",
         state_fetcher=lambda _: "closed",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "andimiya",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4940,7 +4947,7 @@ def test_classify_drop_does_not_archive_for_issues():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "closed",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "zkoppert",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -4962,7 +4969,7 @@ def test_classify_drop_does_not_call_author_fetcher_for_issues():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "closed",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=fetcher,
     )
     assert fetcher_calls == []
@@ -5090,7 +5097,7 @@ def test_classify_read_ci_activity_still_drops():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert (
@@ -5106,7 +5113,7 @@ def test_classify_read_comment_on_closed_pr_still_drops():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "closed",
-        comment_fetcher=lambda _: ("someone", "body"),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot("someone", "body", False, True),
         subject_author_fetcher=lambda _: "andi",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5119,7 +5126,7 @@ def test_classify_comment_mention_on_closed_pr_goes_to_q1():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "closed",
-        comment_fetcher=lambda _: ("someone", "Please review this, @zkoppert"),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot("someone", "Please review this, @zkoppert", True, True),
         subject_author_fetcher=lambda _: "andi",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -5132,7 +5139,7 @@ def test_classify_read_subscribed_on_closed_pr_still_drops():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "merged",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5145,7 +5152,7 @@ def test_classify_read_super_linter_comment_still_drops():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: ("super-linter", "lint failed"),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot("super-linter", "lint failed", False, True),
         subject_author_fetcher=lambda _: "andi",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5161,7 +5168,7 @@ def test_classify_read_inbox_routing_now_returns_inbox():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "andi",
     )
     assert c.bucket == triage.BUCKET_INBOX
@@ -5175,7 +5182,7 @@ def test_classify_read_q1_mention_now_returns_q1():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "andi",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -5413,7 +5420,7 @@ def test_classify_private_subscription_subscribed_drops(private_subscription_fil
         _private_subscription_notif("subscribed"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5427,7 +5434,7 @@ def test_classify_private_subscription_comment_drops(private_subscription_filter
         _private_subscription_notif("comment"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: ("andimiya", "lgtm"),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot("andimiya", "lgtm", False, True),
         subject_author_fetcher=lambda _: "andimiya",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5441,7 +5448,7 @@ def test_classify_private_subscription_ci_activity_drops(private_subscription_fi
         _private_subscription_notif("ci_activity"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5454,7 +5461,7 @@ def test_classify_private_subscription_author_drops(private_subscription_filter)
         _private_subscription_notif("author"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "zkoppert",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5469,7 +5476,7 @@ def test_classify_private_subscription_mention_still_routes_normally(
         _private_subscription_notif("mention"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "andimiya",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -5483,7 +5490,7 @@ def test_classify_private_subscription_assign_still_routes_normally(
         _private_subscription_notif("assign"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "andimiya",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -5497,7 +5504,7 @@ def test_classify_private_subscription_review_requested_still_routes_normally(
         _private_subscription_notif("review_requested"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "andimiya",
     )
     assert c.bucket == triage.BUCKET_Q2
@@ -5511,7 +5518,7 @@ def test_classify_private_subscription_team_mention_drops(private_subscription_f
         _private_subscription_notif("team_mention"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "andimiya",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5530,7 +5537,7 @@ def test_classify_non_filtered_repo_subscribed_drops():
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5547,7 +5554,7 @@ def test_classify_private_subscription_filter_runs_after_closed_state_drop(
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "merged",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "zkoppert",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5567,7 +5574,7 @@ def test_classify_private_subscription_subscribed_drops_regardless_of_read_state
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5582,7 +5589,7 @@ def test_classify_private_subscription_security_alert_still_routes_to_q1(
         _private_subscription_notif("security_alert"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -5597,7 +5604,7 @@ def test_classify_subscription_filter_is_case_insensitive(private_subscription_f
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5637,7 +5644,7 @@ def test_classify_super_linter_repo_subscribed_drops():
         _superlinter_notif("subscribed"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "maintainer",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5651,7 +5658,7 @@ def test_classify_super_linter_repo_mention_routes_to_q1():
         _superlinter_notif("mention"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: ("maintainer", "@zkoppert thoughts?"),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot("maintainer", "@zkoppert thoughts?", True, True),
         subject_author_fetcher=lambda _: "maintainer",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -5665,7 +5672,7 @@ def test_classify_super_linter_github_fork_subscribed_drops():
         _superlinter_notif("subscribed", owner="github"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "maintainer",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5678,7 +5685,7 @@ def test_classify_super_linter_github_fork_review_requested_goes_to_q2():
         _superlinter_notif("review_requested", owner="github"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "maintainer",
     )
     assert c.bucket == triage.BUCKET_Q2
@@ -5690,7 +5697,7 @@ def test_review_requested_survives_title_drop_patterns(title):
         _repo_notif("review_requested", repo="some-org/x", title=title),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
     assert c.bucket == triage.BUCKET_Q2
@@ -5702,7 +5709,7 @@ def test_classify_super_linter_github_fork_mention_kept():
         _superlinter_notif("mention", owner="github"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "maintainer",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -5716,7 +5723,7 @@ def test_classify_super_linter_security_alert_survives():
         _superlinter_notif("security_alert", owner="github"),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "maintainer",
     )
     assert c.bucket == triage.BUCKET_Q1
@@ -5733,7 +5740,7 @@ def test_classify_super_linter_fork_dependabot_bump_left_unread():
         ),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "dependabot[bot]",
     )
     assert c.bucket == triage.BUCKET_DROP
@@ -5776,7 +5783,7 @@ def _classify(notif, *, author="someone-else", state="open"):
         notif,
         my_login="zkoppert",
         state_fetcher=lambda _: state,
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: author,
     )
 
@@ -5821,7 +5828,7 @@ def test_human_review_requested_bump_stays_scheduled():
         ),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "andi",
     )
     assert c.bucket == triage.BUCKET_Q2
@@ -5835,7 +5842,7 @@ def test_dependabot_review_requested_stays_out_of_q2(title):
         _repo_notif("review_requested", repo="some-org/x", title=title),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
-        comment_fetcher=lambda _: (None, None),
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "dependabot[bot]",
     )
     assert c.bucket == triage.BUCKET_DROP

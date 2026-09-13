@@ -144,8 +144,6 @@ class CommentNotificationSnapshot:
     body: str | None
     direct: bool | None
     history_complete: bool
-    comment_id: str | None = None
-    comment_cursor: str | None = None
     comment_cursors: dict[str, str] | None = None
 
 
@@ -232,7 +230,6 @@ def comment_notification_snapshot(
     my_login: str,
     run_gh,
     since: str | None = None,
-    include_history: bool = False,
 ) -> CommentNotificationSnapshot | None:
     subject = notif.get("subject") or {}
     latest = subject.get("latest_comment_url")
@@ -250,7 +247,6 @@ def comment_notification_snapshot(
     )
     collected: list[tuple[_dt.datetime | None, str, int, int, int, dict[str, Any]]] = []
     history_incomplete = False
-    baseline_ts = parse_iso_datetime(str(notif.get("updated_at") or notif.get("last_read_at") or ""))
     paths = _comment_collection_paths(subject, latest_path)
     if not paths and latest_stream_key:
         paths = [(latest_stream_key, latest_path)]
@@ -301,20 +297,13 @@ def comment_notification_snapshot(
             history_incomplete = True
     if not collected:
         if history_incomplete:
-            return CommentNotificationSnapshot(None, None, None, False)
+            return CommentNotificationSnapshot(None, None, None, False, None)
         return None
     relevant: list[tuple[_dt.datetime | None, str, int, int, int, dict[str, Any]]] = []
     for entry in collected:
         entry_ts, entry_stream, entry_comment_id, _, _, _ = entry
         stream_cursor = watermarks.get(entry_stream)
         if stream_cursor is None:
-            if (
-                not include_history
-                and baseline_ts is not None
-                and entry_ts is not None
-                and entry_ts < baseline_ts
-            ):
-                continue
             relevant.append(entry)
             continue
         cursor_ts, cursor_comment_id = stream_cursor
@@ -331,8 +320,8 @@ def comment_notification_snapshot(
             relevant.append(entry)
     if not relevant:
         if history_incomplete:
-            return CommentNotificationSnapshot(None, None, None, False)
-        return CommentNotificationSnapshot(None, None, False, True, None, None)
+            return CommentNotificationSnapshot(None, None, None, False, None)
+        return CommentNotificationSnapshot(None, None, False, True, None)
     relevant.sort(
         key=lambda entry: (
             entry[0] or _dt.datetime.min.replace(tzinfo=_dt.timezone.utc),
@@ -355,16 +344,6 @@ def comment_notification_snapshot(
     latest_comment = latest_entry[5]
     author = (latest_comment.get("user") or {}).get("login")
     body = str(latest_comment.get("body") or "") or None
-    latest_comment_id = latest_comment.get("id")
-    if isinstance(latest_comment_id, int):
-        latest_comment_id_str = str(latest_comment_id)
-        latest_comment_id_num = latest_comment_id
-    elif isinstance(latest_comment_id, str) and latest_comment_id.isdigit():
-        latest_comment_id_str = latest_comment_id
-        latest_comment_id_num = int(latest_comment_id)
-    else:
-        latest_comment_id_str = None
-        latest_comment_id_num = -1
     direct = bool(direct_entries)
     if history_incomplete:
         return CommentNotificationSnapshot(
@@ -372,8 +351,6 @@ def comment_notification_snapshot(
             body,
             direct if direct else None,
             False,
-            latest_comment_id_str,
-            None,
             None,
         )
     return CommentNotificationSnapshot(
@@ -381,8 +358,6 @@ def comment_notification_snapshot(
         body,
         direct,
         True,
-        latest_comment_id_str,
-        _comment_cursor_from_parts(latest_entry[1], latest_entry[0], latest_comment_id_num),
         {
             stream: _comment_cursor_from_parts(stream, stamp, comment_id)
             for stream, (stamp, comment_id) in latest_by_stream.items()

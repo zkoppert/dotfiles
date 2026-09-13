@@ -656,31 +656,6 @@ def fetch_subject_author(notif: dict[str, Any]) -> str | None:
         return None
 
 
-_COMMENT_HISTORY_INCOMPLETE = object()
-
-
-def fetch_latest_comment(
-    notif: dict[str, Any],
-    *,
-    my_login: str | None = None,
-) -> tuple[str | None, Any]:
-    """Return the latest author and comment body relevant to a notification.
-
-    Returns (None, None) if unavailable.
-    """
-    snapshot = shared_comment_notification_snapshot(
-        notif,
-        my_login=my_login or "",
-        run_gh=run_gh,
-        include_history=True,
-    )
-    if snapshot is None:
-        return None, None
-    if not snapshot.history_complete:
-        return None, _COMMENT_HISTORY_INCOMPLETE
-    return snapshot.author, snapshot.body or ""
-
-
 def is_super_linter(author: str | None, body: str | None) -> bool:
     """Return True if the latest comment looks like a super-linter post."""
     if author and author.lower() in {"super-linter", "super-linter[bot]"}:
@@ -698,39 +673,19 @@ def mentions_me(body: str | None, my_login: str) -> bool:
     return re.search(pattern, body, re.IGNORECASE) is not None
 
 
-def _snapshot_from_comment_fetcher(
-    notif: dict[str, Any],
-    *,
-    my_login: str,
-    comment_fetcher,
-) -> Any:
-    if comment_fetcher is None:
-        return None
-    if comment_fetcher is fetch_latest_comment:
-        author, body = comment_fetcher(notif, my_login=my_login)
-    else:
-        author, body = comment_fetcher(notif)
-    if body is _COMMENT_HISTORY_INCOMPLETE:
-        return CommentNotificationSnapshot(None, None, None, False, None, None)
-    direct = mentions_me(body, my_login)
-    return CommentNotificationSnapshot(author, str(body) if body is not None else None, direct, True, None, None)
-
-
 def classify(
     notif: dict[str, Any],
     *,
     my_login: str,
     state_fetcher=fetch_thread_state,
-    comment_fetcher=fetch_latest_comment,
     comment_snapshot_fetcher=None,
     comment_since: str | None = None,
     subject_author_fetcher=fetch_subject_author,
 ) -> Classification:
     """Decide which bucket a notification belongs in.
 
-    `state_fetcher`, `comment_fetcher`, and `subject_author_fetcher` are
-    injectable so tests can avoid network calls. They default to the live
-    API helpers.
+    `state_fetcher` and `subject_author_fetcher` are injectable so tests
+    can avoid network calls. They default to the live API helpers.
 
     Read notifications classify identically to unread ones; the
     `already_tracked` short-circuit prevents the same notification from
@@ -755,12 +710,6 @@ def classify(
                 my_login=my_login,
                 run_gh=run_gh,
                 since=comment_since,
-            )
-        if snapshot is None:
-            snapshot = _snapshot_from_comment_fetcher(
-                notif,
-                my_login=my_login,
-                comment_fetcher=comment_fetcher,
             )
         if snapshot is None:
             return Classification(BUCKET_INBOX, "comment history incomplete")
@@ -2562,16 +2511,11 @@ def run(args: argparse.Namespace) -> TriageStats:
                 thread_id
                 and comment_snapshot is not None
                 and comment_snapshot.history_complete
+                and comment_snapshot.comment_cursors
             ):
-                comment_cursors = []
-                if comment_snapshot.comment_cursors:
-                    comment_cursors.extend(comment_snapshot.comment_cursors.values())
-                elif comment_snapshot.comment_cursor:
-                    comment_cursors.append(comment_snapshot.comment_cursor)
-                if comment_cursors:
-                    pending_comment_watermarks.setdefault(thread_id, []).extend(
-                        comment_cursors
-                    )
+                pending_comment_watermarks.setdefault(thread_id, []).extend(
+                    comment_snapshot.comment_cursors.values()
+                )
 
         classification = classify(
             notif,
@@ -2619,6 +2563,14 @@ def run(args: argparse.Namespace) -> TriageStats:
                     ),
                 )
             )
+            if (
+                not renewed
+                and tracked_terminal
+                and comment_snapshot is not None
+                and comment_snapshot.direct is True
+                and comment_since is not None
+            ):
+                renewed = True
             tracked_nonterminal = bool(tracked and not tracked_terminal)
             tracked_urgent = bool(
                 tracked_nonterminal
