@@ -1670,6 +1670,54 @@ def _entry_exists(data: dict[str, Any], entry: dict[str, Any]) -> bool:
     return _matching_entry(_iter_todo_items(data), entry) is not None
 
 
+def _todo_has_active_matching_entry(
+    path: Path,
+    *,
+    thread_id: str | None,
+    pr_url: str | None,
+) -> bool:
+    if not thread_id and not pr_url:
+        return False
+    try:
+        with _todo_write_lock(path):
+            data = load_todo(path)
+    except (OSError, FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+        logger.warning("could not inspect todo for active Dependabot entry: %s", exc)
+        return True
+
+    def matches(item: Any) -> bool:
+        if not isinstance(item, dict):
+            return False
+        notif = item.get("notification")
+        if not isinstance(notif, dict):
+            return False
+        if thread_id and str(notif.get("thread_id") or "") == thread_id:
+            return True
+        if pr_url and notif.get("url") == pr_url:
+            return True
+        return False
+
+    buckets = [
+        data.get("inbox"),
+        data.get("in_progress"),
+        data.get("blocked"),
+        data.get("in_review"),
+    ]
+    prioritized = data.get("prioritized")
+    if isinstance(prioritized, dict):
+        buckets.extend(
+            prioritized.get(quadrant)
+            for quadrant in ("q1_do_first", "q2_schedule", "q3_delegate")
+        )
+    for bucket in buckets:
+        if not isinstance(bucket, list):
+            continue
+        for item in bucket:
+            if matches(item):
+                return True
+    return False
+
+
 def apply_todo_mutations(
     data: dict[str, Any],
     mutations: TodoMutations,
@@ -2296,7 +2344,15 @@ def run(args: argparse.Namespace) -> TriageStats:
             stats.skipped += 1
             cleared = True
             if thread_id and (
-                reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS or clearable_comment
+                reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS
+                or (
+                    clearable_comment
+                    and not _todo_has_active_matching_entry(
+                        args.todo_file,
+                        thread_id=thread_id,
+                        pr_url=pr_url,
+                    )
+                )
             ):
                 logger.info(
                     "%s#%d -> clearing unowned repo notification (reason=%s)",
@@ -2407,7 +2463,15 @@ def run(args: argparse.Namespace) -> TriageStats:
             stats.skipped_dependency += 1
             cleared = True
             if thread_id and (
-                reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS or clearable_comment
+                reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS
+                or (
+                    clearable_comment
+                    and not _todo_has_active_matching_entry(
+                        args.todo_file,
+                        thread_id=thread_id,
+                        pr_url=pr_url,
+                    )
+                )
             ):
                 logger.info(
                     "%s#%d -> clearing notification (reason=%s)",
