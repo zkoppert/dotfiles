@@ -1774,6 +1774,9 @@ def _comment_notification_still_clearable(
     if current is None:
         return False
     current_reason = str(current.get("reason") or "").lower()
+    original_reason = str(notif.get("reason") or "").lower()
+    if current_reason != original_reason:
+        return False
     record = (
         ledger.notification_record(source_id=thread_id, canonical_artifact=pr_url)
         if ledger is not None
@@ -1786,7 +1789,7 @@ def _comment_notification_still_clearable(
         )
     current_updated_at = parse_iso_datetime(current.get("updated_at"))
     if current_reason in {"mention", "assign"}:
-        if boundary is None or current_updated_at is None or current_updated_at > boundary:
+        if current_updated_at is None or (boundary is not None and current_updated_at > boundary):
             return False
     elif boundary is not None and current_updated_at is not None and current_updated_at > boundary:
         return False

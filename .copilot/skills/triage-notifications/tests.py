@@ -3590,6 +3590,64 @@ def test_route_existing_terminal_inbox_notification_reopens_active_work_to_inbox
     assert "terminal_disposition" not in item["notification"]
 
 
+def test_run_rejects_fresh_stale_prune_when_notification_changed(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [
+                    {
+                        "id": "stale-1",
+                        "source": "github-notification",
+                        "notification": {
+                            "thread_id": "123",
+                            "url": "https://github.com/o/r/pull/1",
+                            "reason": "subscribed",
+                            "repo": "o/r",
+                        },
+                    },
+                ],
+                "prioritized": {"q1_do_first": []},
+                "done": [],
+            }
+        )
+    )
+
+    current_notif = _notif("review_requested", id="123")
+    current_notif["repository"] = {"full_name": "o/r"}
+    current_notif["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/1"
+    current_notif["updated_at"] = "2026-07-02T12:00:00Z"
+
+    def fake_run_gh(cmd, *args, **kwargs):
+        if "/repos/o/r/pulls/1" in cmd:
+            return json.dumps({"state": "open"})
+        return "[]"
+
+    with (
+        patch("triage.get_my_login", return_value="zkoppert"),
+        patch("triage.fetch_notifications", return_value=[current_notif]),
+        patch("triage.run_gh", side_effect=fake_run_gh),
+        patch("triage.check_subject_stale", return_value=(triage.STALE_DROP, "closed pr")),
+        patch("triage.mark_thread_done") as mark_done,
+    ):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        stats = triage.run(args)
+
+    assert stats.already_tracked == 1
+    assert stats.pruned_stale == 0
+    mark_done.assert_not_called()
+    data = yaml.safe_load(todo_file.read_text())
+    found = []
+    for bucket in (data.get("inbox") or []):
+        found.append(bucket)
+    for item in (data.get("prioritized") or {}).get("q1_do_first", []):
+        found.append(item)
+    for item in (data.get("prioritized") or {}).get("q2_schedule", []):
+        found.append(item)
+    assert any(
+        item.get("notification", {}).get("thread_id") == "123" for item in found
+    )
+
+
 def test_run_marks_done_on_completed(todo_file):
     todo_file.write_text(
         yaml.safe_dump(
@@ -5818,6 +5876,35 @@ def test_notification_has_new_activity_uses_marked_done_boundary():
     )
 
 
+def test_notification_has_new_activity_prefers_terminal_recorded_at():
+    tracked = {
+        "notification": {
+            "captured_at": "2026-07-01T12:00:00Z",
+            "marked_done": True,
+            "marked_done_at": "2026-07-03T12:00:00Z",
+            "terminal_recorded_at": "2026-07-05T12:00:00Z",
+        }
+    }
+    between = _notif("mention", updated_at="2026-07-04T12:00:00Z")
+    later = _notif("mention", updated_at="2026-07-06T12:00:00Z")
+    assert (
+        triage.notification_has_new_activity(
+            between,
+            tracked,
+            allow_reason_change_without_timestamp=False,
+        )
+        is False
+    )
+    assert (
+        triage.notification_has_new_activity(
+            later,
+            tracked,
+            allow_reason_change_without_timestamp=False,
+        )
+        is True
+    )
+
+
 def _stale_self_authored_entry(entry_id: str, pr_number: int) -> dict:
     """Tracked entry for a PR I authored, ready to be archived on prune."""
     return {
@@ -6750,6 +6837,60 @@ def test_ledger_first_thread_claims_canonical_tracker_row(todo_file: Path):
     assert second_id == rows[1]["id"]
     assert rows[1]["source_id"] == "thread-b"
     assert rows[1]["tracker_item_id"] is None
+
+
+def test_ledger_capture_leaves_terminal_boundary_unset(todo_file: Path):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    ledger.capture(
+        source_id="thread-a",
+        canonical_artifact="https://github.com/o/r/pull/1",
+        classification="actionable",
+        worker="test",
+        event_at="2026-07-01T12:00:00Z",
+    )
+
+    rows = ledger._rows(
+        """
+        SELECT terminal_recorded_at
+          FROM notifications
+         WHERE source_id = ?
+        """,
+        ("thread-a",),
+    )
+    assert rows == [{"terminal_recorded_at": None}]
+
+
+def test_ledger_record_terminal_keeps_newer_boundary(todo_file: Path):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/1"
+    ledger.capture(
+        source_id="thread-a",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_id="thread-a",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-03T12:00:00Z",
+    )
+    ledger.record_terminal(
+        source_id="thread-a",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-01T12:00:00Z",
+    )
+
+    rows = ledger._rows(
+        """
+        SELECT terminal_recorded_at
+          FROM notifications
+         WHERE source_id = ?
+        """,
+        ("thread-a",),
+    )
+    assert rows == [{"terminal_recorded_at": "2026-07-03T12:00:00Z"}]
 
 
 def test_ledger_actionable_thread_does_not_claim_terminal_canonical_row(

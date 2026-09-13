@@ -591,15 +591,6 @@ class NotificationLedger:
                     repo=repo,
                     now=now,
                 )
-                if event_at:
-                    conn.execute(
-                        """
-                        UPDATE notifications
-                           SET terminal_recorded_at = COALESCE(?, terminal_recorded_at)
-                         WHERE id = ?
-                        """,
-                        (event_at, row_id),
-                    )
                 conn.commit()
                 return row_id
             conn.execute(
@@ -613,8 +604,7 @@ class NotificationLedger:
                         classification = ?,
                         last_seen_at = ?,
                         classified_at = ?,
-                        worker = ?,
-                       terminal_recorded_at = COALESCE(?, terminal_recorded_at)
+                        worker = ?
                  WHERE id = ?
                 """,
                 (
@@ -630,7 +620,6 @@ class NotificationLedger:
                     now,
                     now,
                     worker,
-                    event_at,
                     row_id,
                 ),
             )
@@ -880,11 +869,16 @@ class NotificationLedger:
                 """
                 UPDATE notifications
                    SET terminal_disposition = ?,
-                        terminal_recorded_at = COALESCE(?, terminal_recorded_at),
+                       terminal_recorded_at = CASE
+                           WHEN terminal_recorded_at IS NULL
+                                OR terminal_recorded_at <= ?
+                           THEN ?
+                           ELSE terminal_recorded_at
+                       END,
                        last_seen_at = ?
                  WHERE id = ?
                 """,
-                (terminal_disposition, terminal_at, now, row_id),
+                (terminal_disposition, terminal_at, terminal_at, now, row_id),
             )
             conn.commit()
 
