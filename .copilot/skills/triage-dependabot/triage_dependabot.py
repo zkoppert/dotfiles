@@ -2829,6 +2829,30 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
                 stats.skipped += 1
                 continue
+            try:
+                action_todo = load_todo(args.todo_file)
+            except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+                stats.errors.append(f"failed to reload todo before action for {pr_url}: {exc}")
+                continue
+            if _todo_has_active_matching_entry_in_data(
+                action_todo, thread_id=thread_id or None, pr_url=pr_url
+            ):
+                logger.info(
+                    "%s#%d -> preserving active todo ownership for %s",
+                    repo,
+                    number,
+                    thread_id or pr_url or repo,
+                )
+                stats.skipped += 1
+                continue
+            fresh_pr = fetch_pr(repo, number)
+            if fresh_pr is None:
+                stats.errors.append(f"failed to refresh {pr_url} before action")
+                continue
+            if fresh_pr.get("headRefOid") != pr.get("headRefOid"):
+                stats.skipped += 1
+                continue
+            pr = fresh_pr
             if decision.outcome == OUTCOME_MERGE:
                 merged = do_merge(
                     repo,

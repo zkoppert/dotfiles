@@ -871,14 +871,13 @@ class NotificationLedger:
                    SET terminal_disposition = ?,
                        terminal_recorded_at = CASE
                            WHEN terminal_recorded_at IS NULL
-                                OR terminal_recorded_at <= ?
                            THEN ?
                            ELSE terminal_recorded_at
                        END,
                        last_seen_at = ?
                  WHERE id = ?
                 """,
-                (terminal_disposition, terminal_at, terminal_at, now, row_id),
+                (terminal_disposition, terminal_at, now, row_id),
             )
             conn.commit()
 

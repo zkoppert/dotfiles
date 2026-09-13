@@ -3162,6 +3162,39 @@ def test_retry_pending_github_clears_keeps_new_direct_comment(todo_file):
     mark_done.assert_not_called()
 
 
+def test_retry_pending_github_clears_marks_missing_thread_cleared(todo_file):
+    notif = _notif("subscribed")
+    ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
+    canonical = triage.web_url(notif)
+    ledger.capture(
+        source_id=notif["id"],
+        canonical_artifact=canonical,
+        classification="policy_drop",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_id=notif["id"],
+        canonical_artifact=canonical,
+        terminal_disposition="irrelevant",
+    )
+    ledger.queue_clear(source_id=notif["id"], canonical_artifact=canonical)
+    stats = triage.TriageStats()
+    with patch("triage.fetch_notifications", return_value=[]), patch(
+        "triage.mark_thread_done"
+    ) as mark_done:
+        triage.retry_pending_github_clears(
+            ledger,
+            dry_run=False,
+            stats=stats,
+            attempted_thread_ids=set(),
+            protected_thread_ids=set(),
+            my_login="zkoppert",
+        )
+
+    mark_done.assert_not_called()
+    assert ledger.pending_github_clears() == []
+
+
 def test_run_routes_dependabot_comment_mention_to_q1(todo_file):
     notif = _notif("comment")
     notif["subject"]["title"] = "Bump urllib3 from 2.0.0 to 2.1.0"
@@ -4358,6 +4391,120 @@ def test_run_prunes_and_writes_when_live(todo_file):
     data = yaml.safe_load(todo_file.read_text())
     ids = [e["id"] for e in data["inbox"]]
     assert ids == ["active-1"]
+
+
+def test_run_prunes_when_notification_thread_is_missing(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [
+                    {
+                        "id": "gone-1",
+                        "source": "github-notification",
+                        "notification": {
+                            "thread_id": "gone-thread",
+                            "url": "https://github.com/o/r/pull/3",
+                            "reason": "author",
+                        },
+                    }
+                ],
+                "prioritized": {"q1_do_first": []},
+                "done": [],
+            }
+        )
+    )
+    delete_calls: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        path_args = " ".join(cmd)
+        if "/user" in path_args:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps({"login": "zkoppert"}),
+                stderr="",
+            )
+        if "/notifications" in path_args and "/threads" not in path_args:
+            return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+        if "/pulls/3" in path_args:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps({"state": "closed", "merged_at": "x"}),
+                stderr="",
+            )
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(cmd[-1])
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        args = triage.parse_args(
+            ["--todo-file", str(todo_file), "--no-notify"],
+        )
+        stats = triage.run(args)
+
+    assert stats.pruned_stale == 1
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["inbox"] == []
+    assert delete_calls == []
+
+
+def test_run_prunes_when_notification_thread_is_missing(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [
+                    {
+                        "id": "gone-1",
+                        "source": "github-notification",
+                        "notification": {
+                            "thread_id": "gone-thread",
+                            "url": "https://github.com/o/r/pull/3",
+                            "reason": "author",
+                        },
+                    }
+                ],
+                "prioritized": {"q1_do_first": []},
+                "done": [],
+            }
+        )
+    )
+    delete_calls: list[str] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        path_args = " ".join(cmd)
+        if "/user" in path_args:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps({"login": "zkoppert"}),
+                stderr="",
+            )
+        if "/notifications" in path_args and "/threads" not in path_args:
+            return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+        if "/pulls/3" in path_args:
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps({"state": "closed", "merged_at": "x"}),
+                stderr="",
+            )
+        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(cmd[-1])
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        args = triage.parse_args(
+            ["--todo-file", str(todo_file), "--no-notify"],
+        )
+        stats = triage.run(args)
+
+    assert stats.pruned_stale == 1
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["inbox"] == []
+    assert delete_calls == []
 
 
 def test_run_reports_prunes_from_applied_deltas_after_manual_edit(todo_file):
@@ -6010,6 +6157,101 @@ def test_current_notification_is_clearable_allows_older_actionable_event_after_t
         )
 
 
+def test_current_notification_is_clearable_bootstraps_comment_history_from_terminal_boundary(
+    todo_file,
+):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/issues/1"
+    ledger.capture(
+        source_id="thread-mention",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    ledger.record_terminal(
+        source_id="thread-mention",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-03T12:00:00Z",
+    )
+    current = _notif("mention", id="thread-mention", updated_at="2026-07-02T12:00:00Z")
+    current["subject"]["url"] = "https://api.github.com/repos/o/r/issues/1"
+    current["subject"].pop("latest_comment_url", None)
+    current["repository"] = {"full_name": "o/r"}
+
+    def fake_run_gh(args, *unused_args, **unused_kwargs):
+        path = args[1]
+        if path.endswith("/issues/1/comments"):
+            return json.dumps(
+                [[
+                    {
+                        "body": "ordinary follow-up @zkoppert",
+                        "user": {"login": "teammate"},
+                        "updated_at": "2026-07-01T12:30:00Z",
+                    }
+                ]]
+            )
+        raise AssertionError(args)
+
+    with (
+        patch("triage.fetch_notifications", return_value=[current]),
+        patch("triage.run_gh", side_effect=fake_run_gh),
+    ):
+        assert triage._current_notification_is_clearable(
+            url=artifact,
+            thread_id="thread-mention",
+            reason="mention",
+            ledger=ledger,
+            my_login="zkoppert",
+        )
+
+
+def test_current_notification_is_clearable_allows_new_drop_after_terminal_boundary(
+    todo_file,
+):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/2"
+    ledger.capture(
+        source_id="thread-drop",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    ledger.record_terminal(
+        source_id="thread-drop",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-02T12:00:00Z",
+    )
+    current = _notif("comment", id="thread-drop", updated_at="2026-07-03T12:00:00Z")
+    current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/2"
+    current["subject"]["latest_comment_url"] = (
+        "https://api.github.com/repos/o/r/issues/comments/9"
+    )
+    current["repository"] = {"full_name": "o/r"}
+    snapshot = triage.CommentNotificationSnapshot(None, None, False, True, None)
+    with (
+        patch("triage.fetch_notifications", return_value=[current]),
+        patch(
+            "triage.classify",
+            return_value=triage.Classification(
+                triage.BUCKET_DROP,
+                "Irrelevant update after terminal boundary",
+            ),
+        ),
+        patch("triage.shared_comment_notification_snapshot", return_value=snapshot),
+    ):
+        assert triage._current_notification_is_clearable(
+            url=artifact,
+            thread_id="thread-drop",
+            reason="comment",
+            ledger=ledger,
+            my_login="zkoppert",
+        )
+
+
 def test_run_records_dependabot_handoff_before_clearability_check(todo_file):
     todo_file.write_text(
         yaml.safe_dump(
@@ -7109,7 +7351,7 @@ def test_ledger_capture_leaves_terminal_boundary_unset(todo_file: Path):
     assert rows == [{"terminal_recorded_at": None}]
 
 
-def test_ledger_record_terminal_keeps_newer_boundary(todo_file: Path):
+def test_ledger_record_terminal_keeps_first_boundary(todo_file: Path):
     ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
     artifact = "https://github.com/o/r/pull/1"
     ledger.capture(
@@ -7122,13 +7364,13 @@ def test_ledger_record_terminal_keeps_newer_boundary(todo_file: Path):
         source_id="thread-a",
         canonical_artifact=artifact,
         terminal_disposition="irrelevant",
-        event_at="2026-07-03T12:00:00Z",
+        event_at="2026-07-01T12:00:00Z",
     )
     ledger.record_terminal(
         source_id="thread-a",
         canonical_artifact=artifact,
         terminal_disposition="irrelevant",
-        event_at="2026-07-01T12:00:00Z",
+        event_at="2026-07-03T12:00:00Z",
     )
 
     rows = ledger._rows(
@@ -7139,7 +7381,7 @@ def test_ledger_record_terminal_keeps_newer_boundary(todo_file: Path):
         """,
         ("thread-a",),
     )
-    assert rows == [{"terminal_recorded_at": "2026-07-03T12:00:00Z"}]
+    assert rows == [{"terminal_recorded_at": "2026-07-01T12:00:00Z"}]
 
 
 def test_reconcile_tracker_rows_to_ledger_uses_terminal_recorded_at(todo_file: Path):

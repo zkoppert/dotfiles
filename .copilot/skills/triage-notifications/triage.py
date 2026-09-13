@@ -1014,8 +1014,11 @@ def _current_notification_is_clearable(
     )
     boundary = None
     if record is not None:
-        boundary = parse_iso_datetime(
-            str(record.get("terminal_recorded_at") or record.get("first_seen_at") or "")
+        boundary = parse_iso_datetime(str(record.get("terminal_recorded_at") or ""))
+    if comment_since is None and boundary is not None:
+        comment_since = _bootstrap_comment_since(
+            current,
+            {"notification": {"terminal_recorded_at": boundary.isoformat().replace("+00:00", "Z")}},
         )
     classification = classify(
         current,
@@ -1029,7 +1032,8 @@ def _current_notification_is_clearable(
     else:
         current_updated_at = parse_iso_datetime(current.get("updated_at"))
         if current_updated_at is not None and current_updated_at > boundary:
-            return False
+            if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
+                return False
     subject = current.get("subject") or {}
     latest_url = str(subject.get("latest_comment_url") or "")
     if latest_url:
@@ -2496,12 +2500,15 @@ def reconcile_tracker_rows_to_ledger(
         )
         disposition = tracker_terminal_disposition(item, section)
         if disposition:
-            recorded = ledger.notification_record(
-                source_id=thread_id, canonical_artifact=canonical
-            ) if ledger is not None else None
+            recorded = (
+                ledger.notification_record(
+                    source_id=thread_id, canonical_artifact=canonical
+                )
+                if ledger is not None
+                else None
+            )
             terminal_recorded_at = str(
                 (recorded or {}).get("terminal_recorded_at")
-                or (recorded or {}).get("first_seen_at")
                 or notif.get("terminal_recorded_at")
                 or notif.get("marked_done_at")
                 or (
@@ -2631,6 +2638,16 @@ def retry_pending_github_clears(
         ):
             continue
         try:
+            current = _current_notification_for_clearance(thread_id=thread_id)
+            if current is None:
+                attempted_thread_ids.add(thread_id)
+                _ledger_record_clear_result(
+                    ledger,
+                    dry_run=dry_run,
+                    thread_id=thread_id,
+                    canonical_artifact=canonical,
+                )
+                continue
             if not _current_notification_is_clearable(
                 url=canonical,
                 thread_id=thread_id,
@@ -3197,6 +3214,10 @@ def run(args: argparse.Namespace) -> TriageStats:
         ]
         surviving_prunes: list[PruneDelta] = []
         for delta in mutations.prune:
+            current = _current_notification_for_clearance(thread_id=delta.thread_id)
+            if current is None:
+                surviving_prunes.append(delta)
+                continue
             if not _current_notification_is_clearable(
                 url=None,
                 thread_id=delta.thread_id,

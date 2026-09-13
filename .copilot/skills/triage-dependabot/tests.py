@@ -1900,6 +1900,65 @@ def test_run_rechecks_current_notification_before_merging(tmp_path: Path) -> Non
     mark_mock.assert_not_called()
 
 
+def test_run_skips_merge_when_active_todo_exists_before_mutation(
+    tmp_path: Path,
+) -> None:
+    todo = tmp_path / "todo.yml"
+    todo.write_text(
+        "inbox: []\n"
+        "prioritized:\n"
+        "  q1_do_first:\n"
+        "    - id: tracked-merge\n"
+        "      title: Tracked merge\n"
+        "      source: github-notification\n"
+        "      notification:\n"
+        "        thread_id: thread-active-merge\n"
+        "        url: https://github.com/o/r1/pull/904\n"
+        "        reason: subscribed\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+    notif = {
+        "id": "thread-active-merge",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/904",
+        },
+    }
+    pr = _base_pr(number=904, url="https://github.com/o/r1/pull/904")
+    args = _make_args(tmp_path)
+    args.todo_file = todo
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "_comment_notification_still_clearable",
+        return_value=True,
+    ), mock.patch.object(
+        td, "_todo_has_active_matching_entry_in_data",
+        return_value=True,
+    ), mock.patch.object(
+        td, "decide",
+        return_value=td.Decision(td.OUTCOME_MERGE, "merge now"),
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ) as fetch_pr_mock, mock.patch.object(
+        td, "do_merge"
+    ) as merge_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_mock:
+        stats = td.run(args)
+
+    assert stats.dependabot == 1
+    assert stats.skipped == 1
+    fetch_pr_mock.assert_has_calls([mock.call("o/r1", 904), mock.call("o/r1", 904)])
+    merge_mock.assert_not_called()
+    mark_mock.assert_not_called()
+
+
 def test_run_cleans_stale_inbox_entries_on_merge(tmp_path: Path) -> None:
     """A pre-existing notif-* entry should be removed after the PR auto-merges."""
     notif = {
