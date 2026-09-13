@@ -1257,8 +1257,12 @@ def test_clear_url_deduped_threads_clears_when_still_tracked(tmp_path):
     ]
     stats = triage.TriageStats()
 
-    with patch("triage.mark_thread_done") as mark_done:
-        triage.clear_url_deduped_threads(todo_path, deduped, stats)
+    with patch("triage.mark_thread_done") as mark_done, patch(
+        "triage.run_gh", return_value="[]"
+    ):
+        triage.clear_url_deduped_threads(
+            todo_path, deduped, stats, my_login="zkoppert"
+        )
 
     mark_done.assert_called_once_with("2001")
     assert stats.errors == []
@@ -1281,8 +1285,12 @@ def test_clear_url_deduped_threads_skips_when_untracked_after_commit(tmp_path):
     ]
     stats = triage.TriageStats()
 
-    with patch("triage.mark_thread_done") as mark_done:
-        triage.clear_url_deduped_threads(todo_path, deduped, stats)
+    with patch("triage.mark_thread_done") as mark_done, patch(
+        "triage.run_gh", return_value="[]"
+    ):
+        triage.clear_url_deduped_threads(
+            todo_path, deduped, stats, my_login="zkoppert"
+        )
 
     mark_done.assert_not_called()
     assert stats.errors == []
@@ -1321,8 +1329,10 @@ def test_clear_url_deduped_threads_serializes_clear_under_lock(tmp_path):
 
     with patch("triage.fcntl.flock", side_effect=record_flock), patch(
         "triage.mark_thread_done", side_effect=lambda tid: events.append("clear")
-    ):
-        triage.clear_url_deduped_threads(todo_path, deduped, stats)
+    ), patch("triage.run_gh", return_value="[]"):
+        triage.clear_url_deduped_threads(
+            todo_path, deduped, stats, my_login="zkoppert"
+        )
 
     # The clear happens between acquiring and releasing the lock.
     assert events == ["lock", "clear", "unlock"]
@@ -2993,6 +3003,47 @@ def test_run_comment_history_incomplete_suspends_pending_clear(todo_file):
             "last_clear_error": None,
         }
     ]
+
+
+def test_retry_pending_github_clears_keeps_new_direct_comment(todo_file):
+    notif = _notif("review_requested")
+    ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
+    canonical = triage.web_url(notif)
+    ledger.capture(
+        source_id=notif["id"],
+        canonical_artifact=canonical,
+        classification="policy_drop",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_id=notif["id"],
+        canonical_artifact=canonical,
+        terminal_disposition="irrelevant",
+    )
+    ledger.queue_clear(source_id=notif["id"], canonical_artifact=canonical)
+    stats = triage.TriageStats()
+    comment_pages = [[
+        {
+            "id": 1,
+            "body": "@zkoppert please review",
+            "user": {"login": "someone"},
+            "created_at": "2026-07-06T15:01:00Z",
+            "updated_at": "2026-07-06T15:01:00Z",
+        }
+    ]]
+    with patch("triage.run_gh", return_value=json.dumps(comment_pages)), patch(
+        "triage.mark_thread_done"
+    ) as mark_done:
+        triage.retry_pending_github_clears(
+            ledger,
+            dry_run=False,
+            stats=stats,
+            attempted_thread_ids=set(),
+            protected_thread_ids=set(),
+            my_login="zkoppert",
+        )
+
+    mark_done.assert_not_called()
 
 
 def test_run_routes_dependabot_comment_mention_to_q1(todo_file):

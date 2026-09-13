@@ -2519,7 +2519,10 @@ def test_macos_notify_uses_clickable_terminal_notifier() -> None:
 
 
 def _run_skipped_super_linter_with_reason(
-    tmp_path: Path, reason: str
+    tmp_path: Path,
+    reason: str,
+    *,
+    comment_pages: list[list[dict[str, Any]]] | None = None,
 ) -> tuple[td.TriageStats, mock.MagicMock]:
     """Helper: run() against a single open super-linter PR with the given
     notification reason. Returns the stats plus the mark_thread_done mock so
@@ -2548,6 +2551,8 @@ def _run_skipped_super_linter_with_reason(
     ), mock.patch.object(
         td, "do_merge"
     ), mock.patch.object(
+        td, "run_gh", return_value=json.dumps(comment_pages or [])
+    ), mock.patch.object(
         td, "mark_thread_done"
     ) as mark_mock:
         stats = td.run(args)
@@ -2567,6 +2572,25 @@ def test_run_skips_super_linter_pr_with_review_requested_clears_notification(
     mark_mock.assert_called_once_with(
         "thread-super-linter-review_requested", dry_run=False
     )
+
+
+def test_run_skips_super_linter_review_requested_with_new_direct_comment_keeps_notification(
+    tmp_path: Path,
+) -> None:
+    stats, mark_mock = _run_skipped_super_linter_with_reason(
+        tmp_path,
+        "review_requested",
+        comment_pages=[[{
+            "id": 1,
+            "body": "@zkoppert please review",
+            "user": {"login": "someone"},
+            "created_at": "2026-07-06T15:01:00Z",
+            "updated_at": "2026-07-06T15:01:00Z",
+        }]],
+    )
+    assert stats.skipped_dependency == 1
+    assert stats.dependabot == 0
+    mark_mock.assert_not_called()
 
 
 def test_run_skips_super_linter_pr_with_subscribed_clears_notification(

@@ -1741,8 +1741,16 @@ def _comment_notification_still_clearable(
     thread_id: str,
     pr_url: str,
 ) -> bool:
-    if (notif.get("reason") or "").lower() != "comment":
-        return True
+    subject = notif.get("subject") or {}
+    subject_url = str(subject.get("url") or "")
+    latest_url = str(subject.get("latest_comment_url") or "")
+    if not subject_url and not latest_url:
+        return False
+    probe = dict(notif)
+    probe_subject = dict(subject)
+    if not latest_url:
+        probe_subject["latest_comment_url"] = f"{subject_url.rstrip('/')}/comments"
+    probe["subject"] = probe_subject
     comment_since = None
     if ledger is not None:
         comment_since = ledger.comment_watermark(
@@ -1750,12 +1758,14 @@ def _comment_notification_still_clearable(
             canonical_artifact=pr_url,
         )
     snapshot = shared_comment_notification_snapshot(
-        notif,
+        probe,
         my_login=my_login,
         run_gh=run_gh,
         since=comment_since,
     )
-    return bool(snapshot is not None and snapshot.history_complete and snapshot.direct is False)
+    if snapshot is None:
+        return True
+    return bool(snapshot.history_complete and snapshot.direct is False)
 
 
 def _clear_dependabot_notification(
@@ -2674,7 +2684,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     terminal_disposition="completed",
                     queue_clear=bool(thread_id),
                 )
-                _safe_mark_thread_done(
+                if _safe_mark_thread_done(
                     thread_id,
                     dry_run=args.dry_run,
                     stats=stats,
@@ -2683,15 +2693,15 @@ def run(args: argparse.Namespace) -> TriageStats:
                     canonical_artifact=pr_url,
                     notif=notif,
                     my_login=my_login,
-                )
-                _record_stale_cleanup(
-                    mutations,
-                    stats,
-                    args.todo_file,
-                    thread_id=thread_id,
-                    pr_url=pr_url,
-                    dry_run=args.dry_run,
-                )
+                ):
+                    _record_stale_cleanup(
+                        mutations,
+                        stats,
+                        args.todo_file,
+                        thread_id=thread_id,
+                        pr_url=pr_url,
+                        dry_run=args.dry_run,
+                    )
             elif decision.outcome == OUTCOME_LABEL_AND_MERGE:
                 labels = fetch_repo_labels(repo)
                 if "release" in labels:
@@ -2731,7 +2741,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     terminal_disposition="completed",
                     queue_clear=bool(thread_id),
                 )
-                _safe_mark_thread_done(
+                if _safe_mark_thread_done(
                     thread_id,
                     dry_run=args.dry_run,
                     stats=stats,
@@ -2740,15 +2750,15 @@ def run(args: argparse.Namespace) -> TriageStats:
                     canonical_artifact=pr_url,
                     notif=notif,
                     my_login=my_login,
-                )
-                _record_stale_cleanup(
-                    mutations,
-                    stats,
-                    args.todo_file,
-                    thread_id=thread_id,
-                    pr_url=pr_url,
-                    dry_run=args.dry_run,
-                )
+                ):
+                    _record_stale_cleanup(
+                        mutations,
+                        stats,
+                        args.todo_file,
+                        thread_id=thread_id,
+                        pr_url=pr_url,
+                        dry_run=args.dry_run,
+                    )
             elif decision.outcome == OUTCOME_REBASE:
                 do_rebase_comment(repo, number, dry_run=args.dry_run)
                 stats.rebased += 1
@@ -2781,7 +2791,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     terminal_disposition="irrelevant",
                     queue_clear=bool(thread_id),
                 )
-                _safe_mark_thread_done(
+                if _safe_mark_thread_done(
                     thread_id,
                     dry_run=args.dry_run,
                     stats=stats,
@@ -2790,15 +2800,15 @@ def run(args: argparse.Namespace) -> TriageStats:
                     canonical_artifact=pr_url,
                     notif=notif,
                     my_login=my_login,
-                )
-                _record_stale_cleanup(
-                    mutations,
-                    stats,
-                    args.todo_file,
-                    thread_id=thread_id,
-                    pr_url=pr_url,
-                    dry_run=args.dry_run,
-                )
+                ):
+                    _record_stale_cleanup(
+                        mutations,
+                        stats,
+                        args.todo_file,
+                        thread_id=thread_id,
+                        pr_url=pr_url,
+                        dry_run=args.dry_run,
+                    )
             elif decision.outcome == OUTCOME_FLAG:
                 _ledger_capture(
                     ledger,
@@ -2834,7 +2844,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         terminal_disposition="completed",
                         queue_clear=True,
                     )
-                    _safe_mark_thread_done(
+                    if _safe_mark_thread_done(
                         thread_id,
                         dry_run=args.dry_run,
                         stats=stats,
@@ -2843,15 +2853,15 @@ def run(args: argparse.Namespace) -> TriageStats:
                         canonical_artifact=pr_url,
                         notif=notif,
                         my_login=my_login,
-                    )
-                    _record_stale_cleanup(
-                        mutations,
-                        stats,
-                        args.todo_file,
-                        thread_id=thread_id,
-                        pr_url=pr_url,
-                        dry_run=args.dry_run,
-                    )
+                    ):
+                        _record_stale_cleanup(
+                            mutations,
+                            stats,
+                            args.todo_file,
+                            thread_id=thread_id,
+                            pr_url=pr_url,
+                            dry_run=args.dry_run,
+                        )
                 stats.skipped += 1
         except BranchProtectionBlocked as exc:
             logger.warning(

@@ -970,6 +970,77 @@ def _notification_activity_boundary(
     return boundary
 
 
+def _comment_probe_notification(
+    url: str | None,
+    *,
+    thread_id: str | None,
+    reason: str = "",
+) -> dict[str, Any] | None:
+    if not url:
+        return None
+    api_url: str | None = None
+    subject_type: str | None = None
+    if url.startswith("https://api.github.com/repos/"):
+        api_url = url
+        if "/pulls/" in url:
+            subject_type = "PullRequest"
+        elif "/issues/" in url:
+            subject_type = "Issue"
+    else:
+        parsed = parse_github_url(url)
+        if parsed is None:
+            return None
+        if parsed["kind"] == "pr":
+            subject_type = "PullRequest"
+            api_url = (
+                f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/pulls/{parsed['number']}"
+            )
+        elif parsed["kind"] == "issue":
+            subject_type = "Issue"
+            api_url = (
+                f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/issues/{parsed['number']}"
+            )
+    if api_url is None or subject_type is None:
+        return None
+    return {
+        "id": thread_id or "",
+        "reason": reason,
+        "subject": {
+            "type": subject_type,
+            "url": api_url,
+            "latest_comment_url": f"{api_url}/comments",
+        },
+    }
+
+
+def _current_notification_is_clearable(
+    *,
+    url: str | None,
+    thread_id: str | None,
+    reason: str,
+    ledger: NotificationLedger | None,
+    my_login: str,
+) -> bool:
+    probe = _comment_probe_notification(url, thread_id=thread_id, reason=reason)
+    if probe is None:
+        return False
+    comment_since = None
+    if ledger is not None and thread_id:
+        comment_since = ledger.comment_watermark(
+            source_id=thread_id,
+            canonical_artifact=url,
+        )
+    snapshot = shared_comment_notification_snapshot(
+        probe,
+        my_login=my_login,
+        run_gh=run_gh,
+        since=comment_since,
+    )
+    if snapshot is None:
+        return True
+    return bool(snapshot.history_complete and snapshot.direct is False)
+
+
 def _is_untouched_q2_review_fallback(
     tracked_item: dict[str, Any],
     section: str,
@@ -2396,6 +2467,7 @@ def clear_url_deduped_threads(
     *,
     ledger: NotificationLedger | None = None,
     dry_run: bool = False,
+    my_login: str | None = None,
 ) -> None:
     """Clear GitHub threads for URL-deduped inbox entries.
 
@@ -2425,6 +2497,14 @@ def clear_url_deduped_threads(
                 continue
             if not _tracked_pr_issue_url_exists_elsewhere(
                 current, url, exclude_thread_id=thread_id
+            ):
+                continue
+            if not _current_notification_is_clearable(
+                url=url,
+                thread_id=thread_id,
+                reason="url_deduped",
+                ledger=ledger,
+                my_login=my_login or get_my_login(),
             ):
                 continue
             _ledger_capture(
@@ -2467,6 +2547,7 @@ def retry_pending_github_clears(
     stats: TriageStats,
     attempted_thread_ids: set[str],
     protected_thread_ids: set[str],
+    my_login: str,
 ) -> None:
     if ledger is None:
         return
@@ -2480,6 +2561,14 @@ def retry_pending_github_clears(
         ):
             continue
         try:
+            if not _current_notification_is_clearable(
+                url=canonical,
+                thread_id=thread_id,
+                reason=str(row.get("reason") or ""),
+                ledger=ledger,
+                my_login=my_login,
+            ):
+                continue
             if not dry_run:
                 mark_thread_done(thread_id)
             attempted_thread_ids.add(thread_id)
@@ -2748,6 +2837,15 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
                 reopened_thread_ids.add(thread_id)
             elif classification.bucket == BUCKET_DROP and tracked:
+                if not _current_notification_is_clearable(
+                    url=canonical_url,
+                    thread_id=thread_id,
+                    reason=reason,
+                    ledger=ledger,
+                    my_login=my_login,
+                ):
+                    stats.already_tracked += 1
+                    continue
                 stats.dropped += 1
                 disposition = (
                     "completed"
@@ -2909,6 +3007,14 @@ def run(args: argparse.Namespace) -> TriageStats:
         terminal_canonical_url: str | None = (
             str(notif_meta.get("url") or item.get("link") or "") or None
         )
+        if not _current_notification_is_clearable(
+            url=terminal_canonical_url,
+            thread_id=thread_id,
+            reason=str(notif_meta.get("reason") or ""),
+            ledger=ledger,
+            my_login=my_login,
+        ):
+            continue
         _ledger_capture(
             ledger,
             dry_run=args.dry_run,
@@ -3062,6 +3168,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 stats,
                 ledger=ledger,
                 dry_run=args.dry_run,
+                my_login=my_login,
             )
             if ledger is not None:
                 for reopened in applied["reopened_threads"]:
@@ -3109,6 +3216,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         stats=stats,
         attempted_thread_ids=attempted_thread_ids,
         protected_thread_ids=protected_actionable_thread_ids,
+        my_login=my_login,
     )
 
     if not args.no_notify and not args.dry_run:
