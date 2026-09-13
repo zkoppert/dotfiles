@@ -2717,11 +2717,6 @@ def run(args: argparse.Namespace) -> TriageStats:
             if thread_id and fresh_notif is None:
                 stats.errors.append(f"notification disappeared before action for {pr_url}")
                 continue
-            fresh_pr = fetch_pr(repo, number)
-            if fresh_pr is None:
-                stats.errors.append(f"failed to refresh {pr_url} before action")
-                continue
-            pr = fresh_pr
             fresh_reason = str((fresh_notif or notif).get("reason") or reason).lower()
             if fresh_reason in {"mention", "assign"}:
                 skipped_dep = is_owned_repo(repo) and (
@@ -2762,13 +2757,45 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                     stats.skipped += 1
                 continue
+            latest_notif = _current_notification_for_clearance(thread_id=thread_id or None)
+            if thread_id and latest_notif is None:
+                stats.errors.append(f"notification disappeared before action for {pr_url}")
+                continue
+            current_notif = latest_notif or fresh_notif or notif
+            if thread_id and not _comment_notification_still_clearable(
+                current_notif,
+                ledger=ledger,
+                my_login=my_login,
+                thread_id=thread_id,
+                pr_url=pr_url,
+            ):
+                stats.skipped += 1
+                continue
+            if ledger is not None and ledger.has_active_actionable_notification(
+                source_id=thread_id or None,
+                canonical_artifact=pr_url,
+            ):
+                logger.info(
+                    "%s#%d -> preserving active actionable notification for %s",
+                    repo,
+                    number,
+                    thread_id or pr_url or repo,
+                )
+                stats.skipped += 1
+                continue
+            fresh_pr = fetch_pr(repo, number)
+            if fresh_pr is None:
+                stats.errors.append(f"failed to refresh {pr_url} before action")
+                continue
+            pr = fresh_pr
+            latest_reason = str(current_notif.get("reason") or reason).lower()
             decision = decide(
                 pr,
                 my_login=my_login,
                 repo=repo,
                 coverage_lookup=coverage_lookup,
                 use_copilot=use_copilot,
-                notif_reason=fresh_reason,
+                notif_reason=latest_reason,
             )
             logger.info(
                 "%s#%d -> %s (%s)",
@@ -2777,6 +2804,31 @@ def run(args: argparse.Namespace) -> TriageStats:
                 decision.outcome,
                 decision.reason,
             )
+            action_notif = _current_notification_for_clearance(thread_id=thread_id or None)
+            if thread_id and action_notif is None:
+                stats.errors.append(f"notification disappeared before action for {pr_url}")
+                continue
+            if thread_id and not _comment_notification_still_clearable(
+                action_notif or current_notif,
+                ledger=ledger,
+                my_login=my_login,
+                thread_id=thread_id,
+                pr_url=pr_url,
+            ):
+                stats.skipped += 1
+                continue
+            if ledger is not None and ledger.has_active_actionable_notification(
+                source_id=thread_id or None,
+                canonical_artifact=pr_url,
+            ):
+                logger.info(
+                    "%s#%d -> preserving active actionable notification for %s",
+                    repo,
+                    number,
+                    thread_id or pr_url or repo,
+                )
+                stats.skipped += 1
+                continue
             if decision.outcome == OUTCOME_MERGE:
                 merged = do_merge(
                     repo,

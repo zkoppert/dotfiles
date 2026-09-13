@@ -6010,6 +6010,150 @@ def test_current_notification_is_clearable_allows_older_actionable_event_after_t
         )
 
 
+def test_run_records_dependabot_handoff_before_clearability_check(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {"inbox": [], "prioritized": {"q1_do_first": []}, "done": []}
+        )
+    )
+    notif = _notif(
+        "comment",
+        id="dep-handoff",
+        updated_at="2026-07-07T12:00:00Z",
+    )
+    notif["subject"]["latest_comment_url"] = (
+        "https://api.github.com/repos/o/r/issues/comments/9"
+    )
+    ledger_path = todo_file.parent / "ledger.sqlite"
+    with (
+        patch("triage.DEFAULT_LEDGER_PATH", ledger_path),
+        patch("triage.get_my_login", return_value="zkoppert"),
+        patch("triage.fetch_notifications", return_value=[notif]),
+        patch(
+            "triage.shared_comment_notification_snapshot",
+            return_value=triage.CommentNotificationSnapshot(
+                None, None, False, True, None
+            ),
+        ),
+        patch(
+            "triage.classify",
+            return_value=triage.Classification(
+                triage.BUCKET_DROP,
+                "Dependabot version bump - left unread for triage-dependabot",
+                skip_mark_done=True,
+            ),
+        ),
+        patch(
+            "triage._current_notification_is_clearable",
+            side_effect=AssertionError("should not re-check clearability"),
+        ),
+        patch("triage.mark_thread_done") as mark_mock,
+    ):
+        stats = triage.run(
+            triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        )
+
+    assert stats.left_for_dependabot == 1
+    mark_mock.assert_not_called()
+    ledger = triage.NotificationLedger(ledger_path)
+    rows = ledger._rows(
+        "SELECT classification, clear_state FROM notifications WHERE source_id = ?",
+        ("dep-handoff",),
+    )
+    assert rows == [
+        {
+            "classification": "dependabot_handoff",
+            "clear_state": "not_applicable",
+        }
+    ]
+
+
+def test_run_records_dependabot_handoff_for_tracked_drop_without_clearability_check(
+    todo_file,
+):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {
+                    "q1_do_first": [],
+                    "q2_schedule": [],
+                    "q3_delegate": [],
+                    "q4_eliminate": [
+                        {
+                            "id": "tracked-dep-handoff",
+                            "title": "Tracked dependabot",
+                            "source": "github-notification",
+                            "status": "dropped",
+                            "notification": {
+                                "thread_id": "dep-handoff-tracked",
+                                "url": "https://github.com/o/r/pull/42",
+                                "reason": "comment",
+                                "repo": "o/r",
+                            },
+                        }
+                    ],
+                },
+                "done": [],
+            }
+        )
+    )
+    notif = _notif(
+        "comment",
+        id="dep-handoff-tracked",
+        updated_at="2026-07-07T12:00:00Z",
+    )
+    notif["subject"]["latest_comment_url"] = (
+        "https://api.github.com/repos/o/r/issues/comments/9"
+    )
+    ledger_path = todo_file.parent / "ledger.sqlite"
+
+    with (
+        patch("triage.DEFAULT_LEDGER_PATH", ledger_path),
+        patch("triage.get_my_login", return_value="zkoppert"),
+        patch("triage.fetch_notifications", return_value=[notif]),
+        patch(
+            "triage.shared_comment_notification_snapshot",
+            return_value=triage.CommentNotificationSnapshot(
+                None, None, False, True, None
+            ),
+        ),
+        patch(
+            "triage.classify",
+            return_value=triage.Classification(
+                triage.BUCKET_DROP,
+                "Dependabot version bump - left unread for triage-dependabot",
+                skip_mark_done=True,
+            ),
+        ),
+        patch(
+            "triage._current_notification_is_clearable",
+            side_effect=AssertionError("should not re-check clearability"),
+        ),
+        patch("triage.items_ready_for_clear", return_value=[]),
+        patch("triage.reconcile_tracker_rows_to_ledger"),
+        patch("triage.retry_pending_github_clears"),
+        patch("triage.mark_thread_done") as mark_mock,
+    ):
+        stats = triage.run(
+            triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        )
+
+    assert stats.left_for_dependabot == 1
+    mark_mock.assert_not_called()
+    ledger = triage.NotificationLedger(ledger_path)
+    rows = ledger._rows(
+        "SELECT classification, clear_state FROM notifications WHERE source_id = ?",
+        ("dep-handoff-tracked",),
+    )
+    assert rows == [
+        {
+            "classification": "dependabot_handoff",
+            "clear_state": "not_applicable",
+        }
+    ]
+
+
 def _stale_self_authored_entry(entry_id: str, pr_number: int) -> dict:
     """Tracked entry for a PR I authored, ready to be archived on prune."""
     return {
@@ -7037,6 +7181,19 @@ def test_reconcile_tracker_rows_to_ledger_records_date_only_completion_as_observ
     todo_file: Path,
 ):
     ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/2"
+    ledger.capture(
+        source_id="thread-done-2",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_id="thread-done-2",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-02T11:22:33Z",
+    )
     tracked = {
         "id": "done-2",
         "title": "Cleanup script (github/example)",
@@ -7044,7 +7201,7 @@ def test_reconcile_tracker_rows_to_ledger_records_date_only_completion_as_observ
         "completed": "2026-07-03",
         "notification": {
             "thread_id": "thread-done-2",
-            "url": "https://github.com/o/r/pull/2",
+            "url": artifact,
             "reason": "author",
             "repo": "o/r",
             "captured_at": "2026-07-01T12:00:00Z",
@@ -7067,9 +7224,9 @@ def test_reconcile_tracker_rows_to_ledger_records_date_only_completion_as_observ
         """,
         ("thread-done-2",),
     )
-    assert rows == [{"terminal_recorded_at": "2026-07-03T12:34:56Z"}]
+    assert rows == [{"terminal_recorded_at": "2026-07-02T11:22:33Z"}]
     assert data["done"][0]["notification"]["terminal_recorded_at"] == (
-        "2026-07-03T12:34:56Z"
+        "2026-07-02T11:22:33Z"
     )
 
 

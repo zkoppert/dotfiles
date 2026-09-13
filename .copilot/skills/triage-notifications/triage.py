@@ -2496,8 +2496,13 @@ def reconcile_tracker_rows_to_ledger(
         )
         disposition = tracker_terminal_disposition(item, section)
         if disposition:
+            recorded = ledger.notification_record(
+                source_id=thread_id, canonical_artifact=canonical
+            ) if ledger is not None else None
             terminal_recorded_at = str(
-                notif.get("terminal_recorded_at")
+                (recorded or {}).get("terminal_recorded_at")
+                or (recorded or {}).get("first_seen_at")
+                or notif.get("terminal_recorded_at")
                 or notif.get("marked_done_at")
                 or (
                     item.get("completed")
@@ -2902,15 +2907,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
                 reopened_thread_ids.add(thread_id)
             elif classification.bucket == BUCKET_DROP and tracked:
-                if not _current_notification_is_clearable(
-                    url=canonical_url,
-                    thread_id=thread_id,
-                    reason=reason,
-                    ledger=ledger,
-                    my_login=my_login,
-                ):
-                    stats.already_tracked += 1
-                    continue
                 stats.dropped += 1
                 disposition = (
                     "completed"
@@ -2921,27 +2917,59 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                     else "irrelevant"
                 )
-                classification_name = (
-                    "dependabot_handoff"
-                    if classification.skip_mark_done
-                    else "policy_drop"
-                )
+                if classification.skip_mark_done:
+                    _ledger_capture(
+                        ledger,
+                        dry_run=args.dry_run,
+                        thread_id=thread_id,
+                        canonical_artifact=canonical_url,
+                        classification="dependabot_handoff",
+                        worker="github-intake",
+                        title=title,
+                        reason=reason,
+                        repo=repo,
+                        tracker_item_id=str(tracked[1].get("id") or "") or None,
+                        tracker_section=tracked[0],
+                        queue_clear=False,
+                        event_at=str(notif.get("captured_at") or notif.get("updated_at") or utcnow_iso()),
+                    )
+                    mutations.route_existing_drop.append(
+                        PruneDelta(
+                            item_id=str(tracked[1].get("id") or ""),
+                            thread_id=thread_id,
+                            stale_reason=classification.reason,
+                            notification_reason=reason,
+                            section=tracked[0],
+                            captured_at=str(notif.get("updated_at") or utcnow_iso()),
+                        )
+                    )
+                    stats.left_for_dependabot += 1
+                    stats.already_tracked += 1
+                    continue
+                if not _current_notification_is_clearable(
+                    url=canonical_url,
+                    thread_id=thread_id,
+                    reason=reason,
+                    ledger=ledger,
+                    my_login=my_login,
+                ):
+                    stats.already_tracked += 1
+                    continue
+                stats.dropped += 1
                 _ledger_capture(
                     ledger,
                     dry_run=args.dry_run,
                     thread_id=thread_id,
                     canonical_artifact=canonical_url,
-                    classification=classification_name,
+                    classification="policy_drop",
                     worker="github-intake",
                     title=title,
                     reason=reason,
                     repo=repo,
                     tracker_item_id=str(tracked[1].get("id") or "") or None,
                     tracker_section=tracked[0],
-                    terminal_disposition=(
-                        None if classification.skip_mark_done else disposition
-                    ),
-                    queue_clear=not classification.skip_mark_done,
+                    terminal_disposition=disposition,
+                    queue_clear=True,
                     event_at=str(notif.get("captured_at") or notif.get("updated_at") or utcnow_iso()),
                 )
                 mutations.route_existing_drop.append(
@@ -2954,9 +2982,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         captured_at=str(notif.get("updated_at") or utcnow_iso()),
                     )
                 )
-                if classification.skip_mark_done:
-                    stats.left_for_dependabot += 1
-                elif not args.dry_run:
+                if not args.dry_run:
                     try:
                         attempted_thread_ids.add(thread_id)
                         mark_thread_done(thread_id)
@@ -2980,19 +3006,10 @@ def run(args: argparse.Namespace) -> TriageStats:
                             canonical_artifact=canonical_url,
                             error=exc,
                         )
-            stats.already_tracked += 1
-            continue
-
-        if classification.bucket == BUCKET_DROP:
-            if not _current_notification_is_clearable(
-                url=canonical_url,
-                thread_id=thread_id,
-                reason=reason,
-                ledger=ledger,
-                my_login=my_login,
-            ):
                 stats.already_tracked += 1
                 continue
+
+        if classification.bucket == BUCKET_DROP:
             stats.dropped += 1
             disposition = (
                 "completed"
@@ -3003,9 +3020,32 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
                 else "irrelevant"
             )
-            classification_name = (
-                "dependabot_handoff" if classification.skip_mark_done else "policy_drop"
-            )
+            if classification.skip_mark_done:
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id or None,
+                    canonical_artifact=canonical_url,
+                    classification="dependabot_handoff",
+                    worker="github-intake",
+                    title=title,
+                    reason=reason,
+                    repo=repo,
+                    queue_clear=False,
+                    event_at=str(notif.get("captured_at") or notif.get("updated_at") or utcnow_iso()),
+                )
+                stats.left_for_dependabot += 1
+                continue
+            if not _current_notification_is_clearable(
+                url=canonical_url,
+                thread_id=thread_id,
+                reason=reason,
+                ledger=ledger,
+                my_login=my_login,
+            ):
+                stats.already_tracked += 1
+                continue
+            classification_name = "policy_drop"
             _ledger_capture(
                 ledger,
                 dry_run=args.dry_run,
@@ -3016,17 +3056,12 @@ def run(args: argparse.Namespace) -> TriageStats:
                 title=title,
                 reason=reason,
                 repo=repo,
-                terminal_disposition=(
-                    None if classification.skip_mark_done else disposition
-                ),
-                queue_clear=not classification.skip_mark_done,
+                terminal_disposition=disposition,
+                queue_clear=True,
                 event_at=str(notif.get("captured_at") or notif.get("updated_at") or utcnow_iso()),
             )
             if classification.archive_to_done:
                 mutations.add_done.append(build_done_archive_entry(notif))
-            if classification.skip_mark_done:
-                stats.left_for_dependabot += 1
-                continue
             if not args.dry_run:
                 try:
                     mark_thread_done(thread_id)
