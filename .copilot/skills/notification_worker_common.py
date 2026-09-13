@@ -8,8 +8,11 @@ wrappers can rely on it after the pinned runtime passes import preflight.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
+import re
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
@@ -92,6 +95,91 @@ def review_request_escalates_at(captured_at: str | None) -> str | None:
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+def _comment_collection_paths(subject: dict[str, Any], latest_path: str) -> list[str]:
+    subject_type = (subject.get("type") or "").lower()
+    subject_path = str(subject.get("url") or "").replace("https://api.github.com", "")
+    paths: list[str] = []
+    if subject_type == "pullrequest" and subject_path:
+        issue_path = subject_path.replace("/pulls/", "/issues/")
+        paths.extend([f"{issue_path}/comments", f"{subject_path}/comments"])
+    elif subject_type == "issue" and subject_path:
+        paths.append(f"{subject_path}/comments")
+    elif "/pulls/comments/" in latest_path and "/pulls/" in subject_path:
+        paths.append(f"{subject_path}/comments")
+    elif "/issues/comments/" in latest_path and subject_path:
+        paths.append(f"{subject_path.replace('/pulls/', '/issues/')}/comments")
+    elif "/comments/" in latest_path and subject_path:
+        paths.append(f"{subject_path}/comments")
+    return list(dict.fromkeys(paths))
+
+
+def comment_notification_directness(
+    notif: dict[str, Any],
+    *,
+    my_login: str,
+    run_gh,
+) -> bool | None:
+    subject = notif.get("subject") or {}
+    latest = subject.get("latest_comment_url")
+    if not latest:
+        return None
+    path = str(latest).replace("https://api.github.com", "")
+    collected: list[tuple[str, int, int, int, dict[str, Any]]] = []
+    history_incomplete = False
+    for collection_index, collection_path in enumerate(_comment_collection_paths(subject, path)):
+        try:
+            out = run_gh(
+                ["api", collection_path, "--method", "GET", "--paginate", "--slurp"],
+                timeout=20,
+            )
+            pages = json.loads(out)
+            pages_list = pages if isinstance(pages, list) else [pages]
+            for page_index, page in enumerate(pages_list):
+                comments = page if isinstance(page, list) else [page]
+                for comment_index, comment in enumerate(comments):
+                    if not isinstance(comment, dict):
+                        continue
+                    stamp = str(
+                        comment.get("updated_at") or comment.get("created_at") or ""
+                    )
+                    collected.append(
+                        (stamp, collection_index, page_index, comment_index, comment)
+                    )
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            json.JSONDecodeError,
+        ):
+            history_incomplete = True
+    if collected:
+        collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]))
+        for _stamp, _collection_index, _page_index, _comment_index, comment in reversed(
+            collected
+        ):
+            body = str(comment.get("body") or "")
+            pattern = rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
+            if body and re.search(pattern, body, re.IGNORECASE):
+                return True
+        if history_incomplete:
+            return None
+        latest_comment = collected[-1][4]
+        body = str(latest_comment.get("body") or "")
+        if not body:
+            return None
+        pattern = rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
+        return re.search(pattern, body, re.IGNORECASE) is not None
+    try:
+        out = run_gh(["api", path], timeout=20)
+        data = json.loads(out)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None
+    body = str(data.get("body") or "")
+    if not body:
+        return None
+    pattern = rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
+    return re.search(pattern, body, re.IGNORECASE) is not None
 
 
 class NotificationLedger:

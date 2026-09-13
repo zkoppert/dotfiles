@@ -306,7 +306,7 @@ def test_comment_history_reports_earlier_mention_when_complete():
     assert c.direct_mention is True
 
 
-def test_comment_history_incomplete_uses_latest_comment_lookup():
+def test_comment_history_incomplete_preserves_earlier_mention():
     notif = _notif(
         "comment",
         subject={
@@ -353,9 +353,9 @@ def test_comment_history_incomplete_uses_latest_comment_lookup():
             subject_author_fetcher=lambda _: "someone-else",
         )
 
-    assert author is None
-    assert body is triage._COMMENT_HISTORY_INCOMPLETE
-    assert c.bucket == triage.BUCKET_INBOX
+    assert author == "teammate"
+    assert "@zkoppert" in body
+    assert c.bucket == triage.BUCKET_Q1
 
 
 def test_super_linter_without_mention_drops():
@@ -1644,6 +1644,70 @@ def test_run_preserves_existing_review_escalation_deadline(todo_file):
     ]["notification"]
     assert notification["captured_at"] == "2026-07-01T15:00:00Z"
     assert notification["escalates_at"] == "2026-07-02T15:00:00Z"
+
+
+@pytest.mark.parametrize("reason", ["review_requested"])
+def test_run_keeps_existing_q2_review_when_direct_comment_arrives(todo_file, reason):
+    item = {
+        "id": "old",
+        "title": "Scheduled review",
+        "status": "pending",
+        "quadrant": "q2_schedule",
+        "notification": {
+            "thread_id": "1001",
+            "reason": reason,
+            "captured_at": "2026-07-01T15:00:00Z",
+            "escalates_at": "2026-07-02T15:00:00Z",
+        },
+    }
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {"q1_do_first": [], "q2_schedule": [item]},
+                "done": [],
+            }
+        )
+    )
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps(
+            [
+                _notif(
+                    "comment",
+                    updated_at="2026-07-02T16:00:00Z",
+                )
+            ]
+        ),
+        "/repos/zkoppert/example/pulls/42": json.dumps({"state": "open"}),
+        "/repos/zkoppert/example/issues/42/comments": json.dumps(
+            [
+                [
+                    {
+                        "user": {"login": "teammate"},
+                        "body": "Please review this, @zkoppert.",
+                        "updated_at": "2026-07-02T15:30:00Z",
+                    }
+                ]
+            ]
+        ),
+        "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
+    }
+    delete_calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if "-X" in cmd and "DELETE" in cmd:
+            delete_calls.append(tuple(cmd))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return _gh_returns(responses)(cmd, *args, **kwargs)
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    updated = yaml.safe_load(todo_file.read_text())
+    assert updated["prioritized"]["q2_schedule"] == []
+    assert updated["prioritized"]["q1_do_first"][0]["id"] == "old"
+    assert delete_calls == []
 
 
 def test_run_reopens_terminal_thread_in_inbox(todo_file):

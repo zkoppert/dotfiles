@@ -3377,13 +3377,19 @@ def test_run_hands_archived_direct_comment_to_general_triage(
 
     def fake_run_gh(args, *unused_args, **unused_kwargs):
         path = args[1]
-        if path.endswith("/issues/comments/9"):
+        if path.endswith("/issues/73/comments"):
             return json.dumps(
-                {
-                    "body": "Please review, @zkoppert",
-                    "user": {"login": "teammate"},
-                }
+                [
+                    [
+                        {
+                            "body": "Please review, @zkoppert",
+                            "user": {"login": "teammate"},
+                        }
+                    ]
+                ]
             )
+        if path.endswith("/pulls/73/comments"):
+            return json.dumps([[]])
         raise AssertionError(args)
 
     with mock.patch.object(
@@ -3403,7 +3409,7 @@ def test_run_hands_archived_direct_comment_to_general_triage(
 
     archive_mock.assert_not_called()
     mark_done_mock.assert_not_called()
-    run_gh_mock.assert_called_once()
+    assert run_gh_mock.call_count >= 1
     assert stats.dependabot == 0
     assert stats.skipped == 1
     ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
@@ -3435,7 +3441,11 @@ def test_run_preserves_dependabot_comment_lookup_failure(tmp_path: Path) -> None
 
     def fake_run_gh(args, *unused_args, **unused_kwargs):
         path = args[1]
-        if path.endswith("/issues/comments/9"):
+        if path.endswith("/issues/1/comments"):
+            return json.dumps(
+                [[{"body": "Looks good to me", "user": {"login": "teammate"}}]]
+            )
+        if path.endswith("/pulls/1/comments"):
             raise subprocess.TimeoutExpired(cmd=args, timeout=20)
         raise AssertionError(args)
 
@@ -3454,7 +3464,7 @@ def test_run_preserves_dependabot_comment_lookup_failure(tmp_path: Path) -> None
     ) as decide_mock:
         stats = td.run(args)
 
-    run_gh_mock.assert_called_once()
+    assert run_gh_mock.call_count >= 1
     decide_mock.assert_not_called()
     mark_done_mock.assert_not_called()
     assert stats.skipped == 1

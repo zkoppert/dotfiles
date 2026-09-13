@@ -51,6 +51,7 @@ if str(_SKILLS_DIR) not in sys.path:
 
 import yaml
 from notification_worker_common import DEFAULT_LEDGER_FILE, NotificationLedger
+from notification_worker_common import comment_notification_directness as _comment_notification_directness
 from notification_worker_common import ledger_capture as _ledger_capture
 from notification_worker_common import (
     ledger_record_clear_result as _ledger_record_clear_result,
@@ -388,27 +389,6 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any] | None:
     except json.JSONDecodeError as exc:
         logger.warning("fetch_pr: could not parse PR for %s#%d: %s", repo, number, exc)
         return None
-
-
-def notification_comment_directness(
-    notif: dict[str, Any], my_login: str
-) -> bool | None:
-    subject = notif.get("subject") or {}
-    latest = str(subject.get("latest_comment_url") or "")
-    if not latest:
-        return None
-    path = latest.replace("https://api.github.com", "")
-    try:
-        out = run_gh(["api", path], timeout=20)
-        data = json.loads(out)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-        logger.warning("notification_comment_directness failed for %s: %s", path, exc)
-        return None
-    body = str(data.get("body") or "")
-    if not body:
-        return None
-    pattern = rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
-    return re.search(pattern, body, re.IGNORECASE) is not None
 
 
 def fetch_repo_labels(repo: str) -> set[str]:
@@ -2161,8 +2141,52 @@ def run(args: argparse.Namespace) -> TriageStats:
 
         direct_comment = None
         if reason == "comment":
-            direct_comment = notification_comment_directness(notif, my_login)
-        if reason in {"mention", "assign"} or direct_comment is True:
+            direct_comment = _comment_notification_directness(
+                notif, my_login=my_login, run_gh=run_gh
+            )
+            if direct_comment is True:
+                skipped_dep = is_owned_repo(repo) and (
+                    skipped_dependency_match(pr) or skipped_repo_match(repo)
+                )
+                if skipped_dep:
+                    logger.info(
+                        "%s#%d -> skipping excluded dependency %s",
+                        repo,
+                        number,
+                        skipped_dep,
+                    )
+                    stats.skipped_dependency += 1
+                    _ledger_capture(
+                        ledger,
+                        dry_run=args.dry_run,
+                        thread_id=thread_id or None,
+                        canonical_artifact=pr_url,
+                        classification="dependabot_handoff",
+                        worker="dependabot-excluded-dependency",
+                        title=title,
+                        reason=reason,
+                        repo=repo,
+                    )
+                    if pr_url:
+                        state[pr_url] = now
+                else:
+                    _ledger_capture(
+                        ledger,
+                        dry_run=args.dry_run,
+                        thread_id=thread_id or None,
+                        canonical_artifact=pr_url,
+                        classification="actionable",
+                        worker="dependabot-direct-ask-handoff",
+                        title=title,
+                        reason=reason,
+                        repo=repo,
+                    )
+                    stats.skipped += 1
+                continue
+            if direct_comment is None:
+                stats.skipped += 1
+                continue
+        if reason in {"mention", "assign"}:
             skipped_dep = is_owned_repo(repo) and (
                 skipped_dependency_match(pr) or skipped_repo_match(repo)
             )
@@ -2200,9 +2224,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                     repo=repo,
                 )
                 stats.skipped += 1
-            continue
-        if direct_comment is None:
-            stats.skipped += 1
             continue
 
         if is_archived_repo(repo):
