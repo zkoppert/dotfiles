@@ -104,7 +104,9 @@ def _comment_collection_paths(subject: dict[str, Any], latest_path: str) -> list
     paths: list[str] = []
     if subject_type == "pullrequest" and subject_path:
         issue_path = subject_path.replace("/pulls/", "/issues/")
-        paths.extend([f"{issue_path}/comments", f"{subject_path}/comments"])
+        paths.extend(
+            [f"{issue_path}/comments", f"{subject_path}/comments", f"{subject_path}/reviews"]
+        )
     elif subject_type == "issue" and subject_path:
         paths.append(f"{subject_path}/comments")
     elif "/pulls/comments/" in latest_path and "/pulls/" in subject_path:
@@ -123,6 +125,59 @@ class CommentNotificationSnapshot:
     direct: bool | None
     history_complete: bool
     comment_id: str | None = None
+    comment_cursor: str | None = None
+
+
+def _comment_cursor_from_parts(
+    stamp: _dt.datetime | None,
+    collection_index: int,
+    comment_id: int,
+) -> str:
+    payload = {
+        "ts": stamp.astimezone(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        if stamp
+        else "",
+        "ci": collection_index,
+        "id": comment_id,
+    }
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def _parse_comment_cursor(
+    since: str | None,
+) -> tuple[_dt.datetime | None, int, int] | None:
+    if not since or not isinstance(since, str):
+        return None
+    text = since.strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        stamp = parse_iso_datetime(str(payload.get("ts") or payload.get("stamp") or ""))
+        collection_index_value = payload.get("ci")
+        if collection_index_value is None:
+            collection_index_value = payload.get("collection_index")
+        if collection_index_value is None:
+            collection_index = -1
+        else:
+            collection_index = int(collection_index_value)
+        comment_id_value = payload.get("id")
+        if comment_id_value is None:
+            comment_id_value = payload.get("comment_id")
+        if comment_id_value is None:
+            comment_id = -1
+        else:
+            comment_id = int(comment_id_value)
+        return stamp, collection_index, comment_id
+    stamp = parse_iso_datetime(text)
+    if stamp is not None:
+        return stamp, -1, -1
+    if text.isdigit():
+        return None, -1, int(text)
+    return None
 
 
 def comment_notification_snapshot(
@@ -137,16 +192,13 @@ def comment_notification_snapshot(
     if not latest:
         return None
     path = str(latest).replace("https://api.github.com", "")
-    since_dt = parse_iso_datetime(since)
-    since_comment_id: int | None = None
-    if since_dt is None and since and since.isdigit():
-        since_comment_id = int(since)
+    cursor = _parse_comment_cursor(since)
     pattern = (
         rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
         if my_login
         else None
     )
-    collected: list[tuple[str, int, int, int, int, dict[str, Any]]] = []
+    collected: list[tuple[_dt.datetime | None, int, int, int, int, dict[str, Any]]] = []
     history_incomplete = False
     for collection_index, collection_path in enumerate(_comment_collection_paths(subject, path)):
         try:
@@ -161,8 +213,13 @@ def comment_notification_snapshot(
                 for comment_index, comment in enumerate(comments):
                     if not isinstance(comment, dict):
                         continue
-                    stamp = str(
-                        comment.get("updated_at") or comment.get("created_at") or ""
+                    stamp = parse_iso_datetime(
+                        str(
+                            comment.get("updated_at")
+                            or comment.get("submitted_at")
+                            or comment.get("created_at")
+                            or ""
+                        )
                     )
                     comment_id = comment.get("id")
                     if isinstance(comment_id, int):
@@ -172,7 +229,14 @@ def comment_notification_snapshot(
                     else:
                         numeric_comment_id = -1
                     collected.append(
-                        (stamp, numeric_comment_id, collection_index, page_index, comment_index, comment)
+                        (
+                            stamp,
+                            collection_index,
+                            numeric_comment_id,
+                            page_index,
+                            comment_index,
+                            comment,
+                        )
                     )
         except (
             subprocess.CalledProcessError,
@@ -181,43 +245,83 @@ def comment_notification_snapshot(
         ):
             history_incomplete = True
     if collected:
-        collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3], entry[4]))
+        collected.sort(
+            key=lambda entry: (
+                entry[0] or _dt.datetime.min.replace(tzinfo=_dt.timezone.utc),
+                entry[1],
+                entry[2],
+                entry[3],
+                entry[4],
+            )
+        )
         relevant = collected
-        if since_dt is not None:
+        if cursor is not None:
+            cursor_ts, cursor_collection, cursor_comment_id = cursor
             relevant = []
             for entry in collected:
-                entry_dt = parse_iso_datetime(entry[5].get("updated_at")) or parse_iso_datetime(
-                    entry[5].get("created_at")
-                )
-                if entry_dt is not None and entry_dt > since_dt:
+                entry_ts, entry_collection, entry_comment_id = entry[:3]
+                if cursor_ts is not None:
+                    if entry_ts is None:
+                        continue
+                    if (
+                        entry_ts > cursor_ts
+                        or (
+                            entry_ts == cursor_ts
+                            and (
+                                entry_collection > cursor_collection
+                                or (
+                                    entry_collection == cursor_collection
+                                    and entry_comment_id > cursor_comment_id
+                                )
+                            )
+                        )
+                    ):
+                        relevant.append(entry)
+                elif entry_comment_id > cursor_comment_id:
                     relevant.append(entry)
-        elif since_comment_id is not None:
-            relevant = [entry for entry in collected if entry[1] > since_comment_id]
         if not relevant:
             if history_incomplete:
                 return CommentNotificationSnapshot(None, None, None, False)
-            return CommentNotificationSnapshot(None, None, False, True)
-        latest_comment = relevant[-1][5]
+            return CommentNotificationSnapshot(None, None, False, True, None, None)
+        latest_entry = relevant[-1]
+        latest_comment = latest_entry[5]
         author = (latest_comment.get("user") or {}).get("login")
         body = str(latest_comment.get("body") or "") or None
         latest_comment_id = latest_comment.get("id")
         if isinstance(latest_comment_id, int):
             latest_comment_id_str = str(latest_comment_id)
+            latest_comment_id_num = latest_comment_id
         elif isinstance(latest_comment_id, str) and latest_comment_id.isdigit():
             latest_comment_id_str = latest_comment_id
+            latest_comment_id_num = int(latest_comment_id)
         else:
             latest_comment_id_str = None
+            latest_comment_id_num = -1
         direct = False
-        for _stamp, _comment_id, _collection_index, _page_index, _comment_index, comment in relevant:
+        for _stamp, _collection_index, _comment_id, _page_index, _comment_index, comment in relevant:
             comment_body = str(comment.get("body") or "")
             if pattern and comment_body and re.search(pattern, comment_body, re.IGNORECASE):
                 direct = True
                 break
         if history_incomplete:
-            return CommentNotificationSnapshot(author, body, direct if direct else None, False, latest_comment_id_str)
-        return CommentNotificationSnapshot(author, body, direct, True, latest_comment_id_str)
+            return CommentNotificationSnapshot(
+                author,
+                body,
+                direct if direct else None,
+                False,
+                latest_comment_id_str,
+                None,
+            )
+        return CommentNotificationSnapshot(
+            author,
+            body,
+            direct,
+            True,
+            latest_comment_id_str,
+            _comment_cursor_from_parts(latest_entry[0], latest_entry[1], latest_comment_id_num),
+        )
 
-    if since_dt is not None or since_comment_id is not None:
+    if cursor is not None:
         return CommentNotificationSnapshot(None, None, None if history_incomplete else False, False if history_incomplete else True)
     try:
         out = run_gh(["api", path], timeout=20)
@@ -231,10 +335,13 @@ def comment_notification_snapshot(
     latest_comment_id = data.get("id")
     if isinstance(latest_comment_id, int):
         latest_comment_id_str = str(latest_comment_id)
+        latest_comment_id_num = latest_comment_id
     elif isinstance(latest_comment_id, str) and latest_comment_id.isdigit():
         latest_comment_id_str = latest_comment_id
+        latest_comment_id_num = int(latest_comment_id)
     else:
         latest_comment_id_str = None
+        latest_comment_id_num = -1
     direct = False
     if pattern and body and re.search(pattern, body, re.IGNORECASE):
         direct = True
@@ -244,6 +351,7 @@ def comment_notification_snapshot(
         direct if not history_incomplete or direct else None,
         not history_incomplete,
         latest_comment_id_str,
+        _comment_cursor_from_parts(parse_iso_datetime(str(data.get("updated_at") or data.get("submitted_at") or data.get("created_at") or "")), 0, latest_comment_id_num),
     )
 
 

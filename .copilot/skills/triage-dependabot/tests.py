@@ -3390,6 +3390,8 @@ def test_run_hands_archived_direct_comment_to_general_triage(
             )
         if path.endswith("/pulls/73/comments"):
             return json.dumps([[]])
+        if path.endswith("/pulls/73/reviews"):
+            return json.dumps([[]])
         raise AssertionError(args)
 
     with mock.patch.object(
@@ -3446,6 +3448,8 @@ def test_run_preserves_dependabot_comment_lookup_failure(tmp_path: Path) -> None
                 [[{"body": "Looks good to me", "user": {"login": "teammate"}}]]
             )
         if path.endswith("/pulls/1/comments"):
+            raise subprocess.TimeoutExpired(cmd=args, timeout=20)
+        if path.endswith("/pulls/1/reviews"):
             raise subprocess.TimeoutExpired(cmd=args, timeout=20)
         raise AssertionError(args)
 

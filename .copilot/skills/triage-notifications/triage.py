@@ -59,6 +59,7 @@ from notification_worker_common import (
     ledger_record_clear_result as _ledger_record_clear_result,
 )
 from notification_worker_common import (
+    CommentNotificationSnapshot,
     comment_notification_snapshot as shared_comment_notification_snapshot,
     parse_iso_datetime,
     review_request_escalates_at,
@@ -700,10 +701,25 @@ def _notification_comment_boundary(tracked_item: dict[str, Any]) -> str | None:
     tracked = tracked_item.get("notification")
     if not isinstance(tracked, dict):
         return None
-    watermark = tracked.get("comment_watermark")
-    if watermark:
-        return str(watermark)
-    return None
+    return str(tracked.get("captured_at") or "") or None
+
+
+def _snapshot_from_comment_fetcher(
+    notif: dict[str, Any],
+    *,
+    my_login: str,
+    comment_fetcher,
+) -> Any:
+    if comment_fetcher is None:
+        return None
+    if comment_fetcher is fetch_latest_comment:
+        author, body = comment_fetcher(notif, my_login=my_login)
+    else:
+        author, body = comment_fetcher(notif)
+    if body is _COMMENT_HISTORY_INCOMPLETE:
+        return CommentNotificationSnapshot(None, None, None, False, None, None)
+    direct = mentions_me(body, my_login)
+    return CommentNotificationSnapshot(author, str(body) if body is not None else None, direct, True, None, None)
 
 
 def classify(
@@ -746,46 +762,23 @@ def classify(
                 run_gh=run_gh,
                 since=comment_since,
             )
-        if snapshot is not None:
-            author = snapshot.author
-            body = snapshot.body
-            if snapshot.direct is True:
-                return Classification(
-                    BUCKET_Q1,
-                    f"@mention in comment by @{author}",
-                    direct_mention=True,
-                )
-            if snapshot.direct is None:
-                if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
-                    return Classification(
-                        BUCKET_DROP,
-                        "Dependabot comment history incomplete - left unread for triage-dependabot",
-                        skip_mark_done=True,
-                    )
-                return Classification(BUCKET_INBOX, "comment history incomplete")
-            if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
-                return Classification(
-                    BUCKET_DROP,
-                    "Dependabot comment - left unread for triage-dependabot",
-                    skip_mark_done=True,
-                )
-            if dependabot_bump and dependabot_bump_author is None:
-                return Classification(
-                    BUCKET_DROP,
-                    "Dependabot bump - author lookup unavailable",
-                    skip_mark_done=True,
-                )
-            state = state_fetcher(notif)
-            if state in CLOSED_STATES:
-                return Classification(BUCKET_DROP, f"comment on {state} {subject_type}")
-            if is_super_linter(author, body):
-                return Classification(BUCKET_DROP, "super-linter comment without @mention")
-            return Classification(BUCKET_DROP, "comment without a direct @mention")
-        if comment_fetcher is fetch_latest_comment:
-            author, body = comment_fetcher(notif, my_login=my_login)
-        else:
-            author, body = comment_fetcher(notif)
-        if body is _COMMENT_HISTORY_INCOMPLETE:
+        if snapshot is None:
+            snapshot = _snapshot_from_comment_fetcher(
+                notif,
+                my_login=my_login,
+                comment_fetcher=comment_fetcher,
+            )
+        if snapshot is None:
+            return Classification(BUCKET_INBOX, "comment history incomplete")
+        author = snapshot.author
+        body = snapshot.body
+        if snapshot.direct is True:
+            return Classification(
+                BUCKET_Q1,
+                f"@mention in comment by @{author}",
+                direct_mention=True,
+            )
+        if snapshot.direct is None:
             if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
                 return Classification(
                     BUCKET_DROP,
@@ -793,12 +786,6 @@ def classify(
                     skip_mark_done=True,
                 )
             return Classification(BUCKET_INBOX, "comment history incomplete")
-        if mentions_me(body, my_login):
-            return Classification(
-                BUCKET_Q1,
-                f"@mention in comment by @{author}",
-                direct_mention=True,
-            )
         if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
             return Classification(
                 BUCKET_DROP,
@@ -974,8 +961,6 @@ def web_url(notif: dict[str, Any]) -> str:
 def build_todo_entry(
     notif: dict[str, Any],
     classification: Classification,
-    *,
-    comment_watermark: str | None = None,
 ) -> dict[str, Any]:
     """Construct a todo.yml-shaped entry from a notification."""
     subject = notif.get("subject") or {}
@@ -1001,9 +986,6 @@ def build_todo_entry(
             "captured_at": captured_at,
         },
     }
-
-    if comment_watermark:
-        entry["notification"]["comment_watermark"] = comment_watermark
 
     if reason == "review_requested":
         escalates_at = review_request_escalates_at(captured_at)
@@ -1484,8 +1466,8 @@ def apply_todo_mutations(
         if not terminal:
             existing_notification = item.get("notification")
             if isinstance(existing_notification, dict):
-                for key in ("captured_at", "escalates_at", "comment_watermark"):
-                    if key in existing_notification and key not in replacement_notification:
+                for key in ("captured_at", "escalates_at"):
+                    if key in existing_notification:
                         replacement_notification[key] = existing_notification[key]
         item["notification"] = replacement_notification
         if section not in {"in_progress", "blocked", "in_review"} or terminal:
@@ -1544,8 +1526,8 @@ def apply_todo_mutations(
         replacement_notification = dict(notification)
         existing_notification = item.get("notification")
         if isinstance(existing_notification, dict):
-            for key in ("captured_at", "comment_watermark"):
-                if key in existing_notification and key not in replacement_notification:
+            for key in ("captured_at",):
+                if key in existing_notification:
                     replacement_notification[key] = existing_notification[key]
         item["notification"] = replacement_notification
         item.pop("quadrant", None)
@@ -2543,6 +2525,7 @@ def run(args: argparse.Namespace) -> TriageStats:
     direct_mention_thread_ids: set[str] = set()
     reopened_thread_ids: set[str] = set()
     attempted_thread_ids: set[str] = set()
+    pending_comment_watermarks: dict[str, str] = {}
 
     for notif in notifications:
         thread_id = str(notif.get("id") or "")
@@ -2563,7 +2546,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 None,
             )
         comment_since = None
-        if thread_id:
+        if ledger is not None and thread_id:
             comment_since = ledger.comment_watermark(
                 source_id=thread_id,
                 canonical_artifact=canonical_url,
@@ -2580,17 +2563,12 @@ def run(args: argparse.Namespace) -> TriageStats:
                 since=comment_since,
             )
             if (
-                not args.dry_run
-                and thread_id
+                thread_id
                 and comment_snapshot is not None
                 and comment_snapshot.history_complete
-                and comment_snapshot.comment_id
+                and comment_snapshot.comment_cursor
             ):
-                ledger.record_comment_watermark(
-                    source_id=thread_id,
-                    canonical_artifact=canonical_url,
-                    comment_watermark=comment_snapshot.comment_id,
-                )
+                pending_comment_watermarks[thread_id] = comment_snapshot.comment_cursor
 
         classification = classify(
             notif,
@@ -2848,15 +2826,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
             continue
 
-        entry = build_todo_entry(
-            notif,
-            classification,
-            comment_watermark=(
-                comment_snapshot.comment_id
-                if comment_snapshot and comment_snapshot.history_complete
-                else None
-            ),
-        )
+        entry = build_todo_entry(notif, classification)
         _ledger_capture(
             ledger,
             dry_run=args.dry_run,
@@ -3065,6 +3035,14 @@ def run(args: argparse.Namespace) -> TriageStats:
                     tracker_item_id=str(entry.get("id") or "") or None,
                     tracker_section=tracker_link["section"],
                 )
+
+    if not args.dry_run and ledger is not None:
+        for thread_id, comment_cursor in pending_comment_watermarks.items():
+            ledger.record_comment_watermark(
+                source_id=thread_id,
+                canonical_artifact=None,
+                comment_watermark=comment_cursor,
+            )
 
     retry_pending_github_clears(
         ledger,

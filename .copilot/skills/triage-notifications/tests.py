@@ -338,6 +338,8 @@ def test_comment_snapshot_uses_comment_id_watermark_for_same_second_mentions():
             )
         if "--paginate" in args and path.endswith("/pulls/42/comments"):
             return "[]"
+        if "--paginate" in args and path.endswith("/pulls/42/reviews"):
+            return "[]"
         raise AssertionError(args)
 
     with patch("triage.run_gh", side_effect=fake_run_gh):
@@ -350,7 +352,53 @@ def test_comment_snapshot_uses_comment_id_watermark_for_same_second_mentions():
 
     assert snapshot is not None
     assert snapshot.comment_id == "11"
+    assert snapshot.comment_cursor is not None
     assert snapshot.direct is True
+    assert snapshot.history_complete is True
+
+
+def test_comment_snapshot_detects_review_body_mentions():
+    notif = _notif(
+        "comment",
+        subject={
+            "title": "Sample PR",
+            "url": "https://api.github.com/repos/zkoppert/example/pulls/42",
+            "latest_comment_url": "https://api.github.com/repos/zkoppert/example/pulls/42/reviews/11",
+            "type": "PullRequest",
+        },
+    )
+
+    def fake_run_gh(args, *, timeout=60):
+        path = args[1]
+        if "--paginate" in args and path.endswith("/issues/42/comments"):
+            return "[]"
+        if "--paginate" in args and path.endswith("/pulls/42/comments"):
+            return "[]"
+        if "--paginate" in args and path.endswith("/pulls/42/reviews"):
+            return json.dumps(
+                [
+                    [
+                        {
+                            "id": 22,
+                            "user": {"login": "reviewer"},
+                            "body": "looks good, @zkoppert",
+                            "submitted_at": "2026-07-01T12:00:00Z",
+                        }
+                    ]
+                ]
+            )
+        raise AssertionError(args)
+
+    with patch("triage.run_gh", side_effect=fake_run_gh):
+        snapshot = triage.shared_comment_notification_snapshot(
+            notif,
+            my_login="zkoppert",
+            run_gh=triage.run_gh,
+        )
+
+    assert snapshot is not None
+    assert snapshot.direct is True
+    assert snapshot.comment_cursor is not None
     assert snapshot.history_complete is True
 
 
@@ -2449,7 +2497,7 @@ def test_run_comment_history_failure_routes_direct_mention_to_q1(todo_file):
 
 
 def test_run_comment_history_incomplete_promotes_after_recovery(todo_file):
-    notif = _notif("comment")
+    notif = _notif("comment", updated_at="2026-07-01T09:00:00Z")
     first_responses = {
         "/user": json.dumps({"login": "zkoppert"}),
         "/notifications?all=true": json.dumps([notif]),
@@ -2458,8 +2506,10 @@ def test_run_comment_history_incomplete_promotes_after_recovery(todo_file):
             [
                 [
                     {
+                        "id": 10,
                         "user": {"login": "teammate"},
                         "body": "Could you investigate this?",
+                        "updated_at": "2026-07-01T10:00:00Z",
                     }
                 ]
             ]
@@ -2473,9 +2523,17 @@ def test_run_comment_history_incomplete_promotes_after_recovery(todo_file):
             [
                 [
                     {
+                        "id": 10,
+                        "user": {"login": "teammate"},
+                        "body": "Could you investigate this?",
+                        "updated_at": "2026-07-01T10:00:00Z",
+                    },
+                    {
+                        "id": 11,
                         "user": {"login": "teammate"},
                         "body": "Could you investigate this, @zkoppert?",
-                    }
+                        "updated_at": "2026-07-01T10:00:01Z",
+                    },
                 ]
             ]
         ),

@@ -2141,27 +2141,18 @@ def run(args: argparse.Namespace) -> TriageStats:
 
         direct_comment = None
         if reason == "comment":
-            comment_since = ledger.comment_watermark(
-                source_id=thread_id or None,
-                canonical_artifact=pr_url,
-            )
+            comment_since = None
+            if ledger is not None:
+                comment_since = ledger.comment_watermark(
+                    source_id=thread_id or None,
+                    canonical_artifact=pr_url,
+                )
             snapshot = shared_comment_notification_snapshot(
                 notif,
                 my_login=my_login,
                 run_gh=run_gh,
                 since=comment_since,
             )
-            if (
-                not args.dry_run
-                and snapshot is not None
-                and snapshot.history_complete
-                and snapshot.comment_id
-            ):
-                ledger.record_comment_watermark(
-                    source_id=thread_id or None,
-                    canonical_artifact=pr_url,
-                    comment_watermark=snapshot.comment_id,
-                )
             direct_comment = snapshot.direct if snapshot is not None else None
             if direct_comment is True:
                 skipped_dep = is_owned_repo(repo) and (
