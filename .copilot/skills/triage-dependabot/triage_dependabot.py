@@ -43,7 +43,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Callable, TypedDict
 
 _SKILLS_DIR = Path(__file__).resolve().parents[1]
 if str(_SKILLS_DIR) not in sys.path:
@@ -1070,6 +1070,7 @@ def do_merge(
     dry_run: bool,
     my_login: str | None = None,
     head_sha: str | None = None,
+    action_guard: Callable[[], str | None] | None = None,
 ) -> bool:
     """Approve a PR, then merge it (squash + delete branch).
 
@@ -1108,6 +1109,8 @@ def do_merge(
         logger.info("dry-run: would approve and auto-merge %s#%d", repo, number)
         return True
 
+    if action_guard is not None and action_guard() is not None:
+        return False
     if (
         my_login
         and head_sha
@@ -1123,6 +1126,8 @@ def do_merge(
     else:
         do_approve(repo, number, dry_run=False)
 
+    if action_guard is not None and action_guard() is not None:
+        return False
     try:
         run_gh(
             [
@@ -1154,6 +1159,8 @@ def do_merge(
             number,
         )
 
+    if action_guard is not None and action_guard() is not None:
+        return False
     try:
         run_gh(
             [
@@ -1788,7 +1795,12 @@ def _comment_notification_still_clearable(
     current_updated_at = parse_iso_datetime(current.get("updated_at"))
     if current_reason in {"mention", "assign"}:
         return False
-    if boundary is not None and current_updated_at is not None and current_updated_at > boundary:
+    if (
+        boundary is not None
+        and current_updated_at is not None
+        and current_updated_at > boundary
+        and current_reason not in {"comment", "subscribed", "ci_activity"}
+    ):
         return False
     subject = current.get("subject") or {}
     subject_url = str(subject.get("url") or "")
@@ -2892,15 +2904,52 @@ def run(args: argparse.Namespace) -> TriageStats:
                 stats.skipped += 1
                 continue
             if decision.outcome == OUTCOME_MERGE:
+                def merge_guard_reason() -> str | None:
+                    guarded_notif = _current_notification_for_clearance(
+                        thread_id=thread_id or None
+                    )
+                    if thread_id and guarded_notif is None:
+                        return f"notification disappeared before action for {pr_url}"
+                    if thread_id and not _comment_notification_still_clearable(
+                        guarded_notif or current_notif,
+                        ledger=ledger,
+                        my_login=my_login,
+                        thread_id=thread_id,
+                        pr_url=pr_url,
+                    ):
+                        return "notification no longer clearable"
+                    if ledger is not None and ledger.has_active_actionable_notification(
+                        source_id=thread_id or None,
+                        canonical_artifact=pr_url,
+                    ):
+                        return "preserving active actionable notification"
+                    try:
+                        action_todo = load_todo(args.todo_file)
+                    except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+                        return f"failed to reload todo before action for {pr_url}: {exc}"
+                    if _todo_has_active_matching_entry_in_data(
+                        action_todo, thread_id=thread_id or None, pr_url=pr_url
+                    ):
+                        return "preserving active todo ownership"
+                    return None
+
                 merged = do_merge(
                     repo,
                     number,
                     dry_run=args.dry_run,
                     my_login=my_login,
                     head_sha=pr.get("headRefOid"),
+                    action_guard=merge_guard_reason,
                 )
                 state[pr_url] = now
                 if not merged:
+                    merge_guard_block = merge_guard_reason()
+                    if merge_guard_block is not None:
+                        if merge_guard_block.startswith("failed to reload todo"):
+                            stats.errors.append(merge_guard_block)
+                        else:
+                            stats.skipped += 1
+                        continue
                     _ledger_capture(
                         ledger,
                         dry_run=args.dry_run,

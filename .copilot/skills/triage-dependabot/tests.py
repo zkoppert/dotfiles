@@ -1301,6 +1301,37 @@ def test_do_merge_invokes_gh() -> None:
     assert merged is False
 
 
+def test_do_merge_rechecks_guard_before_each_mutation() -> None:
+    guard_calls: list[str] = []
+    call_log: list[list[str]] = []
+
+    def action_guard() -> str | None:
+        guard_calls.append("guard")
+        return None if len(guard_calls) < 3 else "stale"
+
+    def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
+        call_log.append(list(args))
+        if "--auto" in args:
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd=args,
+                output="",
+                stderr="GraphQL: Auto merge is not allowed for this repository",
+            )
+        return ""
+
+    with mock.patch.object(td, "run_gh", side_effect=fake_run_gh), mock.patch.object(
+        td, "do_approve"
+    ) as approve_mock:
+        merged = td.do_merge("o/r", 1, dry_run=False, action_guard=action_guard)
+
+    assert merged is False
+    assert guard_calls == ["guard", "guard", "guard"]
+    approve_mock.assert_called_once_with("o/r", 1, dry_run=False)
+    assert any("--auto" in args for args in call_log)
+    assert not any("--auto" not in args and "merge" in args for args in call_log)
+
+
 def test_do_merge_approves_before_merge_on_happy_path() -> None:
     """Regression: auto-merge must be preceded by an approval.
 
@@ -2920,6 +2951,89 @@ def test_run_skips_super_linter_pr_with_comment_clears_notification(
     assert stats.skipped_dependency == 1
     assert stats.dependabot == 0
     mark_mock.assert_called_once_with("thread-super-linter-comment", dry_run=False)
+
+
+def test_comment_notification_still_clearable_allows_newer_passive_subscribed_update(
+    tmp_path: Path,
+) -> None:
+    ledger = td.NotificationLedger(tmp_path / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/42"
+    ledger.capture(
+        source_id="thread-passive",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_id="thread-passive",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    current = {
+        "id": "thread-passive",
+        "reason": "subscribed",
+        "updated_at": "2026-07-02T12:00:00Z",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/42",
+            "latest_comment_url": "https://api.github.com/repos/o/r/issues/comments/9",
+        },
+        "repository": {"full_name": "o/r"},
+    }
+    snapshot = mock.Mock(history_complete=True, direct=False)
+    with (
+        mock.patch.object(td, "fetch_notifications", return_value=[current]),
+        mock.patch.object(td, "shared_comment_notification_snapshot", return_value=snapshot),
+    ):
+        assert td._comment_notification_still_clearable(
+            current,
+            ledger=ledger,
+            my_login="zkoppert",
+            thread_id="thread-passive",
+            pr_url=artifact,
+        )
+
+
+def test_comment_notification_still_clearable_rejects_newer_review_requested_update(
+    tmp_path: Path,
+) -> None:
+    ledger = td.NotificationLedger(tmp_path / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/43"
+    ledger.capture(
+        source_id="thread-review",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_id="thread-review",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    current = {
+        "id": "thread-review",
+        "reason": "review_requested",
+        "updated_at": "2026-07-02T12:00:00Z",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/43",
+            "latest_comment_url": "https://api.github.com/repos/o/r/issues/comments/9",
+        },
+        "repository": {"full_name": "o/r"},
+    }
+    with mock.patch.object(td, "fetch_notifications", return_value=[current]):
+        assert (
+            td._comment_notification_still_clearable(
+                current,
+                ledger=ledger,
+                my_login="zkoppert",
+                thread_id="thread-review",
+                pr_url=artifact,
+            )
+            is False
+        )
 
 
 def test_run_skips_super_linter_pr_with_stale_comment_keeps_notification(
