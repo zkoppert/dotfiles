@@ -2138,7 +2138,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         reason = (notif.get("reason") or "").lower()
         title = str(pr.get("title") or "")
 
-        if reason in {"mention", "assign", "comment"}:
+        if reason in {"mention", "assign"}:
             skipped_dep = is_owned_repo(repo) and (
                 skipped_dependency_match(pr) or skipped_repo_match(repo)
             )

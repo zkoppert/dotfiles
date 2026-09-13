@@ -689,6 +689,14 @@ def fetch_latest_comment(
     if not latest:
         return None, None
     path = latest.replace("https://api.github.com", "")
+
+    def _fetch_comment(api_path: str) -> tuple[str | None, str]:
+        out = run_gh(["api", api_path], timeout=20)
+        data = json.loads(out)
+        author = (data.get("user") or {}).get("login")
+        body = str(data.get("body") or "")
+        return author, body
+
     collection_paths = _comment_collection_paths(subject, path)
     collected: list[tuple[str, int, int, int, dict[str, Any]]] = []
     history_incomplete = False
@@ -723,23 +731,35 @@ def fetch_latest_comment(
 
     if collected:
         collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]))
-        latest_comment = collected[-1][4]
-        author = (latest_comment.get("user") or {}).get("login")
-        body = str(latest_comment.get("body") or "")
-        if my_login and mentions_me(body, my_login):
-            return author, body
         if history_incomplete:
+            try:
+                author, body = _fetch_comment(path)
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+                json.JSONDecodeError,
+            ) as exc:
+                logger.warning("fetch_latest_comment failed for %s: %s", path, exc)
+                return None, _COMMENT_HISTORY_INCOMPLETE
+            if my_login and mentions_me(body, my_login):
+                return author, body
             return None, _COMMENT_HISTORY_INCOMPLETE
+        for _stamp, _collection_index, _page_index, _comment_index, comment in reversed(
+            collected
+        ):
+            body = str(comment.get("body") or "")
+            if my_login and mentions_me(body, my_login):
+                author = (comment.get("user") or {}).get("login")
+                return author, body
         if len(collected) == 1:
+            latest_comment = collected[-1][4]
+            author = (latest_comment.get("user") or {}).get("login")
+            body = str(latest_comment.get("body") or "")
             return author, body
         return None, _COMMENT_HISTORY_INCOMPLETE
 
     try:
-        out = run_gh(["api", path], timeout=20)
-        data = json.loads(out)
-        author = (data.get("user") or {}).get("login")
-        body = str(data.get("body") or "")
-        return author, body
+        return _fetch_comment(path)
     except (
         subprocess.CalledProcessError,
         subprocess.TimeoutExpired,

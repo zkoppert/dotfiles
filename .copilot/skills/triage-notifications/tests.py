@@ -245,6 +245,97 @@ def test_comment_with_mention_goes_to_q1():
     assert c.direct_mention is True
 
 
+def test_comment_history_keeps_earlier_mention_when_complete():
+    notif = _notif("comment")
+
+    def fake_run_gh(args, *, timeout=60):
+        path = args[1]
+        if "--paginate" in args and path.endswith("/issues/42/comments"):
+            return json.dumps(
+                [
+                    [
+                        {
+                            "user": {"login": "teammate"},
+                            "body": "hey @zkoppert can you look?",
+                            "updated_at": "2026-07-01T10:00:00Z",
+                        },
+                        {
+                            "user": {"login": "teammate"},
+                            "body": "ordinary follow-up",
+                            "updated_at": "2026-07-01T11:00:00Z",
+                        },
+                    ]
+                ]
+            )
+        if "--paginate" in args and path.endswith("/pulls/42/comments"):
+            return "[]"
+        raise AssertionError(args)
+
+    with patch("triage.run_gh", side_effect=fake_run_gh):
+        c = triage.classify(
+            notif,
+            my_login="zkoppert",
+            state_fetcher=lambda _: "open",
+            comment_fetcher=triage.fetch_latest_comment,
+            subject_author_fetcher=lambda _: "someone-else",
+        )
+
+    assert c.bucket == triage.BUCKET_Q1
+    assert c.direct_mention is True
+
+
+def test_comment_history_incomplete_uses_latest_comment_lookup():
+    notif = _notif(
+        "comment",
+        subject={
+            "title": "Sample PR",
+            "url": "https://api.github.com/repos/zkoppert/example/pulls/42",
+            "latest_comment_url": "https://api.github.com/repos/zkoppert/example/issues/comments/99",
+            "type": "PullRequest",
+        },
+    )
+
+    def fake_run_gh(args, *, timeout=60):
+        path = args[1]
+        if path.endswith("/issues/42/comments"):
+            return json.dumps(
+                [
+                    [
+                        {
+                            "user": {"login": "teammate"},
+                            "body": "hey @zkoppert can you look?",
+                            "updated_at": "2026-07-01T10:00:00Z",
+                        }
+                    ]
+                ]
+            )
+        if path.endswith("/pulls/42/comments"):
+            raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
+        if path.endswith("/issues/comments/99"):
+            return json.dumps(
+                {
+                    "user": {"login": "teammate"},
+                    "body": "plain follow-up",
+                    "updated_at": "2026-07-01T11:00:00Z",
+                }
+            )
+        raise AssertionError(args)
+
+    with patch("triage.run_gh", side_effect=fake_run_gh):
+        author, body = triage.fetch_latest_comment(notif, my_login="zkoppert")
+        c = triage.classify(
+            notif,
+            my_login="zkoppert",
+            state_fetcher=lambda _: "open",
+            comment_fetcher=triage.fetch_latest_comment,
+            subject_author_fetcher=lambda _: "someone-else",
+        )
+
+    assert author is None
+    assert body is triage._COMMENT_HISTORY_INCOMPLETE
+    assert c.bucket == triage.BUCKET_INBOX
+
+
 def test_super_linter_without_mention_drops():
     c = triage.classify(
         _notif("comment"),

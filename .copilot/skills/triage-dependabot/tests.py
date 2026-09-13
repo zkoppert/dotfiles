@@ -3310,7 +3310,7 @@ def test_run_skips_archived_repo_and_clears_notification(tmp_path: Path) -> None
     assert "https://github.com/zkoppert/advanced-security-enforcer/pull/73" in state
 
 
-@pytest.mark.parametrize("reason", ["mention", "assign", "comment"])
+@pytest.mark.parametrize("reason", ["mention", "assign"])
 def test_run_hands_archived_direct_asks_to_general_triage(
     tmp_path: Path, reason: str
 ) -> None:
@@ -3357,6 +3357,40 @@ def test_run_hands_archived_direct_asks_to_general_triage(
             "clear_state": "not_applicable",
         }
     ]
+
+
+def test_run_keeps_dependabot_comments_in_processing(tmp_path: Path) -> None:
+    notif = {
+        "id": "thread-comment",
+        "reason": "comment",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/1",
+        },
+    }
+    pr = _base_pr(number=1, url="https://github.com/o/r1/pull/1")
+    args = _make_args(tmp_path)
+    decide_mock = mock.Mock(
+        return_value=td.Decision(td.OUTCOME_SKIP, "already handled", terminal=False)
+    )
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "decide", decide_mock
+    ), mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_done_mock:
+        stats = td.run(args)
+
+    decide_mock.assert_called_once()
+    mark_done_mock.assert_not_called()
+    assert stats.dependabot == 1
+    assert stats.skipped == 1
 
 
 # ---------------------------------------------------------------------------
