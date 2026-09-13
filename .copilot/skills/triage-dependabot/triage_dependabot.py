@@ -2196,6 +2196,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             if direct_comment is None:
                 stats.skipped += 1
                 continue
+        clearable_comment = reason == "comment" and direct_comment is False
         if ledger is not None and ledger.has_active_actionable_notification(
             source_id=thread_id or None,
             canonical_artifact=pr_url,
@@ -2294,7 +2295,9 @@ def run(args: argparse.Namespace) -> TriageStats:
             )
             stats.skipped += 1
             cleared = True
-            if thread_id and reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS:
+            if thread_id and (
+                reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS or clearable_comment
+            ):
                 logger.info(
                     "%s#%d -> clearing unowned repo notification (reason=%s)",
                     repo,
@@ -2403,7 +2406,9 @@ def run(args: argparse.Namespace) -> TriageStats:
             )
             stats.skipped_dependency += 1
             cleared = True
-            if thread_id and reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS:
+            if thread_id and (
+                reason in EXCLUDED_DEP_AUTO_CLEAR_REASONS or clearable_comment
+            ):
                 logger.info(
                     "%s#%d -> clearing notification (reason=%s)",
                     repo,
