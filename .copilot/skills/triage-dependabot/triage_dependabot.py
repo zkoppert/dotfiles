@@ -1784,14 +1784,11 @@ def _comment_notification_still_clearable(
     )
     boundary = None
     if record is not None:
-        boundary = parse_iso_datetime(
-            str(record.get("terminal_recorded_at") or record.get("first_seen_at") or "")
-        )
+        boundary = parse_iso_datetime(str(record.get("terminal_recorded_at") or ""))
     current_updated_at = parse_iso_datetime(current.get("updated_at"))
     if current_reason in {"mention", "assign"}:
-        if current_updated_at is None or (boundary is not None and current_updated_at > boundary):
-            return False
-    elif boundary is not None and current_updated_at is not None and current_updated_at > boundary:
+        return False
+    if boundary is not None and current_updated_at is not None and current_updated_at > boundary:
         return False
     subject = current.get("subject") or {}
     subject_url = str(subject.get("url") or "")

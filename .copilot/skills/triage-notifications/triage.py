@@ -1026,14 +1026,11 @@ def _current_notification_is_clearable(
         comment_snapshot_fetcher=shared_comment_notification_snapshot,
         comment_since=comment_since,
     )
+    if current_reason in {"mention", "assign"}:
+        return False
     if record is None or boundary is None:
         if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
             return False
-    else:
-        current_updated_at = parse_iso_datetime(current.get("updated_at"))
-        if current_updated_at is not None and current_updated_at > boundary:
-            if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
-                return False
     subject = current.get("subject") or {}
     latest_url = str(subject.get("latest_comment_url") or "")
     if latest_url:
@@ -2507,30 +2504,28 @@ def reconcile_tracker_rows_to_ledger(
                 if ledger is not None
                 else None
             )
-            terminal_recorded_at = str(
+            terminal_recorded_at = (
                 (recorded or {}).get("terminal_recorded_at")
                 or notif.get("terminal_recorded_at")
                 or notif.get("marked_done_at")
-                or (
-                    item.get("completed")
-                    if isinstance(item.get("completed"), str)
-                    and "T" in str(item.get("completed"))
-                    else ""
+                or notif.get("captured_at")
+                or notif.get("updated_at")
+                or item.get("added")
+            )
+            if terminal_recorded_at:
+                terminal_recorded_at = str(terminal_recorded_at)
+                notif["terminal_recorded_at"] = terminal_recorded_at
+                _ledger_capture(
+                    ledger,
+                    dry_run=dry_run,
+                    thread_id=thread_id,
+                    canonical_artifact=canonical,
+                    classification=classification,
+                    worker="tracker-reconcile",
+                    terminal_disposition=disposition,
+                    queue_clear=not bool(notif.get("marked_done")),
+                    event_at=terminal_recorded_at,
                 )
-                or utcnow_iso()
-            )
-            notif["terminal_recorded_at"] = terminal_recorded_at
-            _ledger_capture(
-                ledger,
-                dry_run=dry_run,
-                thread_id=thread_id,
-                canonical_artifact=canonical,
-                classification=classification,
-                worker="tracker-reconcile",
-                terminal_disposition=disposition,
-                queue_clear=not bool(notif.get("marked_done")),
-                event_at=terminal_recorded_at,
-            )
 
 
 def clear_url_deduped_threads(
@@ -2595,6 +2590,15 @@ def clear_url_deduped_threads(
                 queue_clear=True,
                 event_at=str(current_notif.get("captured_at") or current_notif.get("updated_at") or utcnow_iso()),
             )
+            current_notif = _current_notification_for_clearance(thread_id=thread_id)
+            if current_notif is None or not _current_notification_is_clearable(
+                url=url,
+                thread_id=thread_id,
+                reason=str(current_notif.get("reason") or ""),
+                ledger=ledger,
+                my_login=my_login or get_my_login(),
+            ):
+                continue
             try:
                 mark_thread_done(thread_id)
                 _ledger_record_clear_result(
@@ -2656,6 +2660,15 @@ def retry_pending_github_clears(
                 my_login=my_login,
             ):
                 continue
+            current = _current_notification_for_clearance(thread_id=thread_id)
+            if current is None or not _current_notification_is_clearable(
+                url=canonical,
+                thread_id=thread_id,
+                reason=str(current.get("reason") or ""),
+                ledger=ledger,
+                my_login=my_login,
+            ):
+                continue
             if not dry_run:
                 mark_thread_done(thread_id)
             attempted_thread_ids.add(thread_id)
@@ -2683,7 +2696,7 @@ def run(args: argparse.Namespace) -> TriageStats:
     """Main entrypoint - returns stats so tests can assert behaviour."""
     stats = TriageStats()
     ledger: NotificationLedger | None = None
-    if not args.dry_run or DEFAULT_LEDGER_PATH.exists():
+    if not args.dry_run:
         ledger = NotificationLedger(DEFAULT_LEDGER_PATH)
 
     try:
@@ -3000,6 +3013,15 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                 )
                 if not args.dry_run:
+                    current_notif = _current_notification_for_clearance(thread_id=thread_id)
+                    if current_notif is None or not _current_notification_is_clearable(
+                        url=canonical_url,
+                        thread_id=thread_id,
+                        reason=str(current_notif.get("reason") or reason),
+                        ledger=ledger,
+                        my_login=my_login,
+                    ):
+                        continue
                     try:
                         attempted_thread_ids.add(thread_id)
                         mark_thread_done(thread_id)
@@ -3080,6 +3102,15 @@ def run(args: argparse.Namespace) -> TriageStats:
             if classification.archive_to_done:
                 mutations.add_done.append(build_done_archive_entry(notif))
             if not args.dry_run:
+                current_notif = _current_notification_for_clearance(thread_id=thread_id)
+                if current_notif is None or not _current_notification_is_clearable(
+                    url=canonical_url,
+                    thread_id=thread_id,
+                    reason=str(current_notif.get("reason") or reason),
+                    ledger=ledger,
+                    my_login=my_login,
+                ):
+                    continue
                 try:
                     mark_thread_done(thread_id)
                     attempted_thread_ids.add(thread_id)
@@ -3168,6 +3199,15 @@ def run(args: argparse.Namespace) -> TriageStats:
             terminal_disposition=disposition,
         )
         if not args.dry_run:
+            current_notif = _current_notification_for_clearance(thread_id=thread_id)
+            if current_notif is None or not _current_notification_is_clearable(
+                url=terminal_canonical_url,
+                thread_id=thread_id,
+                reason=str(current_notif.get("reason") or notif_meta.get("reason") or ""),
+                ledger=ledger,
+                my_login=my_login,
+            ):
+                continue
             try:
                 mark_thread_done(thread_id)
                 attempted_thread_ids.add(thread_id)
@@ -3244,6 +3284,15 @@ def run(args: argparse.Namespace) -> TriageStats:
                 event_at=delta.captured_at or utcnow_iso(),
             )
             if not args.dry_run:
+                current = _current_notification_for_clearance(thread_id=delta.thread_id)
+                if current is None or not _current_notification_is_clearable(
+                    url=None,
+                    thread_id=delta.thread_id,
+                    reason=str(current.get("reason") or delta.notification_reason or delta.stale_reason),
+                    ledger=ledger,
+                    my_login=my_login,
+                ):
+                    continue
                 try:
                     mark_thread_done(delta.thread_id)
                     attempted_thread_ids.add(delta.thread_id)

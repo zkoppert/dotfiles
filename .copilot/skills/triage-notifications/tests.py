@@ -4447,66 +4447,6 @@ def test_run_prunes_when_notification_thread_is_missing(todo_file):
     assert stats.pruned_stale == 1
     data = yaml.safe_load(todo_file.read_text())
     assert data["inbox"] == []
-    assert delete_calls == []
-
-
-def test_run_prunes_when_notification_thread_is_missing(todo_file):
-    todo_file.write_text(
-        yaml.safe_dump(
-            {
-                "inbox": [
-                    {
-                        "id": "gone-1",
-                        "source": "github-notification",
-                        "notification": {
-                            "thread_id": "gone-thread",
-                            "url": "https://github.com/o/r/pull/3",
-                            "reason": "author",
-                        },
-                    }
-                ],
-                "prioritized": {"q1_do_first": []},
-                "done": [],
-            }
-        )
-    )
-    delete_calls: list[str] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        path_args = " ".join(cmd)
-        if "/user" in path_args:
-            return subprocess.CompletedProcess(
-                cmd,
-                0,
-                stdout=json.dumps({"login": "zkoppert"}),
-                stderr="",
-            )
-        if "/notifications" in path_args and "/threads" not in path_args:
-            return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
-        if "/pulls/3" in path_args:
-            return subprocess.CompletedProcess(
-                cmd,
-                0,
-                stdout=json.dumps({"state": "closed", "merged_at": "x"}),
-                stderr="",
-            )
-        if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
-            delete_calls.append(cmd[-1])
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-    with patch("triage.subprocess.run", side_effect=fake_run):
-        args = triage.parse_args(
-            ["--todo-file", str(todo_file), "--no-notify"],
-        )
-        stats = triage.run(args)
-
-    assert stats.pruned_stale == 1
-    data = yaml.safe_load(todo_file.read_text())
-    assert data["inbox"] == []
-    assert delete_calls == []
-
-
 def test_run_reports_prunes_from_applied_deltas_after_manual_edit(todo_file):
     todo_file.write_text(
         yaml.safe_dump(
@@ -6152,56 +6092,6 @@ def test_current_notification_is_clearable_allows_older_actionable_event_after_t
             url=artifact,
             thread_id="thread-actionable",
             reason="review_requested",
-            ledger=ledger,
-            my_login="zkoppert",
-        )
-
-
-def test_current_notification_is_clearable_bootstraps_comment_history_from_terminal_boundary(
-    todo_file,
-):
-    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
-    artifact = "https://github.com/o/r/issues/1"
-    ledger.capture(
-        source_id="thread-mention",
-        canonical_artifact=artifact,
-        classification="actionable",
-        worker="test",
-        event_at="2026-07-01T12:00:00Z",
-    )
-    ledger.record_terminal(
-        source_id="thread-mention",
-        canonical_artifact=artifact,
-        terminal_disposition="irrelevant",
-        event_at="2026-07-03T12:00:00Z",
-    )
-    current = _notif("mention", id="thread-mention", updated_at="2026-07-02T12:00:00Z")
-    current["subject"]["url"] = "https://api.github.com/repos/o/r/issues/1"
-    current["subject"].pop("latest_comment_url", None)
-    current["repository"] = {"full_name": "o/r"}
-
-    def fake_run_gh(args, *unused_args, **unused_kwargs):
-        path = args[1]
-        if path.endswith("/issues/1/comments"):
-            return json.dumps(
-                [[
-                    {
-                        "body": "ordinary follow-up @zkoppert",
-                        "user": {"login": "teammate"},
-                        "updated_at": "2026-07-01T12:30:00Z",
-                    }
-                ]]
-            )
-        raise AssertionError(args)
-
-    with (
-        patch("triage.fetch_notifications", return_value=[current]),
-        patch("triage.run_gh", side_effect=fake_run_gh),
-    ):
-        assert triage._current_notification_is_clearable(
-            url=artifact,
-            thread_id="thread-mention",
-            reason="mention",
             ledger=ledger,
             my_login="zkoppert",
         )
