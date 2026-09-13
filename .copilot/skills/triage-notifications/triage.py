@@ -672,6 +672,7 @@ def fetch_latest_comment(
         notif,
         my_login=my_login or "",
         run_gh=run_gh,
+        include_history=True,
     )
     if snapshot is None:
         return None, None
@@ -2518,7 +2519,7 @@ def run(args: argparse.Namespace) -> TriageStats:
     direct_mention_thread_ids: set[str] = set()
     reopened_thread_ids: set[str] = set()
     attempted_thread_ids: set[str] = set()
-    pending_comment_watermarks: dict[str, str] = {}
+    pending_comment_watermarks: dict[str, list[str]] = {}
 
     for notif in notifications:
         thread_id = str(notif.get("id") or "")
@@ -2561,9 +2562,16 @@ def run(args: argparse.Namespace) -> TriageStats:
                 thread_id
                 and comment_snapshot is not None
                 and comment_snapshot.history_complete
-                and comment_snapshot.comment_cursor
             ):
-                pending_comment_watermarks[thread_id] = comment_snapshot.comment_cursor
+                comment_cursors = []
+                if comment_snapshot.comment_cursors:
+                    comment_cursors.extend(comment_snapshot.comment_cursors.values())
+                elif comment_snapshot.comment_cursor:
+                    comment_cursors.append(comment_snapshot.comment_cursor)
+                if comment_cursors:
+                    pending_comment_watermarks.setdefault(thread_id, []).extend(
+                        comment_cursors
+                    )
 
         classification = classify(
             notif,
@@ -3032,12 +3040,13 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
 
     if not args.dry_run and ledger is not None:
-        for thread_id, comment_cursor in pending_comment_watermarks.items():
-            ledger.record_comment_watermark(
-                source_id=thread_id,
-                canonical_artifact=None,
-                comment_watermark=comment_cursor,
-            )
+        for thread_id, comment_cursors in pending_comment_watermarks.items():
+            for comment_cursor in comment_cursors:
+                ledger.record_comment_watermark(
+                    source_id=thread_id,
+                    canonical_artifact=None,
+                    comment_watermark=comment_cursor,
+                )
 
     retry_pending_github_clears(
         ledger,

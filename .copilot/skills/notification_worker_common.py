@@ -98,23 +98,43 @@ def review_request_escalates_at(captured_at: str | None) -> str | None:
     )
 
 
-def _comment_collection_paths(subject: dict[str, Any], latest_path: str) -> list[str]:
+def _comment_stream_key_for_path(path: str, subject_type: str) -> str | None:
+    if path.endswith("/reviews"):
+        return "pull_reviews"
+    if "/issues/" in path and path.endswith("/comments"):
+        return "issue_comments"
+    if "/pulls/" in path and path.endswith("/comments"):
+        return "pull_comments"
+    if subject_type == "issue" and path.endswith("/comments"):
+        return "issue_comments"
+    if subject_type == "pullrequest" and path.endswith("/comments"):
+        return "pull_comments"
+    return None
+
+
+def _comment_collection_paths(
+    subject: dict[str, Any], latest_path: str
+) -> list[tuple[str, str]]:
     subject_type = (subject.get("type") or "").lower()
     subject_path = str(subject.get("url") or "").replace("https://api.github.com", "")
-    paths: list[str] = []
+    paths: list[tuple[str, str]] = []
     if subject_type == "pullrequest" and subject_path:
         issue_path = subject_path.replace("/pulls/", "/issues/")
         paths.extend(
-            [f"{issue_path}/comments", f"{subject_path}/comments", f"{subject_path}/reviews"]
+            [
+                ("issue_comments", f"{issue_path}/comments"),
+                ("pull_comments", f"{subject_path}/comments"),
+                ("pull_reviews", f"{subject_path}/reviews"),
+            ]
         )
     elif subject_type == "issue" and subject_path:
-        paths.append(f"{subject_path}/comments")
+        paths.append(("issue_comments", f"{subject_path}/comments"))
     elif "/pulls/comments/" in latest_path and "/pulls/" in subject_path:
-        paths.append(f"{subject_path}/comments")
+        paths.append(("pull_comments", f"{subject_path}/comments"))
     elif "/issues/comments/" in latest_path and subject_path:
-        paths.append(f"{subject_path.replace('/pulls/', '/issues/')}/comments")
+        paths.append(("issue_comments", f"{subject_path.replace('/pulls/', '/issues/')}/comments"))
     elif "/comments/" in latest_path and subject_path:
-        paths.append(f"{subject_path}/comments")
+        paths.append((_comment_stream_key_for_path(latest_path, subject_type) or "pull_comments", f"{subject_path}/comments"))
     return list(dict.fromkeys(paths))
 
 
@@ -126,18 +146,19 @@ class CommentNotificationSnapshot:
     history_complete: bool
     comment_id: str | None = None
     comment_cursor: str | None = None
+    comment_cursors: dict[str, str] | None = None
 
 
 def _comment_cursor_from_parts(
+    stream_key: str,
     stamp: _dt.datetime | None,
-    collection_index: int,
     comment_id: int,
 ) -> str:
     payload = {
+        "stream": stream_key,
         "ts": stamp.astimezone(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         if stamp
         else "",
-        "ci": collection_index,
         "id": comment_id,
     }
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
@@ -145,7 +166,7 @@ def _comment_cursor_from_parts(
 
 def _parse_comment_cursor(
     since: str | None,
-) -> tuple[_dt.datetime | None, int, int] | None:
+) -> tuple[str, _dt.datetime | None, int] | None:
     if not since or not isinstance(since, str):
         return None
     text = since.strip()
@@ -156,14 +177,53 @@ def _parse_comment_cursor(
     except json.JSONDecodeError:
         payload = None
     if isinstance(payload, dict):
+        stream = str(payload.get("stream") or "").strip()
         stamp = parse_iso_datetime(str(payload.get("ts") or ""))
-        collection_index = int(payload.get("ci") or -1)
-        comment_id = int(payload.get("id") or -1)
-        return stamp, collection_index, comment_id
-    stamp = parse_iso_datetime(text)
-    if stamp is not None:
-        return stamp, -1, -1
+        comment_id_value = payload.get("id")
+        if not stream or comment_id_value is None:
+            return None
+        try:
+            comment_id = int(comment_id_value)
+        except (TypeError, ValueError):
+            return None
+        return stream, stamp, comment_id
     return None
+
+
+def _parse_comment_watermarks(
+    since: str | None,
+) -> dict[str, tuple[_dt.datetime | None, int]]:
+    if not since or not isinstance(since, str):
+        return {}
+    text = since.strip()
+    if not text:
+        return {}
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(payload, dict) and "stream" in payload:
+        cursor = _parse_comment_cursor(text)
+        if cursor is None:
+            return {}
+        stream, stamp, comment_id = cursor
+        return {stream: (stamp, comment_id)}
+    if not isinstance(payload, dict):
+        return {}
+    watermarks: dict[str, tuple[_dt.datetime | None, int]] = {}
+    for stream, cursor_payload in payload.items():
+        if not isinstance(stream, str) or not isinstance(cursor_payload, dict):
+            continue
+        stamp = parse_iso_datetime(str(cursor_payload.get("ts") or ""))
+        comment_id_value = cursor_payload.get("id")
+        if comment_id_value is None:
+            continue
+        try:
+            comment_id = int(comment_id_value)
+        except (TypeError, ValueError):
+            continue
+        watermarks[stream] = (stamp, comment_id)
+    return watermarks
 
 
 def comment_notification_snapshot(
@@ -172,21 +232,30 @@ def comment_notification_snapshot(
     my_login: str,
     run_gh,
     since: str | None = None,
+    include_history: bool = False,
 ) -> CommentNotificationSnapshot | None:
     subject = notif.get("subject") or {}
     latest = subject.get("latest_comment_url")
     if not latest:
         return None
-    path = str(latest).replace("https://api.github.com", "")
-    cursor = _parse_comment_cursor(since)
+    latest_path = str(latest).replace("https://api.github.com", "")
+    latest_stream_key = _comment_stream_key_for_path(
+        latest_path, (subject.get("type") or "").lower()
+    )
+    watermarks = _parse_comment_watermarks(since)
     pattern = (
         rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
         if my_login
         else None
     )
-    collected: list[tuple[_dt.datetime | None, int, int, int, int, dict[str, Any]]] = []
+    collected: list[tuple[_dt.datetime | None, str, int, int, int, dict[str, Any]]] = []
     history_incomplete = False
-    for collection_index, collection_path in enumerate(_comment_collection_paths(subject, path)):
+    baseline_ts = parse_iso_datetime(str(notif.get("updated_at") or notif.get("last_read_at") or ""))
+    paths = _comment_collection_paths(subject, latest_path)
+    if not paths and latest_stream_key:
+        paths = [(latest_stream_key, latest_path)]
+    for stream_key, collection_path in paths:
+        stream_cursor = watermarks.get(stream_key)
         try:
             out = run_gh(
                 ["api", collection_path, "--method", "GET", "--paginate", "--slurp"],
@@ -217,7 +286,7 @@ def comment_notification_snapshot(
                     collected.append(
                         (
                             stamp,
-                            collection_index,
+                            stream_key,
                             numeric_comment_id,
                             page_index,
                             comment_index,
@@ -230,88 +299,63 @@ def comment_notification_snapshot(
             json.JSONDecodeError,
         ):
             history_incomplete = True
-    if collected:
-        collected.sort(
-            key=lambda entry: (
-                entry[0] or _dt.datetime.min.replace(tzinfo=_dt.timezone.utc),
-                entry[1],
-                entry[2],
-                entry[3],
-                entry[4],
-            )
-        )
-        relevant = collected
-        if cursor is not None:
-            cursor_ts, cursor_collection, cursor_comment_id = cursor
-            relevant = []
-            for entry in collected:
-                entry_ts, entry_collection, entry_comment_id = entry[:3]
-                if cursor_ts is not None:
-                    if entry_ts is None:
-                        continue
-                    if entry_ts > cursor_ts:
-                        relevant.append(entry)
-                    elif entry_ts == cursor_ts:
-                        if entry_collection != cursor_collection or entry_comment_id > cursor_comment_id:
-                            relevant.append(entry)
-                elif entry_comment_id > cursor_comment_id:
-                    relevant.append(entry)
-        if not relevant:
-            if history_incomplete:
-                return CommentNotificationSnapshot(None, None, None, False)
-            return CommentNotificationSnapshot(None, None, False, True, None, None)
-        direct_entries = [
-            entry
-            for entry in relevant
-            if pattern
-            and str(entry[5].get("body") or "")
-            and re.search(pattern, str(entry[5].get("body") or ""), re.IGNORECASE)
-        ]
-        latest_entry = relevant[-1]
-        latest_comment = latest_entry[5]
-        author = (latest_comment.get("user") or {}).get("login")
-        body = str(latest_comment.get("body") or "") or None
-        latest_comment_id = latest_comment.get("id")
-        if isinstance(latest_comment_id, int):
-            latest_comment_id_str = str(latest_comment_id)
-            latest_comment_id_num = latest_comment_id
-        elif isinstance(latest_comment_id, str) and latest_comment_id.isdigit():
-            latest_comment_id_str = latest_comment_id
-            latest_comment_id_num = int(latest_comment_id)
-        else:
-            latest_comment_id_str = None
-            latest_comment_id_num = -1
-        direct = bool(direct_entries)
-        if history_incomplete:
-            return CommentNotificationSnapshot(
-                author,
-                body,
-                direct if direct else None,
-                False,
-                latest_comment_id_str,
-                None,
-            )
-        return CommentNotificationSnapshot(
-            author,
-            body,
-            direct,
-            True,
-            latest_comment_id_str,
-            _comment_cursor_from_parts(latest_entry[0], latest_entry[1], latest_comment_id_num),
-        )
-
-    if cursor is not None:
-        return CommentNotificationSnapshot(None, None, None if history_incomplete else False, False if history_incomplete else True)
-    try:
-        out = run_gh(["api", path], timeout=20)
-        data = json.loads(out)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError):
+    if not collected:
         if history_incomplete:
             return CommentNotificationSnapshot(None, None, None, False)
         return None
-    author = (data.get("user") or {}).get("login")
-    body = str(data.get("body") or "") or None
-    latest_comment_id = data.get("id")
+    relevant: list[tuple[_dt.datetime | None, str, int, int, int, dict[str, Any]]] = []
+    for entry in collected:
+        entry_ts, entry_stream, entry_comment_id, _, _, _ = entry
+        stream_cursor = watermarks.get(entry_stream)
+        if stream_cursor is None:
+            if (
+                not include_history
+                and baseline_ts is not None
+                and entry_ts is not None
+                and entry_ts < baseline_ts
+            ):
+                continue
+            relevant.append(entry)
+            continue
+        cursor_ts, cursor_comment_id = stream_cursor
+        if cursor_ts is None:
+            if entry_comment_id > cursor_comment_id:
+                relevant.append(entry)
+            continue
+        if entry_ts is None:
+            continue
+        if entry_ts > cursor_ts:
+            relevant.append(entry)
+            continue
+        if entry_ts == cursor_ts and entry_comment_id > cursor_comment_id:
+            relevant.append(entry)
+    if not relevant:
+        if history_incomplete:
+            return CommentNotificationSnapshot(None, None, None, False)
+        return CommentNotificationSnapshot(None, None, False, True, None, None)
+    relevant.sort(
+        key=lambda entry: (
+            entry[0] or _dt.datetime.min.replace(tzinfo=_dt.timezone.utc),
+            entry[2],
+            entry[3],
+            entry[4],
+        )
+    )
+    direct_entries = [
+        entry
+        for entry in relevant
+        if pattern
+        and str(entry[5].get("body") or "")
+        and re.search(pattern, str(entry[5].get("body") or ""), re.IGNORECASE)
+    ]
+    latest_by_stream: dict[str, tuple[_dt.datetime | None, int]] = {}
+    for entry in relevant:
+        latest_by_stream[entry[1]] = (entry[0], entry[2])
+    latest_entry = relevant[-1]
+    latest_comment = latest_entry[5]
+    author = (latest_comment.get("user") or {}).get("login")
+    body = str(latest_comment.get("body") or "") or None
+    latest_comment_id = latest_comment.get("id")
     if isinstance(latest_comment_id, int):
         latest_comment_id_str = str(latest_comment_id)
         latest_comment_id_num = latest_comment_id
@@ -321,16 +365,28 @@ def comment_notification_snapshot(
     else:
         latest_comment_id_str = None
         latest_comment_id_num = -1
-    direct = False
-    if pattern and body and re.search(pattern, body, re.IGNORECASE):
-        direct = True
+    direct = bool(direct_entries)
+    if history_incomplete:
+        return CommentNotificationSnapshot(
+            author,
+            body,
+            direct if direct else None,
+            False,
+            latest_comment_id_str,
+            None,
+            None,
+        )
     return CommentNotificationSnapshot(
         author,
         body,
-        direct if not history_incomplete or direct else None,
-        not history_incomplete,
+        direct,
+        True,
         latest_comment_id_str,
-        _comment_cursor_from_parts(parse_iso_datetime(str(data.get("updated_at") or data.get("submitted_at") or data.get("created_at") or "")), 0, latest_comment_id_num),
+        _comment_cursor_from_parts(latest_entry[1], latest_entry[0], latest_comment_id_num),
+        {
+            stream: _comment_cursor_from_parts(stream, stamp, comment_id)
+            for stream, (stamp, comment_id) in latest_by_stream.items()
+        },
     )
 
 
@@ -697,6 +753,10 @@ class NotificationLedger:
     ) -> None:
         if not comment_watermark:
             return
+        cursor = _parse_comment_cursor(comment_watermark)
+        if cursor is None:
+            return
+        stream_key, stamp, comment_id = cursor
         now = utcnow_iso()
         canonical_artifact = (
             normalize_github_url(canonical_artifact) or canonical_artifact
@@ -716,6 +776,19 @@ class NotificationLedger:
                     worker="comment-watermark",
                     now=now,
                 )
+            row = conn.execute(
+                "SELECT comment_watermark FROM notifications WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+            state = _parse_comment_watermarks(str(row["comment_watermark"]) if row and row["comment_watermark"] else None)
+            state[stream_key] = (stamp, comment_id)
+            payload = {
+                stream: {
+                    "ts": cursor_stamp.astimezone(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z") if cursor_stamp else "",
+                    "id": cursor_comment_id,
+                }
+                for stream, (cursor_stamp, cursor_comment_id) in state.items()
+            }
             conn.execute(
                 """
                 UPDATE notifications
@@ -723,7 +796,7 @@ class NotificationLedger:
                        last_seen_at = ?
                  WHERE id = ?
                 """,
-                (comment_watermark, now, row_id),
+                (json.dumps(payload, separators=(",", ":"), sort_keys=True), now, row_id),
             )
             conn.commit()
 
@@ -887,6 +960,39 @@ class NotificationLedger:
         with self._connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
         return [dict(row) for row in rows]
+
+    def has_active_actionable_notification(
+        self,
+        *,
+        source_id: str | None,
+        canonical_artifact: str | None,
+    ) -> bool:
+        canonical_artifact = (
+            normalize_github_url(canonical_artifact) or canonical_artifact
+        )
+        with self._connect() as conn:
+            row_id = self._find_row_id(
+                conn,
+                source_id=source_id,
+                canonical_artifact=canonical_artifact,
+            )
+            if row_id is None:
+                return False
+            row = conn.execute(
+                """
+                SELECT classification, terminal_disposition, clear_state
+                  FROM notifications
+                 WHERE id = ?
+                """,
+                (row_id,),
+            ).fetchone()
+            if not row:
+                return False
+            return (
+                row["classification"] == "actionable"
+                and row["terminal_disposition"] is None
+                and row["clear_state"] == "not_applicable"
+            )
 
     def pending_github_clears(self) -> list[dict[str, Any]]:
         return self._rows("""

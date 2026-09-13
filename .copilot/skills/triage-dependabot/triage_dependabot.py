@@ -2196,6 +2196,18 @@ def run(args: argparse.Namespace) -> TriageStats:
             if direct_comment is None:
                 stats.skipped += 1
                 continue
+        if ledger is not None and ledger.has_active_actionable_notification(
+            source_id=thread_id or None,
+            canonical_artifact=pr_url,
+        ):
+            logger.info(
+                "%s#%d -> preserving active actionable notification for %s",
+                repo,
+                number,
+                thread_id or pr_url or repo,
+            )
+            stats.skipped += 1
+            continue
         if reason in {"mention", "assign"}:
             skipped_dep = is_owned_repo(repo) and (
                 skipped_dependency_match(pr) or skipped_repo_match(repo)

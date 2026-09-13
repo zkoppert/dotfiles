@@ -349,7 +349,7 @@ def test_comment_snapshot_uses_comment_id_watermark_for_same_second_mentions():
             notif,
             my_login="zkoppert",
             run_gh=triage.run_gh,
-            since=json.dumps({"ts": "2026-07-01T10:00:00Z", "ci": 0, "id": 10}),
+            since=json.dumps({"stream": "issue_comments", "ts": "2026-07-01T10:00:00Z", "id": 10}),
         )
 
     assert snapshot is not None
@@ -452,12 +452,69 @@ def test_comment_snapshot_prefers_issue_mentions_over_same_second_review_bodies(
             notif,
             my_login="zkoppert",
             run_gh=triage.run_gh,
-            since=json.dumps({"ts": "2026-07-01T12:00:00Z", "ci": 2, "id": 22}),
+            since=json.dumps({"stream": "pull_reviews", "ts": "2026-07-01T12:00:00Z", "id": 22}),
         )
 
     assert snapshot is not None
     assert snapshot.direct is True
     assert snapshot.comment_id == "12"
+    assert snapshot.history_complete is True
+
+
+def test_comment_snapshot_tracks_per_stream_cursors():
+    notif = _notif(
+        "comment",
+        subject={
+            "title": "Sample PR",
+            "url": "https://api.github.com/repos/zkoppert/example/pulls/42",
+            "latest_comment_url": "https://api.github.com/repos/zkoppert/example/pulls/42/reviews/11",
+            "type": "PullRequest",
+        },
+    )
+
+    def fake_run_gh(args, *, timeout=60):
+        path = args[1]
+        if "--paginate" in args and path.endswith("/issues/42/comments"):
+            return json.dumps(
+                [
+                    [
+                        {
+                            "id": 12,
+                            "user": {"login": "teammate"},
+                            "body": "please take a look, @zkoppert",
+                            "updated_at": "2026-07-01T12:00:00Z",
+                        }
+                    ]
+                ]
+            )
+        if "--paginate" in args and path.endswith("/pulls/42/comments"):
+            return "[]"
+        if "--paginate" in args and path.endswith("/pulls/42/reviews"):
+            return json.dumps(
+                [
+                    [
+                        {
+                            "id": 22,
+                            "user": {"login": "reviewer"},
+                            "body": "looks good",
+                            "submitted_at": "2026-07-01T12:01:00Z",
+                        }
+                    ]
+                ]
+            )
+        raise AssertionError(args)
+
+    with patch("triage.run_gh", side_effect=fake_run_gh):
+        snapshot = triage.shared_comment_notification_snapshot(
+            notif,
+            my_login="zkoppert",
+            run_gh=triage.run_gh,
+        )
+
+    assert snapshot is not None
+    assert snapshot.direct is True
+    assert snapshot.comment_cursors is not None
+    assert set(snapshot.comment_cursors) == {"issue_comments", "pull_reviews"}
     assert snapshot.history_complete is True
 
 
