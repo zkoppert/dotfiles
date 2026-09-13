@@ -649,6 +649,26 @@ def fetch_subject_author(notif: dict[str, Any]) -> str | None:
         return None
 
 
+def _comment_collection_paths(subject: dict[str, Any], latest_path: str) -> list[str]:
+    subject_type = (subject.get("type") or "").lower()
+    subject_path = str(subject.get("url") or "").replace(
+        "https://api.github.com", ""
+    )
+    paths: list[str] = []
+    if subject_type == "pullrequest" and subject_path:
+        issue_path = subject_path.replace("/pulls/", "/issues/")
+        paths.extend([f"{issue_path}/comments", f"{subject_path}/comments"])
+    elif subject_type == "issue" and subject_path:
+        paths.append(f"{subject_path}/comments")
+    elif "/pulls/comments/" in latest_path and "/pulls/" in subject_path:
+        paths.append(f"{subject_path}/comments")
+    elif "/issues/comments/" in latest_path and subject_path:
+        paths.append(f"{subject_path.replace('/pulls/', '/issues/')}/comments")
+    elif "/comments/" in latest_path and subject_path:
+        paths.append(f"{subject_path}/comments")
+    return list(dict.fromkeys(paths))
+
+
 def fetch_latest_comment(
     notif: dict[str, Any],
 ) -> tuple[str | None, str | None]:
@@ -662,41 +682,38 @@ def fetch_latest_comment(
     if not latest:
         return None, None
     path = latest.replace("https://api.github.com", "")
-    subject_path = str(subject.get("url") or "").replace(
-        "https://api.github.com", ""
-    )
-    collection_path: str | None = None
-    if "/pulls/comments/" in path and "/pulls/" in subject_path:
-        collection_path = f"{subject_path}/comments"
-    elif "/issues/comments/" in path:
-        collection_path = f"{subject_path.replace('/pulls/', '/issues/')}/comments"
-    elif "/comments/" in path and subject_path:
-        collection_path = f"{subject_path}/comments"
-
-    last_read_at = notif.get("last_read_at")
-    if collection_path:
+    collection_paths = _comment_collection_paths(subject, path)
+    collected: list[tuple[str, int, int, int, dict[str, Any]]] = []
+    for collection_index, collection_path in enumerate(collection_paths):
         try:
-            cmd = ["api", collection_path, "--method", "GET", "--paginate", "--slurp"]
-            if last_read_at:
-                cmd[4:4] = ["-f", f"since={last_read_at}"]
-            out = run_gh(cmd, timeout=20)
+            out = run_gh(
+                ["api", collection_path, "--method", "GET", "--paginate", "--slurp"],
+                timeout=20,
+            )
             pages = json.loads(out)
-            comments = [
-                comment
-                for page in pages
-                for comment in (page if isinstance(page, list) else [page])
-                if isinstance(comment, dict)
-            ]
-            if comments:
-                author = (comments[-1].get("user") or {}).get("login")
-                bodies = "\n".join(str(comment.get("body") or "") for comment in comments)
-                return author, bodies
+            pages_list = pages if isinstance(pages, list) else [pages]
+            for page_index, page in enumerate(pages_list):
+                comments = page if isinstance(page, list) else [page]
+                for comment_index, comment in enumerate(comments):
+                    if not isinstance(comment, dict):
+                        continue
+                    stamp = str(comment.get("updated_at") or comment.get("created_at") or "")
+                    collected.append(
+                        (stamp, collection_index, page_index, comment_index, comment)
+                    )
         except (
             subprocess.CalledProcessError,
             subprocess.TimeoutExpired,
             json.JSONDecodeError,
         ) as exc:
             logger.warning("comment history fetch failed for %s: %s", collection_path, exc)
+
+    if collected:
+        collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]))
+        comments = [entry[4] for entry in collected]
+        author = (comments[-1].get("user") or {}).get("login")
+        bodies = "\n".join(str(comment.get("body") or "") for comment in comments)
+        return author, bodies
 
     try:
         out = run_gh(["api", path], timeout=20)
@@ -1401,18 +1418,16 @@ def apply_todo_mutations(
                     if key in existing_notification:
                         replacement_notification[key] = existing_notification[key]
         item["notification"] = replacement_notification
-        if section not in {"in_progress", "blocked", "in_review"}:
-            quadrant = section.removeprefix("prioritized.")
-            if section in {"inbox", "done"}:
-                data[section].remove(item)
-            elif quadrant in PRUNE_QUADRANTS:
-                data["prioritized"][quadrant].remove(item)
+        if section not in {"in_progress", "blocked", "in_review"} or terminal:
+            if not _remove_item_from_current_section(data, section, item):
+                continue
             item["quadrant"] = "q2_schedule"
             item["urgency"] = "high"
             item["importance"] = "high"
             if terminal:
                 item["status"] = "pending"
                 item.pop("completed", None)
+                _reset_terminal_notification(item["notification"])
                 reopened_threads.append(
                     {
                         "thread_id": thread_id or "",
@@ -1454,12 +1469,7 @@ def apply_todo_mutations(
         terminal = tracker_terminal_disposition(item, section)
         if not terminal:
             continue
-        quadrant = section.removeprefix("prioritized.")
-        if section in {"inbox", "done"}:
-            data[section].remove(item)
-        elif quadrant in PRUNE_QUADRANTS:
-            data["prioritized"][quadrant].remove(item)
-        else:
+        if not _remove_item_from_current_section(data, section, item):
             continue
         item["notification"] = dict(notification)
         item.pop("quadrant", None)
@@ -1468,6 +1478,7 @@ def apply_todo_mutations(
         if terminal:
             item["status"] = "pending"
             item.pop("completed", None)
+            _reset_terminal_notification(item["notification"])
             reopened_threads.append(
                 {
                     "thread_id": thread_id or "",
@@ -1755,6 +1766,25 @@ def _tracked_pr_issue_url_exists_elsewhere(
     return False
 
 
+def _remove_item_from_current_section(
+    data: dict[str, Any], section: str, item: dict[str, Any]
+) -> bool:
+    if section in {"inbox", "done", "in_progress", "blocked", "in_review"}:
+        data[section].remove(item)
+        return True
+    quadrant = section.removeprefix("prioritized.")
+    if quadrant in PRUNE_QUADRANTS:
+        data["prioritized"][quadrant].remove(item)
+        return True
+    return False
+
+
+def _reset_terminal_notification(notification: dict[str, Any]) -> None:
+    notification.pop("marked_done", None)
+    notification.pop("marked_done_at", None)
+    notification.pop("terminal_disposition", None)
+
+
 def _reconcile_canonical_entry(
     data: dict[str, Any], entry: dict[str, Any], target_quadrant: str
 ) -> tuple[dict[str, Any], str] | None:
@@ -1780,10 +1810,7 @@ def _reconcile_canonical_entry(
         if terminal:
             item["status"] = "pending"
             item.pop("completed", None)
-            if isinstance(item["notification"], dict):
-                item["notification"].pop("marked_done", None)
-                item["notification"].pop("marked_done_at", None)
-                item["notification"].pop("terminal_disposition", None)
+            _reset_terminal_notification(item["notification"])
         if not terminal and (
             section in active_sections or current_quadrant == "q1_do_first"
         ):
@@ -1791,11 +1818,7 @@ def _reconcile_canonical_entry(
         if current_quadrant == target_quadrant:
             return item, section
 
-        if section in {"inbox", "done"}:
-            data[section].remove(item)
-        elif current_quadrant in PRUNE_QUADRANTS:
-            data["prioritized"][current_quadrant].remove(item)
-        else:
+        if not _remove_item_from_current_section(data, section, item):
             return item, section
 
         item["quadrant"] = target_quadrant

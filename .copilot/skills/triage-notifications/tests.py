@@ -825,6 +825,51 @@ def test_apply_todo_mutations_reconciles_canonical_artifact(target, expected_sec
     ]
 
 
+@pytest.mark.parametrize("active_section", ["in_progress", "blocked", "in_review"])
+def test_apply_todo_mutations_reconciles_terminal_canonical_artifact_in_active_work(
+    active_section,
+):
+    existing = {
+        "id": "tracked-review",
+        "title": "Tracked review",
+        "status": "dropped",
+        "artifacts": ["https://github.com/o/r/pull/7"],
+        "notification": {
+            "reason": "review_requested",
+            "marked_done": True,
+            "terminal_disposition": "irrelevant",
+        },
+    }
+    entry = {
+        "id": "notification-pr",
+        "notification": {
+            "thread_id": "thread-7",
+            "url": "https://github.com/o/r/pull/7",
+            "reason": "review_requested",
+        },
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {"q1_do_first": [], "q2_schedule": []},
+        "in_progress": [],
+        "blocked": [],
+        "in_review": [],
+        "done": [],
+    }
+    data[active_section].append(existing)
+
+    applied = triage.apply_todo_mutations(data, triage.TodoMutations(add_q2=[entry]))
+
+    assert applied["already_tracked"] == 1
+    assert data[active_section] == []
+    assert data["prioritized"]["q2_schedule"] == [existing]
+    assert existing["status"] == "pending"
+    assert existing["quadrant"] == "q2_schedule"
+    assert existing["notification"]["thread_id"] == "thread-7"
+    assert "marked_done" not in existing["notification"]
+    assert "terminal_disposition" not in existing["notification"]
+
+
 def test_apply_todo_mutations_keeps_untracked_inbox_url(tmp_path):
     todo_path = tmp_path / "todo.yml"
     todo_path.write_text(
@@ -1993,6 +2038,7 @@ def test_run_notifies_for_direct_mention_in_comment(todo_file):
                 "body": "Can you take a look, @zkoppert?",
             }
         ),
+        "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
     }
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
         "triage.macos_notify"
@@ -2033,6 +2079,7 @@ def test_run_preserves_direct_mention_followed_by_newer_comment(todo_file):
                 ]
             ]
         ),
+        "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
     }
 
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
@@ -2068,6 +2115,51 @@ def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
                 ]
             ]
         ),
+        "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
+    }
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
+    assert stats.added_q1 == 1
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_called_once()
+
+
+def test_run_preserves_direct_mention_across_pr_issue_and_review_comments(todo_file):
+    notif = _notif("comment")
+    notif["subject"]["latest_comment_url"] = (
+        "https://api.github.com/repos/zkoppert/example/pulls/comments/11"
+    )
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+        "/repos/zkoppert/example/pulls/42": json.dumps({"state": "open"}),
+        "/repos/zkoppert/example/issues/42/comments": json.dumps(
+            [
+                [
+                    {
+                        "user": {"login": "teammate"},
+                        "body": "Please review this, @zkoppert.",
+                        "created_at": "2026-07-01T12:00:00Z",
+                    }
+                ]
+            ]
+        ),
+        "/repos/zkoppert/example/pulls/42/comments": json.dumps(
+            [
+                [
+                    {
+                        "user": {"login": "automation[bot]"},
+                        "body": "Latest review feedback",
+                        "created_at": "2026-07-01T12:05:00Z",
+                    }
+                ]
+            ]
+        ),
     }
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
         "triage.macos_notify"
@@ -2094,6 +2186,7 @@ def test_run_routes_dependabot_comment_mention_to_q1(todo_file):
                 "body": "@zkoppert can you review this update?",
             }
         ),
+        "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
     }
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
         "triage.macos_notify"
@@ -2329,6 +2422,101 @@ def test_stale_review_escalation_preserves_fresh_active_item(active_section):
     assert applied["changed"] is False
     assert data[active_section] == [item]
     assert data["prioritized"]["q1_do_first"] == []
+
+
+@pytest.mark.parametrize("active_section", ["in_progress", "blocked", "in_review"])
+def test_route_existing_terminal_review_request_reopens_active_work_to_q2(
+    active_section,
+):
+    item = {
+        "id": "review-2",
+        "status": "dropped",
+        "notification": {
+            "thread_id": "thr-2",
+            "reason": "review_requested",
+            "marked_done": True,
+            "marked_done_at": "2026-07-04",
+            "terminal_disposition": "irrelevant",
+        },
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {"q1_do_first": [], "q2_schedule": []},
+        "in_progress": [],
+        "blocked": [],
+        "in_review": [],
+        "done": [],
+    }
+    data[active_section].append(item)
+    refreshed = {
+        "id": "review-2",
+        "notification": {
+            "thread_id": "thr-2",
+            "reason": "review_requested",
+            "captured_at": "2026-07-07T11:00:00Z",
+            "escalates_at": "2026-07-08T11:00:00Z",
+        },
+    }
+
+    applied = triage.apply_todo_mutations(
+        data, triage.TodoMutations(route_existing_q2=[refreshed])
+    )
+
+    assert applied["changed"] is True
+    assert data[active_section] == []
+    assert data["prioritized"]["q2_schedule"] == [item]
+    assert item["status"] == "pending"
+    assert item["quadrant"] == "q2_schedule"
+    assert item["notification"]["captured_at"] == "2026-07-07T11:00:00Z"
+    assert "marked_done" not in item["notification"]
+    assert "terminal_disposition" not in item["notification"]
+
+
+@pytest.mark.parametrize("active_section", ["in_progress", "blocked", "in_review"])
+def test_route_existing_terminal_inbox_notification_reopens_active_work_to_inbox(
+    active_section,
+):
+    item = {
+        "id": "inbox-2",
+        "status": "dropped",
+        "notification": {
+            "thread_id": "thr-3",
+            "reason": "author",
+            "marked_done": True,
+            "marked_done_at": "2026-07-04",
+            "terminal_disposition": "irrelevant",
+        },
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {"q1_do_first": [], "q2_schedule": []},
+        "in_progress": [],
+        "blocked": [],
+        "in_review": [],
+        "done": [],
+    }
+    data[active_section].append(item)
+    refreshed = {
+        "id": "inbox-2",
+        "notification": {
+            "thread_id": "thr-3",
+            "reason": "author",
+            "captured_at": "2026-07-07T11:00:00Z",
+        },
+    }
+
+    applied = triage.apply_todo_mutations(
+        data, triage.TodoMutations(route_existing_inbox=[refreshed])
+    )
+
+    assert applied["changed"] is True
+    assert data[active_section] == []
+    assert data["inbox"] == [item]
+    assert item["status"] == "pending"
+    assert "quadrant" not in item
+    assert item["notification"]["captured_at"] == "2026-07-07T11:00:00Z"
+    assert "marked_done" not in item["notification"]
+    assert "terminal_disposition" not in item["notification"]
 
 
 def test_run_marks_done_on_completed(todo_file):
