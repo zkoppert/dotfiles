@@ -2092,10 +2092,11 @@ def test_run_preserves_direct_mention_followed_by_newer_comment(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 1
+    assert stats.added_q1 == 0
+    assert stats.added_inbox == 1
     data = yaml.safe_load(todo_file.read_text())
-    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
-    notify_mock.assert_called_once()
+    assert data["inbox"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_not_called()
 
 
 def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
@@ -2127,11 +2128,11 @@ def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 1
-    assert stats.added_inbox == 0
+    assert stats.added_q1 == 0
+    assert stats.added_inbox == 1
     data = yaml.safe_load(todo_file.read_text())
-    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
-    notify_mock.assert_called_once()
+    assert data["inbox"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_not_called()
 
 
 def test_run_preserves_direct_mention_across_pr_issue_and_review_comments(todo_file):
@@ -2172,11 +2173,11 @@ def test_run_preserves_direct_mention_across_pr_issue_and_review_comments(todo_f
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 1
-    assert stats.added_inbox == 0
+    assert stats.added_q1 == 0
+    assert stats.added_inbox == 1
     data = yaml.safe_load(todo_file.read_text())
-    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
-    notify_mock.assert_called_once()
+    assert data["inbox"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_not_called()
 
 
 def test_run_comment_history_failure_keeps_inbox(todo_file):
@@ -2209,11 +2210,11 @@ def test_run_comment_history_failure_keeps_inbox(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 0
-    assert stats.added_inbox == 1
+    assert stats.added_q1 == 1
+    assert stats.added_inbox == 0
     data = yaml.safe_load(todo_file.read_text())
-    assert data["inbox"][0]["notification"]["thread_id"] == "1001"
-    notify_mock.assert_not_called()
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_called_once()
 
 
 def test_run_routes_dependabot_comment_mention_to_q1(todo_file):
@@ -4637,6 +4638,7 @@ def test_build_done_archive_entry_includes_notification_thread_id():
     notif = {
         "id": "55555",
         "reason": "author",
+        "updated_at": "2026-07-01T12:34:56Z",
         "repository": {"full_name": "github/example"},
         "subject": {
             "title": "Some PR",
@@ -4648,6 +4650,7 @@ def test_build_done_archive_entry_includes_notification_thread_id():
     assert "notification" in entry
     assert entry["notification"]["thread_id"] == "55555"
     assert entry["notification"]["repo"] == "github/example"
+    assert entry["notification"]["captured_at"] == "2026-07-01T12:34:56Z"
 
 
 def test_existing_thread_ids_finds_archived_entries():
@@ -4682,6 +4685,7 @@ def test_build_done_archive_entry_from_tracked_carries_thread_id():
             "url": "https://api.github.com/repos/github/example/pulls/42",
             "reason": "author",
             "repo": "github/example",
+            "captured_at": "2026-07-01T12:34:56Z",
         },
     }
     entry = triage.build_done_archive_entry_from_tracked(tracked)
@@ -4689,7 +4693,33 @@ def test_build_done_archive_entry_from_tracked_carries_thread_id():
     assert entry["source"] == "github-notification-auto-archive"
     assert entry["notification"]["thread_id"] == "tid-123"
     assert entry["notification"]["reason"] == "author"
+    assert entry["notification"]["captured_at"] == "2026-07-01T12:34:56Z"
     assert entry["title"] == "Cleanup script (github/example)"
+
+
+def test_notification_has_new_activity_uses_archive_captured_at():
+    notif = {
+        "id": "55555",
+        "reason": "author",
+        "updated_at": "2026-07-01T12:34:56Z",
+        "repository": {"full_name": "github/example"},
+        "subject": {
+            "title": "Some PR",
+            "url": "https://api.github.com/repos/github/example/pulls/42",
+            "type": "PullRequest",
+        },
+    }
+    archived = triage.build_done_archive_entry(notif)
+    renewed = _notif(
+        "mention",
+        id="55555",
+        updated_at="2026-07-02T12:34:56Z",
+    )
+    assert triage.notification_has_new_activity(
+        renewed,
+        {"notification": archived["notification"]},
+        allow_reason_change_without_timestamp=False,
+    ) is True
 
 
 def _stale_self_authored_entry(entry_id: str, pr_number: int) -> dict:
@@ -5225,6 +5255,17 @@ def test_review_requested_random_repo_kept():
     """review_requested survives as scheduled work in Q2."""
     q2 = _classify(_repo_notif("review_requested", repo="some-org/x"))
     assert q2.bucket == triage.BUCKET_Q2
+
+
+def test_human_review_requested_bump_stays_scheduled():
+    c = triage.classify(
+        _repo_notif("review_requested", repo="some-org/x", title="Bump urllib3 from 2.0.0 to 2.1.0"),
+        my_login="zkoppert",
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: "andi",
+    )
+    assert c.bucket == triage.BUCKET_Q2
 
 
 @pytest.mark.parametrize("title", ["Bump urllib3 from 2.0.0 to 2.1.0", "chore(deps): bump foo from 1 to 2"])

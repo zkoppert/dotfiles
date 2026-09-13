@@ -477,10 +477,24 @@ class AppliedTodoMutations(TypedDict):
     changed: bool
 
 
+DEPENDABOT_AUTHOR_LOGINS: set[str] = {
+    "dependabot[bot]",
+    "dependabot-preview[bot]",
+    "app/dependabot",
+    "app/dependabot-preview",
+}
+
+
 def is_dependabot_bump(title: str) -> bool:
     """Return True if `title` looks like a Dependabot version-bump PR."""
     text = title or ""
     return any(pattern.search(text) for pattern in DEPENDABOT_BUMP_PATTERNS)
+
+
+def is_dependabot_author(login: str | None) -> bool:
+    if not login:
+        return False
+    return login.lower() in DEPENDABOT_AUTHOR_LOGINS
 
 
 def is_security_title(title: str) -> bool:
@@ -716,15 +730,18 @@ def fetch_latest_comment(
             history_incomplete = True
             logger.warning("comment history fetch failed for %s: %s", collection_path, exc)
 
-    if history_incomplete:
-        return None, _COMMENT_HISTORY_INCOMPLETE
     if collected:
         collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]))
-        comments = [entry[4] for entry in collected]
-        latest_comment = comments[-1]
+        latest_comment = collected[-1][4]
         author = (latest_comment.get("user") or {}).get("login")
-        bodies = "\n".join(str(comment.get("body") or "") for comment in comments)
-        return author, bodies
+        body = str(latest_comment.get("body") or "")
+        if my_login and mentions_me(body, my_login):
+            return author, body
+        if history_incomplete:
+            return None, _COMMENT_HISTORY_INCOMPLETE
+        if len(collected) == 1:
+            return author, body
+        return None, _COMMENT_HISTORY_INCOMPLETE
 
     try:
         out = run_gh(["api", path], timeout=20)
@@ -737,6 +754,9 @@ def fetch_latest_comment(
         subprocess.TimeoutExpired,
         json.JSONDecodeError,
     ) as exc:
+        if history_incomplete:
+            logger.warning("fetch_latest_comment failed for %s: %s", path, exc)
+            return None, _COMMENT_HISTORY_INCOMPLETE
         logger.warning("fetch_latest_comment failed for %s: %s", path, exc)
         return None, None
 
@@ -802,12 +822,34 @@ def classify(
             return Classification(BUCKET_DROP, "super-linter comment without @mention")
         return Classification(BUCKET_DROP, "comment without a direct @mention")
 
-    # Dependabot version-bump PRs: drop from the inbox but normally NEVER
-    # mark the GitHub notification done - triage-dependabot consumes those
-    # threads and needs them unread. Watch-only repos from private config
-    # are the exception: passive bump notifications should be marked done
-    # instead of handed off.
+    dependabot_bump_author = None
     if subject_type == "pullrequest" and is_dependabot_bump(title):
+        dependabot_bump_author = subject_author_fetcher(notif)
+
+    if reason == "review_requested":
+        state = state_fetcher(notif)
+        if state in CLOSED_STATES:
+            return Classification(BUCKET_DROP, f"review_requested on {state} {subject_type}")
+        if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
+            repo_lc = repo_full.lower()
+            if repo_lc in WATCH_ONLY_DEPENDABOT_MARK_DONE_REPOS:
+                return Classification(
+                    BUCKET_DROP,
+                    f"{repo_full}: watch-only Dependabot bump - mark done",
+                )
+            return Classification(
+                BUCKET_DROP,
+                "Dependabot version bump - left unread for triage-dependabot",
+                skip_mark_done=True,
+            )
+        return Classification(BUCKET_Q2, "review_requested - scheduled review")
+
+    if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
+        # Dependabot version-bump PRs: drop from the inbox but normally NEVER
+        # mark the GitHub notification done - triage-dependabot consumes those
+        # threads and needs them unread. Watch-only repos from private config
+        # are the exception: passive bump notifications should be marked done
+        # instead of handed off.
         repo_lc = repo_full.lower()
         if repo_lc in WATCH_ONLY_DEPENDABOT_MARK_DONE_REPOS:
             if reason not in DIRECTED_REPO_REASONS:
@@ -821,12 +863,6 @@ def classify(
                 "Dependabot version bump - left unread for triage-dependabot",
                 skip_mark_done=True,
             )
-
-    if reason == "review_requested":
-        state = state_fetcher(notif)
-        if state in CLOSED_STATES:
-            return Classification(BUCKET_DROP, f"review_requested on {state} {subject_type}")
-        return Classification(BUCKET_Q2, "review_requested - scheduled review")
 
     # Title-pattern drop: repetitive system-generated noise (flaky-test
     # reports) and routine `Enable Dependabot` config PRs. Mention/assign
@@ -1046,6 +1082,9 @@ def build_done_archive_entry(notif: dict[str, Any]) -> dict[str, Any]:
             "url": web_url(notif),
             "reason": (notif.get("reason") or "").lower(),
             "repo": repo,
+            "captured_at": str(
+                notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()
+            ),
         },
     }
 
@@ -1089,6 +1128,9 @@ def build_done_archive_entry_from_tracked(entry: dict[str, Any]) -> dict[str, An
             "url": notif.get("url") or "",
             "reason": notif.get("reason") or "author",
             "repo": notif.get("repo") or "unknown",
+            "captured_at": str(
+                notif.get("captured_at") or entry.get("added") or utcnow_iso()
+            ),
         },
     }
 
