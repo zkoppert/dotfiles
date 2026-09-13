@@ -23,10 +23,12 @@ upgrades or seeing a backlog of dependabot notifications.
 1. Fetches all notifications via `gh api /notifications?all=true --paginate`.
 2. Filters to notifications whose subject is a PullRequest authored by
    `dependabot[bot]` (or `dependabot-preview[bot]`).
-3. Skips repos whose owner is not `github`, `github-community-projects`,
+3. Hands `mention`, `assign`, and `comment` notifications to general triage
+   before taking any terminal action.
+4. Skips repos whose owner is not `github`, `github-community-projects`,
    or `zkoppert`; passive notifications are marked done, direct pings stay in
    the inbox, and no todo is created.
-4. For each remaining PR, fetches metadata (`gh pr view --json`) and decides one
+5. For each remaining PR, fetches metadata (`gh pr view --json`) and decides one
    of five outcomes:
    - `merge` - approve, then enable `gh pr merge --auto --squash --delete-branch`
      (synchronous merge fallback when the repo disallows auto-merge).
@@ -43,15 +45,15 @@ upgrades or seeing a backlog of dependabot notifications.
      has historically ignored `@dependabot close` comments for hours.
    - `flag-for-review` - write a Q1 entry to
      `~/repos/zkoppert-todo/todo.yml` for human attention.
-5. Records the source decision in the shared local ledger and then marks
+6. Records the source decision in the shared local ledger and then marks
    the notification done on GitHub when an action runs.
-6. Persists a per-PR cooldown timestamp in
+7. Persists a per-PR cooldown timestamp in
    `~/Library/Logs/triage-dependabot-state.json` so re-runs within an
    hour do not double-act.
-7. Writes `todo.yml` through an exclusive `todo.yml.lock`, fresh re-read,
+8. Writes `todo.yml` through an exclusive `todo.yml.lock`, fresh re-read,
    delta apply, and atomic replace. Any resulting change is committed in
    the todo repo, followed by a best-effort pull and push.
-8. Sends one clickable macOS notification for each newly added
+9. Sends one clickable macOS notification for each newly added
    `flag-for-review` entry. Selecting it opens the PR URL. Routine actions,
    already tracked flags, no-op runs, and dry runs stay silent.
 

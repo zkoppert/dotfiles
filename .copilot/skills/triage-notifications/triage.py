@@ -53,18 +53,19 @@ if str(_TRIAGE_DEPENDABOT_DIR) not in sys.path:
     sys.path.insert(0, str(_TRIAGE_DEPENDABOT_DIR))
 
 import yaml
+from notification_worker_common import DEFAULT_LEDGER_FILE, NotificationLedger
+from notification_worker_common import ledger_capture as _ledger_capture
 from notification_worker_common import (
-    DEFAULT_LEDGER_FILE,
-    NotificationLedger,
-    ledger_capture as _ledger_capture,
     ledger_record_clear_result as _ledger_record_clear_result,
+)
+from notification_worker_common import (
     parse_iso_datetime,
     review_request_escalates_at,
     utcnow_iso,
 )
-from triage_dependabot import DEPENDABOT_LOGINS
 from ruamel.yaml import YAML
 from ruamel.yaml import YAMLError as _RuamelYAMLError
+from triage_dependabot import DEPENDABOT_LOGINS
 
 # Round-trip YAML loader/dumper preserves comments, key order, and quoting
 # in zkoppert-todo's todo.yml. Plain `yaml.safe_dump` drops every comment,
@@ -121,9 +122,7 @@ CLOSED_STATES: set[str] = {"closed", "merged"}
 # specific phrase + `\s*:` so legitimate titles aren't swept up.
 _TITLE_DROP_PREFIX = r"^\s*(\[[^\]]+\]\s*)?"
 TITLE_DROP_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(
-        _TITLE_DROP_PREFIX + r"intermittent test failure\s*:", re.IGNORECASE
-    ),
+    re.compile(_TITLE_DROP_PREFIX + r"intermittent test failure\s*:", re.IGNORECASE),
     re.compile(_TITLE_DROP_PREFIX + r"flaky test\s*:", re.IGNORECASE),
     re.compile(_TITLE_DROP_PREFIX + r"test flake\s*:", re.IGNORECASE),
     # `Enable Dependabot` PRs are routine config PRs I author to turn on
@@ -327,9 +326,7 @@ ALWAYS_DROP_REPOS: set[str] = {"github/.github"} | _private_repo_set(
 # vulnerability alert is too important to silently drop just because a
 # repo's title or subscription filter did not match.
 REPO_OVERRIDE_PROTECTED_REASONS: set[str] = {"mention", "assign", "security_alert"}
-DIRECTED_REPO_REASONS: set[str] = REPO_OVERRIDE_PROTECTED_REASONS | {
-    "review_requested"
-}
+DIRECTED_REPO_REASONS: set[str] = REPO_OVERRIDE_PROTECTED_REASONS | {"review_requested"}
 
 # Owner-agnostic subscription filters, matched by regex against the
 # lowercased full_name. Used where the same project lives under multiple
@@ -588,9 +585,7 @@ def fetch_notifications() -> list[dict[str, Any]]:
     """
     # `--slurp` returns a JSON array-of-arrays (one inner array per page),
     # which is safe to parse regardless of titles that contain `][`.
-    raw = run_gh(
-        ["api", "/notifications?all=true", "--paginate", "--slurp"]
-    ).strip()
+    raw = run_gh(["api", "/notifications?all=true", "--paginate", "--slurp"]).strip()
     if not raw:
         return []
     try:
@@ -661,9 +656,7 @@ def fetch_subject_author(notif: dict[str, Any]) -> str | None:
 
 def _comment_collection_paths(subject: dict[str, Any], latest_path: str) -> list[str]:
     subject_type = (subject.get("type") or "").lower()
-    subject_path = str(subject.get("url") or "").replace(
-        "https://api.github.com", ""
-    )
+    subject_path = str(subject.get("url") or "").replace("https://api.github.com", "")
     paths: list[str] = []
     if subject_type == "pullrequest" and subject_path:
         issue_path = subject_path.replace("/pulls/", "/issues/")
@@ -724,7 +717,9 @@ def fetch_latest_comment(
             json.JSONDecodeError,
         ) as exc:
             history_incomplete = True
-            logger.warning("comment history fetch failed for %s: %s", collection_path, exc)
+            logger.warning(
+                "comment history fetch failed for %s: %s", collection_path, exc
+            )
 
     if collected:
         collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]))
@@ -844,7 +839,9 @@ def classify(
     if reason == "review_requested":
         state = state_fetcher(notif)
         if state in CLOSED_STATES:
-            return Classification(BUCKET_DROP, f"review_requested on {state} {subject_type}")
+            return Classification(
+                BUCKET_DROP, f"review_requested on {state} {subject_type}"
+            )
         if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
             repo_lc = repo_full.lower()
             if repo_lc in WATCH_ONLY_DEPENDABOT_MARK_DONE_REPOS:
@@ -1021,7 +1018,9 @@ def build_todo_entry(
             entry["notification"]["escalates_at"] = escalates_at
 
     if classification.bucket in {BUCKET_Q1, BUCKET_Q2}:
-        quadrant = "q1_do_first" if classification.bucket == BUCKET_Q1 else "q2_schedule"
+        quadrant = (
+            "q1_do_first" if classification.bucket == BUCKET_Q1 else "q2_schedule"
+        )
         entry.update(
             {
                 "urgency": "high",
@@ -1042,9 +1041,10 @@ def notification_has_new_activity(
     tracked = tracked_item.get("notification")
     if not isinstance(tracked, dict):
         return True
-    reason_changed = str(notif.get("reason") or "").lower() != str(
-        tracked.get("reason") or ""
-    ).lower()
+    reason_changed = (
+        str(notif.get("reason") or "").lower()
+        != str(tracked.get("reason") or "").lower()
+    )
     updated_at = parse_iso_datetime(notif.get("updated_at"))
     captured_at = parse_iso_datetime(tracked.get("captured_at"))
     if captured_at is None:
@@ -1460,9 +1460,7 @@ def apply_todo_mutations(
         if _append_unique(data, data["prioritized"]["q1_do_first"], entry):
             applied["added_q1"] += 1
             added_entries.append(entry)
-            tracker_links.append(
-                {"entry": entry, "section": "prioritized.q1_do_first"}
-            )
+            tracker_links.append({"entry": entry, "section": "prioritized.q1_do_first"})
             changed = True
         else:
             applied["already_tracked"] += 1
@@ -1573,9 +1571,7 @@ def apply_todo_mutations(
         if _append_unique(data, data["prioritized"]["q2_schedule"], entry):
             applied["added_q2"] += 1
             added_entries.append(entry)
-            tracker_links.append(
-                {"entry": entry, "section": "prioritized.q2_schedule"}
-            )
+            tracker_links.append({"entry": entry, "section": "prioritized.q2_schedule"})
             changed = True
         else:
             applied["already_tracked"] += 1
@@ -1636,7 +1632,9 @@ def apply_todo_mutations_with_lock(
         return applied
 
 
-def preview_todo_mutations(path: Path, mutations: TodoMutations) -> AppliedTodoMutations:
+def preview_todo_mutations(
+    path: Path, mutations: TodoMutations
+) -> AppliedTodoMutations:
     """Apply deltas to a read-only fresh load for dry-run reporting."""
     data = load_todo(path)
     return apply_todo_mutations(data, mutations)
@@ -1673,7 +1671,9 @@ def _git_metadata_exists(repo: Path) -> bool:
     return (repo / ".git").exists()
 
 
-def _run_git(repo: Path, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _run_git(
+    repo: Path, args: list[str], *, check: bool = True
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         check=check,
@@ -1706,7 +1706,9 @@ def commit_todo_changes(path: Path, message: str) -> bool:
     with _todo_write_lock(path):
         try:
             _run_git(repo, ["add", "--", path.name])
-            diff = _run_git(repo, ["diff", "--cached", "--quiet", "--", path.name], check=False)
+            diff = _run_git(
+                repo, ["diff", "--cached", "--quiet", "--", path.name], check=False
+            )
         except (FileNotFoundError, subprocess.SubprocessError) as exc:
             _log_git_warning("add", exc)
             return False
@@ -1876,6 +1878,8 @@ def _reconcile_canonical_entry(
             continue
 
         terminal = tracker_terminal_disposition(item, section)
+        if not isinstance(notification, dict):
+            return None
         item["notification"] = dict(notification)
         active_sections = {"in_progress", "blocked", "in_review"}
         current_quadrant = section.removeprefix("prioritized.")
@@ -1934,7 +1938,9 @@ def tracker_terminal_disposition(item: dict[str, Any], section: str) -> str | No
     return None
 
 
-def items_ready_for_clear(data: dict[str, Any]) -> list[tuple[dict[str, Any], str, str]]:
+def items_ready_for_clear(
+    data: dict[str, Any],
+) -> list[tuple[dict[str, Any], str, str]]:
     """Return `(item, section, disposition)` for clearable notification rows."""
     ready: list[tuple[dict[str, Any], str, str]] = []
     for section, item in _iter_notification_items_with_sections(data):
@@ -2438,9 +2444,7 @@ def clear_url_deduped_threads(
                 subprocess.CalledProcessError,
                 subprocess.TimeoutExpired,
             ) as exc:
-                stats.errors.append(
-                    f"mark-done failed for thread {thread_id}: {exc}"
-                )
+                stats.errors.append(f"mark-done failed for thread {thread_id}: {exc}")
                 _ledger_record_clear_result(
                     ledger,
                     dry_run=dry_run,
@@ -2607,10 +2611,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 stats.already_tracked += 1
                 continue
             if classification.bucket == BUCKET_Q1:
-                if (
-                    renewed
-                    and tracked
-                ):
+                if renewed and tracked:
                     mutations.escalate.append(
                         EscalationDelta(
                             item_id="",
@@ -2642,11 +2643,15 @@ def run(args: argparse.Namespace) -> TriageStats:
                 reopened_thread_ids.add(thread_id)
             elif classification.bucket == BUCKET_DROP and tracked:
                 stats.dropped += 1
-                disposition = "completed" if (
-                    classification.archive_to_done
-                    or "closed" in classification.reason
-                    or "merged" in classification.reason
-                ) else "irrelevant"
+                disposition = (
+                    "completed"
+                    if (
+                        classification.archive_to_done
+                        or "closed" in classification.reason
+                        or "merged" in classification.reason
+                    )
+                    else "irrelevant"
+                )
                 classification_name = (
                     "dependabot_handoff"
                     if classification.skip_mark_done
@@ -2709,11 +2714,15 @@ def run(args: argparse.Namespace) -> TriageStats:
 
         if classification.bucket == BUCKET_DROP:
             stats.dropped += 1
-            disposition = "completed" if (
-                classification.archive_to_done
-                or "closed" in classification.reason
-                or "merged" in classification.reason
-            ) else "irrelevant"
+            disposition = (
+                "completed"
+                if (
+                    classification.archive_to_done
+                    or "closed" in classification.reason
+                    or "merged" in classification.reason
+                )
+                else "irrelevant"
+            )
             classification_name = (
                 "dependabot_handoff" if classification.skip_mark_done else "policy_drop"
             )
@@ -2727,7 +2736,9 @@ def run(args: argparse.Namespace) -> TriageStats:
                 title=title,
                 reason=reason,
                 repo=repo,
-                terminal_disposition=None if classification.skip_mark_done else disposition,
+                terminal_disposition=(
+                    None if classification.skip_mark_done else disposition
+                ),
                 queue_clear=not classification.skip_mark_done,
             )
             if classification.archive_to_done:
@@ -2787,12 +2798,14 @@ def run(args: argparse.Namespace) -> TriageStats:
         thread_id = str(notif_meta["thread_id"])
         if thread_id in reopened_thread_ids:
             continue
-        canonical_url = str(notif_meta.get("url") or item.get("link") or "") or None
+        terminal_canonical_url: str | None = (
+            str(notif_meta.get("url") or item.get("link") or "") or None
+        )
         _ledger_capture(
             ledger,
             dry_run=args.dry_run,
             thread_id=thread_id,
-            canonical_artifact=canonical_url,
+            canonical_artifact=terminal_canonical_url,
             classification="actionable",
             worker="tracker-terminal",
             title=str(item.get("title") or ""),

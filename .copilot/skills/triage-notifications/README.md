@@ -41,33 +41,37 @@ noise that drops and is marked done on GitHub.
 
 `KEEP_REASONS = {review_requested, assign, author, mention, security_alert}`
 
-A series of early-exit drops fire before reason routing, in this order:
+A series of protected reason routes runs before the noise-only drops:
 
-1. **Title-pattern drop** - repetitive system-generated noise and routine
+1. **Comments** - an exact, case-insensitive `@zkoppert` mention routes to
+   Q1. Dependabot comments are left for `triage-dependabot` after their author
+   is verified. Incomplete comment history is retained rather than cleared.
+2. **Direct reasons** - `mention`, `assign`, and `security_alert` route to Q1.
+3. **Review requests** - open, non-Dependabot review requests route to Q2 with
+   one-business-day escalation. Verified Dependabot review requests are left
+   for `triage-dependabot`.
+
+The remaining notifications then pass through these drops in order:
+
+1. **Dependabot version-bump drop** - verified Dependabot-authored bump PRs
+   drop from the tracker but are **never marked done on GitHub**
+   (`skip_mark_done`). A separate `triage-dependabot` tool consumes those
+   threads, so they must stay available to that worker.
+2. **Title-pattern drop** - repetitive system-generated noise and routine
    config PRs (regex match on `subject.title`). Catches flaky-test report
    titles (`Intermittent test failure: ...`, `Flaky test: ...`, `test
-   flake: ...`) and `Enable Dependabot` config PRs. Overridden when
-   `reason` is `mention` or `assign` so a direct human ping always
-   reaches the inbox. Edit `TITLE_DROP_PATTERNS` in `triage.py` to add
-   patterns.
-2. **Dependabot version-bump drop** - PRs whose title looks like a
-   Dependabot bump (`build(deps): ...`, `chore(deps-dev): ...`, or
-   `Bump <pkg> from <x> to <y>`) drop from the inbox but are **never
-   marked done on GitHub** (`skip_mark_done`). A separate
-   `triage-dependabot` tool consumes those threads, so they must stay
-   unread. A direct `mention`/`assign` overrides this so a human ping on
-   a bump still reaches me.
-3. **Closed-subject drop** - if a KEEP-reason PR or issue is already
-   closed/merged when the notification arrives, drop instead of routing
-   anywhere. If the subject is a PR I authored, also append an entry to
-   todo.yml's `done` section (source `github-notification-auto-archive`)
-   so the shipped work is captured for biannual reflection.
+   flake: ...`) and `Enable Dependabot` config PRs. Edit
+   `TITLE_DROP_PATTERNS` in `triage.py` to add patterns.
+3. **Closed-subject drop** - if an ordinary review request or author status
+   item is already closed/merged when the notification arrives, drop instead
+   of routing it. Direct asks have already routed to Q1. If the subject is a
+   PR I authored, also append an entry to todo.yml's `done` section (source
+   `github-notification-auto-archive`) so the shipped work is captured for
+   biannual reflection.
 4. **Repo-level overrides** (`repo_override`) - per-repo policies, often
-   stricter than the global KEEP_REASONS. A safety carve-out runs first:
-   a direct `mention`, a direct `assign`, or a `security_alert` always
-    survives these gates, because a
-   personal ping or a vulnerability alert is too important to silently
-   drop on a title or subscription miss.
+   stricter than the global KEEP_REASONS. Direct asks, security alerts, and
+   ordinary review requests have already been routed before these noise-only
+   gates.
    - `github/.github` plus private config entries (`ALWAYS_DROP_REPOS`):
       drop unprotected notification reasons.
    - `github/curated-data`: drop everything except the carve-out (direct
@@ -86,8 +90,8 @@ A series of early-exit drops fire before reason routing, in this order:
    - Private config entries in `subscription_filtered_repos`: keep the
      listed reasons plus the carve-out reasons; drop everything else.
 
-After the drops, surviving KEEP_REASONS notifications route by reason.
-Both read and unread notifications classify through the same table; the
+After the drops, surviving `author` notifications route to INBOX and unknown
+reasons drop. Both read and unread notifications classify through the same table; the
 `already_tracked` short-circuit in `run()` prevents re-adding a tracked
 notification.
 

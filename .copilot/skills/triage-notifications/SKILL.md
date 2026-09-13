@@ -33,9 +33,11 @@ dropped and cleared from GitHub, and only personal-action items survive.
    - **Everything else** (`subscribed`, `team_mention`, `comment`,
      `state_change`, `ci_activity`, `manual`, ...) is passive noise and
      **drops** (marked done on GitHub).
-   - **Repo overrides** run first and can be stricter. A safety carve-out
-     applies: a direct `mention`/`assign` or a `security_alert` always
-     survives these gates (except on fully tuned-out repos). Otherwise:
+   - Comments, direct `mention`/`assign` reasons, security alerts, and
+     ordinary review requests route before noise-only title and repository
+     filters. Incomplete comment history is retained rather than cleared.
+   - **Repo overrides** can be stricter for the remaining reasons. They do
+     not override the protected routes above. For unprotected reasons:
      `github/.github` plus private config entries always drop everything;
      `github/curated-data` keeps only the carve-out reasons;
      `github/markup` keeps security titles plus the carve-out;

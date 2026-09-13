@@ -16,12 +16,13 @@ from typing import Any
 from unittest import mock
 
 import pytest
-
 import triage_dependabot as td
 
 
 @pytest.fixture(autouse=True)
-def _isolate_notification_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_notification_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(td, "DEFAULT_LEDGER_PATH", tmp_path / "ledger.sqlite")
 
 
@@ -304,9 +305,7 @@ def test_detect_repo_coverage_extracts_simplecov_line_and_branch() -> None:
 
 def test_detect_repo_coverage_extracts_simplecov_single_number() -> None:
     files = {
-        "spec/spec_helper.rb": (
-            "SimpleCov.start\nSimpleCov.minimum_coverage 90\n"
-        ),
+        "spec/spec_helper.rb": ("SimpleCov.start\nSimpleCov.minimum_coverage 90\n"),
     }
 
     def fake_run_gh(args: list[str], *, timeout: int = 60) -> str:
@@ -907,12 +906,20 @@ def test_remove_stale_entries_matches_by_thread_id() -> None:
 def test_remove_stale_entries_matches_by_pr_url_fallback() -> None:
     data = {
         "inbox": [
-            {"id": "stale", "notification": {"thread_id": "OLD", "url": "https://example/pr/1"}},
-            {"id": "keep", "notification": {"thread_id": "OTHER", "url": "https://example/pr/2"}},
+            {
+                "id": "stale",
+                "notification": {"thread_id": "OLD", "url": "https://example/pr/1"},
+            },
+            {
+                "id": "keep",
+                "notification": {"thread_id": "OTHER", "url": "https://example/pr/2"},
+            },
         ],
         "prioritized": {"q1_do_first": []},
     }
-    removed = td.remove_stale_entries(data, thread_id="T-new", pr_url="https://example/pr/1")
+    removed = td.remove_stale_entries(
+        data, thread_id="T-new", pr_url="https://example/pr/1"
+    )
     assert removed == 1
     assert [item["id"] for item in data["inbox"]] == ["keep"]
 
@@ -1105,9 +1112,7 @@ def test_commit_todo_changes_skips_commit_when_nothing_staged(tmp_path: Path) ->
     assert not any("commit" in call for call in calls)
 
 
-def _staged_commit_fake_run(
-    calls: list[list[str]], *, fail_step: str | None = None
-):
+def _staged_commit_fake_run(calls: list[list[str]], *, fail_step: str | None = None):
     """Fake subprocess.run for commit_todo_changes with a staged diff.
 
     ``diff --cached --quiet`` returns 1 (changes staged) so the commit
@@ -1406,9 +1411,9 @@ def test_fetch_notifications_parses_paginated_pages() -> None:
     with mock.patch.object(td, "run_gh", return_value=json.dumps(pages)) as mock_run:
         assert td.fetch_notifications() == [{"id": "1"}, {"id": "2"}]
     args = mock_run.call_args[0][0]
-    assert "/notifications?all=true" in args, (
-        f"expected ?all=true so read-but-not-done threads stay visible; got {args!r}"
-    )
+    assert (
+        "/notifications?all=true" in args
+    ), f"expected ?all=true so read-but-not-done threads stay visible; got {args!r}"
 
 
 def test_fetch_notifications_empty_when_no_output() -> None:
@@ -2571,9 +2576,7 @@ def test_run_skips_super_linter_pr_with_subscribed_clears_notification(
     rather than letting them sit in the inbox."""
     stats, mark_mock = _run_skipped_super_linter_with_reason(tmp_path, "subscribed")
     assert stats.skipped_dependency == 1
-    mark_mock.assert_called_once_with(
-        "thread-super-linter-subscribed", dry_run=False
-    )
+    mark_mock.assert_called_once_with("thread-super-linter-subscribed", dry_run=False)
 
 
 def test_run_skips_super_linter_pr_with_ci_activity_clears_notification(
@@ -2582,9 +2585,7 @@ def test_run_skips_super_linter_pr_with_ci_activity_clears_notification(
     """CI activity on an excluded dep is noise, so clear the notification."""
     stats, mark_mock = _run_skipped_super_linter_with_reason(tmp_path, "ci_activity")
     assert stats.skipped_dependency == 1
-    mark_mock.assert_called_once_with(
-        "thread-super-linter-ci_activity", dry_run=False
-    )
+    mark_mock.assert_called_once_with("thread-super-linter-ci_activity", dry_run=False)
 
 
 def test_run_skips_super_linter_pr_with_team_mention_keeps_notification(
@@ -2841,9 +2842,7 @@ def test_run_closed_excluded_dep_mark_done_failure_does_not_abort_run(
         stats = td.run(args)
 
     assert stats.skipped_dependency == 2
-    assert any(
-        "mark-done failed for closed excluded-dep" in e for e in stats.errors
-    )
+    assert any("mark-done failed for closed excluded-dep" in e for e in stats.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -2927,9 +2926,7 @@ def test_run_skips_super_linter_repo_pr_with_mention_keeps_notification(
     tmp_path: Path,
 ) -> None:
     """Direct pings inside an unowned repo keep the notification open."""
-    stats, mark_mock = _run_skipped_super_linter_repo_with_reason(
-        tmp_path, "mention"
-    )
+    stats, mark_mock = _run_skipped_super_linter_repo_with_reason(tmp_path, "mention")
     assert stats.skipped == 1
     assert stats.skipped_dependency == 0
     mark_mock.assert_not_called()
@@ -3368,13 +3365,9 @@ def test_run_hands_archived_direct_asks_to_general_triage(
 
 
 def test_is_branch_protection_error_matches_known_markers() -> None:
-    assert td._is_branch_protection_error(
-        "the base branch policy prohibits the merge"
-    )
+    assert td._is_branch_protection_error("the base branch policy prohibits the merge")
     # Case-insensitive.
-    assert td._is_branch_protection_error(
-        "The Base Branch Policy Prohibits The Merge"
-    )
+    assert td._is_branch_protection_error("The Base Branch Policy Prohibits The Merge")
     assert td._is_branch_protection_error(
         "GraphQL: At least 1 approving review is required by reviewers"
     )
@@ -3505,17 +3498,13 @@ def test_do_merge_skips_approve_when_already_approved(tmp_path: Path) -> None:
     ) as approve_mock, mock.patch.object(
         td, "run_gh", side_effect=fake_run_gh
     ):
-        td.do_merge(
-            "o/r", 1, dry_run=False, my_login="zkoppert", head_sha="abc123"
-        )
+        td.do_merge("o/r", 1, dry_run=False, my_login="zkoppert", head_sha="abc123")
 
     approval_check.assert_called_once_with("o/r", 1, "zkoppert", "abc123")
     approve_mock.assert_not_called()
     # First call was --auto attempt; second was the sync merge.
     assert any("--auto" in a for a in call_log)
-    assert any(
-        "--auto" not in a and "merge" in a and "--squash" in a for a in call_log
-    )
+    assert any("--auto" not in a and "merge" in a and "--squash" in a for a in call_log)
 
 
 def test_do_merge_already_approved_auto_merge_succeeds_no_fallback(
@@ -3530,14 +3519,10 @@ def test_do_merge_already_approved_auto_merge_succeeds_no_fallback(
 
     with mock.patch.object(
         td, "has_existing_approval", return_value=True
-    ), mock.patch.object(
-        td, "do_approve"
-    ) as approve_mock, mock.patch.object(
+    ), mock.patch.object(td, "do_approve") as approve_mock, mock.patch.object(
         td, "run_gh", side_effect=fake_run_gh
     ):
-        td.do_merge(
-            "o/r", 1, dry_run=False, my_login="zkoppert", head_sha="abc123"
-        )
+        td.do_merge("o/r", 1, dry_run=False, my_login="zkoppert", head_sha="abc123")
 
     approve_mock.assert_not_called()
     # Only the --auto merge ran; no plain (fallback) merge.
@@ -3561,9 +3546,7 @@ def test_do_merge_raises_branch_protection_blocked_on_sync_merge_failure(
 
     with mock.patch.object(
         td, "has_existing_approval", return_value=True
-    ), mock.patch.object(
-        td, "do_approve"
-    ), mock.patch.object(
+    ), mock.patch.object(td, "do_approve"), mock.patch.object(
         td, "run_gh", side_effect=fake_run_gh
     ):
         with pytest.raises(td.BranchProtectionBlocked) as exc_info:
@@ -3595,15 +3578,11 @@ def test_do_merge_raises_branch_protection_blocked_on_auto_merge_failure(
 
     with mock.patch.object(
         td, "has_existing_approval", return_value=True
-    ), mock.patch.object(
-        td, "do_approve"
-    ), mock.patch.object(
+    ), mock.patch.object(td, "do_approve"), mock.patch.object(
         td, "run_gh", side_effect=fake_run_gh
     ):
         with pytest.raises(td.BranchProtectionBlocked) as exc_info:
-            td.do_merge(
-                "o/r", 3, dry_run=False, my_login="zkoppert", head_sha="abc"
-            )
+            td.do_merge("o/r", 3, dry_run=False, my_login="zkoppert", head_sha="abc")
 
     assert "at least 1 approving review is required" in exc_info.value.marker
     # The --auto attempt raised; the synchronous merge must not have run.
@@ -3812,9 +3791,7 @@ def test_run_branch_protection_keeps_notification_when_only_done_item_exists(
     assert stats.already_tracked == 1
     reloaded = td.load_todo(args.todo_file)
     assert reloaded["prioritized"]["q1_do_first"] == []
-    assert [item["id"] for item in reloaded["done"]] == [
-        "dependabot-example-pr-61"
-    ]
+    assert [item["id"] for item in reloaded["done"]] == ["dependabot-example-pr-61"]
     ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
     rows = ledger._rows(
         """
@@ -3888,7 +3865,9 @@ def test_remove_stale_entries_never_removes_items_without_notification(
 
     # Diagnostic logging captured the removal with the matched key + item id.
     matching_records = [
-        rec.getMessage() for rec in caplog.records if "stale-removal" in rec.getMessage()
+        rec.getMessage()
+        for rec in caplog.records
+        if "stale-removal" in rec.getMessage()
     ]
     assert any("dependabot-foo-pr-9" in msg for msg in matching_records)
     assert any("thread_id=thread-resolved" in msg for msg in matching_records)
@@ -4059,7 +4038,9 @@ def test_do_dependabot_close_dry_run_no_subprocess() -> None:
 
 def test_do_dependabot_close_force_closes_via_api() -> None:
     with mock.patch.object(td, "run_gh") as mocked:
-        td.do_dependabot_close("github-community-projects/stale-repos", 520, dry_run=False)
+        td.do_dependabot_close(
+            "github-community-projects/stale-repos", 520, dry_run=False
+        )
     assert mocked.call_count == 1
     close_args = mocked.call_args_list[0][0][0]
     assert close_args[:2] == ["pr", "close"]
@@ -4075,12 +4056,13 @@ def test_do_dependabot_close_does_not_post_dependabot_close_comment() -> None:
     ``gh pr close --delete-branch`` closes the PR directly, so the
     comment must never be sent."""
     with mock.patch.object(td, "run_gh") as mocked:
-        td.do_dependabot_close("github-community-projects/stale-repos", 520, dry_run=False)
+        td.do_dependabot_close(
+            "github-community-projects/stale-repos", 520, dry_run=False
+        )
     for call in mocked.call_args_list:
         args = call[0][0]
         assert args[:2] != ["pr", "comment"], (
-            "do_dependabot_close must not post any PR comment; got "
-            f"{args!r}"
+            "do_dependabot_close must not post any PR comment; got " f"{args!r}"
         )
 
 
@@ -4189,9 +4171,7 @@ def test_run_closes_prerelease_and_marks_notification_done(tmp_path: Path) -> No
     merge_mock.assert_not_called()
     mark_done_mock.assert_called_once_with("thread-prerelease", dry_run=False)
     state = td.load_state(args.state_file)
-    assert (
-        "https://github.com/github-community-projects/stale-repos/pull/520" in state
-    )
+    assert "https://github.com/github-community-projects/stale-repos/pull/520" in state
 
 
 def test_run_merge_cooldown_set_when_mark_done_fails(tmp_path: Path) -> None:
@@ -4433,7 +4413,7 @@ def test_run_closes_prerelease_dry_run_does_not_post(tmp_path: Path) -> None:
     for call in run_gh_mock.call_args_list:
         cmd = call[0][0]
         assert "comment" not in cmd, f"unexpected comment call: {cmd}"
-        assert not (cmd[0] == "api" and "-X" in cmd and "DELETE" in cmd), (
-            f"unexpected DELETE call: {cmd}"
-        )
+        assert not (
+            cmd[0] == "api" and "-X" in cmd and "DELETE" in cmd
+        ), f"unexpected DELETE call: {cmd}"
     assert not args.state_file.exists()

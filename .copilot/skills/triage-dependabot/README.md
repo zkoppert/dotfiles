@@ -25,9 +25,10 @@ For each notification from `gh api /notifications?all=true` whose subject is a
 | --- | --- |
 | PR closed or merged | skip and mark notification done |
 | Repo owner is not `github`, `github-community-projects`, or `zkoppert` AND notification reason is `review_requested`, `subscribed`, or `ci_activity` | skip and mark notification done |
-| Repo owner is not `github`, `github-community-projects`, or `zkoppert` AND notification reason is `mention`, `team_mention`, `author`, or `manual` | skip, leave notification in inbox for direct response |
+| Notification reason is `mention`, `assign`, or `comment` | hand off to general notification triage before any terminal action |
+| Repo owner is not `github`, `github-community-projects`, or `zkoppert` AND notification reason is not passive | skip, leave notification in inbox for direct response |
 | Title or body references an excluded dependency (e.g. `super-linter/super-linter`) AND notification reason is `review_requested`, `subscribed`, or `ci_activity` | skip and mark notification done |
-| Title or body references an excluded dependency AND notification reason is `mention`, `team_mention`, `author`, or `manual` | skip, leave notification in inbox for direct response |
+| Title or body references an excluded dependency AND notification reason is not passive | skip, leave notification in inbox for direct response |
 | Draft PR | flag-for-review |
 | Any non-bot human (other than me) reviewed or commented | flag-for-review |
 | Target version is a prerelease (alpha / beta / rc / dev / preview) | close-prerelease (force-close via `gh pr close --delete-branch`) |
@@ -49,8 +50,9 @@ The script only processes repos whose owner is `github`,
 case-insensitive. Dependabot PRs from every other owner are skipped and no Q1
 todo entry is created. Passive notification reasons (`review_requested`,
 `subscribed`, `ci_activity`) are marked done so third-party subscription noise
-stays out of the inbox. Direct pings (`mention`, `team_mention`, `author`,
-`manual`) leave the notification in place so the user can respond. Repo-specific
+stays out of the inbox. `mention`, `assign`, and `comment` notifications are
+handed to general triage before this policy runs; other non-passive reasons
+leave the notification in place so the user can respond. Repo-specific
 skips from the private config still apply inside the owned owners.
 
 ### Prerelease detection
@@ -87,9 +89,9 @@ coordinates the script must never auto-act on (currently
 `super-linter/super-linter`). These PRs always skip the action branches,
 but the notification handling depends on the reason: passive reasons
 (`review_requested`, `subscribed`, `ci_activity`) auto-clear so the
-inbox stops accumulating, while actionable reasons (`mention`,
-`team_mention`, `author`, `manual`) leave the notification in place so
-the user can respond directly.
+inbox stops accumulating. `mention`, `assign`, and `comment` notifications
+are handed to general triage before the exclusion policy; other reasons leave
+the notification in place.
 
 ### Coverage detection
 

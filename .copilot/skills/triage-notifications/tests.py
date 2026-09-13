@@ -15,9 +15,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-import yaml
-
 import triage
+import yaml
 
 
 @pytest.fixture(autouse=True)
@@ -170,9 +169,7 @@ def test_classify_self_assign_on_non_pr_still_goes_to_q1():
     route to Q1 the way it did before."""
     notif = _notif("assign")
     notif["subject"]["type"] = "Issue"
-    notif["subject"]["url"] = (
-        "https://api.github.com/repos/zkoppert/example/issues/42"
-    )
+    notif["subject"]["url"] = "https://api.github.com/repos/zkoppert/example/issues/42"
     fetcher_called = []
 
     def fetcher(n):
@@ -1206,9 +1203,7 @@ def _gh_returns(responses: dict[str, str]):
     return fake_run
 
 
-def _assign_notif_for_tracked_url(
-    *, thread_id: str = "2001", number: int = 99
-) -> dict:
+def _assign_notif_for_tracked_url(*, thread_id: str = "2001", number: int = 99) -> dict:
     return {
         "id": thread_id,
         "reason": "assign",
@@ -1244,9 +1239,7 @@ def _run_with_assign_notification(todo_file: Path, notif: dict):
             return subprocess.CompletedProcess(
                 cmd,
                 0,
-                stdout=json.dumps(
-                    {"state": "open", "user": {"login": "zkoppert"}}
-                ),
+                stdout=json.dumps({"state": "open", "user": {"login": "zkoppert"}}),
                 stderr="",
             )
         raise AssertionError(f"unexpected gh call: {cmd}")
@@ -1533,9 +1526,9 @@ def test_run_preserves_existing_review_escalation_deadline(todo_file):
     ):
         triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
 
-    notification = yaml.safe_load(todo_file.read_text())["prioritized"][
-        "q2_schedule"
-    ][0]["notification"]
+    notification = yaml.safe_load(todo_file.read_text())["prioritized"]["q2_schedule"][
+        0
+    ]["notification"]
     assert notification["captured_at"] == "2026-07-01T15:00:00Z"
     assert notification["escalates_at"] == "2026-07-02T15:00:00Z"
 
@@ -2137,9 +2130,9 @@ def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
 
 def test_run_preserves_direct_mention_across_pr_issue_and_review_comments(todo_file):
     notif = _notif("comment")
-    notif["subject"]["latest_comment_url"] = (
-        "https://api.github.com/repos/zkoppert/example/pulls/comments/11"
-    )
+    notif["subject"][
+        "latest_comment_url"
+    ] = "https://api.github.com/repos/zkoppert/example/pulls/comments/11"
     responses = {
         "/user": json.dumps({"login": "zkoppert"}),
         "/notifications?all=true": json.dumps([notif]),
@@ -2255,10 +2248,12 @@ def test_run_leaves_dependabot_comment_without_mention_unread(todo_file):
     responses = {
         "/user": json.dumps({"login": "zkoppert"}),
         "/notifications?all=true": json.dumps([notif]),
-        "/repos/zkoppert/example/pulls/42": json.dumps({
-            "state": "open",
-            "user": {"login": "dependabot[bot]"},
-        }),
+        "/repos/zkoppert/example/pulls/42": json.dumps(
+            {
+                "state": "open",
+                "user": {"login": "dependabot[bot]"},
+            }
+        ),
         "/repos/zkoppert/example/issues/42/comments": json.dumps(
             [
                 [
@@ -2408,13 +2403,13 @@ def test_collect_review_request_escalations_promotes_stale_items_to_q1():
     with patch("triage.utcnow_iso", return_value="2026-07-07T12:00:00Z"):
         deltas = triage.collect_review_request_escalations(data)
     assert len(deltas) == 1
-    applied = triage.apply_todo_mutations(
-        data, triage.TodoMutations(escalate=deltas)
-    )
+    applied = triage.apply_todo_mutations(data, triage.TodoMutations(escalate=deltas))
     assert applied["escalated_review_requests"] == 1
     q1 = data["prioritized"]["q1_do_first"]
     assert q1[0]["id"] == "review-1"
-    assert q1[0]["notification"]["review_requested_escalated_at"] == "2026-07-07T12:00:00Z"
+    assert (
+        q1[0]["notification"]["review_requested_escalated_at"] == "2026-07-07T12:00:00Z"
+    )
 
 
 def test_review_request_escalation_wins_over_same_run_activity_refresh():
@@ -2500,9 +2495,7 @@ def test_stale_review_escalation_preserves_fresh_active_item(active_section):
         escalated_at="2026-07-07T12:00:00Z",
     )
 
-    applied = triage.apply_todo_mutations(
-        data, triage.TodoMutations(escalate=[delta])
-    )
+    applied = triage.apply_todo_mutations(data, triage.TodoMutations(escalate=[delta]))
 
     assert applied["changed"] is False
     assert data[active_section] == [item]
@@ -4319,9 +4312,9 @@ def test_classify_title_drop_does_not_match_phrase_as_substring():
             comment_fetcher=lambda _: (None, None),
             subject_author_fetcher=lambda _: "someone-else",
         )
-        assert c.bucket != triage.BUCKET_DROP, (
-            f"title {title!r} should not drop, got {c}"
-        )
+        assert (
+            c.bucket != triage.BUCKET_DROP
+        ), f"title {title!r} should not drop, got {c}"
 
 
 def test_classify_title_drop_matches_bracketed_prefix():
@@ -4353,7 +4346,9 @@ def test_title_drop_patterns_constant_seeded():
 # --- Tests for read-notification sweep + done-archive (PR sweep-read-closed) ---
 
 
-def _read_notif(reason: str, *, subject_type: str = "PullRequest", title: str = "Some PR") -> dict:
+def _read_notif(
+    reason: str, *, subject_type: str = "PullRequest", title: str = "Some PR"
+) -> dict:
     """A notification the user has already viewed on github.com."""
     return {
         "id": "9999",
@@ -4593,9 +4588,9 @@ def test_classify_read_ci_activity_still_drops():
         comment_fetcher=lambda _: (None, None),
         subject_author_fetcher=lambda _: "someone-else",
     )
-    assert c.bucket == triage.BUCKET_DROP, (
-        "read ci_activity must drop so the notification gets cleared"
-    )
+    assert (
+        c.bucket == triage.BUCKET_DROP
+    ), "read ci_activity must drop so the notification gets cleared"
 
 
 def test_classify_read_comment_on_closed_pr_still_drops():
@@ -4765,11 +4760,14 @@ def test_notification_has_new_activity_uses_archive_captured_at():
         id="55555",
         updated_at="2026-07-02T12:34:56Z",
     )
-    assert triage.notification_has_new_activity(
-        renewed,
-        {"notification": archived["notification"]},
-        allow_reason_change_without_timestamp=False,
-    ) is True
+    assert (
+        triage.notification_has_new_activity(
+            renewed,
+            {"notification": archived["notification"]},
+            allow_reason_change_without_timestamp=False,
+        )
+        is True
+    )
 
 
 def _stale_self_authored_entry(entry_id: str, pr_number: int) -> dict:
@@ -5020,7 +5018,9 @@ def test_classify_non_filtered_repo_subscribed_drops():
     ping)."""
     notif = _private_subscription_notif("subscribed")
     notif["repository"]["full_name"] = "github/some-other-repo"
-    notif["subject"]["url"] = "https://api.github.com/repos/github/some-other-repo/pulls/1"
+    notif["subject"][
+        "url"
+    ] = "https://api.github.com/repos/github/some-other-repo/pulls/1"
     c = triage.classify(
         notif,
         my_login="zkoppert",
@@ -5309,7 +5309,11 @@ def test_review_requested_random_repo_kept():
 
 def test_human_review_requested_bump_stays_scheduled():
     c = triage.classify(
-        _repo_notif("review_requested", repo="some-org/x", title="Bump urllib3 from 2.0.0 to 2.1.0"),
+        _repo_notif(
+            "review_requested",
+            repo="some-org/x",
+            title="Bump urllib3 from 2.0.0 to 2.1.0",
+        ),
         my_login="zkoppert",
         state_fetcher=lambda _: "open",
         comment_fetcher=lambda _: (None, None),
@@ -5318,7 +5322,9 @@ def test_human_review_requested_bump_stays_scheduled():
     assert c.bucket == triage.BUCKET_Q2
 
 
-@pytest.mark.parametrize("title", ["Bump urllib3 from 2.0.0 to 2.1.0", "chore(deps): bump foo from 1 to 2"])
+@pytest.mark.parametrize(
+    "title", ["Bump urllib3 from 2.0.0 to 2.1.0", "chore(deps): bump foo from 1 to 2"]
+)
 def test_dependabot_review_requested_stays_out_of_q2(title):
     c = triage.classify(
         _repo_notif("review_requested", repo="some-org/x", title=title),
@@ -5356,25 +5362,37 @@ def private_aor_filter(monkeypatch):
 def test_private_aor_title_kept(private_aor_filter):
     """A private AoR repo notification whose title is in scope is kept."""
     for title in ("Improve the pulls dashboard", "Fix inbox grouping", "tweak /pulls"):
-        c = _classify(_repo_notif("review_requested", repo=PRIVATE_AOR_REPO, title=title))
+        c = _classify(
+            _repo_notif("review_requested", repo=PRIVATE_AOR_REPO, title=title)
+        )
         assert c.bucket != triage.BUCKET_DROP, title
 
 
 def test_private_aor_non_aor_title_drops(private_aor_filter):
     """A private AoR repo notification unrelated to our area drops."""
     for reason in ("review_requested", "subscribed", "team_mention"):
-        c = _classify(_repo_notif(reason, repo=PRIVATE_AOR_REPO, title="Refactor merge queue"))
+        c = _classify(
+            _repo_notif(reason, repo=PRIVATE_AOR_REPO, title="Refactor merge queue")
+        )
         assert c.bucket == triage.BUCKET_DROP, reason
 
 
 def test_private_aor_non_aor_direct_ping_survives(private_aor_filter):
     """Carve-out: a direct @-mention, assignment, or security alert on
     the private AoR repo survives even when the title is not in scope."""
-    mention = _classify(_repo_notif("mention", repo=PRIVATE_AOR_REPO, title="Refactor merge queue"))
+    mention = _classify(
+        _repo_notif("mention", repo=PRIVATE_AOR_REPO, title="Refactor merge queue")
+    )
     assert mention.bucket == triage.BUCKET_Q1
-    assign = _classify(_repo_notif("assign", repo=PRIVATE_AOR_REPO, title="Refactor merge queue"))
+    assign = _classify(
+        _repo_notif("assign", repo=PRIVATE_AOR_REPO, title="Refactor merge queue")
+    )
     assert assign.bucket == triage.BUCKET_Q1
-    sec = _classify(_repo_notif("security_alert", repo=PRIVATE_AOR_REPO, title="Refactor merge queue"))
+    sec = _classify(
+        _repo_notif(
+            "security_alert", repo=PRIVATE_AOR_REPO, title="Refactor merge queue"
+        )
+    )
     assert sec.bucket == triage.BUCKET_Q1
 
 
@@ -5439,13 +5457,19 @@ def test_curated_data_assign_and_security_alert_survive():
 def test_markup_security_title_kept():
     """A security-titled markup notification is kept even on a passive
     reason - vulnerabilities are never silently dropped."""
-    for title in ("Security: fix XSS in renderer", "Patch CVE-2025-0001", "vulnerability in parser"):
+    for title in (
+        "Security: fix XSS in renderer",
+        "Patch CVE-2025-0001",
+        "vulnerability in parser",
+    ):
         c = _classify(_repo_notif("subscribed", repo="github/markup", title=title))
         assert c.bucket == triage.BUCKET_INBOX, title
 
 
 def test_markup_mention_kept():
-    c = _classify(_repo_notif("mention", repo="github/markup", title="question for you"))
+    c = _classify(
+        _repo_notif("mention", repo="github/markup", title="question for you")
+    )
     assert c.bucket == triage.BUCKET_Q1
 
 
@@ -5455,14 +5479,18 @@ def test_markup_assign_and_security_alert_survive():
     direct ping still matters)."""
     expected = {"assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q1}
     for reason in ("assign", "security_alert"):
-        c = _classify(_repo_notif(reason, repo="github/markup", title="Bump rendering perf"))
+        c = _classify(
+            _repo_notif(reason, repo="github/markup", title="Bump rendering perf")
+        )
         assert c.bucket == expected[reason], reason
 
 
 def test_markup_normal_title_drops():
     """A non-security, non-ping markup notification drops (low priority)."""
     c = _classify(
-        _repo_notif("review_requested", repo="github/markup", title="Bump rendering perf")
+        _repo_notif(
+            "review_requested", repo="github/markup", title="Bump rendering perf"
+        )
     )
     assert c.bucket == triage.BUCKET_DROP
 
@@ -5530,7 +5558,9 @@ def test_run_dependabot_bump_dropped_but_not_marked_done(todo_file):
         idx = cmd.index("api")
         after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
         path = after[0] if after else ""
-        return subprocess.CompletedProcess(cmd, 0, stdout=responses.get(path, ""), stderr="")
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=responses.get(path, ""), stderr=""
+        )
 
     with patch("triage.subprocess.run", side_effect=fake_run):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
@@ -5557,8 +5587,7 @@ def test_run_dependabot_bump_not_added_to_todo(todo_file):
         triage.run(args)
     data = yaml.safe_load(todo_file.read_text())
     assert data["inbox"] == [] or all(
-        e.get("notification", {}).get("thread_id") != "dep-100"
-        for e in data["inbox"]
+        e.get("notification", {}).get("thread_id") != "dep-100" for e in data["inbox"]
     )
 
 
@@ -5588,7 +5617,7 @@ def test_runtime_preflight_wrapper_fails_on_missing_python_modules(tmp_path: Pat
     runtime.parent.mkdir(parents=True)
     runtime.write_text(
         "#!/bin/sh\n"
-        "if [ \"$1\" = \"-c\" ]; then\n"
+        'if [ "$1" = "-c" ]; then\n'
         "  echo \"ModuleNotFoundError: No module named 'yaml'\" 1>&2\n"
         "  exit 1\n"
         "fi\n"
@@ -5599,7 +5628,9 @@ def test_runtime_preflight_wrapper_fails_on_missing_python_modules(tmp_path: Pat
     wrapper = Path(__file__).resolve().parents[3] / "bin" / "notification-triage"
     env = {"HOME": str(home), "PATH": "/usr/bin:/bin"}
 
-    result = subprocess.run([str(wrapper), "--help"], capture_output=True, text=True, env=env)
+    result = subprocess.run(
+        [str(wrapper), "--help"], capture_output=True, text=True, env=env
+    )
 
     assert result.returncode == 1
     assert "import preflight" in result.stderr
@@ -5650,13 +5681,11 @@ def test_ledger_first_thread_claims_canonical_tracker_row(todo_file: Path):
         worker="test",
     )
 
-    rows = ledger._rows(
-        """
+    rows = ledger._rows("""
         SELECT id, source_id, tracker_item_id, tracker_section
           FROM notifications
          ORDER BY id
-        """
-    )
+        """)
     assert first_id == rows[0]["id"]
     assert rows[0]["source_id"] == "thread-a"
     assert rows[0]["tracker_item_id"] == "existing-item"
@@ -5666,7 +5695,9 @@ def test_ledger_first_thread_claims_canonical_tracker_row(todo_file: Path):
     assert rows[1]["tracker_item_id"] is None
 
 
-def test_ledger_actionable_thread_does_not_claim_terminal_canonical_row(todo_file: Path):
+def test_ledger_actionable_thread_does_not_claim_terminal_canonical_row(
+    todo_file: Path,
+):
     ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
     artifact = "https://github.com/o/r/pull/1"
     ledger.capture(
@@ -5692,13 +5723,11 @@ def test_ledger_actionable_thread_does_not_claim_terminal_canonical_row(todo_fil
         worker="test",
     )
 
-    rows = ledger._rows(
-        """
+    rows = ledger._rows("""
         SELECT id, source_id, terminal_disposition, clear_state
           FROM notifications
          ORDER BY id
-        """
-    )
+        """)
     assert len(rows) == 2
     assert rows[0]["source_id"] is None
     assert rows[0]["terminal_disposition"] == "irrelevant"
@@ -5809,9 +5838,7 @@ def test_run_q4_item_records_irrelevant_and_clears_notification(todo_file: Path)
     assert item["notification"]["marked_done"] is True
     assert item["notification"]["terminal_disposition"] == "irrelevant"
     ledger = triage.NotificationLedger(ledger_file)
-    rows = ledger._rows(
-        "SELECT terminal_disposition, clear_state FROM notifications"
-    )
+    rows = ledger._rows("SELECT terminal_disposition, clear_state FROM notifications")
     assert rows == [{"terminal_disposition": "irrelevant", "clear_state": "succeeded"}]
 
 

@@ -50,10 +50,9 @@ if str(_SKILLS_DIR) not in sys.path:
     sys.path.insert(0, str(_SKILLS_DIR))
 
 import yaml
+from notification_worker_common import DEFAULT_LEDGER_FILE, NotificationLedger
+from notification_worker_common import ledger_capture as _ledger_capture
 from notification_worker_common import (
-    DEFAULT_LEDGER_FILE,
-    NotificationLedger,
-    ledger_capture as _ledger_capture,
     ledger_record_clear_result as _ledger_record_clear_result,
 )
 from ruamel.yaml import YAML
@@ -558,7 +557,6 @@ def parse_bump_from_body(body: str) -> str:
     return highest or BUMP_UNKNOWN
 
 
-
 _GROUPED_TITLE_RE = re.compile(
     r"\bbump\s+the\s+[\w.\-/]+\s+group\b",
     re.IGNORECASE,
@@ -582,8 +580,7 @@ def is_prerelease_target(pr: dict[str, Any]) -> bool:
     title = pr.get("title") or ""
     body = pr.get("body") or ""
     return bool(
-        _PRERELEASE_TARGET_RE.search(title)
-        or _PRERELEASE_TARGET_RE.search(body)
+        _PRERELEASE_TARGET_RE.search(title) or _PRERELEASE_TARGET_RE.search(body)
     )
 
 
@@ -1107,7 +1104,11 @@ def do_merge(
         logger.info("dry-run: would approve and auto-merge %s#%d", repo, number)
         return True
 
-    if my_login and head_sha and has_existing_approval(repo, number, my_login, head_sha):
+    if (
+        my_login
+        and head_sha
+        and has_existing_approval(repo, number, my_login, head_sha)
+    ):
         logger.info(
             "%s#%d already approved by %s at %s, skipping approve",
             repo,
@@ -1223,9 +1224,7 @@ def _is_branch_protection_error(stderr: str) -> bool:
     return _match_branch_protection_marker(stderr) is not None
 
 
-def has_existing_approval(
-    repo: str, number: int, my_login: str, head_sha: str
-) -> bool:
+def has_existing_approval(repo: str, number: int, my_login: str, head_sha: str) -> bool:
     """True when ``my_login`` already approved this PR at the current head.
 
     Re-approving an already-approved PR is the GitHub equivalent of a
@@ -1653,9 +1652,7 @@ def _item_thread_id(item: Any) -> str | None:
     return str(thread_id) if thread_id else None
 
 
-def _matching_entry(
-    items: list[Any], entry: dict[str, Any]
-) -> dict[str, Any] | None:
+def _matching_entry(items: list[Any], entry: dict[str, Any]) -> dict[str, Any] | None:
     entry_id = entry.get("id")
     entry_thread_id = _item_thread_id(entry)
     for item in items:
@@ -1770,7 +1767,9 @@ def _git_metadata_exists(repo: Path) -> bool:
     return (repo / ".git").exists()
 
 
-def _run_git(repo: Path, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _run_git(
+    repo: Path, args: list[str], *, check: bool = True
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         check=check,
@@ -1802,7 +1801,9 @@ def commit_todo_changes(path: Path, message: str) -> bool:
     with _todo_write_lock(path):
         try:
             _run_git(repo, ["add", "--", path.name])
-            diff = _run_git(repo, ["diff", "--cached", "--quiet", "--", path.name], check=False)
+            diff = _run_git(
+                repo, ["diff", "--cached", "--quiet", "--", path.name], check=False
+            )
         except (FileNotFoundError, subprocess.SubprocessError) as exc:
             _log_git_warning("add", exc)
             return False
@@ -2686,10 +2687,10 @@ def run(args: argparse.Namespace) -> TriageStats:
                 tracker_section="prioritized.q1_do_first",
             )
         for handoff in branch_protection_handoffs:
-            entry = _matching_entry(active_q1_entries, handoff.entry)
-            if entry is None:
+            matched_entry = _matching_entry(active_q1_entries, handoff.entry)
+            if matched_entry is None:
                 continue
-            notif_meta = entry.get("notification")
+            notif_meta = matched_entry.get("notification")
             if not isinstance(notif_meta, dict):
                 continue
             handoff_thread_id = str(notif_meta.get("thread_id") or "")
@@ -2700,10 +2701,10 @@ def run(args: argparse.Namespace) -> TriageStats:
                 canonical_artifact=handoff.pr_url,
                 classification="actionable",
                 worker="dependabot-branch-protection",
-                title=str(entry.get("title") or ""),
+                title=str(matched_entry.get("title") or ""),
                 reason=str(notif_meta.get("reason") or "").lower(),
                 repo=str(notif_meta.get("repo") or ""),
-                tracker_item_id=str(entry.get("id") or "") or None,
+                tracker_item_id=str(matched_entry.get("id") or "") or None,
                 tracker_section="prioritized.q1_do_first",
                 terminal_disposition="tracked_elsewhere",
                 queue_clear=bool(handoff_thread_id),

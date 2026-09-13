@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
-
 HOME = Path.home()
 DEFAULT_SUPPORT_DIR = HOME / "Library" / "Application Support" / "notification-workers"
 DEFAULT_LEDGER_FILE = DEFAULT_SUPPORT_DIR / "ledger.sqlite"
@@ -87,8 +86,11 @@ def review_request_escalates_at(captured_at: str | None) -> str | None:
     parsed = parse_iso_datetime(captured_at)
     if parsed is None:
         return None
-    return add_business_days(parsed, 1).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
+    return (
+        add_business_days(parsed, 1)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
     )
 
 
@@ -125,8 +127,7 @@ class NotificationLedger:
 
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS notifications (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   source_id TEXT,
@@ -149,8 +150,7 @@ class NotificationLedger:
                   cleared_at TEXT,
                   worker TEXT NOT NULL DEFAULT ''
                 )
-                """
-            )
+                """)
             columns = {
                 str(row[1]) for row in conn.execute("PRAGMA table_info(notifications)")
             }
@@ -161,20 +161,16 @@ class NotificationLedger:
                     conn.execute(
                         f"ALTER TABLE notifications DROP COLUMN {obsolete_column}"
                     )
-            conn.execute(
-                """
+            conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_source
                 ON notifications (source_id)
                 WHERE source_id IS NOT NULL AND source_id != ''
-                """
-            )
-            conn.execute(
-                """
+                """)
+            conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_notifications_canonical
                 ON notifications (canonical_artifact)
                 WHERE canonical_artifact IS NOT NULL AND canonical_artifact != ''
-                """
-            )
+                """)
             conn.commit()
 
     def _find_row_id(
@@ -239,7 +235,9 @@ class NotificationLedger:
                 worker,
             ),
         )
-        return int(cur.lastrowid)
+        if cur.lastrowid is None:
+            raise RuntimeError("notification ledger insert did not return a row id")
+        return cur.lastrowid
 
     def _claim_canonical_row(
         self,
@@ -290,7 +288,9 @@ class NotificationLedger:
         repo: str = "",
     ) -> int:
         now = utcnow_iso()
-        canonical_artifact = normalize_github_url(canonical_artifact) or canonical_artifact
+        canonical_artifact = (
+            normalize_github_url(canonical_artifact) or canonical_artifact
+        )
         with self._connect() as conn:
             row_id = self._find_row_id(
                 conn,
@@ -300,13 +300,13 @@ class NotificationLedger:
             if row_id is None and source_id:
                 row_id = self._claim_canonical_row(
                     conn,
-                        source_id=source_id,
+                    source_id=source_id,
                     canonical_artifact=canonical_artifact,
                 )
             if row_id is None:
                 row_id = self._insert_row(
                     conn,
-                        source_id=source_id,
+                    source_id=source_id,
                     canonical_artifact=canonical_artifact,
                     classification=classification,
                     worker=worker,
@@ -359,7 +359,9 @@ class NotificationLedger:
         tracker_section: str,
     ) -> None:
         now = utcnow_iso()
-        canonical_artifact = normalize_github_url(canonical_artifact) or canonical_artifact
+        canonical_artifact = (
+            normalize_github_url(canonical_artifact) or canonical_artifact
+        )
         with self._connect() as conn:
             row_id = self._find_row_id(
                 conn,
@@ -369,7 +371,7 @@ class NotificationLedger:
             if row_id is None:
                 row_id = self._insert_row(
                     conn,
-                        source_id=source_id,
+                    source_id=source_id,
                     canonical_artifact=canonical_artifact,
                     classification="actionable",
                     worker="tracker-reconcile",
@@ -425,7 +427,9 @@ class NotificationLedger:
         terminal_disposition: str,
     ) -> None:
         now = utcnow_iso()
-        canonical_artifact = normalize_github_url(canonical_artifact) or canonical_artifact
+        canonical_artifact = (
+            normalize_github_url(canonical_artifact) or canonical_artifact
+        )
         with self._connect() as conn:
             row_id = self._find_row_id(
                 conn,
@@ -435,7 +439,7 @@ class NotificationLedger:
             if row_id is None:
                 row_id = self._insert_row(
                     conn,
-                        source_id=source_id,
+                    source_id=source_id,
                     canonical_artifact=canonical_artifact,
                     classification="actionable",
                     worker="tracker-reconcile",
@@ -460,7 +464,9 @@ class NotificationLedger:
         canonical_artifact: str | None,
     ) -> None:
         now = utcnow_iso()
-        canonical_artifact = normalize_github_url(canonical_artifact) or canonical_artifact
+        canonical_artifact = (
+            normalize_github_url(canonical_artifact) or canonical_artifact
+        )
         with self._connect() as conn:
             row_id = self._find_row_id(
                 conn,
@@ -470,7 +476,7 @@ class NotificationLedger:
             if row_id is None:
                 row_id = self._insert_row(
                     conn,
-                        source_id=source_id,
+                    source_id=source_id,
                     canonical_artifact=canonical_artifact,
                     classification="policy_drop",
                     worker="clear-queue",
@@ -498,7 +504,9 @@ class NotificationLedger:
         canonical_artifact: str | None,
     ) -> None:
         now = utcnow_iso()
-        canonical_artifact = normalize_github_url(canonical_artifact) or canonical_artifact
+        canonical_artifact = (
+            normalize_github_url(canonical_artifact) or canonical_artifact
+        )
         with self._connect() as conn:
             row_id = self._find_row_id(
                 conn,
@@ -508,7 +516,7 @@ class NotificationLedger:
             if row_id is None:
                 row_id = self._insert_row(
                     conn,
-                        source_id=source_id,
+                    source_id=source_id,
                     canonical_artifact=canonical_artifact,
                     classification="policy_drop",
                     worker="clear-success",
@@ -536,7 +544,9 @@ class NotificationLedger:
         error: str,
     ) -> None:
         now = utcnow_iso()
-        canonical_artifact = normalize_github_url(canonical_artifact) or canonical_artifact
+        canonical_artifact = (
+            normalize_github_url(canonical_artifact) or canonical_artifact
+        )
         with self._connect() as conn:
             row_id = self._find_row_id(
                 conn,
@@ -546,7 +556,7 @@ class NotificationLedger:
             if row_id is None:
                 row_id = self._insert_row(
                     conn,
-                        source_id=source_id,
+                    source_id=source_id,
                     canonical_artifact=canonical_artifact,
                     classification="policy_drop",
                     worker="clear-failure",
@@ -571,8 +581,7 @@ class NotificationLedger:
         return [dict(row) for row in rows]
 
     def pending_github_clears(self) -> list[dict[str, Any]]:
-        return self._rows(
-            """
+        return self._rows("""
             SELECT source_id, canonical_artifact, classification, reason, repo,
                    terminal_disposition, clear_state
               FROM notifications
@@ -580,8 +589,8 @@ class NotificationLedger:
                AND source_id != ''
                AND clear_state IN ('pending', 'failed')
              ORDER BY first_seen_at ASC
-            """
-        )
+            """)
+
 
 def ledger_capture(
     ledger: NotificationLedger | None,
