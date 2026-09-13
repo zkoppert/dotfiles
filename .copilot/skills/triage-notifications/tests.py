@@ -1256,10 +1256,19 @@ def test_clear_url_deduped_threads_clears_when_still_tracked(tmp_path):
         }
     ]
     stats = triage.TriageStats()
+    current_notif = {
+        "id": "2001",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/octocat/Hello-World/pulls/99",
+            "latest_comment_url": "https://api.github.com/repos/octocat/Hello-World/pulls/99/comments",
+        },
+    }
 
     with patch("triage.mark_thread_done") as mark_done, patch(
-        "triage.run_gh", return_value="[]"
-    ):
+        "triage.fetch_notifications", return_value=[current_notif]
+    ), patch("triage.run_gh", return_value="[]"):
         triage.clear_url_deduped_threads(
             todo_path, deduped, stats, my_login="zkoppert"
         )
@@ -1284,10 +1293,19 @@ def test_clear_url_deduped_threads_skips_when_untracked_after_commit(tmp_path):
         }
     ]
     stats = triage.TriageStats()
+    current_notif = {
+        "id": "2001",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/octocat/Hello-World/pulls/99",
+            "latest_comment_url": "https://api.github.com/repos/octocat/Hello-World/pulls/99/comments",
+        },
+    }
 
     with patch("triage.mark_thread_done") as mark_done, patch(
-        "triage.run_gh", return_value="[]"
-    ):
+        "triage.fetch_notifications", return_value=[current_notif]
+    ), patch("triage.run_gh", return_value="[]"):
         triage.clear_url_deduped_threads(
             todo_path, deduped, stats, my_login="zkoppert"
         )
@@ -1319,6 +1337,15 @@ def test_clear_url_deduped_threads_serializes_clear_under_lock(tmp_path):
         }
     ]
     stats = triage.TriageStats()
+    current_notif = {
+        "id": "2001",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/octocat/Hello-World/pulls/99",
+            "latest_comment_url": "https://api.github.com/repos/octocat/Hello-World/pulls/99/comments",
+        },
+    }
     events: list[str] = []
 
     def record_flock(_fileno, op):
@@ -1329,7 +1356,9 @@ def test_clear_url_deduped_threads_serializes_clear_under_lock(tmp_path):
 
     with patch("triage.fcntl.flock", side_effect=record_flock), patch(
         "triage.mark_thread_done", side_effect=lambda tid: events.append("clear")
-    ), patch("triage.run_gh", return_value="[]"):
+    ), patch("triage.fetch_notifications", return_value=[current_notif]), patch(
+        "triage.run_gh", return_value="[]"
+    ):
         triage.clear_url_deduped_threads(
             todo_path, deduped, stats, my_login="zkoppert"
         )
@@ -3006,7 +3035,7 @@ def test_run_comment_history_incomplete_suspends_pending_clear(todo_file):
 
 
 def test_retry_pending_github_clears_keeps_new_direct_comment(todo_file):
-    notif = _notif("review_requested")
+    notif = _notif("subscribed")
     ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
     canonical = triage.web_url(notif)
     ledger.capture(
@@ -3031,7 +3060,16 @@ def test_retry_pending_github_clears_keeps_new_direct_comment(todo_file):
             "updated_at": "2026-07-06T15:01:00Z",
         }
     ]]
-    with patch("triage.run_gh", return_value=json.dumps(comment_pages)), patch(
+    with patch(
+        "triage.fetch_notifications",
+        return_value=[
+            {
+                "id": notif["id"],
+                "reason": notif["reason"],
+                "subject": notif["subject"],
+            }
+        ],
+    ), patch("triage.run_gh", return_value=json.dumps(comment_pages)), patch(
         "triage.mark_thread_done"
     ) as mark_done:
         triage.retry_pending_github_clears(

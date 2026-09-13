@@ -970,47 +970,18 @@ def _notification_activity_boundary(
     return boundary
 
 
-def _comment_probe_notification(
-    url: str | None,
+def _current_notification_for_clearance(
     *,
+    url: str | None,
     thread_id: str | None,
-    reason: str = "",
 ) -> dict[str, Any] | None:
-    if not url:
-        return None
-    api_url: str | None = None
-    subject_type: str | None = None
-    if url.startswith("https://api.github.com/repos/"):
-        api_url = url
-        if "/pulls/" in url:
-            subject_type = "PullRequest"
-        elif "/issues/" in url:
-            subject_type = "Issue"
-    else:
-        parsed = parse_github_url(url)
-        if parsed is None:
-            return None
-        if parsed["kind"] == "pr":
-            subject_type = "PullRequest"
-            api_url = (
-                f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/pulls/{parsed['number']}"
-            )
-        elif parsed["kind"] == "issue":
-            subject_type = "Issue"
-            api_url = (
-                f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/issues/{parsed['number']}"
-            )
-    if api_url is None or subject_type is None:
-        return None
-    return {
-        "id": thread_id or "",
-        "reason": reason,
-        "subject": {
-            "type": subject_type,
-            "url": api_url,
-            "latest_comment_url": f"{api_url}/comments",
-        },
-    }
+    for current in fetch_notifications():
+        current_thread_id = str(current.get("id") or "")
+        if thread_id and current_thread_id == thread_id:
+            return current
+        if url and web_url(current) == url:
+            return current
+    return None
 
 
 def _current_notification_is_clearable(
@@ -1021,8 +992,8 @@ def _current_notification_is_clearable(
     ledger: NotificationLedger | None,
     my_login: str,
 ) -> bool:
-    probe = _comment_probe_notification(url, thread_id=thread_id, reason=reason)
-    if probe is None:
+    current = _current_notification_for_clearance(url=url, thread_id=thread_id)
+    if current is None:
         return False
     comment_since = None
     if ledger is not None and thread_id:
@@ -1030,15 +1001,27 @@ def _current_notification_is_clearable(
             source_id=thread_id,
             canonical_artifact=url,
         )
-    snapshot = shared_comment_notification_snapshot(
-        probe,
+    classification = classify(
+        current,
         my_login=my_login,
-        run_gh=run_gh,
-        since=comment_since,
+        comment_snapshot_fetcher=shared_comment_notification_snapshot,
+        comment_since=comment_since,
     )
-    if snapshot is None:
-        return True
-    return bool(snapshot.history_complete and snapshot.direct is False)
+    if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
+        return False
+    subject = current.get("subject") or {}
+    if subject.get("latest_comment_url"):
+        snapshot = shared_comment_notification_snapshot(
+            current,
+            my_login=my_login,
+            run_gh=run_gh,
+            since=comment_since,
+        )
+        if snapshot is not None and (
+            not snapshot.history_complete or snapshot.direct is True
+        ):
+            return False
+    return True
 
 
 def _is_untouched_q2_review_fallback(

@@ -1733,6 +1733,16 @@ def _todo_has_active_matching_entry_in_data(
 
 
 
+def _current_notification_for_clearance(
+    *,
+    thread_id: str | None,
+) -> dict[str, Any] | None:
+    for current in fetch_notifications():
+        if thread_id and str(current.get("id") or "") == thread_id:
+            return current
+    return None
+
+
 def _comment_notification_still_clearable(
     notif: dict[str, Any],
     *,
@@ -1741,12 +1751,18 @@ def _comment_notification_still_clearable(
     thread_id: str,
     pr_url: str,
 ) -> bool:
-    subject = notif.get("subject") or {}
+    current = _current_notification_for_clearance(thread_id=thread_id or None)
+    if current is None:
+        return False
+    current_reason = str(current.get("reason") or "").lower()
+    if current_reason in {"mention", "assign"}:
+        return False
+    subject = current.get("subject") or {}
     subject_url = str(subject.get("url") or "")
     latest_url = str(subject.get("latest_comment_url") or "")
     if not subject_url and not latest_url:
         return False
-    probe = dict(notif)
+    probe = dict(current)
     probe_subject = dict(subject)
     if not latest_url:
         probe_subject["latest_comment_url"] = f"{subject_url.rstrip('/')}/comments"
@@ -1889,6 +1905,12 @@ def apply_todo_mutations(
     }
 
     for prune_delta in mutations.prunes:
+        if _todo_has_active_matching_entry_in_data(
+            data,
+            thread_id=prune_delta.thread_id,
+            pr_url=prune_delta.pr_url,
+        ):
+            continue
         removed = remove_stale_entries(
             data,
             thread_id=prune_delta.thread_id,
