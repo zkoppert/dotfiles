@@ -267,7 +267,7 @@ def test_comment_with_mention_goes_to_q1():
     assert c.direct_mention is True
 
 
-def test_comment_history_uses_latest_comment_when_complete():
+def test_comment_history_reports_earlier_mention_when_complete():
     notif = _notif("comment")
 
     def fake_run_gh(args, *, timeout=60):
@@ -302,8 +302,8 @@ def test_comment_history_uses_latest_comment_when_complete():
             subject_author_fetcher=lambda _: "someone-else",
         )
 
-    assert c.bucket == triage.BUCKET_DROP
-    assert c.direct_mention is False
+    assert c.bucket == triage.BUCKET_Q1
+    assert c.direct_mention is True
 
 
 def test_comment_history_incomplete_uses_latest_comment_lookup():
@@ -2165,7 +2165,7 @@ def test_run_notifies_for_direct_mention_in_comment(todo_file):
     )
 
 
-def test_run_ignores_direct_mention_followed_by_newer_comment(todo_file):
+def test_run_preserves_direct_mention_followed_by_newer_comment(todo_file):
     notif = _notif(
         "comment",
         last_read_at="2026-07-01T12:00:00Z",
@@ -2198,10 +2198,14 @@ def test_run_ignores_direct_mention_followed_by_newer_comment(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 0
+    assert stats.added_q1 == 1
     assert stats.added_inbox == 0
-    assert stats.dropped == 1
-    notify_mock.assert_not_called()
+    assert stats.dropped == 0
+    notify_mock.assert_called_once_with(
+        "GitHub mention",
+        "Sample PR (zkoppert/example)",
+        "https://github.com/zkoppert/example/pull/42",
+    )
 
 
 def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
@@ -2233,11 +2237,15 @@ def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 0
-    assert stats.added_inbox == 1
+    assert stats.added_q1 == 1
+    assert stats.added_inbox == 0
     data = yaml.safe_load(todo_file.read_text())
-    assert data["inbox"][0]["notification"]["thread_id"] == "1001"
-    notify_mock.assert_not_called()
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_called_once_with(
+        "GitHub mention",
+        "Intermittent test failure: foo (zkoppert/example)",
+        "https://github.com/zkoppert/example/pull/42",
+    )
 
 
 def test_run_preserves_direct_mention_across_pr_issue_and_review_comments(todo_file):
@@ -2278,11 +2286,15 @@ def test_run_preserves_direct_mention_across_pr_issue_and_review_comments(todo_f
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 0
-    assert stats.added_inbox == 1
+    assert stats.added_q1 == 1
+    assert stats.added_inbox == 0
     data = yaml.safe_load(todo_file.read_text())
-    assert data["inbox"][0]["notification"]["thread_id"] == "1001"
-    notify_mock.assert_not_called()
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_called_once_with(
+        "GitHub mention",
+        "Sample PR (zkoppert/example)",
+        "https://github.com/zkoppert/example/pull/42",
+    )
 
 
 def test_run_comment_history_failure_keeps_inbox(todo_file):

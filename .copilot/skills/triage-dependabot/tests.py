@@ -3420,20 +3420,24 @@ def test_run_hands_archived_direct_comment_to_general_triage(
     ]
 
 
-def test_run_keeps_dependabot_comments_in_processing(tmp_path: Path) -> None:
+def test_run_preserves_dependabot_comment_lookup_failure(tmp_path: Path) -> None:
     notif = {
         "id": "thread-comment",
         "reason": "comment",
         "subject": {
             "type": "PullRequest",
             "url": "https://api.github.com/repos/o/r1/pulls/1",
+            "latest_comment_url": "https://api.github.com/repos/o/r1/issues/comments/9",
         },
     }
     pr = _base_pr(number=1, url="https://github.com/o/r1/pull/1")
     args = _make_args(tmp_path)
-    decide_mock = mock.Mock(
-        return_value=td.Decision(td.OUTCOME_SKIP, "already handled", terminal=False)
-    )
+
+    def fake_run_gh(args, *unused_args, **unused_kwargs):
+        path = args[1]
+        if path.endswith("/issues/comments/9"):
+            raise subprocess.TimeoutExpired(cmd=args, timeout=20)
+        raise AssertionError(args)
 
     with mock.patch.object(
         td, "get_my_login", return_value="zkoppert"
@@ -3442,15 +3446,17 @@ def test_run_keeps_dependabot_comments_in_processing(tmp_path: Path) -> None:
     ), mock.patch.object(
         td, "fetch_pr", return_value=pr
     ), mock.patch.object(
-        td, "decide", decide_mock
-    ), mock.patch.object(
+        td, "run_gh", side_effect=fake_run_gh
+    ) as run_gh_mock, mock.patch.object(
         td, "mark_thread_done"
-    ) as mark_done_mock:
+    ) as mark_done_mock, mock.patch.object(
+        td, "decide"
+    ) as decide_mock:
         stats = td.run(args)
 
-    decide_mock.assert_called_once()
+    run_gh_mock.assert_called_once()
+    decide_mock.assert_not_called()
     mark_done_mock.assert_not_called()
-    assert stats.dependabot == 1
     assert stats.skipped == 1
 
 

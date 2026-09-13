@@ -390,21 +390,23 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any] | None:
         return None
 
 
-def notification_comment_mentions_user(notif: dict[str, Any], my_login: str) -> bool:
+def notification_comment_directness(
+    notif: dict[str, Any], my_login: str
+) -> bool | None:
     subject = notif.get("subject") or {}
     latest = str(subject.get("latest_comment_url") or "")
     if not latest:
-        return False
+        return None
     path = latest.replace("https://api.github.com", "")
     try:
         out = run_gh(["api", path], timeout=20)
         data = json.loads(out)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-        logger.warning("notification_comment_mentions_user failed for %s: %s", path, exc)
-        return False
+        logger.warning("notification_comment_directness failed for %s: %s", path, exc)
+        return None
     body = str(data.get("body") or "")
     if not body:
-        return False
+        return None
     pattern = rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
     return re.search(pattern, body, re.IGNORECASE) is not None
 
@@ -2157,10 +2159,10 @@ def run(args: argparse.Namespace) -> TriageStats:
         reason = (notif.get("reason") or "").lower()
         title = str(pr.get("title") or "")
 
-        direct_comment = reason == "comment" and notification_comment_mentions_user(
-            notif, my_login
-        )
-        if reason in {"mention", "assign"} or direct_comment:
+        direct_comment = None
+        if reason == "comment":
+            direct_comment = notification_comment_directness(notif, my_login)
+        if reason in {"mention", "assign"} or direct_comment is True:
             skipped_dep = is_owned_repo(repo) and (
                 skipped_dependency_match(pr) or skipped_repo_match(repo)
             )
@@ -2198,6 +2200,9 @@ def run(args: argparse.Namespace) -> TriageStats:
                     repo=repo,
                 )
                 stats.skipped += 1
+            continue
+        if direct_comment is None:
+            stats.skipped += 1
             continue
 
         if is_archived_repo(repo):

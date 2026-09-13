@@ -679,6 +679,7 @@ def fetch_latest_comment(
     notif: dict[str, Any],
     *,
     my_login: str | None = None,
+    since: str | None = None,
 ) -> tuple[str | None, Any]:
     """Return the latest author and comment body relevant to a notification.
 
@@ -689,6 +690,7 @@ def fetch_latest_comment(
     if not latest:
         return None, None
     path = latest.replace("https://api.github.com", "")
+    since_dt = parse_iso_datetime(since)
 
     def _fetch_comment(api_path: str) -> tuple[str | None, str]:
         out = run_gh(["api", api_path], timeout=20)
@@ -731,23 +733,31 @@ def fetch_latest_comment(
 
     if collected:
         collected.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]))
-        if history_incomplete:
-            try:
-                author, body = _fetch_comment(path)
-            except (
-                subprocess.CalledProcessError,
-                subprocess.TimeoutExpired,
-                json.JSONDecodeError,
-            ) as exc:
-                logger.warning("fetch_latest_comment failed for %s: %s", path, exc)
+        relevant = collected
+        if since_dt is not None:
+            relevant = []
+            for entry in collected:
+                entry_dt = parse_iso_datetime(entry[4].get("updated_at")) or parse_iso_datetime(
+                    entry[4].get("created_at")
+                )
+                if entry_dt is not None and entry_dt > since_dt:
+                    relevant.append(entry)
+        if relevant:
+            for _stamp, _collection_index, _page_index, _comment_index, comment in reversed(
+                relevant
+            ):
+                body = str(comment.get("body") or "")
+                if my_login and mentions_me(body, my_login):
+                    author = (comment.get("user") or {}).get("login")
+                    return author, body
+            if history_incomplete:
                 return None, _COMMENT_HISTORY_INCOMPLETE
-            if my_login and mentions_me(body, my_login):
-                return author, body
+            latest_comment = relevant[-1][4]
+            author = (latest_comment.get("user") or {}).get("login")
+            body = str(latest_comment.get("body") or "")
+            return author, body
+        if history_incomplete or since_dt is not None:
             return None, _COMMENT_HISTORY_INCOMPLETE
-        latest_comment = collected[-1][4]
-        author = (latest_comment.get("user") or {}).get("login")
-        body = str(latest_comment.get("body") or "")
-        return author, body
 
     try:
         return _fetch_comment(path)
@@ -2569,9 +2579,34 @@ def run(args: argparse.Namespace) -> TriageStats:
         repo = str((notif.get("repository") or {}).get("full_name") or "")
         title = str(subject.get("title") or "")
 
+        comment_since = None
+        tracked = None
+        if thread_id and thread_id in seen_ids:
+            tracked = next(
+                (
+                    (section, item)
+                    for section, item in _iter_notification_items_with_sections(data)
+                    if _item_thread_id(item) == thread_id
+                ),
+                None,
+            )
+            if tracked:
+                tracked_notif = tracked[1].get("notification")
+                if isinstance(tracked_notif, dict):
+                    comment_since = str(tracked_notif.get("captured_at") or "") or None
+
+        comment_fetcher = fetch_latest_comment
+        if comment_since:
+            comment_fetcher = lambda n, since=comment_since: fetch_latest_comment(
+                n,
+                my_login=my_login,
+                since=since,
+            )
+
         classification = classify(
             notif,
             my_login=my_login,
+            comment_fetcher=comment_fetcher,
         )
         logger.debug(
             "thread %s → %s (%s)",
@@ -2579,6 +2614,8 @@ def run(args: argparse.Namespace) -> TriageStats:
             classification.bucket,
             classification.reason,
         )
+        if classification.direct_mention and thread_id:
+            direct_mention_thread_ids.add(thread_id)
 
         if thread_id and thread_id in seen_ids:
             tracked = next(
@@ -2619,9 +2656,20 @@ def run(args: argparse.Namespace) -> TriageStats:
                     "in_review",
                 }
             )
+            tracked_direct_ask = bool(
+                tracked_nonterminal
+                and tracked
+                and tracked[0] == "prioritized.q1_do_first"
+                and isinstance(tracked[1].get("notification"), dict)
+                and str(tracked[1]["notification"].get("reason") or "").lower()
+                in {"mention", "assign", "comment"}
+            )
             subject_resolved = classification.bucket == BUCKET_DROP and (
                 "closed" in classification.reason or "merged" in classification.reason
             )
+            if tracked_direct_ask:
+                subject_resolved = False
+                direct_mention_thread_ids.add(thread_id)
             if (
                 tracked_urgent
                 and classification.bucket != BUCKET_Q1
@@ -2810,8 +2858,6 @@ def run(args: argparse.Namespace) -> TriageStats:
             reason=reason,
             repo=repo,
         )
-        if classification.direct_mention and thread_id:
-            direct_mention_thread_ids.add(thread_id)
         if classification.bucket == BUCKET_Q1:
             mutations.add_q1.append(entry)
         elif classification.bucket == BUCKET_Q2:
@@ -2822,7 +2868,7 @@ def run(args: argparse.Namespace) -> TriageStats:
     for item, section, disposition in items_ready_for_clear(data):
         notif_meta = item["notification"]
         thread_id = str(notif_meta["thread_id"])
-        if thread_id in reopened_thread_ids:
+        if thread_id in reopened_thread_ids or thread_id in direct_mention_thread_ids:
             continue
         terminal_canonical_url: str | None = (
             str(notif_meta.get("url") or item.get("link") or "") or None
