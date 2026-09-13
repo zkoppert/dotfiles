@@ -744,19 +744,10 @@ def fetch_latest_comment(
             if my_login and mentions_me(body, my_login):
                 return author, body
             return None, _COMMENT_HISTORY_INCOMPLETE
-        for _stamp, _collection_index, _page_index, _comment_index, comment in reversed(
-            collected
-        ):
-            body = str(comment.get("body") or "")
-            if my_login and mentions_me(body, my_login):
-                author = (comment.get("user") or {}).get("login")
-                return author, body
-        if len(collected) == 1:
-            latest_comment = collected[-1][4]
-            author = (latest_comment.get("user") or {}).get("login")
-            body = str(latest_comment.get("body") or "")
-            return author, body
-        return None, _COMMENT_HISTORY_INCOMPLETE
+        latest_comment = collected[-1][4]
+        author = (latest_comment.get("user") or {}).get("login")
+        body = str(latest_comment.get("body") or "")
+        return author, body
 
     try:
         return _fetch_comment(path)
@@ -813,8 +804,9 @@ def classify(
     title = subject.get("title") or ""
     repo_full = (notif.get("repository") or {}).get("full_name") or ""
 
+    dependabot_bump = subject_type == "pullrequest" and is_dependabot_bump(title)
     dependabot_bump_author = None
-    if subject_type == "pullrequest" and is_dependabot_bump(title):
+    if dependabot_bump:
         dependabot_bump_author = subject_author_fetcher(notif)
 
     if reason == "comment":
@@ -840,6 +832,12 @@ def classify(
             return Classification(
                 BUCKET_DROP,
                 "Dependabot comment - left unread for triage-dependabot",
+                skip_mark_done=True,
+            )
+        if dependabot_bump and dependabot_bump_author is None:
+            return Classification(
+                BUCKET_DROP,
+                "Dependabot bump - author lookup unavailable",
                 skip_mark_done=True,
             )
         state = state_fetcher(notif)
@@ -895,6 +893,12 @@ def classify(
                 "Dependabot version bump - left unread for triage-dependabot",
                 skip_mark_done=True,
             )
+    elif dependabot_bump and dependabot_bump_author is None:
+        return Classification(
+            BUCKET_DROP,
+            "Dependabot bump - author lookup unavailable",
+            skip_mark_done=True,
+        )
 
     # Title-pattern drop: repetitive system-generated noise (flaky-test
     # reports) and routine `Enable Dependabot` config PRs. Mention/assign
@@ -2231,6 +2235,8 @@ def _stale_notification_prune_delta(
     if action != STALE_DROP:
         return None
     notification_reason = (notif.get("reason") or "").lower()
+    if notification_reason in {"mention", "assign", "comment"}:
+        return None
     archive_entry = None
     if parsed.get("kind") == "pr" and notification_reason == "author":
         archive_entry = build_done_archive_entry_from_tracked(entry)

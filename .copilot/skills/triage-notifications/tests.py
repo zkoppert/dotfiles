@@ -213,6 +213,28 @@ def test_review_requested_goes_to_q2_without_author_lookup():
     assert author_lookups == []
 
 
+def test_dependabot_bump_with_unknown_author_is_preserved():
+    notif = _notif(
+        "subscribed",
+        subject={
+            "title": "Bump urllib3 from 2.0.0 to 2.1.0",
+            "url": "https://api.github.com/repos/zkoppert/example/pulls/42",
+            "latest_comment_url": None,
+            "type": "PullRequest",
+        },
+    )
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        state_fetcher=lambda _: "open",
+        comment_fetcher=lambda _: (None, None),
+        subject_author_fetcher=lambda _: None,
+    )
+    assert c.bucket == triage.BUCKET_DROP
+    assert c.skip_mark_done is True
+    assert c.reason == "Dependabot bump - author lookup unavailable"
+
+
 def test_comment_on_closed_thread_drops():
     c = triage.classify(
         _notif("comment"),
@@ -245,7 +267,7 @@ def test_comment_with_mention_goes_to_q1():
     assert c.direct_mention is True
 
 
-def test_comment_history_keeps_earlier_mention_when_complete():
+def test_comment_history_uses_latest_comment_when_complete():
     notif = _notif("comment")
 
     def fake_run_gh(args, *, timeout=60):
@@ -280,8 +302,8 @@ def test_comment_history_keeps_earlier_mention_when_complete():
             subject_author_fetcher=lambda _: "someone-else",
         )
 
-    assert c.bucket == triage.BUCKET_Q1
-    assert c.direct_mention is True
+    assert c.bucket == triage.BUCKET_DROP
+    assert c.direct_mention is False
 
 
 def test_comment_history_incomplete_uses_latest_comment_lookup():
@@ -2143,7 +2165,7 @@ def test_run_notifies_for_direct_mention_in_comment(todo_file):
     )
 
 
-def test_run_preserves_direct_mention_followed_by_newer_comment(todo_file):
+def test_run_ignores_direct_mention_followed_by_newer_comment(todo_file):
     notif = _notif(
         "comment",
         last_read_at="2026-07-01T12:00:00Z",
@@ -2177,9 +2199,8 @@ def test_run_preserves_direct_mention_followed_by_newer_comment(todo_file):
         stats = triage.run(args)
 
     assert stats.added_q1 == 0
-    assert stats.added_inbox == 1
-    data = yaml.safe_load(todo_file.read_text())
-    assert data["inbox"][0]["notification"]["thread_id"] == "1001"
+    assert stats.added_inbox == 0
+    assert stats.dropped == 1
     notify_mock.assert_not_called()
 
 
@@ -3757,6 +3778,33 @@ def test_stale_prune_collector_drops_from_q1_do_first():
         _collect_and_apply_stale_prunes(data, stats)
     assert data["prioritized"]["q1_do_first"] == []
     assert stats.pruned_stale == 1
+
+
+def test_stale_prune_collector_keeps_direct_mention_q1():
+    stats = triage.TriageStats()
+    data = {
+        "inbox": [],
+        "prioritized": {
+            "q1_do_first": [
+                {
+                    "id": "q1-direct",
+                    "source": "github-notification",
+                    "notification": {
+                        "url": "https://github.com/o/r/pull/101",
+                        "thread_id": "thr-101",
+                        "reason": "comment",
+                    },
+                }
+            ]
+        },
+    }
+    with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
+        "triage.mark_thread_done"
+    ) as mark_done_mock:
+        _collect_and_apply_stale_prunes(data, stats)
+    assert len(data["prioritized"]["q1_do_first"]) == 1
+    assert stats.pruned_stale == 0
+    mark_done_mock.assert_not_called()
 
 
 def test_stale_prune_collector_drops_from_q2_schedule():

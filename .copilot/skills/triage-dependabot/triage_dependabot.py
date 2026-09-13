@@ -390,6 +390,25 @@ def fetch_pr(repo: str, number: int) -> dict[str, Any] | None:
         return None
 
 
+def notification_comment_mentions_user(notif: dict[str, Any], my_login: str) -> bool:
+    subject = notif.get("subject") or {}
+    latest = str(subject.get("latest_comment_url") or "")
+    if not latest:
+        return False
+    path = latest.replace("https://api.github.com", "")
+    try:
+        out = run_gh(["api", path], timeout=20)
+        data = json.loads(out)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        logger.warning("notification_comment_mentions_user failed for %s: %s", path, exc)
+        return False
+    body = str(data.get("body") or "")
+    if not body:
+        return False
+    pattern = rf"(?<![A-Za-z0-9])@{re.escape(my_login)}(?![A-Za-z0-9-])"
+    return re.search(pattern, body, re.IGNORECASE) is not None
+
+
 def fetch_repo_labels(repo: str) -> set[str]:
     """Return the set of label names defined on a repository."""
     try:
@@ -2138,7 +2157,10 @@ def run(args: argparse.Namespace) -> TriageStats:
         reason = (notif.get("reason") or "").lower()
         title = str(pr.get("title") or "")
 
-        if reason in {"mention", "assign"}:
+        direct_comment = reason == "comment" and notification_comment_mentions_user(
+            notif, my_login
+        )
+        if reason in {"mention", "assign"} or direct_comment:
             skipped_dep = is_owned_repo(repo) and (
                 skipped_dependency_match(pr) or skipped_repo_match(repo)
             )

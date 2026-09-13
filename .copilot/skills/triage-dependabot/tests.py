@@ -3359,6 +3359,67 @@ def test_run_hands_archived_direct_asks_to_general_triage(
     ]
 
 
+def test_run_hands_archived_direct_comment_to_general_triage(
+    tmp_path: Path,
+) -> None:
+    notif = {
+        "id": "thread-archived-comment",
+        "reason": "comment",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/zkoppert/archived/pulls/73",
+            "latest_comment_url": "https://api.github.com/repos/zkoppert/archived/issues/comments/9",
+        },
+    }
+    pr_url = "https://github.com/zkoppert/archived/pull/73"
+    pr = _base_pr(number=73, url=pr_url)
+    args = _make_args(tmp_path)
+
+    def fake_run_gh(args, *unused_args, **unused_kwargs):
+        path = args[1]
+        if path.endswith("/issues/comments/9"):
+            return json.dumps(
+                {
+                    "body": "Please review, @zkoppert",
+                    "user": {"login": "teammate"},
+                }
+            )
+        raise AssertionError(args)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "run_gh", side_effect=fake_run_gh
+    ) as run_gh_mock, mock.patch.object(
+        td, "is_archived_repo", return_value=True
+    ) as archive_mock, mock.patch.object(
+        td, "mark_thread_done"
+    ) as mark_done_mock:
+        stats = td.run(args)
+
+    archive_mock.assert_not_called()
+    mark_done_mock.assert_not_called()
+    run_gh_mock.assert_called_once()
+    assert stats.dependabot == 0
+    assert stats.skipped == 1
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    rows = ledger._rows(
+        "SELECT classification, worker, clear_state FROM notifications WHERE source_id = ?",
+        ("thread-archived-comment",),
+    )
+    assert rows == [
+        {
+            "classification": "actionable",
+            "worker": "dependabot-direct-ask-handoff",
+            "clear_state": "not_applicable",
+        }
+    ]
+
+
 def test_run_keeps_dependabot_comments_in_processing(tmp_path: Path) -> None:
     notif = {
         "id": "thread-comment",
