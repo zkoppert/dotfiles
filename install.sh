@@ -94,8 +94,9 @@ remove_notification_launch_agent() {
   local plist_name="$1"
   local expected_source="$2"
   local target="$HOME/Library/LaunchAgents/$plist_name"
+  local launchctl_label="${plist_name%.plist}"
   if [ -L "$target" ]; then
-    local linked_target resolved_target
+    local linked_target resolved_target print_output
     linked_target="$(readlink "$target")"
     if [[ "$linked_target" = /* ]]; then
       resolved_target="$linked_target"
@@ -106,12 +107,18 @@ remove_notification_launch_agent() {
       echo "⚠ $target points to $resolved_target - skipping"
       return
     fi
-    if ! launchctl unload "$target" >/dev/null 2>&1; then
-      echo "⚠ failed to unload $target - skipping removal"
+    if launchctl unload "$target" >/dev/null 2>&1; then
+      rm -f "$target"
+      echo "✓ Removed $plist_name launch agent symlink; it stays unloaded until a later attended activation step"
       return
     fi
-    rm -f "$target"
-    echo "✓ Removed $plist_name launch agent symlink; it stays unloaded until a later attended activation step"
+    print_output="$(launchctl print "gui/$(id -u)/$launchctl_label" 2>&1)" || true
+    if [[ "$print_output" == *"Could not find service"* ]]; then
+      rm -f "$target"
+      echo "✓ Removed $plist_name launch agent symlink; it stays unloaded until a later attended activation step"
+      return
+    fi
+    echo "⚠ failed to unload $target - skipping removal"
   elif [ -e "$target" ]; then
     echo "⚠ $target exists and is not a symlink - skipping"
   fi

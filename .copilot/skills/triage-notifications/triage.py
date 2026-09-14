@@ -3054,23 +3054,6 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
                 stats.left_for_dependabot += 1
                 terminal_disposition = None
                 queue_clear = False
-                if (
-                    tracked_terminal_item is not None
-                    and notification_has_new_activity(
-                        notif,
-                        tracked_terminal_item[1],
-                        allow_reason_change_without_timestamp=False,
-                    )
-                    and ledger is not None
-                    and thread_id
-                    and not ledger.readonly
-                ):
-                    ledger.reopen_actionable(
-                        source_id=thread_id,
-                        canonical_artifact=canonical_url,
-                        reason=reason or "dependabot_handoff",
-                        tracker_section=tracker_section or "prioritized.q1_do_first",
-                    )
             else:
                 terminal_disposition = (
                     "completed"

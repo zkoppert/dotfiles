@@ -428,6 +428,44 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(triage_target.resolve(), foreign_target.resolve())
         self.assertFalse(dependabot_target.exists())
 
+    def test_notification_jobs_remove_when_absent_service_is_confirmed(self) -> None:
+        launch_agents = self.repo / "LaunchAgents"
+        launch_agents.mkdir()
+        triage_plist = launch_agents / "com.zkoppert.notification-triage.plist"
+        triage_plist.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
+        dependabot_plist = launch_agents / "com.zkoppert.triage-dependabot.plist"
+        dependabot_plist.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
+        bin_dir = self.repo / "bin"
+        bin_dir.mkdir()
+        for command in ("notification-triage", "triage-dependabot"):
+            wrapper = bin_dir / command
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+        launchctl = self.fake_bin / "launchctl"
+        launchctl.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "unload" ]; then\n'
+            "  exit 1\n"
+            "fi\n"
+            'if [ "$1" = "print" ]; then\n'
+            "  printf '%s\\n' \"Could not find service \\\"$2\\\"\"\n"
+            "  exit 1\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        launchctl.chmod(0o755)
+        triage_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.notification-triage.plist"
+        triage_target.parent.mkdir(parents=True)
+        triage_target.symlink_to(triage_plist)
+        dependabot_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.triage-dependabot.plist"
+        dependabot_target.symlink_to(dependabot_plist)
+
+        self.run_installer()
+
+        self.assertFalse(triage_target.exists())
+        self.assertFalse(dependabot_target.exists())
+
     def test_notification_jobs_stay_linked_when_unload_cannot_be_verified(self) -> None:
         launch_agents = self.repo / "LaunchAgents"
         launch_agents.mkdir()
