@@ -1479,6 +1479,7 @@ def _safe_mark_thread_done(
     canonical_artifact: str | None = None,
     notif: dict[str, Any] | None = None,
     my_login: str | None = None,
+    todo_file: Path | None = None,
 ) -> bool:
     """Best-effort wrapper around ``mark_thread_done`` for post-action cleanup.
 
@@ -1500,6 +1501,21 @@ def _safe_mark_thread_done(
     """
     if not thread_id:
         return True
+    if todo_file is not None:
+        try:
+            with _todo_write_lock(todo_file):
+                data = load_todo(todo_file)
+                if _todo_has_active_direct_ownership_in_data(
+                    data, thread_id=thread_id, pr_url=canonical_artifact
+                ):
+                    logger.info(
+                        "skipping mark-done for %s because durable todo ownership is still active",
+                        context,
+                    )
+                    return False
+        except (OSError, FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+            stats.errors.append(f"failed to reload todo before mark-done for {context}: {exc}")
+            return False
     if notif is not None and my_login:
         if not _comment_notification_still_clearable(
             notif,
@@ -1770,6 +1786,27 @@ def _todo_has_active_matching_entry_in_data(
     return False
 
 
+def _todo_has_active_direct_ownership_in_data(
+    data: dict[str, Any],
+    *,
+    thread_id: str | None,
+    pr_url: str | None,
+) -> bool:
+    if not thread_id and not pr_url:
+        return False
+    for item in _active_todo_items(data):
+        notif = item.get("notification")
+        if not isinstance(notif, dict):
+            continue
+        if thread_id and str(notif.get("thread_id") or "") != thread_id:
+            continue
+        if pr_url and notif.get("url") != pr_url:
+            continue
+        if _notification_is_direct_ask(notif):
+            return True
+    return False
+
+
 def _active_todo_items(data: dict[str, Any]) -> list[Any]:
     items: list[Any] = []
     for key in ("inbox", "in_progress", "blocked", "in_review"):
@@ -1891,7 +1928,7 @@ def _clear_dependabot_notification(
     try:
         with _todo_write_lock(args.todo_file):
             data = load_todo(args.todo_file)
-            if _todo_has_active_matching_entry_in_data(
+            if _todo_has_active_direct_ownership_in_data(
                 data, thread_id=thread_id, pr_url=pr_url
             ):
                 return False
@@ -1917,6 +1954,7 @@ def _clear_dependabot_notification(
                     canonical_artifact=pr_url,
                     notif=notif,
                     my_login=my_login,
+                    todo_file=args.todo_file,
                 ):
                     return False
                 stats.stale_removed += _cleanup_stale_entries(
@@ -1949,6 +1987,7 @@ def _clear_dependabot_notification(
                 canonical_artifact=pr_url,
                 notif=notif,
                 my_login=my_login,
+                    todo_file=args.todo_file,
             ):
                 return False
             removed = remove_stale_entries(
@@ -2606,6 +2645,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     canonical_artifact=pr_url,
                     notif=notif,
                     my_login=my_login,
+                    todo_file=args.todo_file,
                 ):
                     _record_stale_cleanup(
                         mutations,
@@ -2708,6 +2748,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         canonical_artifact=pr_url,
                         notif=notif,
                         my_login=my_login,
+                    todo_file=args.todo_file,
                     ):
                         _record_stale_cleanup(
                             mutations,
@@ -3012,6 +3053,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     canonical_artifact=pr_url,
                     notif=notif,
                     my_login=my_login,
+                    todo_file=args.todo_file,
                 ):
                     _record_stale_cleanup(
                         mutations,
@@ -3169,6 +3211,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     canonical_artifact=pr_url,
                     notif=notif,
                     my_login=my_login,
+                    todo_file=args.todo_file,
                 ):
                     _record_stale_cleanup(
                         mutations,
@@ -3283,6 +3326,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     canonical_artifact=pr_url,
                     notif=notif,
                     my_login=my_login,
+                    todo_file=args.todo_file,
                 ):
                     _record_stale_cleanup(
                         mutations,
@@ -3354,6 +3398,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         canonical_artifact=pr_url,
                         notif=notif,
                         my_login=my_login,
+                    todo_file=args.todo_file,
                     ):
                         _record_stale_cleanup(
                             mutations,

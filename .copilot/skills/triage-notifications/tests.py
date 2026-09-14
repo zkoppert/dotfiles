@@ -2231,6 +2231,7 @@ def test_run_keeps_existing_q2_review_when_direct_comment_arrives(todo_file, rea
             ]
         ),
         "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
+        "/repos/zkoppert/example/pulls/42/reviews": json.dumps([]),
     }
     delete_calls = []
 
@@ -2240,12 +2241,15 @@ def test_run_keeps_existing_q2_review_when_direct_comment_arrives(todo_file, rea
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         return _gh_returns(responses)(cmd, *args, **kwargs)
 
-    with patch("triage.subprocess.run", side_effect=fake_run):
+    with patch("triage.subprocess.run", side_effect=fake_run), patch(
+        "triage.utcnow_iso", return_value="2026-07-02T14:00:00Z"
+    ):
         triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
 
     updated = yaml.safe_load(todo_file.read_text())
     assert updated["prioritized"]["q2_schedule"] == []
     assert updated["prioritized"]["q1_do_first"][0]["id"] == "old"
+    assert updated["prioritized"]["q1_do_first"][0]["notification"]["direct_ask"] is True
     assert delete_calls == []
 
 
@@ -2348,6 +2352,7 @@ def test_run_preserves_unresolved_direct_ask_when_reason_changes(
             "thread_id": "1001",
             "reason": tracked_reason,
             "captured_at": "2026-07-01T12:00:00Z",
+            **({"direct_ask": True} if tracked_reason == "comment" else {}),
         },
     }
     todo_file.write_text(
@@ -2381,6 +2386,8 @@ def test_run_preserves_unresolved_direct_ask_when_reason_changes(
 
     updated = yaml.safe_load(todo_file.read_text())
     assert updated["prioritized"]["q1_do_first"] == [item]
+    if tracked_reason == "comment":
+        assert updated["prioritized"]["q1_do_first"][0]["notification"]["direct_ask"] is True
     assert updated["prioritized"]["q2_schedule"] == []
     assert delete_calls == []
 
@@ -2793,6 +2800,7 @@ def test_run_preserves_direct_mention_followed_by_newer_comment(todo_file):
             ]
         ),
         "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
+        "/repos/zkoppert/example/pulls/42/reviews": json.dumps([]),
     }
 
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
@@ -2801,14 +2809,17 @@ def test_run_preserves_direct_mention_followed_by_newer_comment(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 0
+    assert stats.added_q1 == 1
     assert stats.added_inbox == 0
     assert stats.dropped == 0
     assert stats.unread == 0
     data = yaml.safe_load(todo_file.read_text())
-    assert data["inbox"] == []
-    assert data["prioritized"]["q1_do_first"] == []
-    notify_mock.assert_not_called()
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["direct_ask"] is True
+    notify_mock.assert_called_once_with(
+        "GitHub mention",
+        "Sample PR (zkoppert/example)",
+        "https://github.com/zkoppert/example/pull/42",
+    )
 
 
 def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
@@ -2833,6 +2844,7 @@ def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
             ]
         ),
         "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
+        "/repos/zkoppert/example/pulls/42/reviews": json.dumps([]),
     }
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
         "triage.macos_notify"
@@ -7525,6 +7537,11 @@ def test_preview_backfill_ledger_reconciles_tracker_rows(tmp_path: Path, monkeyp
     notif["subject"]["latest_comment_url"] = "https://api.github.com/repos/o/r/issues/comments/1"
     monkeypatch.setattr(triage, "get_my_login", lambda: "zkoppert")
     monkeypatch.setattr(triage, "fetch_notifications", lambda: [notif])
+    monkeypatch.setattr(
+        triage,
+        "shared_comment_notification_snapshot",
+        lambda *args, **kwargs: triage.CommentNotificationSnapshot(None, None, False, True, None),
+    )
     monkeypatch.setattr(
         triage,
         "classify",

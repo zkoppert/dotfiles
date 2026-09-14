@@ -431,6 +431,7 @@ class EscalationDelta:
     reopen_terminal: bool = False
     reason: str = ""
     captured_at: str = ""
+    direct_ask: bool = False
 
 
 @dataclass
@@ -1009,6 +1010,49 @@ def _current_notification_for_clearance(
     return None
 
 
+def _notification_comment_snapshot(
+    notif: dict[str, Any],
+    *,
+    data: dict[str, Any],
+    ledger: NotificationLedger | None,
+    my_login: str,
+) -> tuple[str, str, CommentNotificationSnapshot | None]:
+    thread_id = str(notif.get("id") or "")
+    canonical_url = web_url(notif)
+    tracked = None
+    if thread_id:
+        tracked = next(
+            (
+                (section, item)
+                for section, item in _iter_notification_items_with_sections(data)
+                if _item_thread_id(item) == thread_id
+            ),
+            None,
+        )
+    canonical_tracked = (
+        None
+        if tracked is not None
+        else _find_todo_item_by_canonical_url(data, canonical_url)
+    )
+    comment_since = None
+    if ledger is not None and thread_id:
+        comment_since = ledger.comment_watermark(
+            source_id=thread_id,
+            canonical_artifact=canonical_url,
+        )
+    if comment_since is None and tracked is not None:
+        comment_since = _bootstrap_comment_since(notif, tracked[1])
+    if comment_since is None and canonical_tracked is not None:
+        comment_since = _bootstrap_comment_since(notif, canonical_tracked[1])
+    snapshot = shared_comment_notification_snapshot(
+        notif,
+        my_login=my_login,
+        run_gh=run_gh,
+        since=comment_since,
+    )
+    return thread_id, canonical_url, snapshot
+
+
 def _current_notification_is_clearable(
     *,
     url: str | None,
@@ -1087,17 +1131,10 @@ def _is_untouched_q2_review_fallback(
     return str(notification.get("reason") or "").lower() == "review_requested"
 
 
-def _notification_is_direct_ask(
-    notification: dict[str, Any],
-    *,
-    section: str | None = None,
-) -> bool:
+def _notification_is_direct_ask(notification: dict[str, Any]) -> bool:
     if notification.get("direct_ask"):
         return True
-    reason = str(notification.get("reason") or "").lower()
-    if reason in {"mention", "assign"}:
-        return True
-    return reason == "comment" and section == "prioritized.q1_do_first"
+    return str(notification.get("reason") or "").lower() in {"mention", "assign"}
 
 
 def notification_has_new_activity(
@@ -1456,8 +1493,11 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
         not in {"", "pending", "not_started"}
     ):
         return False
+    notif = candidate.get("notification")
+    if isinstance(notif, dict) and delta.direct_ask:
+        notif["direct_ask"] = True
     if quadrant == "q1_do_first" and not delta.reopen_terminal:
-        return False
+        return bool(delta.direct_ask and isinstance(notif, dict))
     if candidate_section in {
         "inbox",
         "done",
@@ -1482,7 +1522,6 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
     )
     if delta.reopen_terminal:
         candidate.pop("completed", None)
-    notif = candidate.get("notification")
     if isinstance(notif, dict):
         if delta.escalated_at:
             notif["review_requested_escalated_at"] = delta.escalated_at
@@ -2368,7 +2407,7 @@ def _stale_notification_prune_delta(
     if action != STALE_DROP:
         return None
     notification_reason = (notif.get("reason") or "").lower()
-    if _notification_is_direct_ask(notif, section=section):
+    if _notification_is_direct_ask(notif):
         return None
     archive_entry = None
     if parsed.get("kind") == "pr" and notification_reason == "author":
@@ -2505,8 +2544,12 @@ def reconcile_tracker_rows_to_ledger(
     ledger: NotificationLedger | None,
     dry_run: bool,
     stats: TriageStats,
+    deferred_thread_ids: set[str] | None = None,
+    deferred_canonical_artifacts: set[str] | None = None,
 ) -> None:
     """Mirror the current tracker view into the durable notification ledger."""
+    deferred_thread_ids = deferred_thread_ids or set()
+    deferred_canonical_artifacts = deferred_canonical_artifacts or set()
     for section, item in _iter_notification_items_with_sections(data):
         notif = item.get("notification")
         if not isinstance(notif, dict):
@@ -2514,6 +2557,10 @@ def reconcile_tracker_rows_to_ledger(
         thread_id = str(notif.get("thread_id") or "") or None
         canonical = str(notif.get("url") or item.get("link") or "") or None
         if not thread_id and not canonical:
+            continue
+        if (thread_id and thread_id in deferred_thread_ids) or (
+            canonical and canonical in deferred_canonical_artifacts
+        ):
             continue
         reason = str(notif.get("reason") or "").lower()
         repo = str(notif.get("repo") or "")
@@ -2800,11 +2847,28 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
         record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
         return stats
 
+    deferred_thread_ids: set[str] = set()
+    deferred_canonical_artifacts: set[str] = set()
+    for notif in notifications:
+        thread_id, canonical_url, snapshot = _notification_comment_snapshot(
+            notif,
+            data=data,
+            ledger=ledger,
+            my_login=my_login,
+        )
+        if snapshot is not None and not snapshot.history_complete:
+            if thread_id:
+                deferred_thread_ids.add(thread_id)
+            if canonical_url:
+                deferred_canonical_artifacts.add(canonical_url)
+
     reconcile_tracker_rows_to_ledger(
         data,
         ledger=ledger,
         dry_run=False,
         stats=stats,
+        deferred_thread_ids=deferred_thread_ids,
+        deferred_canonical_artifacts=deferred_canonical_artifacts,
     )
 
     seen_ids = existing_thread_ids(data)
@@ -2971,11 +3035,28 @@ def run(args: argparse.Namespace) -> TriageStats:
         record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
         return stats
 
+    deferred_thread_ids: set[str] = set()
+    deferred_canonical_artifacts: set[str] = set()
+    for notif in notifications:
+        thread_id, canonical_url, snapshot = _notification_comment_snapshot(
+            notif,
+            data=data,
+            ledger=ledger,
+            my_login=my_login,
+        )
+        if snapshot is not None and not snapshot.history_complete:
+            if thread_id:
+                deferred_thread_ids.add(thread_id)
+            if canonical_url:
+                deferred_canonical_artifacts.add(canonical_url)
+
     reconcile_tracker_rows_to_ledger(
         data,
         ledger=ledger,
         dry_run=args.dry_run,
         stats=stats,
+        deferred_thread_ids=deferred_thread_ids,
+        deferred_canonical_artifacts=deferred_canonical_artifacts,
     )
 
     seen_ids = existing_thread_ids(data)
@@ -3109,7 +3190,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 tracked_nonterminal
                 and tracked
                 and isinstance(tracked_notification, dict)
-                and _notification_is_direct_ask(tracked_notification, section=tracked[0])
+                and _notification_is_direct_ask(tracked_notification)
             )
             subject_resolved = classification.bucket == BUCKET_DROP and (
                 "closed" in classification.reason or "merged" in classification.reason
@@ -3148,6 +3229,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         ),
                         reason=reason,
                         captured_at=str(notif.get("updated_at") or utcnow_iso()),
+                        direct_ask=classification.direct_mention,
                     )
                 )
                 if tracker_terminal_disposition(tracked[1], tracked[0]):
