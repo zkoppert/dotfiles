@@ -1507,6 +1507,29 @@ def test_mark_thread_done_dry_run() -> None:
     mocked.assert_not_called()
 
 
+def test_run_dry_run_skips_health_writes(tmp_path: Path) -> None:
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([]),
+    }
+
+    def fake_run(cmd, *args, **kwargs):
+        joined = " ".join(cmd)
+        if "/notifications?all=true" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout=responses["/notifications?all=true"], stderr="")
+        if "/user" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout=responses["/user"], stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with mock.patch.object(td.subprocess, "run", side_effect=fake_run):
+        args = _make_args(tmp_path, dry_run=True)
+        stats = td.run(args)
+
+    assert stats.fetched == 0
+    assert ledger.health_snapshot(worker="triage-dependabot") is None
+
+
 def test_mark_thread_done_uses_delete() -> None:
     with mock.patch.object(td, "run_gh") as mocked:
         td.mark_thread_done("t1", dry_run=False)

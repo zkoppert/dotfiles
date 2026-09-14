@@ -37,6 +37,7 @@ import fcntl
 import json
 import logging
 import os
+import sqlite3
 import re
 import subprocess
 import sys
@@ -2396,7 +2397,13 @@ def run(args: argparse.Namespace) -> TriageStats:
     """Main entrypoint. Returns stats so tests can assert behaviour."""
     stats = TriageStats()
     ledger: NotificationLedger | None = None
-    if not args.dry_run:
+    if args.dry_run:
+        if DEFAULT_LEDGER_PATH.exists():
+            try:
+                ledger = NotificationLedger(DEFAULT_LEDGER_PATH, readonly=True)
+            except (OSError, sqlite3.OperationalError) as exc:
+                stats.errors.append(f"failed to open read-only ledger: {exc}")
+    else:
         ledger = NotificationLedger(DEFAULT_LEDGER_PATH)
     try:
         my_login = get_my_login()
@@ -2935,35 +2942,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 stats.skipped += 1
                 continue
             if decision.outcome == OUTCOME_MERGE:
-                def merge_guard_reason() -> str | None:
-                    guarded_notif = _current_notification_for_clearance(
-                        thread_id=thread_id or None
-                    )
-                    if thread_id and guarded_notif is None:
-                        return f"notification disappeared before action for {pr_url}"
-                    if thread_id and not _comment_notification_still_clearable(
-                        guarded_notif or current_notif,
-                        ledger=ledger,
-                        my_login=my_login,
-                        thread_id=thread_id,
-                        pr_url=pr_url,
-                    ):
-                        return "notification no longer clearable"
-                    if ledger is not None and ledger.has_active_actionable_notification(
-                        source_id=thread_id or None,
-                        canonical_artifact=pr_url,
-                    ):
-                        return "preserving active actionable notification"
-                    try:
-                        action_todo = load_todo(args.todo_file)
-                    except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
-                        return f"failed to reload todo before action for {pr_url}: {exc}"
-                    if _todo_has_active_matching_entry_in_data(
-                        action_todo, thread_id=thread_id or None, pr_url=pr_url
-                    ):
-                        return "preserving active todo ownership"
-                    return None
-
                 try:
                     action_todo = load_todo(args.todo_file)
                 except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
@@ -2989,7 +2967,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     action_guard=mutation_guard_reason,
                 )
                 if not merged:
-                    merge_guard_block = merge_guard_reason()
+                    merge_guard_block = mutation_guard_reason()
                     if merge_guard_block is not None:
                         if merge_guard_block.startswith("failed to reload todo"):
                             stats.errors.append(merge_guard_block)
@@ -3146,7 +3124,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     action_guard=mutation_guard_reason,
                 )
                 if not merged:
-                    merge_guard_block = merge_guard_reason()
+                    merge_guard_block = mutation_guard_reason()
                     if merge_guard_block is not None:
                         if merge_guard_block.startswith("failed to reload todo"):
                             stats.errors.append(merge_guard_block)

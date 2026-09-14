@@ -368,16 +368,18 @@ def comment_notification_snapshot(
 class NotificationLedger:
     """Durable local ledger for notification lifecycle state."""
 
-    def __init__(self, path: Path = DEFAULT_LEDGER_FILE):
+    def __init__(self, path: Path = DEFAULT_LEDGER_FILE, *, readonly: bool = False):
         self.path = path
-        self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        if self.path == DEFAULT_LEDGER_FILE:
-            self.path.parent.chmod(0o700)
-        fd = os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600)
-        os.close(fd)
-        self._secure_files()
-        self._ensure_schema()
-        self._secure_files()
+        self.readonly = readonly
+        if not self.readonly:
+            self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            if self.path == DEFAULT_LEDGER_FILE:
+                self.path.parent.chmod(0o700)
+            fd = os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+            self._secure_files()
+            self._ensure_schema()
+            self._secure_files()
 
     def _secure_files(self) -> None:
         for path in (
@@ -392,7 +394,10 @@ class NotificationLedger:
                 pass
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=30)
+        if self.readonly:
+            conn = sqlite3.connect(f"file:{self.path}?mode=ro", timeout=30, uri=True)
+        else:
+            conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -679,16 +684,43 @@ class NotificationLedger:
     def reopen_actionable(
         self,
         *,
-        source_id: str,
+        source_id: str | None,
+        canonical_artifact: str | None = None,
         reason: str,
         tracker_section: str,
     ) -> None:
+        canonical_artifact = (
+            normalize_github_url(canonical_artifact) or canonical_artifact
+        )
         now = utcnow_iso()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row_id = self._find_row_id(
+                conn,
+                source_id=source_id,
+                canonical_artifact=canonical_artifact,
+            )
+            if row_id is None and canonical_artifact:
+                row = conn.execute(
+                    """
+                    SELECT id
+                      FROM notifications
+                     WHERE canonical_artifact = ?
+                       AND (source_id IS NULL OR source_id = '')
+                    """,
+                    (canonical_artifact,),
+                ).fetchone()
+                if row is not None:
+                    row_id = int(row["id"])
+            if row_id is None:
+                conn.rollback()
+                return
             conn.execute(
                 """
                 UPDATE notifications
-                   SET classification = 'actionable',
+                   SET source_id = COALESCE(NULLIF(source_id, ''), ?),
+                       canonical_artifact = COALESCE(?, canonical_artifact),
+                       classification = 'actionable',
                        reason = ?,
                        tracker_section = ?,
                        terminal_disposition = NULL,
@@ -699,9 +731,9 @@ class NotificationLedger:
                        last_clear_error = NULL,
                        last_seen_at = ?,
                        classified_at = ?
-                 WHERE source_id = ?
+                 WHERE id = ?
                 """,
-                (reason, tracker_section, now, now, source_id),
+                (source_id, canonical_artifact, reason, tracker_section, now, now, row_id),
             )
             conn.commit()
 
@@ -1193,6 +1225,7 @@ def ledger_capture(
         ):
             ledger.reopen_actionable(
                 source_id=thread_id,
+                canonical_artifact=canonical_artifact,
                 reason=reason or "actionable",
                 tracker_section=tracker_section,
             )
@@ -1239,7 +1272,7 @@ def record_worker_health_snapshot(
     worker: str,
     stats: Any,
 ) -> None:
-    if ledger is None:
+    if ledger is None or ledger.readonly:
         return
     metrics = ledger.health_metrics()
     now = utcnow_iso()

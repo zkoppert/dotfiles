@@ -3353,10 +3353,59 @@ def test_run_dry_run_does_not_write(todo_file):
     ) as notify_mock:
         args = triage.parse_args(["--todo-file", str(todo_file), "--dry-run"])
         stats = triage.run(args)
-    assert stats.added_q1 == 1
-    assert stats.added_q2 == 0
     assert todo_file.read_text() == before
     assert not triage.DEFAULT_LEDGER_PATH.exists()
+    notify_mock.assert_not_called()
+
+
+def test_run_dry_run_uses_existing_read_only_ledger_watermark(todo_file):
+    before = todo_file.read_text()
+    ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
+    notif = _notif("comment")
+    ledger.record_comment_watermark(
+        source_id=notif["id"],
+        canonical_artifact=triage.web_url(notif),
+        comment_watermark=json.dumps(
+            {"stream": "issue_comments", "ts": "2026-07-01T10:00:00Z", "id": 10},
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+        "/repos/zkoppert/example/pulls/42": json.dumps({"state": "open"}),
+        "/repos/zkoppert/example/issues/42/comments": json.dumps(
+            [
+                [
+                    {
+                        "id": 10,
+                        "user": {"login": "teammate"},
+                        "body": "Could you investigate this, @zkoppert?",
+                        "updated_at": "2026-07-01T10:00:00Z",
+                    },
+                    {
+                        "id": 11,
+                        "user": {"login": "teammate"},
+                        "body": "Thanks for checking.",
+                        "updated_at": "2026-07-01T10:00:01Z",
+                    },
+                ]
+            ]
+        ),
+        "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
+        "/repos/zkoppert/example/pulls/42/reviews": json.dumps([]),
+    }
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file), "--dry-run"])
+        stats = triage.run(args)
+
+    assert stats.added_q1 == 0
+    assert stats.dropped == 1
+    assert todo_file.read_text() == before
+    assert ledger.health_snapshot(worker="notification-triage") is None
     notify_mock.assert_not_called()
 
 
@@ -4849,7 +4898,7 @@ def test_stale_prune_collector_keeps_direct_mention_q1():
                     "notification": {
                         "url": "https://github.com/o/r/pull/101",
                         "thread_id": "thr-101",
-                        "reason": "comment",
+                        "reason": "mention",
                     },
                 }
             ]
@@ -8199,4 +8248,64 @@ def test_reconcile_tracker_rows_to_ledger_reopens_terminal_rows(todo_file: Path)
         }
     ]
     assert "terminal_disposition" not in data["inbox"][0]["notification"]
+    assert "terminal_recorded_at" not in data["inbox"][0]["notification"]
+
+
+def test_reconcile_tracker_rows_to_ledger_reopens_canonical_only_rows(todo_file: Path):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/2"
+    ledger.capture(
+        source_id=None,
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_id=None,
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    notification = {
+        "thread_id": "",
+        "url": artifact,
+        "reason": "subscribed",
+        "repo": "o/r",
+        "captured_at": "2026-07-02T12:00:00Z",
+        "terminal_recorded_at": "2026-07-01T12:00:00Z",
+        "terminal_disposition": "irrelevant",
+    }
+    data = {
+        "inbox": [
+            {
+                "id": "active-1",
+                "title": "Active notification",
+                "source": "github-notification",
+                "notification": notification,
+            }
+        ],
+        "prioritized": {"q1_do_first": [], "q2_schedule": [], "q3_delegate": [], "q4_eliminate": []},
+        "done": [],
+    }
+
+    triage.reconcile_tracker_rows_to_ledger(
+        data,
+        ledger=ledger,
+        dry_run=False,
+        stats=triage.TriageStats(),
+    )
+
+    rows = ledger._rows(
+        "SELECT terminal_disposition, terminal_recorded_at, clear_state FROM notifications WHERE canonical_artifact = ?",
+        (artifact,),
+    )
+    assert rows == [
+        {
+            "terminal_disposition": None,
+            "terminal_recorded_at": None,
+            "clear_state": "not_applicable",
+        }
+    ]
+    assert "terminal_disposition" not in data["inbox"][0]["notification"]
+    assert "terminal_recorded_at" not in data["inbox"][0]["notification"]
     assert "terminal_recorded_at" not in data["inbox"][0]["notification"]

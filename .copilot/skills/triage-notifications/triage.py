@@ -34,6 +34,7 @@ import contextlib
 import datetime
 import fcntl
 import json
+import sqlite3
 import logging
 import os
 import re
@@ -1614,6 +1615,7 @@ def apply_todo_mutations(
                 reopened_threads.append(
                     {
                         "thread_id": thread_id or "",
+                        "canonical_artifact": str(notification.get("url") or item.get("link") or "") or "",
                         "reason": "review_requested",
                         "tracker_section": "prioritized.q2_schedule",
                     }
@@ -1671,6 +1673,7 @@ def apply_todo_mutations(
             reopened_threads.append(
                 {
                     "thread_id": thread_id or "",
+                    "canonical_artifact": str(notification.get("url") or item.get("link") or "") or "",
                     "reason": str(notification.get("reason") or ""),
                     "tracker_section": "inbox",
                 }
@@ -2347,7 +2350,7 @@ def _stale_notification_prune_delta(
     if action != STALE_DROP:
         return None
     notification_reason = (notif.get("reason") or "").lower()
-    if section == "prioritized.q1_do_first":
+    if section == "prioritized.q1_do_first" and notification_reason in {"mention", "assign"}:
         return None
     archive_entry = None
     if parsed.get("kind") == "pr" and notification_reason == "author":
@@ -2556,6 +2559,7 @@ def reconcile_tracker_rows_to_ledger(
             _reset_terminal_notification(notif)
             ledger.reopen_actionable(
                 source_id=thread_id,
+                canonical_artifact=canonical,
                 reason=reason,
                 tracker_section=section,
             )
@@ -2854,6 +2858,13 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
                 stats.left_for_dependabot += 1
                 terminal_disposition = None
                 queue_clear = False
+                if ledger is not None and thread_id and not ledger.readonly:
+                    ledger.reopen_actionable(
+                        source_id=thread_id,
+                        canonical_artifact=canonical_url,
+                        reason=reason or "dependabot_handoff",
+                        tracker_section=tracker_section or "prioritized.q1_do_first",
+                    )
             else:
                 terminal_disposition = (
                     "completed"
@@ -2905,7 +2916,13 @@ def run(args: argparse.Namespace) -> TriageStats:
     if args.dry_run and args.backfill:
         return preview_backfill_ledger(args)
     ledger: NotificationLedger | None = None
-    if not args.dry_run:
+    if args.dry_run:
+        if DEFAULT_LEDGER_PATH.exists():
+            try:
+                ledger = NotificationLedger(DEFAULT_LEDGER_PATH, readonly=True)
+            except (OSError, sqlite3.OperationalError) as exc:
+                stats.errors.append(f"failed to open read-only ledger: {exc}")
+    else:
         ledger = NotificationLedger(DEFAULT_LEDGER_PATH)
 
     try:
@@ -2991,15 +3008,14 @@ def run(args: argparse.Namespace) -> TriageStats:
             since=comment_since,
         )
         if (
-            reason == "comment"
-            and comment_snapshot is not None
+            comment_snapshot is not None
             and not comment_snapshot.history_complete
             and comment_snapshot.direct is not True
             and not dependabot_bump
         ):
             if thread_id:
                 protected_actionable_thread_ids.add(thread_id)
-            if ledger is not None and thread_id:
+            if ledger is not None and thread_id and not ledger.readonly:
                 ledger.suspend_pending_clear(
                     source_id=thread_id,
                     canonical_artifact=canonical_url,
@@ -3385,73 +3401,101 @@ def run(args: argparse.Namespace) -> TriageStats:
         terminal_canonical_url: str | None = (
             str(notif_meta.get("url") or item.get("link") or "") or None
         )
-        if not _current_notification_is_clearable(
-            url=terminal_canonical_url,
-            thread_id=thread_id,
-            reason=str(notif_meta.get("reason") or ""),
-            ledger=ledger,
-            my_login=my_login,
-        ):
+        try:
+            with _todo_write_lock(args.todo_file):
+                live_data = load_todo(args.todo_file)
+                live_match = next(
+                    (
+                        (live_section, live_item)
+                        for live_section, live_item in _iter_notification_items_with_sections(live_data)
+                        if (
+                            str(live_item.get("id") or "") == str(item.get("id") or "")
+                            or _item_thread_id(live_item) == thread_id
+                        )
+                    ),
+                    None,
+                )
+                if live_match is None:
+                    continue
+                live_section, live_item = live_match
+                if tracker_terminal_disposition(live_item, live_section) != disposition:
+                    continue
+                live_notif = live_item.get("notification")
+                if not isinstance(live_notif, dict):
+                    continue
+                if not _current_notification_is_clearable(
+                    url=terminal_canonical_url,
+                    thread_id=thread_id,
+                    reason=str(live_notif.get("reason") or notif_meta.get("reason") or ""),
+                    ledger=ledger,
+                    my_login=my_login,
+                ):
+                    continue
+                current_notif = _current_notification_for_clearance(thread_id=thread_id)
+                if current_notif is not None and not _current_notification_is_clearable(
+                    url=terminal_canonical_url,
+                    thread_id=thread_id,
+                    reason=str(current_notif.get("reason") or live_notif.get("reason") or notif_meta.get("reason") or ""),
+                    ledger=ledger,
+                    my_login=my_login,
+                ):
+                    continue
+                _ledger_capture(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=thread_id,
+                    canonical_artifact=terminal_canonical_url,
+                    classification="actionable",
+                    worker="tracker-terminal",
+                    title=str(live_item.get("title") or ""),
+                    reason=str(live_notif.get("reason") or notif_meta.get("reason") or "").lower(),
+                    repo=str(live_notif.get("repo") or ""),
+                    tracker_item_id=str(live_item.get("id") or "") or None,
+                    tracker_section=live_section,
+                    terminal_disposition=disposition,
+                    queue_clear=True,
+                    event_at=str(live_notif.get("captured_at") or live_notif.get("updated_at") or utcnow_iso()),
+                )
+                mark_done_delta = MarkDoneDelta(
+                    item_id=str(live_item.get("id") or ""),
+                    thread_id=thread_id,
+                    marked_done_at=datetime.date.today().isoformat(),
+                    terminal_recorded_at=utcnow_iso(),
+                    terminal_disposition=disposition,
+                )
+                if not args.dry_run:
+                    mark_thread_done(thread_id)
+                    attempted_thread_ids.add(thread_id)
+                    mutations.mark_done.append(mark_done_delta)
+                    _ledger_record_clear_result(
+                        ledger,
+                        dry_run=args.dry_run,
+                        thread_id=thread_id,
+                        canonical_artifact=terminal_canonical_url,
+                    )
+                else:
+                    mutations.mark_done.append(mark_done_delta)
+        except (
+            FileNotFoundError,
+            yaml.YAMLError,
+            _RuamelYAMLError,
+        ) as exc:
+            stats.errors.append(f"failed to reload todo before clearing terminal item: {exc}")
             continue
-        _ledger_capture(
-            ledger,
-            dry_run=args.dry_run,
-            thread_id=thread_id,
-            canonical_artifact=terminal_canonical_url,
-            classification="actionable",
-            worker="tracker-terminal",
-            title=str(item.get("title") or ""),
-            reason=str(notif_meta.get("reason") or "").lower(),
-            repo=str(notif_meta.get("repo") or ""),
-            tracker_item_id=str(item.get("id") or "") or None,
-            tracker_section=section,
-            terminal_disposition=disposition,
-            queue_clear=True,
-            event_at=str(notif_meta.get("captured_at") or notif_meta.get("updated_at") or utcnow_iso()),
-        )
-        mark_done_delta = MarkDoneDelta(
-            item_id=str(item.get("id") or ""),
-            thread_id=thread_id,
-            marked_done_at=datetime.date.today().isoformat(),
-            terminal_recorded_at=utcnow_iso(),
-            terminal_disposition=disposition,
-        )
-        if not args.dry_run:
-            current_notif = _current_notification_for_clearance(thread_id=thread_id)
-            if current_notif is not None and not _current_notification_is_clearable(
-                url=terminal_canonical_url,
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as exc:
+            stats.errors.append(
+                f"mark-done-on-completed failed for thread {thread_id}: {exc}"
+            )
+            _ledger_record_clear_result(
+                ledger,
+                dry_run=args.dry_run,
                 thread_id=thread_id,
-                reason=str(current_notif.get("reason") or notif_meta.get("reason") or ""),
-                ledger=ledger,
-                my_login=my_login,
-            ):
-                continue
-            try:
-                mark_thread_done(thread_id)
-                attempted_thread_ids.add(thread_id)
-                mutations.mark_done.append(mark_done_delta)
-                _ledger_record_clear_result(
-                    ledger,
-                    dry_run=args.dry_run,
-                    thread_id=thread_id,
-                    canonical_artifact=terminal_canonical_url,
-                )
-            except (
-                subprocess.CalledProcessError,
-                subprocess.TimeoutExpired,
-            ) as exc:
-                stats.errors.append(
-                    f"mark-done-on-completed failed for thread {thread_id}: {exc}"
-                )
-                _ledger_record_clear_result(
-                    ledger,
-                    dry_run=args.dry_run,
-                    thread_id=thread_id,
-                    canonical_artifact=terminal_canonical_url,
-                    error=exc,
-                )
-        else:
-            mutations.mark_done.append(mark_done_delta)
+                canonical_artifact=terminal_canonical_url,
+                error=exc,
+            )
 
     mutations.escalate.extend(collect_review_request_escalations(data))
 
@@ -3474,54 +3518,86 @@ def run(args: argparse.Namespace) -> TriageStats:
         for delta in mutations.prune:
             if delta.thread_id and delta.thread_id in attempted_thread_ids:
                 continue
-            current = _current_notification_for_clearance(thread_id=delta.thread_id)
-            if current is not None and not _current_notification_is_clearable(
-                url=None,
-                thread_id=delta.thread_id,
-                reason=delta.notification_reason or delta.stale_reason,
-                ledger=ledger,
-                my_login=my_login,
-            ):
+            try:
+                with _todo_write_lock(args.todo_file):
+                    live_data = load_todo(args.todo_file)
+                    live_match = next(
+                        (
+                            (live_section, live_item)
+                            for live_section, live_item in _iter_notification_items_with_sections(live_data)
+                            if (
+                                str(live_item.get("id") or "") == delta.item_id
+                                or _item_thread_id(live_item) == delta.thread_id
+                            )
+                        ),
+                        None,
+                    )
+                    if live_match is None:
+                        continue
+                    live_section, live_item = live_match
+                    live_disposition = tracker_terminal_disposition(live_item, live_section)
+                    if live_disposition != "completed":
+                        continue
+                    live_notif = live_item.get("notification")
+                    if not isinstance(live_notif, dict):
+                        continue
+                    current = _current_notification_for_clearance(thread_id=delta.thread_id)
+                    if current is not None and not _current_notification_is_clearable(
+                        url=None,
+                        thread_id=delta.thread_id,
+                        reason=delta.notification_reason or delta.stale_reason,
+                        ledger=ledger,
+                        my_login=my_login,
+                    ):
+                        continue
+                    surviving_prunes.append(delta)
+                    _ledger_capture(
+                        ledger,
+                        dry_run=args.dry_run,
+                        thread_id=delta.thread_id,
+                        canonical_artifact=None,
+                        classification="policy_drop",
+                        worker="github-pruner",
+                        reason=delta.stale_reason,
+                        tracker_item_id=delta.item_id or None,
+                        tracker_section=live_section or delta.section or None,
+                        terminal_disposition="completed",
+                        queue_clear=True,
+                        event_at=delta.captured_at or utcnow_iso(),
+                    )
+                    if not args.dry_run:
+                        mark_thread_done(delta.thread_id)
+                        attempted_thread_ids.add(delta.thread_id)
+                        _ledger_record_clear_result(
+                            ledger,
+                            dry_run=args.dry_run,
+                            thread_id=delta.thread_id,
+                            canonical_artifact=None,
+                        )
                 continue
-            surviving_prunes.append(delta)
-            _ledger_capture(
-                ledger,
-                dry_run=args.dry_run,
-                thread_id=delta.thread_id,
-                canonical_artifact=None,
-                classification="policy_drop",
-                worker="github-pruner",
-                reason=delta.stale_reason,
-                tracker_item_id=delta.item_id or None,
-                tracker_section=delta.section or None,
-                terminal_disposition="completed",
-                queue_clear=True,
-                event_at=delta.captured_at or utcnow_iso(),
-            )
-            if not args.dry_run:
-                try:
-                    mark_thread_done(delta.thread_id)
-                    attempted_thread_ids.add(delta.thread_id)
-                    _ledger_record_clear_result(
-                        ledger,
-                        dry_run=args.dry_run,
-                        thread_id=delta.thread_id,
-                        canonical_artifact=None,
-                    )
-                except (
-                    subprocess.CalledProcessError,
-                    subprocess.TimeoutExpired,
-                ) as exc:
-                    stats.errors.append(
-                        f"prune mark-done failed for thread {delta.thread_id}: {exc}"
-                    )
-                    _ledger_record_clear_result(
-                        ledger,
-                        dry_run=args.dry_run,
-                        thread_id=delta.thread_id,
-                        canonical_artifact=None,
-                        error=exc,
-                    )
+            except (
+                FileNotFoundError,
+                yaml.YAMLError,
+                _RuamelYAMLError,
+            ) as exc:
+                stats.errors.append(
+                    f"failed to reload todo before pruning terminal item: {exc}"
+                )
+                continue
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+            ) as exc:
+                stats.errors.append(
+                    f"prune mark-done failed for thread {delta.thread_id}: {exc}"
+                )
+                _ledger_record_clear_result(
+                    ledger,
+                    dry_run=args.dry_run,
+                    thread_id=delta.thread_id,
+                    canonical_artifact=None,
+                    error=exc,
+                )
         mutations.prune = surviving_prunes
 
     has_todo_mutations = bool(
@@ -3578,6 +3654,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 for reopened in applied["reopened_threads"]:
                     ledger.reopen_actionable(
                         source_id=reopened["thread_id"],
+                        canonical_artifact=reopened.get("canonical_artifact") or None,
                         reason=reopened["reason"],
                         tracker_section=reopened.get(
                             "tracker_section", "prioritized.q1_do_first"
