@@ -1944,13 +1944,7 @@ def _comment_notification_still_clearable(
     if fresh_current is None:
         return False
     if _comment_notification_signature(fresh_current) != _comment_notification_signature(current or {}):
-        return _comment_notification_still_clearable_from_current(
-            fresh_current,
-            ledger=ledger,
-            my_login=my_login,
-            thread_id=thread_id,
-            pr_url=pr_url,
-        )
+        return False
     return True
 
 
@@ -2542,6 +2536,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             continue
         pr = fetch_pr(repo, number)
         if pr is None:
+            stats.errors.append(f"failed to refresh {candidate_url} before action")
             continue
         if not is_dependabot_pr(pr):
             continue
@@ -2565,6 +2560,10 @@ def run(args: argparse.Namespace) -> TriageStats:
                 since=comment_since,
             )
             direct_comment = snapshot.direct if snapshot is not None else None
+            if snapshot is not None and not snapshot.history_complete:
+                stats.errors.append(
+                    f"incomplete comment history for notification {thread_id or pr_url}"
+                )
             if direct_comment is True:
                 skipped_dep = is_owned_repo(repo) and (
                     skipped_dependency_match(pr) or skipped_repo_match(repo)
@@ -2605,9 +2604,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                     stats.skipped += 1
                 continue
             if direct_comment is None:
-                stats.errors.append(
-                    f"incomplete comment history for notification {thread_id or pr_url}"
-                )
                 stats.skipped += 1
                 continue
         clearable_comment = reason == "comment" and direct_comment is False

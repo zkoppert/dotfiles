@@ -2144,6 +2144,68 @@ def test_run_records_error_on_incomplete_comment_history(tmp_path: Path) -> None
     assert snapshot["last_error_at"] is not None
 
 
+def test_run_records_error_on_incomplete_comment_history_even_when_direct(tmp_path: Path) -> None:
+    notif = {
+        "id": "thread-incomplete-direct",
+        "reason": "comment",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/906",
+        },
+    }
+    pr = _base_pr(number=906, url="https://github.com/o/r1/pull/906")
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "shared_comment_notification_snapshot",
+        return_value=mock.Mock(history_complete=False, direct=True),
+    ):
+        stats = td.run(args)
+
+    assert stats.skipped_dependency == 0
+    assert stats.skipped == 1
+    assert any("incomplete comment history" in err for err in stats.errors)
+    snapshot = td.NotificationLedger(td.DEFAULT_LEDGER_PATH).health_snapshot(
+        worker="triage-dependabot"
+    )
+    assert snapshot is not None
+    assert snapshot["last_error_at"] is not None
+
+
+def test_run_records_error_when_pr_refresh_fails(tmp_path: Path) -> None:
+    notif = {
+        "id": "thread-missing-pr",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/907",
+        },
+    }
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=None
+    ):
+        stats = td.run(args)
+
+    assert any("failed to refresh" in err for err in stats.errors)
+    snapshot = td.NotificationLedger(td.DEFAULT_LEDGER_PATH).health_snapshot(
+        worker="triage-dependabot"
+    )
+    assert snapshot is not None
+    assert snapshot["last_error_at"] is not None
+
+
 def test_run_cleans_stale_inbox_entries_on_merge(tmp_path: Path) -> None:
     """A pre-existing notif-* entry should be removed after the PR auto-merges."""
     notif = {

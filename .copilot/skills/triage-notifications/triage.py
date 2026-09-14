@@ -1160,23 +1160,9 @@ def _current_notification_is_clearable(
         return False
     fresh_current = _current_notification_for_clearance(thread_id=thread_id)
     if fresh_current is None:
-        return _current_notification_is_clearable_from_current(
-            fresh_current,
-            url=url,
-            thread_id=thread_id,
-            reason=reason,
-            ledger=ledger,
-            my_login=my_login,
-        )
+        return False
     if _notification_clearability_signature(fresh_current) != _notification_clearability_signature(current or {}):
-        return _current_notification_is_clearable_from_current(
-            fresh_current,
-            url=url,
-            thread_id=thread_id,
-            reason=reason,
-            ledger=ledger,
-            my_login=my_login,
-        )
+        return False
     return True
 
 
@@ -3027,6 +3013,14 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
             and tracked is not None
             and _is_untouched_q2_review_fallback(tracked[1], tracked[0])
         )
+        if tracked_terminal and classification.bucket in {BUCKET_Q1, BUCKET_Q2, BUCKET_INBOX}:
+            if ledger is not None and not ledger.readonly:
+                ledger.reopen_actionable(
+                    source_id=thread_id,
+                    canonical_artifact=canonical_url,
+                    reason=reason or classification.reason,
+                    tracker_section=tracker_section or "inbox",
+                )
         if (
             tracked_nonterminal
             and classification.bucket == BUCKET_DROP

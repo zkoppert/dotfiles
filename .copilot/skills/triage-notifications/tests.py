@@ -7977,6 +7977,87 @@ def test_preview_backfill_skips_incomplete_comment_history(tmp_path: Path, monke
     assert snapshot["last_error_at"] is not None
 
 
+def test_preview_backfill_reopens_terminal_tracker_rows_for_new_assign(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {
+                    "q1_do_first": [],
+                    "q2_schedule": [],
+                    "q3_delegate": [],
+                    "q4_eliminate": [
+                        {
+                            "id": "terminal-1",
+                            "title": "Closed ask",
+                            "status": "dropped",
+                            "completed": "2026-07-01",
+                            "notification": {
+                                "thread_id": "thread-terminal",
+                                "reason": "subscribed",
+                                "url": "https://github.com/o/r/pull/1",
+                                "repo": "o/r",
+                                "terminal_disposition": "irrelevant",
+                                "terminal_recorded_at": "2026-07-01T12:00:00Z",
+                            },
+                        }
+                    ],
+                },
+                "done": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    preview_ledger = tmp_path / "preview.sqlite"
+    notif = _notif(
+        "assign",
+        id="thread-terminal",
+        updated_at="2026-09-14T08:00:00Z",
+        repo="o/r",
+        url="https://api.github.com/repos/o/r/pulls/1",
+    )
+    notif["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/1"
+    notif["subject"]["latest_comment_url"] = "https://api.github.com/repos/o/r/issues/comments/1"
+    monkeypatch.setattr(triage, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(triage, "fetch_notifications", lambda: [notif])
+    monkeypatch.setattr(
+        triage,
+        "shared_comment_notification_snapshot",
+        lambda *args, **kwargs: triage.CommentNotificationSnapshot(None, None, False, True, None),
+    )
+    monkeypatch.setattr(
+        triage,
+        "classify",
+        lambda *args, **kwargs: triage.Classification(triage.BUCKET_Q1, "assign -> Q1", direct_mention=False),
+    )
+
+    stats = triage.preview_backfill_ledger(
+        triage.parse_args([
+            "--todo-file",
+            str(todo_file),
+            "--dry-run",
+            "--backfill",
+            "--backfill-ledger",
+            str(preview_ledger),
+        ])
+    )
+
+    ledger = triage.NotificationLedger(preview_ledger)
+    rows = ledger._rows(
+        "SELECT classification, terminal_disposition, clear_state FROM notifications WHERE source_id = ?",
+        ("thread-terminal",),
+    )
+    assert stats.added_q1 == 1
+    assert rows == [
+        {
+            "classification": "actionable",
+            "terminal_disposition": None,
+            "clear_state": "not_applicable",
+        }
+    ]
+
+
 def test_run_keeps_direct_comment_even_with_incomplete_comment_history(todo_file: Path, monkeypatch: pytest.MonkeyPatch):
     notif = _notif(
         "comment",
