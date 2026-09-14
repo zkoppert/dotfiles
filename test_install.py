@@ -514,6 +514,51 @@ class InstallScriptTest(unittest.TestCase):
         self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/venv").exists())
         self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/requirements.sha256").exists())
 
+    def test_notification_jobs_skip_runtime_provisioning_for_loaded_services_in_nonstandard_checkout(self) -> None:
+        relocated = self.root / "relocated"
+        relocated.mkdir()
+        (relocated / "python").mkdir()
+        (relocated / "python" / "notification-worker-requirements.txt").write_text(
+            "PyYAML==6.0.2\nruamel.yaml==0.18.6\n",
+            encoding="utf-8",
+        )
+        relocated_installer = relocated / "install.sh"
+        relocated_installer.write_bytes((self.repo / "install.sh").read_bytes())
+        relocated_installer.chmod(0o755)
+
+        activity_log = self.home / "install.log"
+        launchctl = self.fake_bin / "launchctl"
+        launchctl.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"launchctl $*\" >> \"$HOME/install.log\"\n"
+            'if [ "$1" = "print" ]; then\n'
+            "  printf '%s\\n' 'State = running'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        launchctl.chmod(0o755)
+
+        result = subprocess.run(
+            [str(relocated_installer)],
+            cwd=relocated,
+            env=self.env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        calls = activity_log.read_text(encoding="utf-8").splitlines()
+        self.assertIn(f"launchctl print gui/{os.getuid()}/com.zkoppert.notification-triage", calls)
+        self.assertIn(f"launchctl print gui/{os.getuid()}/com.zkoppert.triage-dependabot", calls)
+        self.assertIn(
+            "Notification worker runtime provisioning skipped until notification launch agents are confirmed unloaded",
+            result.stdout,
+        )
+        self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/venv").exists())
+        self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/requirements.sha256").exists())
+
     def test_accessibility_picker_is_linked_and_loaded_with_private_config(
         self,
     ) -> None:

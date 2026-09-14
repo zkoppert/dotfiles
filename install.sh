@@ -127,12 +127,30 @@ remove_notification_launch_agent() {
   return 0
 }
 
+notification_launch_agent_is_unloaded() {
+  local launchctl_label="$1"
+  local print_output
+  if ! command -v launchctl >/dev/null 2>&1; then
+    return 1
+  fi
+  print_output="$(launchctl print "gui/$(id -u)/$launchctl_label" 2>&1)" || true
+  [[ "$print_output" == *"Could not find service"* ]]
+}
+
 notification_launch_agents_ready=true
-if [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
-  if ! remove_notification_launch_agent "com.zkoppert.notification-triage.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"; then
+if [ "$(uname)" = "Darwin" ]; then
+  if [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
+    if ! remove_notification_launch_agent "com.zkoppert.notification-triage.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"; then
+      notification_launch_agents_ready=false
+    fi
+    if ! remove_notification_launch_agent "com.zkoppert.triage-dependabot.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.triage-dependabot.plist"; then
+      notification_launch_agents_ready=false
+    fi
+  fi
+  if ! notification_launch_agent_is_unloaded "com.zkoppert.notification-triage"; then
     notification_launch_agents_ready=false
   fi
-  if ! remove_notification_launch_agent "com.zkoppert.triage-dependabot.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.triage-dependabot.plist"; then
+  if ! notification_launch_agent_is_unloaded "com.zkoppert.triage-dependabot"; then
     notification_launch_agents_ready=false
   fi
 fi
