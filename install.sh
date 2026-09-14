@@ -139,7 +139,9 @@ notification_launch_agent_is_unloaded() {
 
 notification_launch_agents_absent() {
   [ ! -e "$HOME/Library/LaunchAgents/com.zkoppert.notification-triage.plist" ] &&
-    [ ! -e "$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist" ]
+    [ ! -L "$HOME/Library/LaunchAgents/com.zkoppert.notification-triage.plist" ] &&
+    [ ! -e "$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist" ] &&
+    [ ! -L "$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist" ]
 }
 
 notification_launch_agents_ready=true

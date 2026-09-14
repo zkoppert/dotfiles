@@ -873,7 +873,15 @@ def classify(
         # A PR/issue I opened that is still open (closed/merged ones drop
         # and archive via the closed-state check above). Keep as an inbox
         # status item so I can see my own in-flight work.
-        return Classification(BUCKET_INBOX, "author - open PR/issue I opened")
+        author = subject_author_fetcher(notif)
+        if author is None:
+            return Classification(BUCKET_INBOX, "author - author lookup unavailable")
+        if author.lower() == my_login.lower():
+            return Classification(BUCKET_INBOX, "author - open PR/issue I opened")
+        return Classification(
+            BUCKET_DROP,
+            "author notification for non-self-authored PR/issue",
+        )
 
     # Defensive: any KEEP reason not explicitly routed above surfaces for
     # human triage rather than dropping (future-proofing if KEEP_REASONS

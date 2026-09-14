@@ -532,9 +532,7 @@ class InstallScriptTest(unittest.TestCase):
         launch_agents = relocated / "LaunchAgents"
         launch_agents.mkdir()
         triage_plist = launch_agents / "com.zkoppert.notification-triage.plist"
-        triage_plist.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
         dependabot_plist = launch_agents / "com.zkoppert.triage-dependabot.plist"
-        dependabot_plist.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
         (relocated / "python").mkdir()
         (relocated / "python" / "notification-worker-requirements.txt").write_text(
             "PyYAML==6.0.2\nruamel.yaml==0.18.6\n",

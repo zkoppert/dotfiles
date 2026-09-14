@@ -5648,9 +5648,8 @@ def test_classify_enable_dependabot_title_match_is_case_insensitive():
     assert c.bucket == triage.BUCKET_DROP
 
 
-def test_classify_does_not_drop_unrelated_author_pr():
-    """`reason=author` on a PR with a different title is not affected by
-    the Enable Dependabot title-drop - it stays as an inbox status item."""
+def test_classify_author_notification_keeps_self_authored_pr():
+    """`reason=author` stays in the inbox when the PR really is mine."""
     notif = _notif(
         "author",
         subject={
@@ -5668,6 +5667,46 @@ def test_classify_does_not_drop_unrelated_author_pr():
         subject_author_fetcher=lambda _: "zkoppert",
     )
     assert c.bucket == triage.BUCKET_INBOX
+
+
+def test_classify_author_notification_defaults_to_inbox_when_author_lookup_missing():
+    notif = _notif(
+        "author",
+        subject={
+            "title": "Fix payment processing bug",
+            "url": "https://api.github.com/repos/o/r/pulls/30",
+            "latest_comment_url": None,
+            "type": "PullRequest",
+        },
+    )
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        state_fetcher=lambda _: "open",
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
+        subject_author_fetcher=lambda _: None,
+    )
+    assert c.bucket == triage.BUCKET_INBOX
+
+
+def test_classify_author_notification_drops_non_self_authored_dependabot_bump():
+    notif = _notif(
+        "author",
+        subject={
+            "title": "build(deps): bump actions/checkout from 4 to 5",
+            "url": "https://api.github.com/repos/o/r/pulls/30",
+            "latest_comment_url": None,
+            "type": "PullRequest",
+        },
+    )
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        state_fetcher=lambda _: "open",
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_DROP
 
 
 WATCH_ONLY_REPO = "acme/watch-only"
