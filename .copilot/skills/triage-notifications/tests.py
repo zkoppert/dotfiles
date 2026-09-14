@@ -7382,6 +7382,99 @@ def test_ledger_capture_leaves_terminal_boundary_unset(todo_file: Path):
     assert rows == [{"terminal_recorded_at": None}]
 
 
+def test_notification_health_snapshot_round_trips(tmp_path: Path):
+    ledger = triage.NotificationLedger(tmp_path / "ledger.sqlite")
+    ledger.record_health_snapshot(
+        worker="notification-triage",
+        snapshot={
+            "last_success_at": "2026-09-14T07:00:00Z",
+            "current_notification_count": 3,
+            "current_unread_count": 2,
+            "actionable_without_tracker_link_count": 1,
+            "actionable_without_tracker_links": [{"source_id": "thr-1"}],
+            "clear_failure_count": 1,
+            "clear_failures": [{"source_id": "thr-2"}],
+            "stale_dropped_count": 1,
+            "stale_dropped_items": [{"source_id": "thr-3"}],
+            "notification_counts": {"total": 3},
+        },
+    )
+
+    snapshot = ledger.health_snapshot(worker="notification-triage")
+
+    assert snapshot is not None
+    assert snapshot["worker"] == "notification-triage"
+    assert snapshot["last_success_at"] == "2026-09-14T07:00:00Z"
+    assert snapshot["actionable_without_tracker_link_count"] == 1
+    assert snapshot["clear_failure_count"] == 1
+    assert snapshot["stale_dropped_count"] == 1
+    assert snapshot["notification_counts"] == {"total": 3}
+
+
+def test_preview_backfill_ledger_reconciles_tracker_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text(
+        "inbox:\n"
+        "  - id: tracked-one\n"
+        "    title: tracked notification\n"
+        "    source: github-notification\n"
+        "    notification:\n"
+        "      thread_id: notif-1\n"
+        "      url: https://github.com/o/r/pull/1\n"
+        "      reason: subscribed\n"
+        "      repo: o/r\n"
+        "prioritized:\n"
+        "  q1_do_first: []\n"
+        "done: []\n",
+        encoding="utf-8",
+    )
+    preview_ledger = tmp_path / "preview.sqlite"
+    notif = _notif(
+        "subscribed",
+        id="notif-1",
+        updated_at="2026-09-14T07:00:00Z",
+        repo="o/r",
+        url="https://api.github.com/repos/o/r/pulls/1",
+    )
+    notif["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/1"
+    notif["subject"]["latest_comment_url"] = "https://api.github.com/repos/o/r/issues/comments/1"
+    monkeypatch.setattr(triage, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(triage, "fetch_notifications", lambda: [notif])
+    monkeypatch.setattr(
+        triage,
+        "classify",
+        lambda *args, **kwargs: triage.Classification(triage.BUCKET_Q1, "preview"),
+    )
+
+    stats = triage.preview_backfill_ledger(
+        triage.parse_args([
+            "--todo-file",
+            str(todo_file),
+            "--dry-run",
+            "--backfill",
+            "--backfill-ledger",
+            str(preview_ledger),
+        ])
+    )
+
+    ledger = triage.NotificationLedger(preview_ledger)
+    rows = ledger._rows(
+        "SELECT source_id, tracker_item_id, tracker_section FROM notifications WHERE source_id = ?",
+        ("notif-1",),
+    )
+    assert stats.fetched == 1
+    assert rows == [
+        {
+            "source_id": "notif-1",
+            "tracker_item_id": "tracked-one",
+            "tracker_section": "inbox",
+        }
+    ]
+    snapshot = ledger.health_snapshot(worker="notification-triage")
+    assert snapshot is not None
+    assert snapshot["current_notification_count"] == 1
+
+
 def test_ledger_record_terminal_keeps_first_boundary(todo_file: Path):
     ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
     artifact = "https://github.com/o/r/pull/1"

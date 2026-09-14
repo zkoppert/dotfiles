@@ -2390,6 +2390,43 @@ def _record_stale_cleanup(
     )
 
 
+
+def _record_worker_health_snapshot(
+    *,
+    ledger: NotificationLedger | None,
+    worker: str,
+    stats: TriageStats,
+) -> None:
+    if ledger is None:
+        return
+    metrics = ledger.health_metrics()
+    now = utcnow_iso()
+    snapshot = {
+        "current_notification_count": stats.fetched,
+        "current_unread_count": stats.unread,
+        "actionable_without_tracker_link_count": len(
+            metrics["actionable_without_tracker_links"]
+        ),
+        "actionable_without_tracker_links": metrics["actionable_without_tracker_links"],
+        "clear_failure_count": len(metrics["clear_failures"]),
+        "clear_failures": metrics["clear_failures"],
+        "stale_dropped_count": len(metrics["stale_dropped_items"]),
+        "stale_dropped_items": metrics["stale_dropped_items"],
+        "notification_counts": metrics["notification_counts"],
+    }
+    prior = ledger.health_snapshot(worker=worker)
+    if stats.errors:
+        snapshot["last_error_at"] = now
+        snapshot["last_error"] = stats.errors[-1]
+        if prior is not None:
+            snapshot.setdefault("last_success_at", prior.get("last_success_at"))
+    else:
+        snapshot["last_success_at"] = now
+        if prior is not None:
+            snapshot.setdefault("last_error_at", prior.get("last_error_at"))
+            snapshot.setdefault("last_error", prior.get("last_error"))
+    ledger.record_health_snapshot(worker=worker, snapshot=snapshot)
+
 def run(args: argparse.Namespace) -> TriageStats:
     """Main entrypoint. Returns stats so tests can assert behaviour."""
     stats = TriageStats()
@@ -2405,6 +2442,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         LookupError,
     ) as exc:
         stats.errors.append(f"failed to fetch /user: {exc}")
+        _record_worker_health_snapshot(ledger=ledger, worker="triage-dependabot", stats=stats)
         return stats
 
     try:
@@ -2415,6 +2453,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         json.JSONDecodeError,
     ) as exc:
         stats.errors.append(f"failed to fetch notifications: {exc}")
+        _record_worker_health_snapshot(ledger=ledger, worker="triage-dependabot", stats=stats)
         return stats
     stats.fetched = len(notifications)
     stats.unread = sum(1 for notif in notifications if notif.get("unread"))
@@ -3408,6 +3447,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             applied = apply_todo_mutations_with_lock(args.todo_file, mutations)
         except (OSError, FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
             stats.errors.append(f"failed to write todo file: {exc}")
+            _record_worker_health_snapshot(ledger=ledger, worker="triage-dependabot", stats=stats)
             return stats
         stats.flagged = int(applied["added_flags"])
         stats.already_tracked += int(applied["already_tracked"])
@@ -3496,6 +3536,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 str(notif_meta.get("url") or ""),
             )
 
+    _record_worker_health_snapshot(ledger=ledger, worker="triage-dependabot", stats=stats)
     return stats
 
 

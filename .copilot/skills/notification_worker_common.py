@@ -7,6 +7,7 @@ wrappers can rely on it after the pinned runtime passes import preflight.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import json
 import os
@@ -21,6 +22,7 @@ from urllib.parse import urlparse
 HOME = Path.home()
 DEFAULT_SUPPORT_DIR = HOME / "Library" / "Application Support" / "notification-workers"
 DEFAULT_LEDGER_FILE = DEFAULT_SUPPORT_DIR / "ledger.sqlite"
+ALLOW_DRY_RUN_LEDGER_WRITES = False
 
 
 def utcnow() -> _dt.datetime:
@@ -444,6 +446,13 @@ class NotificationLedger:
                 CREATE INDEX IF NOT EXISTS idx_notifications_canonical
                 ON notifications (canonical_artifact)
                 WHERE canonical_artifact IS NOT NULL AND canonical_artifact != ''
+                """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS notification_health (
+                  worker TEXT PRIMARY KEY,
+                  updated_at TEXT NOT NULL,
+                  snapshot_json TEXT NOT NULL
+                )
                 """)
             conn.commit()
 
@@ -1062,6 +1071,116 @@ class NotificationLedger:
              ORDER BY first_seen_at ASC
             """)
 
+    def health_metrics(self) -> dict[str, Any]:
+        actionable_without_tracker_links = self._rows(
+            """
+            SELECT source_id, canonical_artifact, title, reason, repo,
+                   classification, tracker_item_id, tracker_section,
+                   terminal_disposition, clear_state
+              FROM notifications
+             WHERE classification = 'actionable'
+               AND (tracker_item_id IS NULL OR tracker_item_id = '')
+               AND terminal_disposition IS NULL
+               AND clear_state = 'not_applicable'
+             ORDER BY first_seen_at ASC
+            """
+        )
+        clear_failures = self._rows(
+            """
+            SELECT source_id, canonical_artifact, title, reason, repo,
+                   classification, tracker_item_id, tracker_section,
+                   terminal_disposition, clear_state, last_clear_error
+              FROM notifications
+             WHERE clear_state = 'failed'
+             ORDER BY first_seen_at ASC
+            """
+        )
+        stale_dropped_items = self._rows(
+            """
+            SELECT source_id, canonical_artifact, title, reason, repo,
+                   classification, tracker_item_id, tracker_section,
+                   terminal_disposition, clear_state
+              FROM notifications
+             WHERE terminal_disposition = 'irrelevant'
+               AND clear_state NOT IN ('succeeded', 'cleared')
+             ORDER BY first_seen_at ASC
+            """
+        )
+        notification_counts = self._rows(
+            """
+            SELECT
+              COUNT(*) AS total,
+              COALESCE(SUM(CASE WHEN clear_state = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+              COALESCE(SUM(CASE WHEN clear_state = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+              COALESCE(SUM(CASE WHEN clear_state IN ('succeeded', 'cleared') THEN 1 ELSE 0 END), 0) AS cleared,
+              COALESCE(SUM(CASE WHEN classification = 'actionable' THEN 1 ELSE 0 END), 0) AS actionable,
+              COALESCE(SUM(CASE WHEN terminal_disposition IS NOT NULL THEN 1 ELSE 0 END), 0) AS terminal
+              FROM notifications
+            """
+        )
+        counts = notification_counts[0] if notification_counts else {}
+        return {
+            "actionable_without_tracker_links": actionable_without_tracker_links,
+            "clear_failures": clear_failures,
+            "stale_dropped_items": stale_dropped_items,
+            "notification_counts": counts,
+        }
+
+    def record_health_snapshot(self, *, worker: str, snapshot: dict[str, Any]) -> None:
+        now = utcnow_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notification_health (
+                  worker TEXT PRIMARY KEY,
+                  updated_at TEXT NOT NULL,
+                  snapshot_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO notification_health (worker, updated_at, snapshot_json)
+                VALUES (?, ?, ?)
+                ON CONFLICT(worker) DO UPDATE SET
+                  updated_at = excluded.updated_at,
+                  snapshot_json = excluded.snapshot_json
+                """,
+                (worker, now, json.dumps(snapshot, sort_keys=True)),
+            )
+            conn.commit()
+
+    def health_snapshot(self, *, worker: str) -> dict[str, Any] | None:
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT updated_at, snapshot_json
+                      FROM notification_health
+                     WHERE worker = ?
+                    """,
+                    (worker,),
+                ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        payload = json.loads(row["snapshot_json"])
+        payload["updated_at"] = row["updated_at"]
+        payload["worker"] = worker
+        return payload
+
+
+@contextlib.contextmanager
+def permit_dry_run_ledger_writes():
+    global ALLOW_DRY_RUN_LEDGER_WRITES
+    previous = ALLOW_DRY_RUN_LEDGER_WRITES
+    ALLOW_DRY_RUN_LEDGER_WRITES = True
+    try:
+        yield
+    finally:
+        ALLOW_DRY_RUN_LEDGER_WRITES = previous
+
 
 def ledger_capture(
     ledger: NotificationLedger | None,
@@ -1080,7 +1199,7 @@ def ledger_capture(
     queue_clear: bool = False,
     event_at: str | None = None,
 ) -> None:
-    if ledger is None or dry_run:
+    if ledger is None or (dry_run and not ALLOW_DRY_RUN_LEDGER_WRITES):
         return
     ledger.capture(
         source_id=thread_id,
@@ -1132,7 +1251,7 @@ def ledger_record_clear_result(
     canonical_artifact: str | None,
     error: BaseException | None = None,
 ) -> None:
-    if ledger is None or dry_run:
+    if ledger is None or (dry_run and not ALLOW_DRY_RUN_LEDGER_WRITES):
         return
     if error is None:
         ledger.record_clear_success(

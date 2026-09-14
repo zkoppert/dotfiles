@@ -173,6 +173,21 @@ To pause:
 launchctl unload ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist
 ```
 
+## Health and backfill preview
+
+The workers write a machine-readable health snapshot into the shared local
+ledger (`~/Library/Application Support/notification-workers/ledger.sqlite`).
+It records the last success/error timestamps plus the current counts for
+actionable items without tracker links, clear failures, stale dropped items,
+and the current notification totals.
+
+To preview a ledger backfill without mutating GitHub or `todo.yml`, run:
+
+```bash
+~/repos/dotfiles/bin/notification-triage --dry-run --backfill \
+  --backfill-ledger /tmp/notification-backfill.sqlite
+```
+
 ## Pruning stale notifications
 
 After classifying new notifications, the script walks the inbox **and

@@ -135,6 +135,14 @@ conservative default.
   the default browser. Routine merges, rebases, labels, prerelease closes,
   already tracked flags, and no-op runs stay silent.
 
+## Health snapshot
+
+The shared notification ledger also carries a machine-readable health
+snapshot for Dependabot runs. It includes last success/error timestamps,
+notification totals, actionables without tracker links, clear failures,
+and stale dropped items so the hourly job can be inspected without
+opening the database manually.
+
 ## Per-PR cooldown
 
 `~/Library/Logs/triage-dependabot-state.json` records the last action

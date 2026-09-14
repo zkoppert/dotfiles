@@ -2020,6 +2020,11 @@ def test_run_skips_merge_when_active_todo_exists_before_mutation(
     fetch_pr_mock.assert_has_calls([mock.call("o/r1", 904), mock.call("o/r1", 904)])
     merge_mock.assert_not_called()
     mark_mock.assert_not_called()
+    snapshot = td.NotificationLedger(td.DEFAULT_LEDGER_PATH).health_snapshot(
+        worker="triage-dependabot"
+    )
+    assert snapshot is not None
+    assert snapshot["current_notification_count"] == 1
 
 
 def test_run_cleans_stale_inbox_entries_on_merge(tmp_path: Path) -> None:
