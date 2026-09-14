@@ -582,13 +582,13 @@ class InstallScriptTest(unittest.TestCase):
             text=True,
         )
 
-        calls = activity_log.read_text(encoding="utf-8").splitlines()
-        self.assertIn(f"launchctl print gui/{os.getuid()}/com.zkoppert.notification-triage", calls)
-        self.assertIn(f"launchctl print gui/{os.getuid()}/com.zkoppert.triage-dependabot", calls)
+        self.assertFalse(activity_log.exists())
         self.assertIn(
             "Notification worker runtime provisioning skipped until notification launch agents are confirmed unloaded",
             result.stdout,
         )
+        self.assertTrue(triage_target.is_symlink())
+        self.assertTrue(dependabot_target.is_symlink())
         self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/venv").exists())
         self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/requirements.sha256").exists())
 

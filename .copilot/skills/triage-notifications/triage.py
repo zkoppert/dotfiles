@@ -1094,19 +1094,20 @@ def _current_notification_is_clearable_from_current(
         if current_updated_at is not None and current_updated_at < boundary:
             return True
         if current_updated_at is not None and current_updated_at == boundary:
-            if current_reason == reason == "review_requested":
-                snapshot = shared_comment_notification_snapshot(
-                    current,
-                    my_login=my_login,
-                    run_gh=run_gh,
-                    since=(
-                        ledger.comment_watermark(source_id=thread_id, canonical_artifact=url)
-                        if ledger is not None and thread_id
-                        else None
-                    ),
-                )
-                if snapshot is not None and snapshot.direct is True:
-                    return False
+            if current_reason == reason and current_reason in {"mention", "assign", "review_requested"}:
+                if current_reason == "review_requested":
+                    snapshot = shared_comment_notification_snapshot(
+                        current,
+                        my_login=my_login,
+                        run_gh=run_gh,
+                        since=(
+                            ledger.comment_watermark(source_id=thread_id, canonical_artifact=url)
+                            if ledger is not None and thread_id
+                            else None
+                        ),
+                    )
+                    if snapshot is not None and snapshot.direct is True:
+                        return False
                 return True
         if current_reason in {"mention", "assign"}:
             return False
@@ -2835,7 +2836,16 @@ def retry_pending_github_clears(
             ):
                 continue
             current = _current_notification_for_clearance(thread_id=thread_id)
-            if current is None or not _current_notification_is_clearable(
+            if current is None:
+                attempted_thread_ids.add(thread_id)
+                _ledger_record_clear_result(
+                    ledger,
+                    dry_run=dry_run,
+                    thread_id=thread_id,
+                    canonical_artifact=canonical,
+                )
+                continue
+            if not _current_notification_is_clearable(
                 url=canonical,
                 thread_id=thread_id,
                 reason=str(current.get("reason") or ""),

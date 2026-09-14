@@ -3230,6 +3230,44 @@ def test_retry_pending_github_clears_marks_missing_thread_cleared(todo_file):
     assert ledger.pending_github_clears() == []
 
 
+def test_retry_pending_github_clears_marks_missing_thread_cleared_after_revalidation(todo_file):
+    notif = _notif("review_requested", id="thread-review-revalidated", updated_at="2026-07-03T12:00:00Z")
+    ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
+    canonical = triage.web_url(notif)
+    ledger.capture(
+        source_id=notif["id"],
+        canonical_artifact=canonical,
+        classification="policy_drop",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_id=notif["id"],
+        canonical_artifact=canonical,
+        terminal_disposition="irrelevant",
+    )
+    ledger.queue_clear(source_id=notif["id"], canonical_artifact=canonical)
+    stats = triage.TriageStats()
+    current = _notif("review_requested", id=notif["id"], updated_at="2026-07-03T12:00:00Z")
+    with patch(
+        "triage.fetch_notifications",
+        side_effect=[[current], [current], [current], []],
+    ), patch(
+        "triage.shared_comment_notification_snapshot",
+        return_value=triage.CommentNotificationSnapshot(None, None, False, True),
+    ), patch("triage.mark_thread_done") as mark_done:
+        triage.retry_pending_github_clears(
+            ledger,
+            dry_run=False,
+            stats=stats,
+            attempted_thread_ids=set(),
+            protected_thread_ids=set(),
+            my_login="zkoppert",
+        )
+
+    mark_done.assert_not_called()
+    assert ledger.pending_github_clears() == []
+
+
 def test_run_routes_dependabot_comment_mention_to_q1(todo_file):
     notif = _notif("comment")
     notif["subject"]["title"] = "Bump urllib3 from 2.0.0 to 2.1.0"
@@ -6751,37 +6789,39 @@ def test_current_notification_is_clearable_rechecks_fresh_assign_before_delete(
         )
 
 
-def test_current_notification_is_clearable_rejects_same_second_assign_after_terminal_boundary(
+@pytest.mark.parametrize("reason", ["mention", "assign"])
+def test_current_notification_is_clearable_allows_same_second_direct_ask_after_terminal_boundary(
     todo_file,
+    reason,
 ):
     ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
-    artifact = "https://github.com/o/r/pull/6"
+    artifact = f"https://github.com/o/r/pull/{6 if reason == 'mention' else 7}"
     ledger.capture(
-        source_id="thread-assign",
+        source_id=f"thread-{reason}",
         canonical_artifact=artifact,
         classification="actionable",
         worker="test",
         event_at="2026-07-01T12:00:00Z",
     )
     ledger.record_terminal(
-        source_id="thread-assign",
+        source_id=f"thread-{reason}",
         canonical_artifact=artifact,
         terminal_disposition="irrelevant",
         event_at="2026-07-03T12:00:00Z",
     )
-    current = _notif("assign", id="thread-assign", updated_at="2026-07-03T12:00:00Z")
-    current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/6"
+    current = _notif(reason, id=f"thread-{reason}", updated_at="2026-07-03T12:00:00Z")
+    current["subject"]["url"] = artifact
     current["repository"] = {"full_name": "o/r"}
     with patch("triage.fetch_notifications", return_value=[current]):
         assert (
             triage._current_notification_is_clearable(
                 url=artifact,
-                thread_id="thread-assign",
-                reason="assign",
+                thread_id=f"thread-{reason}",
+                reason=reason,
                 ledger=ledger,
                 my_login="zkoppert",
             )
-            is False
+            is True
         )
 
 
@@ -6806,7 +6846,10 @@ def test_current_notification_is_clearable_allows_same_second_review_requested_a
     current = _notif("review_requested", id="thread-review", updated_at="2026-07-03T12:00:00Z")
     current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/7"
     current["repository"] = {"full_name": "o/r"}
-    with patch("triage.fetch_notifications", return_value=[current]):
+    with patch("triage.fetch_notifications", return_value=[current]), patch(
+        "triage.shared_comment_notification_snapshot",
+        return_value=triage.CommentNotificationSnapshot(None, None, False, True),
+    ):
         assert (
             triage._current_notification_is_clearable(
                 url=artifact,
@@ -6857,40 +6900,6 @@ def test_current_notification_is_clearable_rejects_same_second_review_requested_
                 my_login="zkoppert",
             )
             is False
-        )
-
-
-def test_current_notification_is_clearable_rejects_newer_review_requested_after_terminal_boundary(
-    todo_file,
-):
-    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
-    artifact = "https://github.com/o/r/pull/7"
-    ledger.capture(
-        source_id="thread-review",
-        canonical_artifact=artifact,
-        classification="actionable",
-        worker="test",
-        event_at="2026-07-01T12:00:00Z",
-    )
-    ledger.record_terminal(
-        source_id="thread-review",
-        canonical_artifact=artifact,
-        terminal_disposition="irrelevant",
-        event_at="2026-07-03T12:00:00Z",
-    )
-    current = _notif("review_requested", id="thread-review", updated_at="2026-07-03T12:00:00Z")
-    current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/7"
-    current["repository"] = {"full_name": "o/r"}
-    with patch("triage.fetch_notifications", return_value=[current]):
-        assert (
-            triage._current_notification_is_clearable(
-                url=artifact,
-                thread_id="thread-review",
-                reason="review_requested",
-                ledger=ledger,
-                my_login="zkoppert",
-            )
-            is True
         )
 
 
