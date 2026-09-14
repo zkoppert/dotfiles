@@ -94,6 +94,18 @@ class InstallScriptTest(unittest.TestCase):
         )
         python3.chmod(0o755)
 
+        launchctl = self.fake_bin / "launchctl"
+        launchctl.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "print" ]; then\n'
+            "  printf '%s\\n' 'Could not find service \"$2\"'\n"
+            "  exit 1\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        launchctl.chmod(0o755)
+
         self.env = dict(os.environ)
         self.env["HOME"] = str(self.home)
         self.env["PATH"] = f"{self.fake_bin}{os.pathsep}{self.env['PATH']}"
