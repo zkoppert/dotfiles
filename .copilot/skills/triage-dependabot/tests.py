@@ -2238,6 +2238,26 @@ def test_run_records_error_on_incomplete_comment_history_even_when_direct(tmp_pa
     assert snapshot["last_error_at"] is not None
 
 
+def test_comment_notification_still_clearable_from_current_allows_empty_history() -> None:
+    current = {
+        "reason": "subscribed",
+        "subject": {
+            "url": "https://api.github.com/repos/o/r/pulls/1",
+            "latest_comment_url": "https://api.github.com/repos/o/r/issues/comments/1",
+        },
+    }
+    with mock.patch.object(
+        td, "shared_comment_notification_snapshot", return_value=None
+    ):
+        assert td._comment_notification_still_clearable_from_current(
+            current,
+            ledger=None,
+            my_login="zkoppert",
+            thread_id="thread-passive",
+            pr_url="https://github.com/o/r/pull/1",
+        ) is True
+
+
 def test_run_records_error_when_pr_refresh_fails(tmp_path: Path) -> None:
     notif = {
         "id": "thread-missing-pr",

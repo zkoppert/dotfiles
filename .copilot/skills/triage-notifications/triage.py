@@ -30,6 +30,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import datetime
 import fcntl
@@ -3022,19 +3023,19 @@ def _plan_notification_mutations(
             if classification.bucket == BUCKET_Q1 and tracked and (
                 tracked_nonterminal or renewed
             ):
+                terminal_reopen = bool(tracker_terminal_disposition(tracked[1], tracked[0]))
                 mutations.escalate.append(
                     EscalationDelta(
                         item_id="",
                         thread_id=thread_id,
-                        reopen_terminal=bool(
-                            tracker_terminal_disposition(tracked[1], tracked[0])
-                        ),
+                        reopen_terminal=terminal_reopen,
                         reason=reason,
                         captured_at=str(notif.get("updated_at") or utcnow_iso()),
                         direct_ask=classification.direct_mention,
                     )
                 )
-                if tracker_terminal_disposition(tracked[1], tracked[0]):
+                if terminal_reopen:
+                    stats.added_q1 += 1
                     reopened_thread_ids.add(thread_id)
             elif (
                 classification.bucket == BUCKET_Q2
@@ -3385,7 +3386,7 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
         deferred_canonical_artifacts=deferred_canonical_artifacts,
     )
 
-    _plan_notification_mutations(
+    mutations, _, _, _, pending_comment_watermarks = _plan_notification_mutations(
         args=args,
         notifications=notifications,
         data=data,
@@ -3395,12 +3396,31 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
         comment_snapshot_cache=comment_snapshot_cache,
         ledger_dry_run=False,
     )
+    preview_data = copy.deepcopy(data)
+    apply_todo_mutations(preview_data, mutations)
+    reconcile_tracker_rows_to_ledger(
+        preview_data,
+        ledger=ledger,
+        dry_run=False,
+        stats=stats,
+        deferred_thread_ids=deferred_thread_ids,
+        deferred_canonical_artifacts=deferred_canonical_artifacts,
+    )
+    if ledger is not None:
+        for thread_id, comment_cursors in pending_comment_watermarks.items():
+            for comment_cursor in comment_cursors:
+                ledger.record_comment_watermark(
+                    source_id=thread_id,
+                    canonical_artifact=None,
+                    comment_watermark=comment_cursor,
+                )
     record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
     return stats
 
 def run(args: argparse.Namespace) -> TriageStats:
     """Main entrypoint - returns stats so tests can assert behaviour."""
     stats = TriageStats()
+    ledger_dry_run = args.dry_run
     if args.backfill and not args.dry_run:
         stats.errors.append("backfill requires --dry-run")
         return stats

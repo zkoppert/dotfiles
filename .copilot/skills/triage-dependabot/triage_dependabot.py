@@ -1895,7 +1895,7 @@ def _comment_notification_still_clearable_from_current(
             )
         except Exception:
             return False
-        return bool(snapshot is not None and snapshot.history_complete and snapshot.direct is False)
+        return snapshot is None or bool(snapshot.history_complete and snapshot.direct is False)
     subject = current.get("subject") or {}
     subject_url = str(subject.get("url") or "")
     latest_url = str(subject.get("latest_comment_url") or "")
@@ -1919,7 +1919,7 @@ def _comment_notification_still_clearable_from_current(
         since=comment_since,
     )
     if snapshot is None:
-        return False
+        return True
     return bool(snapshot.history_complete and snapshot.direct is False)
 
 
