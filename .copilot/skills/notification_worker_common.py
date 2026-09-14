@@ -433,11 +433,6 @@ class NotificationLedger:
             }
             conn.execute("DROP INDEX IF EXISTS idx_notifications_source")
             conn.execute("DROP INDEX IF EXISTS idx_notifications_canonical")
-            for obsolete_column in ("source_type", "lifecycle_state", "payload_json"):
-                if obsolete_column in columns:
-                    conn.execute(
-                        f"ALTER TABLE notifications DROP COLUMN {obsolete_column}"
-                    )
             if "comment_watermark" not in columns:
                 conn.execute("ALTER TABLE notifications ADD COLUMN comment_watermark TEXT")
             conn.execute("""
@@ -450,9 +445,6 @@ class NotificationLedger:
                 ON notifications (canonical_artifact)
                 WHERE canonical_artifact IS NOT NULL AND canonical_artifact != ''
                 """)
-            conn.execute(
-                "UPDATE notifications SET clear_state = 'succeeded' WHERE clear_state = 'cleared'"
-            )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS notification_health (
                   worker TEXT PRIMARY KEY,

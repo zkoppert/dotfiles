@@ -854,7 +854,7 @@ def test_build_flag_entry_schema() -> None:
     entry = td.build_flag_entry(
         pr,
         "o/r",
-        {"id": "thread-123", "reason": "subscribed"},
+        {"id": "thread-123", "reason": "subscribed", "captured_at": "2026-07-07T12:00:00Z"},
         td.Decision(td.OUTCOME_FLAG, "ci failing", bump=td.BUMP_MAJOR),
     )
     assert entry["id"] == "dependabot-r-pr-42"
@@ -862,6 +862,7 @@ def test_build_flag_entry_schema() -> None:
     assert entry["category"] == "process"
     assert entry["source"] == "dependabot-triage"
     assert entry["notification"]["thread_id"] == "thread-123"
+    assert entry["notification"]["captured_at"] == "2026-07-07T12:00:00Z"
     assert entry["notification"]["pr_number"] == 42
     assert entry["notification"]["bump"] == td.BUMP_MAJOR
 

@@ -2287,6 +2287,9 @@ def build_flag_entry(
             "url": pr.get("url") or "",
             "reason": notif.get("reason") or "",
             "repo": repo,
+            "captured_at": str(
+                notif.get("captured_at") or notif.get("updated_at") or utcnow_iso()
+            ),
             "pr_number": pr.get("number"),
             "bump": decision.bump,
         },

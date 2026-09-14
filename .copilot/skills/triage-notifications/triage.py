@@ -3379,6 +3379,16 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                     else "irrelevant"
                 )
+                if (
+                    tracker_terminal_disposition(tracked[1], tracked[0])
+                    and not notification_has_new_activity(
+                        notif,
+                        tracked[1],
+                        allow_reason_change_without_timestamp=False,
+                    )
+                ):
+                    stats.already_tracked += 1
+                    continue
                 if classification.skip_mark_done:
                     stats.dropped += 1
                     _ledger_capture(

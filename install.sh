@@ -239,16 +239,11 @@ if [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; 
   fi
 fi
 
-# Install notification-triage launchd agent (macOS only).
-# The wrapper itself goes in ~/.local/bin so it stays on PATH for ad-hoc runs,
-# and the plist gets symlinked into ~/Library/LaunchAgents so launchctl can
-# pick it up on an hourly 24x7 cadence.
 if [ "$(uname)" = "Darwin" ] && ! command -v terminal-notifier >/dev/null 2>&1; then
   echo "⚠ terminal-notifier is missing - run 'brew install terminal-notifier' to enable clickable triage alerts"
 fi
 
 TRIAGE_WRAPPER="$DOTFILES_DIR/bin/notification-triage"
-TRIAGE_PLIST="$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"
 if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
   mkdir -p "$HOME/.local/bin"
   TRIAGE_BIN_TARGET="$HOME/.local/bin/notification-triage"
@@ -259,21 +254,9 @@ if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = 
     echo "⚠ $TRIAGE_BIN_TARGET exists and is not a symlink - skipping"
   fi
 
-  if [ -f "$TRIAGE_PLIST" ]; then
-    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
-    PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.notification-triage.plist"
-    launchctl unload "$PLIST_TARGET" >/dev/null 2>&1 || true
-    if [ -L "$PLIST_TARGET" ] || [ ! -e "$PLIST_TARGET" ]; then
-      ln -sfn "$TRIAGE_PLIST" "$PLIST_TARGET"
-      echo "✓ Linked com.zkoppert.notification-triage; keep it unloaded until the separate attended activation step"
-    else
-      echo "⚠ $PLIST_TARGET exists and is not a symlink - skipping (delete it manually if you want the dotfiles version)"
-    fi
-  fi
 fi
 
 DEPENDABOT_WRAPPER="$DOTFILES_DIR/bin/triage-dependabot"
-DEPENDABOT_PLIST="$DOTFILES_DIR/LaunchAgents/com.zkoppert.triage-dependabot.plist"
 if [ -x "$DEPENDABOT_WRAPPER" ] && [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
   mkdir -p "$HOME/.local/bin"
   DEPENDABOT_BIN_TARGET="$HOME/.local/bin/triage-dependabot"
@@ -282,18 +265,6 @@ if [ -x "$DEPENDABOT_WRAPPER" ] && [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR
     echo "✓ Linked triage-dependabot → ~/.local/bin/triage-dependabot"
   else
     echo "⚠ $DEPENDABOT_BIN_TARGET exists and is not a symlink - skipping"
-  fi
-
-  if [ -f "$DEPENDABOT_PLIST" ]; then
-    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
-    DEPENDABOT_PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist"
-    launchctl unload "$DEPENDABOT_PLIST_TARGET" >/dev/null 2>&1 || true
-    if [ -L "$DEPENDABOT_PLIST_TARGET" ] || [ ! -e "$DEPENDABOT_PLIST_TARGET" ]; then
-      ln -sfn "$DEPENDABOT_PLIST" "$DEPENDABOT_PLIST_TARGET"
-      echo "✓ Linked com.zkoppert.triage-dependabot; keep it unloaded until the separate attended activation step"
-    else
-      echo "⚠ $DEPENDABOT_PLIST_TARGET exists and is not a symlink - skipping"
-    fi
   fi
 fi
 

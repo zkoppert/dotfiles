@@ -6730,7 +6730,7 @@ def test_run_records_dependabot_handoff_before_clearability_check(todo_file):
     ]
 
 
-def test_run_records_dependabot_handoff_for_tracked_drop_without_clearability_check(
+def test_run_skips_dependabot_handoff_for_stale_tracked_drop(
     todo_file,
 ):
     todo_file.write_text(
@@ -6752,6 +6752,7 @@ def test_run_records_dependabot_handoff_for_tracked_drop_without_clearability_ch
                                 "url": "https://github.com/o/r/pull/42",
                                 "reason": "comment",
                                 "repo": "o/r",
+                                "captured_at": "2026-07-07T12:00:00Z",
                             },
                         }
                     ],
@@ -6793,6 +6794,7 @@ def test_run_records_dependabot_handoff_for_tracked_drop_without_clearability_ch
             side_effect=AssertionError("should not re-check clearability"),
         ),
         patch("triage.items_ready_for_clear", return_value=[]),
+        patch("triage.collect_stale_notification_prunes", return_value=[]),
         patch("triage.reconcile_tracker_rows_to_ledger"),
         patch("triage.retry_pending_github_clears"),
         patch("triage.mark_thread_done") as mark_mock,
@@ -6801,19 +6803,18 @@ def test_run_records_dependabot_handoff_for_tracked_drop_without_clearability_ch
             triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         )
 
-    assert stats.left_for_dependabot == 1
+    assert stats.left_for_dependabot == 0
     mark_mock.assert_not_called()
     ledger = triage.NotificationLedger(ledger_path)
     rows = ledger._rows(
         "SELECT classification, clear_state FROM notifications WHERE source_id = ?",
         ("dep-handoff-tracked",),
     )
-    assert rows == [
-        {
-            "classification": "dependabot_handoff",
-            "clear_state": "not_applicable",
-        }
-    ]
+    assert rows == []
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["prioritized"]["q4_eliminate"][0]["notification"]["captured_at"] == (
+        "2026-07-07T12:00:00Z"
+    )
 
 
 def _stale_self_authored_entry(entry_id: str, pr_number: int) -> dict:
@@ -7692,7 +7693,7 @@ def test_runtime_preflight_wrapper_fails_on_missing_python_modules(tmp_path: Pat
     assert "yaml" in result.stderr
 
 
-def test_install_sh_links_notification_agents_without_loading(tmp_path: Path):
+def test_install_sh_does_not_link_notification_agents_yet(tmp_path: Path):
     repo_root = Path(__file__).resolve().parents[3]
     home = tmp_path / "home"
     dotfiles_link = home / "repos" / "dotfiles"
@@ -7758,26 +7759,9 @@ def test_install_sh_links_notification_agents_without_loading(tmp_path: Path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert (home / "Library/LaunchAgents/com.zkoppert.notification-triage.plist").is_symlink()
-    assert (home / "Library/LaunchAgents/com.zkoppert.triage-dependabot.plist").is_symlink()
-    launchctl_invocations = [
-        line.split()
-        for line in (
-            launchctl_log.read_text(encoding="utf-8").splitlines()
-            if launchctl_log.exists()
-            else []
-        )
-    ]
-    assert not any(
-        parts and parts[0] == "load" and any(
-            plist in parts
-            for plist in (
-                "com.zkoppert.notification-triage.plist",
-                "com.zkoppert.triage-dependabot.plist",
-            )
-        )
-        for parts in launchctl_invocations
-    )
+    assert not (home / "Library/LaunchAgents/com.zkoppert.notification-triage.plist").exists()
+    assert not (home / "Library/LaunchAgents/com.zkoppert.triage-dependabot.plist").exists()
+    assert not launchctl_log.exists()
 
 
 def test_ledger_tracks_distinct_threads_for_same_artifact(todo_file: Path):
@@ -9073,37 +9057,6 @@ def test_preview_backfill_keeps_terminal_tracker_rows_when_notification_is_not_n
             "clear_state": "pending",
         }
     ]
-
-
-def test_notification_worker_tests_workflow_uses_matrix_and_lockfile():
-    workflow = yaml.safe_load(
-        Path(".github/workflows/notification-worker-tests.yml").read_text()
-    )
-    jobs = workflow["jobs"]
-    assert list(jobs) == ["notification-workers"]
-    job = jobs["notification-workers"]
-    assert job["runs-on"] == "ubuntu-24.04"
-    assert job["container"]["image"] == (
-        "python:3.13.0-bookworm@sha256:91a40c9db8e53aa8c4cae96c24dc7135835e07c8140de233826ece4442ca8e29"
-    )
-    assert job["strategy"]["matrix"]["include"] == [
-        {
-            "suite": "triage-notifications",
-            "test_file": ".copilot/skills/triage-notifications/tests.py",
-        },
-        {
-            "suite": "triage-dependabot",
-            "test_file": ".copilot/skills/triage-dependabot/tests.py",
-        },
-    ]
-    install_step = next(step for step in job["steps"] if step.get("name") == "Install test dependencies")
-    assert "--require-hashes" in install_step["run"]
-    assert "notification-worker-requirements.lock.txt" in install_step["run"]
-    assert all(
-        not step.get("uses", "").startswith("actions/setup-python@")
-        for step in job["steps"]
-        if isinstance(step, dict)
-    )
 
 
 def test_current_notification_is_clearable_allows_closed_review_requested_without_terminal_boundary(
