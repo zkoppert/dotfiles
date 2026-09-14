@@ -1486,6 +1486,21 @@ def test_do_add_label_invokes_gh() -> None:
     mocked.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    ("helper", "args"),
+    [
+        (td.do_rebase_comment, ("o/r", 1)),
+        (td.do_add_label, ("o/r", 1, "release")),
+        (td.do_dependabot_close, ("o/r", 1)),
+    ],
+)
+def test_action_helpers_respect_guard_before_mutation(helper, args) -> None:
+    with mock.patch.object(td, "run_gh") as mocked:
+        result = helper(*args, dry_run=False, action_guard=lambda: "stale")
+    assert result is False
+    mocked.assert_not_called()
+
+
 def test_mark_thread_done_dry_run() -> None:
     with mock.patch.object(td, "run_gh") as mocked:
         td.mark_thread_done("t1", dry_run=True)
@@ -2119,6 +2134,7 @@ def test_run_dry_run_previews_stale_cleanup_without_mutating(tmp_path: Path) -> 
     # Dry-run must NOT mutate the file on disk.
     assert len(reloaded["inbox"]) == 1
     assert reloaded["inbox"][0]["id"] == "notif-old-entry"
+    assert not td.DEFAULT_LEDGER_PATH.exists()
 
 
 def test_run_cleans_stale_inbox_entries_on_label_and_merge(tmp_path: Path) -> None:
@@ -4558,7 +4574,7 @@ def test_run_branch_protection_failure_flags_and_sets_long_cooldown(
             "tracker_item_id": flags[0]["id"],
             "tracker_section": "prioritized.q1_do_first",
             "terminal_disposition": "tracked_elsewhere",
-            "clear_state": "cleared",
+            "clear_state": "succeeded",
         }
     ]
 

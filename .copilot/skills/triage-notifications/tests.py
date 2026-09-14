@@ -3356,6 +3356,7 @@ def test_run_dry_run_does_not_write(todo_file):
     assert stats.added_q1 == 1
     assert stats.added_q2 == 0
     assert todo_file.read_text() == before
+    assert not triage.DEFAULT_LEDGER_PATH.exists()
     notify_mock.assert_not_called()
 
 
@@ -7228,8 +7229,8 @@ def test_install_sh_links_notification_agents_without_loading(tmp_path: Path):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     launchctl_log = tmp_path / "launchctl.log"
-    bootstrap_python = tmp_path / "bootstrap-python"
-    bootstrap_python.write_text(
+    python3 = fake_bin / "python3"
+    python3.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
         'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then\n'
@@ -7237,10 +7238,11 @@ def test_install_sh_links_notification_agents_without_loading(tmp_path: Path):
         "  mkdir -p \"$target/bin\"\n"
         "  cat > \"$target/bin/python3\" <<'EOF'\n"
         "#!/bin/sh\n"
-        'if [ "$1" = "-c" ]; then\n'
+        "set -eu\n"
+        'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
         "  exit 0\n"
         "fi\n"
-        'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
+        'if [ "$1" = "-" ] || [ "$1" = "-c" ]; then\n'
         "  exit 0\n"
         "fi\n"
         "exit 0\n"
@@ -7248,10 +7250,13 @@ def test_install_sh_links_notification_agents_without_loading(tmp_path: Path):
         "  chmod +x \"$target/bin/python3\"\n"
         "  exit 0\n"
         "fi\n"
+        'if [ "$1" = "-" ] || [ "$1" = "-c" ]; then\n'
+        "  exit 0\n"
+        "fi\n"
         "exit 0\n",
         encoding="utf-8",
     )
-    bootstrap_python.chmod(0o755)
+    python3.chmod(0o755)
 
     scripts = {
         "uname": "#!/bin/sh\necho Darwin\n",
@@ -7270,7 +7275,6 @@ def test_install_sh_links_notification_agents_without_loading(tmp_path: Path):
     env = {
         "HOME": str(home),
         "PATH": f"{fake_bin}:/usr/bin:/bin",
-        "NOTIFICATION_BOOTSTRAP_PYTHON": str(bootstrap_python),
     }
     result = subprocess.run(
         ["bash", str(dotfiles_link / "install.sh")],
@@ -8034,3 +8038,165 @@ def test_run_clears_dependabot_tracked_item_when_dropped(todo_file: Path):
         ("dep-couple-1",),
     )
     assert rows == [{"clear_state": "succeeded", "terminal_disposition": "irrelevant"}]
+
+
+def test_run_comment_history_with_review_requested_routes_to_q1(todo_file):
+    notif = _notif("review_requested")
+    responses = {
+        "/user": json.dumps({"login": "zkoppert"}),
+        "/notifications?all=true": json.dumps([notif]),
+        "/repos/zkoppert/example/pulls/42": json.dumps({"state": "open"}),
+        "/repos/zkoppert/example/issues/42/comments": json.dumps(
+            [
+                [
+                    {
+                        "user": {"login": "teammate"},
+                        "body": "Could you investigate this, @zkoppert?",
+                    }
+                ]
+            ]
+        ),
+    }
+
+    with patch("triage.subprocess.run", side_effect=_gh_returns(responses)), patch(
+        "triage.macos_notify"
+    ) as notify_mock:
+        args = triage.parse_args(["--todo-file", str(todo_file)])
+        stats = triage.run(args)
+
+    assert stats.added_q1 == 1
+    assert stats.added_q2 == 0
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
+    notify_mock.assert_called_once()
+
+
+def test_preview_backfill_requires_explicit_ledger_path(tmp_path: Path):
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first: []\ndone: []\n",
+        encoding="utf-8",
+    )
+
+    stats = triage.preview_backfill_ledger(
+        triage.parse_args([
+            "--todo-file",
+            str(todo_file),
+            "--dry-run",
+            "--backfill",
+        ])
+    )
+
+    assert stats.errors == ["backfill requires --backfill-ledger"]
+
+
+def test_preview_backfill_preserves_dependabot_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first: []\ndone: []\n",
+        encoding="utf-8",
+    )
+    preview_ledger = tmp_path / "preview.sqlite"
+    notif = _notif(
+        "subscribed",
+        id="notif-handoff",
+        updated_at="2026-09-14T07:00:00Z",
+        repo="o/r",
+        url="https://api.github.com/repos/o/r/pulls/1",
+    )
+    notif["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/1"
+    monkeypatch.setattr(triage, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(triage, "fetch_notifications", lambda: [notif])
+    monkeypatch.setattr(
+        triage,
+        "classify",
+        lambda *args, **kwargs: triage.Classification(
+            triage.BUCKET_DROP,
+            "dependabot handoff",
+            skip_mark_done=True,
+        ),
+    )
+
+    stats = triage.preview_backfill_ledger(
+        triage.parse_args([
+            "--todo-file",
+            str(todo_file),
+            "--dry-run",
+            "--backfill",
+            "--backfill-ledger",
+            str(preview_ledger),
+        ])
+    )
+
+    ledger = triage.NotificationLedger(preview_ledger)
+    rows = ledger._rows(
+        "SELECT classification, terminal_disposition, clear_state FROM notifications WHERE source_id = ?",
+        ("notif-handoff",),
+    )
+    assert stats.left_for_dependabot == 1
+    assert rows == [
+        {
+            "classification": "dependabot_handoff",
+            "terminal_disposition": None,
+            "clear_state": "not_applicable",
+        }
+    ]
+
+
+def test_reconcile_tracker_rows_to_ledger_reopens_terminal_rows(todo_file: Path):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/1"
+    ledger.capture(
+        source_id="thread-active",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_id="thread-active",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    notification = {
+        "thread_id": "thread-active",
+        "url": artifact,
+        "reason": "subscribed",
+        "repo": "o/r",
+        "captured_at": "2026-07-02T12:00:00Z",
+        "terminal_recorded_at": "2026-07-01T12:00:00Z",
+        "terminal_disposition": "irrelevant",
+    }
+    data = {
+        "inbox": [
+            {
+                "id": "active-1",
+                "title": "Active notification",
+                "source": "github-notification",
+                "notification": notification,
+            }
+        ],
+        "prioritized": {"q1_do_first": [], "q2_schedule": [], "q3_delegate": [], "q4_eliminate": []},
+        "done": [],
+    }
+
+    triage.reconcile_tracker_rows_to_ledger(
+        data,
+        ledger=ledger,
+        dry_run=False,
+        stats=triage.TriageStats(),
+    )
+
+    rows = ledger._rows(
+        "SELECT terminal_disposition, terminal_recorded_at, clear_state FROM notifications WHERE source_id = ?",
+        ("thread-active",),
+    )
+    assert rows == [
+        {
+            "terminal_disposition": None,
+            "terminal_recorded_at": None,
+            "clear_state": "not_applicable",
+        }
+    ]
+    assert "terminal_disposition" not in data["inbox"][0]["notification"]
+    assert "terminal_recorded_at" not in data["inbox"][0]["notification"]

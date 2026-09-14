@@ -50,7 +50,7 @@ if str(_SKILLS_DIR) not in sys.path:
     sys.path.insert(0, str(_SKILLS_DIR))
 
 import yaml
-from notification_worker_common import DEFAULT_LEDGER_FILE, NotificationLedger
+from notification_worker_common import DEFAULT_LEDGER_FILE, NotificationLedger, record_worker_health_snapshot
 from notification_worker_common import comment_notification_snapshot as shared_comment_notification_snapshot
 from notification_worker_common import ledger_capture as _ledger_capture
 from notification_worker_common import (
@@ -1329,13 +1329,13 @@ def do_rebase_comment(
     *,
     dry_run: bool,
     action_guard: Callable[[], str | None] | None = None,
-) -> None:
+) -> bool:
     """Post the ``@dependabot rebase`` comment."""
     if dry_run:
         logger.info("dry-run: would comment rebase on %s#%d", repo, number)
-        return
+        return True
     if action_guard is not None and action_guard() is not None:
-        return
+        return False
     run_gh(
         [
             "pr",
@@ -1348,6 +1348,7 @@ def do_rebase_comment(
         ],
         timeout=30,
     )
+    return True
 
 
 def do_add_label(
@@ -1357,12 +1358,12 @@ def do_add_label(
     *,
     dry_run: bool,
     action_guard: Callable[[], str | None] | None = None,
-) -> None:
+) -> bool:
     if dry_run:
         logger.info("dry-run: would add label %s to %s#%d", label, repo, number)
-        return
+        return True
     if action_guard is not None and action_guard() is not None:
-        return
+        return False
     run_gh(
         [
             "pr",
@@ -1375,6 +1376,7 @@ def do_add_label(
         ],
         timeout=30,
     )
+    return True
 
 
 def _is_already_closed_stderr(stderr: str) -> bool:
@@ -1402,7 +1404,7 @@ def do_dependabot_close(
     *,
     dry_run: bool,
     action_guard: Callable[[], str | None] | None = None,
-) -> None:
+) -> bool:
     """Force-close a prerelease bump PR via the GitHub API.
 
     Calls ``gh pr close --delete-branch`` to shut the PR directly. We
@@ -1428,9 +1430,9 @@ def do_dependabot_close(
     """
     if dry_run:
         logger.info("dry-run: would force-close %s#%d", repo, number)
-        return
+        return True
     if action_guard is not None and action_guard() is not None:
-        return
+        return False
     try:
         run_gh(
             [
@@ -1451,8 +1453,9 @@ def do_dependabot_close(
                 repo,
                 number,
             )
-            return
+            return True
         raise
+    return True
 
 
 def mark_thread_done(thread_id: str, *, dry_run: bool) -> None:
@@ -1828,10 +1831,8 @@ def _comment_notification_still_clearable(
                 ),
             )
         except Exception:
-            return True
-        if snapshot is not None and snapshot.direct is True:
             return False
-        return True
+        return bool(snapshot is not None and snapshot.history_complete and snapshot.direct is False)
     record = (
         ledger.notification_record(source_id=thread_id, canonical_artifact=pr_url)
         if ledger is not None
@@ -2391,47 +2392,11 @@ def _record_stale_cleanup(
 
 
 
-def _record_worker_health_snapshot(
-    *,
-    ledger: NotificationLedger | None,
-    worker: str,
-    stats: TriageStats,
-) -> None:
-    if ledger is None:
-        return
-    metrics = ledger.health_metrics()
-    now = utcnow_iso()
-    snapshot = {
-        "current_notification_count": stats.fetched,
-        "current_unread_count": stats.unread,
-        "actionable_without_tracker_link_count": len(
-            metrics["actionable_without_tracker_links"]
-        ),
-        "actionable_without_tracker_links": metrics["actionable_without_tracker_links"],
-        "clear_failure_count": len(metrics["clear_failures"]),
-        "clear_failures": metrics["clear_failures"],
-        "stale_dropped_count": len(metrics["stale_dropped_items"]),
-        "stale_dropped_items": metrics["stale_dropped_items"],
-        "notification_counts": metrics["notification_counts"],
-    }
-    prior = ledger.health_snapshot(worker=worker)
-    if stats.errors:
-        snapshot["last_error_at"] = now
-        snapshot["last_error"] = stats.errors[-1]
-        if prior is not None:
-            snapshot.setdefault("last_success_at", prior.get("last_success_at"))
-    else:
-        snapshot["last_success_at"] = now
-        if prior is not None:
-            snapshot.setdefault("last_error_at", prior.get("last_error_at"))
-            snapshot.setdefault("last_error", prior.get("last_error"))
-    ledger.record_health_snapshot(worker=worker, snapshot=snapshot)
-
 def run(args: argparse.Namespace) -> TriageStats:
     """Main entrypoint. Returns stats so tests can assert behaviour."""
     stats = TriageStats()
     ledger: NotificationLedger | None = None
-    if not args.dry_run or DEFAULT_LEDGER_PATH.exists():
+    if not args.dry_run:
         ledger = NotificationLedger(DEFAULT_LEDGER_PATH)
     try:
         my_login = get_my_login()
@@ -2442,7 +2407,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         LookupError,
     ) as exc:
         stats.errors.append(f"failed to fetch /user: {exc}")
-        _record_worker_health_snapshot(ledger=ledger, worker="triage-dependabot", stats=stats)
+        record_worker_health_snapshot(ledger=ledger, worker="triage-dependabot", stats=stats)
         return stats
 
     try:
@@ -2453,7 +2418,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         json.JSONDecodeError,
     ) as exc:
         stats.errors.append(f"failed to fetch notifications: {exc}")
-        _record_worker_health_snapshot(ledger=ledger, worker="triage-dependabot", stats=stats)
+        record_worker_health_snapshot(ledger=ledger, worker="triage-dependabot", stats=stats)
         return stats
     stats.fetched = len(notifications)
     stats.unread = sum(1 for notif in notifications if notif.get("unread"))
@@ -3021,8 +2986,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     dry_run=args.dry_run,
                     my_login=my_login,
                     head_sha=pr.get("headRefOid"),
+                    action_guard=mutation_guard_reason,
                 )
-                state[pr_url] = now
                 if not merged:
                     merge_guard_block = merge_guard_reason()
                     if merge_guard_block is not None:
@@ -3031,6 +2996,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         else:
                             stats.skipped += 1
                         continue
+                    state[pr_url] = now
                     _ledger_capture(
                         ledger,
                         dry_run=args.dry_run,
@@ -3043,6 +3009,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         repo=repo,
                     )
                     continue
+                state[pr_url] = now
                 stats.merged += 1
                 _ledger_capture(
                     ledger,
@@ -3121,12 +3088,14 @@ def run(args: argparse.Namespace) -> TriageStats:
                         )
                         stats.skipped += 1
                         continue
-                    do_add_label(
+                    if not do_add_label(
                         repo,
                         number,
                         "release",
                         dry_run=args.dry_run,
-                    )
+                        action_guard=mutation_guard_reason,
+                    ):
+                        continue
                 final_notif = _current_notification_for_clearance(thread_id=thread_id or None)
                 if thread_id and final_notif is None:
                     stats.errors.append(f"notification disappeared before action for {pr_url}")
@@ -3174,9 +3143,17 @@ def run(args: argparse.Namespace) -> TriageStats:
                     dry_run=args.dry_run,
                     my_login=my_login,
                     head_sha=pr.get("headRefOid"),
+                    action_guard=mutation_guard_reason,
                 )
-                state[pr_url] = now
                 if not merged:
+                    merge_guard_block = merge_guard_reason()
+                    if merge_guard_block is not None:
+                        if merge_guard_block.startswith("failed to reload todo"):
+                            stats.errors.append(merge_guard_block)
+                        else:
+                            stats.skipped += 1
+                        continue
+                    state[pr_url] = now
                     _ledger_capture(
                         ledger,
                         dry_run=args.dry_run,
@@ -3189,6 +3166,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         repo=repo,
                     )
                     continue
+                state[pr_url] = now
                 stats.labeled_and_merged += 1
                 _ledger_capture(
                     ledger,
@@ -3249,11 +3227,13 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                     stats.skipped += 1
                     continue
-                do_rebase_comment(
+                if not do_rebase_comment(
                     repo,
                     number,
                     dry_run=args.dry_run,
-                )
+                    action_guard=mutation_guard_reason,
+                ):
+                    continue
                 stats.rebased += 1
                 state[pr_url] = now
                 _ledger_capture(
@@ -3293,11 +3273,13 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                     stats.skipped += 1
                     continue
-                do_dependabot_close(
+                if not do_dependabot_close(
                     repo,
                     number,
                     dry_run=args.dry_run,
-                )
+                    action_guard=mutation_guard_reason,
+                ):
+                    continue
                 stats.closed_prerelease += 1
                 state[pr_url] = now
                 _ledger_capture(
@@ -3447,7 +3429,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             applied = apply_todo_mutations_with_lock(args.todo_file, mutations)
         except (OSError, FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
             stats.errors.append(f"failed to write todo file: {exc}")
-            _record_worker_health_snapshot(ledger=ledger, worker="triage-dependabot", stats=stats)
+            record_worker_health_snapshot(ledger=ledger, worker="triage-dependabot", stats=stats)
             return stats
         stats.flagged = int(applied["added_flags"])
         stats.already_tracked += int(applied["already_tracked"])
@@ -3536,7 +3518,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 str(notif_meta.get("url") or ""),
             )
 
-    _record_worker_health_snapshot(ledger=ledger, worker="triage-dependabot", stats=stats)
+    record_worker_health_snapshot(ledger=ledger, worker="triage-dependabot", stats=stats)
     return stats
 
 

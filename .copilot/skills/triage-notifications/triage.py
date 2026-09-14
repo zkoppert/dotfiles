@@ -53,7 +53,7 @@ if str(_TRIAGE_DEPENDABOT_DIR) not in sys.path:
     sys.path.insert(0, str(_TRIAGE_DEPENDABOT_DIR))
 
 import yaml
-from notification_worker_common import DEFAULT_LEDGER_FILE, NotificationLedger
+from notification_worker_common import DEFAULT_LEDGER_FILE, NotificationLedger, record_worker_health_snapshot
 from notification_worker_common import ledger_capture as _ledger_capture
 from notification_worker_common import (
     ledger_record_clear_result as _ledger_record_clear_result,
@@ -766,20 +766,6 @@ def classify(
         if is_super_linter(author, body):
             return Classification(BUCKET_DROP, "super-linter comment without @mention")
         return Classification(BUCKET_DROP, "comment without a direct @mention")
-
-    if reason == "assign" and subject_type == "pullrequest":
-        state = state_fetcher(notif)
-        if state in CLOSED_STATES:
-            archive = False
-            if subject_type == "pullrequest":
-                author = subject_author_fetcher(notif)
-                if author and author.lower() == my_login.lower():
-                    archive = True
-            return Classification(
-                BUCKET_DROP,
-                f"assign on {state} {subject_type}",
-                archive_to_done=archive,
-            )
 
     if reason in Q1_REASONS:
         return Classification(
@@ -2361,7 +2347,7 @@ def _stale_notification_prune_delta(
     if action != STALE_DROP:
         return None
     notification_reason = (notif.get("reason") or "").lower()
-    if section == "prioritized.q1_do_first" and notification_reason == "comment":
+    if section == "prioritized.q1_do_first":
         return None
     archive_entry = None
     if parsed.get("kind") == "pr" and notification_reason == "author":
@@ -2438,13 +2424,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--backfill",
         action="store_true",
-        help="Dry-run preview: backfill a temporary ledger from current notifications and tracker rows without mutating GitHub or todo.yml.",
+        help="Dry-run preview: backfill current notifications and tracker rows into a fresh preview ledger without mutating GitHub or todo.yml.",
     )
     parser.add_argument(
         "--backfill-ledger",
         type=Path,
         default=None,
-        help="Write the dry-run backfill preview ledger to this path instead of a throwaway temp file.",
+        help="Write the dry-run backfill preview ledger to this fresh path.",
     )
     parser.add_argument(
         "--verbose",
@@ -2566,6 +2552,13 @@ def reconcile_tracker_rows_to_ledger(
                     queue_clear=not bool(notif.get("marked_done")),
                     event_at=terminal_recorded_at,
                 )
+        elif ledger is not None:
+            _reset_terminal_notification(notif)
+            ledger.reopen_actionable(
+                source_id=thread_id,
+                reason=reason,
+                tracker_section=section,
+            )
 
 
 def clear_url_deduped_threads(
@@ -2735,42 +2728,6 @@ def retry_pending_github_clears(
 
 
 
-def _record_worker_health_snapshot(
-    *,
-    ledger: NotificationLedger | None,
-    worker: str,
-    stats: TriageStats,
-) -> None:
-    if ledger is None:
-        return
-    metrics = ledger.health_metrics()
-    now = utcnow_iso()
-    snapshot = {
-        "current_notification_count": stats.fetched,
-        "current_unread_count": stats.unread,
-        "actionable_without_tracker_link_count": len(
-            metrics["actionable_without_tracker_links"]
-        ),
-        "actionable_without_tracker_links": metrics["actionable_without_tracker_links"],
-        "clear_failure_count": len(metrics["clear_failures"]),
-        "clear_failures": metrics["clear_failures"],
-        "stale_dropped_count": len(metrics["stale_dropped_items"]),
-        "stale_dropped_items": metrics["stale_dropped_items"],
-        "notification_counts": metrics["notification_counts"],
-    }
-    prior = ledger.health_snapshot(worker=worker)
-    if stats.errors:
-        snapshot["last_error_at"] = now
-        snapshot["last_error"] = stats.errors[-1]
-        if prior is not None:
-            snapshot.setdefault("last_success_at", prior.get("last_success_at"))
-    else:
-        snapshot["last_success_at"] = now
-        if prior is not None:
-            snapshot.setdefault("last_error_at", prior.get("last_error_at"))
-            snapshot.setdefault("last_error", prior.get("last_error"))
-    ledger.record_health_snapshot(worker=worker, snapshot=snapshot)
-
 
 def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
     """Dry-run preview that mirrors current notifications into a temp ledger."""
@@ -2781,7 +2738,11 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
 
     preview_ledger_path = args.backfill_ledger
     if preview_ledger_path is None:
-        preview_ledger_path = Path(tempfile.mkdtemp(prefix="notification-backfill-")) / "ledger.sqlite"
+        stats.errors.append("backfill requires --backfill-ledger")
+        return stats
+    if preview_ledger_path.exists() or preview_ledger_path.resolve() == DEFAULT_LEDGER_PATH.resolve():
+        stats.errors.append("backfill requires a fresh non-production --backfill-ledger path")
+        return stats
     ledger = NotificationLedger(preview_ledger_path)
 
     try:
@@ -2793,7 +2754,7 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
         LookupError,
     ) as exc:
         stats.errors.append(f"failed to fetch /user: {exc}")
-        _record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
         return stats
 
     try:
@@ -2804,7 +2765,7 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
         json.JSONDecodeError,
     ) as exc:
         stats.errors.append(f"failed to fetch notifications: {exc}")
-        _record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
         return stats
 
     stats.fetched = len(notifications)
@@ -2814,7 +2775,7 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
         data = load_todo(args.todo_file)
     except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
         stats.errors.append(f"failed to load todo file: {exc}")
-        _record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
         return stats
 
     reconcile_tracker_rows_to_ledger(
@@ -2860,14 +2821,12 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
         if comment_since is None and canonical_tracked is not None:
             comment_since = _bootstrap_comment_since(notif, canonical_tracked[1])
 
-        comment_snapshot = None
-        if reason == "comment":
-            comment_snapshot = shared_comment_notification_snapshot(
-                notif,
-                my_login=my_login,
-                run_gh=run_gh,
-                since=comment_since,
-            )
+        comment_snapshot = shared_comment_notification_snapshot(
+            notif,
+            my_login=my_login,
+            run_gh=run_gh,
+            since=comment_since,
+        )
 
         classification = classify(
             notif,
@@ -2891,18 +2850,21 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
         queue_clear = False
         if classification.bucket == BUCKET_DROP:
             stats.dropped += 1
-            terminal_disposition = (
-                "completed"
-                if (
-                    classification.archive_to_done
-                    or "closed" in classification.reason
-                    or "merged" in classification.reason
-                )
-                else "irrelevant"
-            )
-            queue_clear = bool(thread_id)
             if classification.skip_mark_done:
                 stats.left_for_dependabot += 1
+                terminal_disposition = None
+                queue_clear = False
+            else:
+                terminal_disposition = (
+                    "completed"
+                    if (
+                        classification.archive_to_done
+                        or "closed" in classification.reason
+                        or "merged" in classification.reason
+                    )
+                    else "irrelevant"
+                )
+                queue_clear = bool(thread_id)
         elif classification.bucket == BUCKET_Q1:
             stats.added_q1 += 1
         elif classification.bucket == BUCKET_Q2:
@@ -2915,7 +2877,11 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
             dry_run=False,
             thread_id=thread_id or None,
             canonical_artifact=canonical_url,
-            classification="policy_drop" if terminal_disposition else "actionable",
+            classification=(
+                "dependabot_handoff"
+                if classification.skip_mark_done
+                else ("policy_drop" if terminal_disposition else "actionable")
+            ),
             worker="backfill-preview",
             title=title,
             reason=reason,
@@ -2927,7 +2893,7 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
             event_at=str(notif.get("captured_at") or notif.get("updated_at") or utcnow_iso()),
         )
 
-    _record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+    record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
     return stats
 
 def run(args: argparse.Namespace) -> TriageStats:
@@ -2939,7 +2905,7 @@ def run(args: argparse.Namespace) -> TriageStats:
     if args.dry_run and args.backfill:
         return preview_backfill_ledger(args)
     ledger: NotificationLedger | None = None
-    if not args.dry_run or DEFAULT_LEDGER_PATH.exists():
+    if not args.dry_run:
         ledger = NotificationLedger(DEFAULT_LEDGER_PATH)
 
     try:
@@ -2947,14 +2913,14 @@ def run(args: argparse.Namespace) -> TriageStats:
         logger.debug("authenticated as @%s", my_login)
     except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         stats.errors.append(f"failed to fetch /user: {exc}")
-        _record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
         return stats
 
     try:
         notifications = fetch_notifications()
     except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         stats.errors.append(f"failed to fetch notifications: {exc}")
-        _record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
         return stats
 
     stats.fetched = len(notifications)
@@ -2965,7 +2931,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         data = load_todo(args.todo_file)
     except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
         stats.errors.append(f"failed to load todo file: {exc}")
-        _record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
         return stats
 
     reconcile_tracker_rows_to_ledger(
@@ -3018,37 +2984,36 @@ def run(args: argparse.Namespace) -> TriageStats:
             comment_since = _bootstrap_comment_since(notif, canonical_tracked[1])
 
         dependabot_bump = is_dependabot_bump(title)
-        comment_snapshot = None
-        if reason == "comment":
-            comment_snapshot = shared_comment_notification_snapshot(
-                notif,
-                my_login=my_login,
-                run_gh=run_gh,
-                since=comment_since,
-            )
-            if (
-                comment_snapshot is not None
-                and not comment_snapshot.history_complete
-                and comment_snapshot.direct is not True
-                and not dependabot_bump
-            ):
-                if thread_id:
-                    protected_actionable_thread_ids.add(thread_id)
-                if ledger is not None and thread_id:
-                    ledger.suspend_pending_clear(
-                        source_id=thread_id,
-                        canonical_artifact=canonical_url,
-                    )
-                continue
-            if (
-                thread_id
-                and comment_snapshot is not None
-                and comment_snapshot.history_complete
-                and comment_snapshot.comment_cursors
-            ):
-                pending_comment_watermarks.setdefault(thread_id, []).extend(
-                    comment_snapshot.comment_cursors.values()
+        comment_snapshot = shared_comment_notification_snapshot(
+            notif,
+            my_login=my_login,
+            run_gh=run_gh,
+            since=comment_since,
+        )
+        if (
+            reason == "comment"
+            and comment_snapshot is not None
+            and not comment_snapshot.history_complete
+            and comment_snapshot.direct is not True
+            and not dependabot_bump
+        ):
+            if thread_id:
+                protected_actionable_thread_ids.add(thread_id)
+            if ledger is not None and thread_id:
+                ledger.suspend_pending_clear(
+                    source_id=thread_id,
+                    canonical_artifact=canonical_url,
                 )
+            continue
+        if (
+            thread_id
+            and comment_snapshot is not None
+            and comment_snapshot.history_complete
+            and comment_snapshot.comment_cursors
+        ):
+            pending_comment_watermarks.setdefault(thread_id, []).extend(
+                comment_snapshot.comment_cursors.values()
+            )
 
         classification = classify(
             notif,
@@ -3583,7 +3548,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 _RuamelYAMLError,
             ) as exc:
                 stats.errors.append(f"failed to preview todo updates: {exc}")
-                _record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+                record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
                 return stats
         else:
             try:
@@ -3595,7 +3560,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 _RuamelYAMLError,
             ) as exc:
                 stats.errors.append(f"failed to write todo file: {exc}")
-                _record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+                record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
                 return stats
             if applied["changed"]:
                 commit_todo_changes(
@@ -3672,7 +3637,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 str(notif_meta.get("url") or ""),
             )
 
-    _record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+    record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
     return stats
 
 

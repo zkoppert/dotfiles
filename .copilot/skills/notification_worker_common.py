@@ -7,7 +7,6 @@ wrappers can rely on it after the pinned runtime passes import preflight.
 
 from __future__ import annotations
 
-import contextlib
 import datetime as _dt
 import json
 import os
@@ -22,7 +21,6 @@ from urllib.parse import urlparse
 HOME = Path.home()
 DEFAULT_SUPPORT_DIR = HOME / "Library" / "Application Support" / "notification-workers"
 DEFAULT_LEDGER_FILE = DEFAULT_SUPPORT_DIR / "ledger.sqlite"
-ALLOW_DRY_RUN_LEDGER_WRITES = False
 
 
 def utcnow() -> _dt.datetime:
@@ -447,6 +445,9 @@ class NotificationLedger:
                 ON notifications (canonical_artifact)
                 WHERE canonical_artifact IS NOT NULL AND canonical_artifact != ''
                 """)
+            conn.execute(
+                "UPDATE notifications SET clear_state = 'succeeded' WHERE clear_state = 'cleared'"
+            )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS notification_health (
                   worker TEXT PRIMARY KEY,
@@ -919,7 +920,7 @@ class NotificationLedger:
                 """
                 UPDATE notifications
                    SET clear_state = CASE
-                           WHEN clear_state IN ('succeeded', 'cleared') THEN clear_state
+                           WHEN clear_state = 'succeeded' THEN clear_state
                            WHEN clear_state = 'failed' THEN clear_state
                            ELSE 'pending'
                         END,
@@ -955,31 +956,17 @@ class NotificationLedger:
                     worker="clear-success",
                     now=now,
                 )
-            terminal_disposition = None
-            row = conn.execute(
-                """
-                SELECT terminal_disposition
-                  FROM notifications
-                 WHERE id = ?
-                """,
-                (row_id,),
-            ).fetchone()
-            if row is not None:
-                terminal_disposition = row[0]
-            clear_state = (
-                'cleared' if terminal_disposition == 'tracked_elsewhere' else 'succeeded'
-            )
             conn.execute(
                 """
                 UPDATE notifications
-                   SET clear_state = ?,
+                   SET clear_state = 'succeeded',
                        last_clear_error = NULL,
                        clear_attempted_at = ?,
                        cleared_at = ?,
                        last_seen_at = ?
                  WHERE id = ?
                 """,
-                (clear_state, now, now, now, row_id),
+                (now, now, now, row_id),
             )
             conn.commit()
 
@@ -1102,7 +1089,7 @@ class NotificationLedger:
                    terminal_disposition, clear_state
               FROM notifications
              WHERE terminal_disposition = 'irrelevant'
-               AND clear_state NOT IN ('succeeded', 'cleared')
+               AND clear_state != 'succeeded'
              ORDER BY first_seen_at ASC
             """
         )
@@ -1112,7 +1099,7 @@ class NotificationLedger:
               COUNT(*) AS total,
               COALESCE(SUM(CASE WHEN clear_state = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
               COALESCE(SUM(CASE WHEN clear_state = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
-              COALESCE(SUM(CASE WHEN clear_state IN ('succeeded', 'cleared') THEN 1 ELSE 0 END), 0) AS cleared,
+              COALESCE(SUM(CASE WHEN clear_state = 'succeeded' THEN 1 ELSE 0 END), 0) AS succeeded,
               COALESCE(SUM(CASE WHEN classification = 'actionable' THEN 1 ELSE 0 END), 0) AS actionable,
               COALESCE(SUM(CASE WHEN terminal_disposition IS NOT NULL THEN 1 ELSE 0 END), 0) AS terminal
               FROM notifications
@@ -1129,15 +1116,6 @@ class NotificationLedger:
     def record_health_snapshot(self, *, worker: str, snapshot: dict[str, Any]) -> None:
         now = utcnow_iso()
         with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS notification_health (
-                  worker TEXT PRIMARY KEY,
-                  updated_at TEXT NOT NULL,
-                  snapshot_json TEXT NOT NULL
-                )
-                """
-            )
             conn.execute(
                 """
                 INSERT INTO notification_health (worker, updated_at, snapshot_json)
@@ -1171,17 +1149,6 @@ class NotificationLedger:
         return payload
 
 
-@contextlib.contextmanager
-def permit_dry_run_ledger_writes():
-    global ALLOW_DRY_RUN_LEDGER_WRITES
-    previous = ALLOW_DRY_RUN_LEDGER_WRITES
-    ALLOW_DRY_RUN_LEDGER_WRITES = True
-    try:
-        yield
-    finally:
-        ALLOW_DRY_RUN_LEDGER_WRITES = previous
-
-
 def ledger_capture(
     ledger: NotificationLedger | None,
     *,
@@ -1199,7 +1166,7 @@ def ledger_capture(
     queue_clear: bool = False,
     event_at: str | None = None,
 ) -> None:
-    if ledger is None or (dry_run and not ALLOW_DRY_RUN_LEDGER_WRITES):
+    if ledger is None or dry_run:
         return
     ledger.capture(
         source_id=thread_id,
@@ -1251,7 +1218,7 @@ def ledger_record_clear_result(
     canonical_artifact: str | None,
     error: BaseException | None = None,
 ) -> None:
-    if ledger is None or (dry_run and not ALLOW_DRY_RUN_LEDGER_WRITES):
+    if ledger is None or dry_run:
         return
     if error is None:
         ledger.record_clear_success(
@@ -1264,3 +1231,40 @@ def ledger_record_clear_result(
         canonical_artifact=canonical_artifact,
         error=str(error),
     )
+
+
+def record_worker_health_snapshot(
+    ledger: NotificationLedger | None,
+    *,
+    worker: str,
+    stats: Any,
+) -> None:
+    if ledger is None:
+        return
+    metrics = ledger.health_metrics()
+    now = utcnow_iso()
+    snapshot = {
+        "current_notification_count": stats.fetched,
+        "current_unread_count": stats.unread,
+        "actionable_without_tracker_link_count": len(
+            metrics["actionable_without_tracker_links"]
+        ),
+        "actionable_without_tracker_links": metrics["actionable_without_tracker_links"],
+        "clear_failure_count": len(metrics["clear_failures"]),
+        "clear_failures": metrics["clear_failures"],
+        "stale_dropped_count": len(metrics["stale_dropped_items"]),
+        "stale_dropped_items": metrics["stale_dropped_items"],
+        "notification_counts": metrics["notification_counts"],
+    }
+    prior = ledger.health_snapshot(worker=worker)
+    if stats.errors:
+        snapshot["last_error_at"] = now
+        snapshot["last_error"] = stats.errors[-1]
+        if prior is not None:
+            snapshot.setdefault("last_success_at", prior.get("last_success_at"))
+    else:
+        snapshot["last_success_at"] = now
+        if prior is not None:
+            snapshot.setdefault("last_error_at", prior.get("last_error_at"))
+            snapshot.setdefault("last_error", prior.get("last_error"))
+    ledger.record_health_snapshot(worker=worker, snapshot=snapshot)

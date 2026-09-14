@@ -64,6 +64,35 @@ class InstallScriptTest(unittest.TestCase):
         )
         copilot.chmod(0o755)
 
+        python3 = self.fake_bin / "python3"
+        python3.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then\n'
+            "  target=$3\n"
+            "  mkdir -p \"$target/bin\"\n"
+            "  cat > \"$target/bin/python3\" <<'EOF'\n"
+            "#!/bin/sh\n"
+            "set -eu\n"
+            'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
+            "  exit 0\n"
+            "fi\n"
+            'if [ "$1" = "-" ] || [ "$1" = "-c" ]; then\n'
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n"
+            "EOF\n"
+            "  chmod +x \"$target/bin/python3\"\n"
+            "  exit 0\n"
+            "fi\n"
+            'if [ "$1" = "-" ] || [ "$1" = "-c" ]; then\n'
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        python3.chmod(0o755)
+
         self.env = dict(os.environ)
         self.env["HOME"] = str(self.home)
         self.env["PATH"] = f"{self.fake_bin}{os.pathsep}{self.env['PATH']}"
