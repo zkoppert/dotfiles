@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -200,6 +201,24 @@ class InstallScriptTest(unittest.TestCase):
         )
         self.assertIn("Failed to install Copilot plugin gho11y", result.stdout)
         self.assertIn("Dotfiles install complete.", result.stdout)
+
+    def test_notification_worker_runtime_is_provisioned_once(self) -> None:
+        requirements = self.repo / "python" / "notification-worker-requirements.txt"
+        requirements.parent.mkdir(parents=True)
+        requirements.write_text("PyYAML==6.0.2\nruamel.yaml==0.18.6\n", encoding="utf-8")
+        expected_hash = hashlib.sha256(requirements.read_bytes()).hexdigest()
+
+        first_run = self.run_installer()
+        second_run = self.run_installer()
+
+        runtime_python = self.home / ".local/share/dotfiles/notification-workers/venv/bin/python3"
+        stamp = self.home / ".local/share/dotfiles/notification-workers/requirements.sha256"
+
+        self.assertTrue(runtime_python.exists())
+        self.assertTrue(stamp.exists())
+        self.assertEqual(stamp.read_text(encoding="utf-8").strip(), expected_hash)
+        self.assertIn("Provisioned notification worker runtime", first_run.stdout)
+        self.assertIn("Notification worker runtime already provisioned", second_run.stdout)
 
     def test_existing_deploy_alias_is_preserved(self) -> None:
         definitions = (

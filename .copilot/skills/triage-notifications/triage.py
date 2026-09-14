@@ -80,10 +80,11 @@ _RT_YAML.indent(mapping=2, sequence=4, offset=2)
 
 logger = logging.getLogger("triage")
 
-# Reasons that route straight to Q1 regardless of author.
+# Reasons that route through the direct-ask policy.
 Q1_REASONS: set[str] = {
     "mention",
     "assign",
+    "security_alert",
 }
 
 # Aggressive "bulk triage" policy: only directed, personal-action reasons
@@ -771,8 +772,8 @@ def classify(
 
     if reason in Q1_REASONS:
         return Classification(
-            BUCKET_Q1,
-            f"{reason} → Q1",
+            BUCKET_Q2 if reason == "security_alert" else BUCKET_Q1,
+            f"{reason} → {'Q2' if reason == 'security_alert' else 'Q1'}",
             direct_mention=reason == "mention",
         )
 
@@ -791,9 +792,6 @@ def classify(
                 skip_mark_done=True,
             )
         return Classification(BUCKET_Q2, "review_requested - scheduled review")
-
-    if reason == "security_alert":
-        return Classification(BUCKET_Q2, "security_alert - vulnerability alert")
 
     if dependabot_bump:
         # Dependabot version-bump PRs: drop from the inbox but normally NEVER
