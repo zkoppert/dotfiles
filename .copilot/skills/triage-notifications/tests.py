@@ -3825,6 +3825,10 @@ def test_run_rejects_fresh_stale_prune_when_notification_changed(todo_file):
     current_notif["repository"] = {"full_name": "o/r"}
     current_notif["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/1"
     current_notif["updated_at"] = "2026-07-02T12:00:00Z"
+    renewed_assign = _notif("assign", id="123")
+    renewed_assign["repository"] = {"full_name": "o/r"}
+    renewed_assign["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/1"
+    renewed_assign["updated_at"] = "2026-07-02T12:05:00Z"
 
     def fake_run_gh(cmd, *args, **kwargs):
         if "/repos/o/r/pulls/1" in cmd:
@@ -3835,6 +3839,7 @@ def test_run_rejects_fresh_stale_prune_when_notification_changed(todo_file):
         patch("triage.get_my_login", return_value="zkoppert"),
         patch("triage.fetch_notifications", return_value=[current_notif]),
         patch("triage.run_gh", side_effect=fake_run_gh),
+        patch("triage._current_notification_for_clearance", side_effect=[current_notif, renewed_assign]),
         patch("triage.check_subject_stale", return_value=(triage.STALE_DROP, "closed pr")),
         patch("triage.mark_thread_done") as mark_done,
     ):
@@ -4088,6 +4093,41 @@ def test_main_returns_zero_on_success(todo_file):
     with patch("triage.subprocess.run", side_effect=_gh_returns(responses)):
         rc = triage.main(["--todo-file", str(todo_file), "--no-notify"])
     assert rc == 0
+
+
+def test_run_records_error_on_user_timeout(todo_file):
+    def fake_run(cmd, *args, **kwargs):
+        if "/user" in " ".join(cmd):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=20)
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        stats = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+    assert any("failed to fetch /user" in err for err in stats.errors)
+    snapshot = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH).health_snapshot(
+        worker="notification-triage"
+    )
+    assert snapshot is not None
+    assert snapshot["last_error_at"] is not None
+
+
+def test_run_records_error_on_notifications_timeout(todo_file):
+    def fake_run(cmd, *args, **kwargs):
+        joined = " ".join(cmd)
+        if "/user" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"login": "zkoppert"}), stderr="")
+        if "/notifications" in joined and "/threads" not in joined:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=20)
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        stats = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+    assert any("failed to fetch notifications" in err for err in stats.errors)
+    snapshot = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH).health_snapshot(
+        worker="notification-triage"
+    )
+    assert snapshot is not None
+    assert snapshot["last_error_at"] is not None
 
 
 # ----------------------------------------------------------------------

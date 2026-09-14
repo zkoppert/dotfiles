@@ -3108,14 +3108,14 @@ def run(args: argparse.Namespace) -> TriageStats:
     try:
         my_login = get_my_login()
         logger.debug("authenticated as @%s", my_login)
-    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         stats.errors.append(f"failed to fetch /user: {exc}")
         record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
         return stats
 
     try:
         notifications = fetch_notifications()
-    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         stats.errors.append(f"failed to fetch notifications: {exc}")
         record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
         return stats
@@ -3412,6 +3412,16 @@ def run(args: argparse.Namespace) -> TriageStats:
                 ):
                     stats.already_tracked += 1
                     continue
+                current_notif = _current_notification_for_clearance(thread_id=thread_id)
+                if current_notif is None or not _current_notification_is_clearable(
+                    url=canonical_url,
+                    thread_id=thread_id,
+                    reason=str(current_notif.get("reason") or reason),
+                    ledger=ledger,
+                    my_login=my_login,
+                ):
+                    stats.already_tracked += 1
+                    continue
                 stats.dropped += 1
                 _ledger_capture(
                     ledger,
@@ -3440,15 +3450,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                 )
                 if not args.dry_run:
-                    current_notif = _current_notification_for_clearance(thread_id=thread_id)
-                    if current_notif is None or not _current_notification_is_clearable(
-                        url=canonical_url,
-                        thread_id=thread_id,
-                        reason=str(current_notif.get("reason") or reason),
-                        ledger=ledger,
-                        my_login=my_login,
-                    ):
-                        continue
                     try:
                         attempted_thread_ids.add(thread_id)
                         mark_thread_done(thread_id)
