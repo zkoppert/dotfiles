@@ -343,42 +343,28 @@ class InstallScriptTest(unittest.TestCase):
         launchctl = self.fake_bin / "launchctl"
         launchctl.write_text(
             "#!/bin/sh\n"
-            'if [ "$1" = "unload" ] && [ -e "$HOME/.local/share/dotfiles/notification-workers/venv" ]; then\n'
-            "  printf '%s\\n' \"launchctl $* (runtime already provisioned)\" >> \"$HOME/install.log\"\n"
-            "  exit 1\n"
+            'if [ "$1" = "unload" ]; then\n'
+            "  : > \"$HOME/notification-teardown-ready\"\n"
             "fi\n"
             "printf '%s\\n' \"launchctl $*\" >> \"$HOME/install.log\"\n",
             encoding="utf-8",
         )
         launchctl.chmod(0o755)
-        python3 = self.fake_bin / "python3"
-        python3.write_text(
+        gh = self.fake_bin / "gh"
+        gh.write_text(
             "#!/bin/sh\n"
             "set -eu\n"
-            'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then\n'
-            "  target=$3\n"
-            "  mkdir -p \"$target/bin\"\n"
-            "  cat > \"$target/bin/python3\" <<'EOF'\n"
-            "#!/bin/sh\n"
-            "set -eu\n"
-            'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
-            "  exit 0\n"
-            "fi\n"
-            'if [ "$1" = "-" ] || [ "$1" = "-c" ]; then\n'
-            "  exit 0\n"
-            "fi\n"
-            "exit 0\n"
-            "EOF\n"
-            "  chmod +x \"$target/bin/python3\"\n"
-            "  exit 0\n"
-            "fi\n"
-            'if [ "$1" = "-" ] || [ "$1" = "-c" ]; then\n'
-            "  exit 0\n"
-            "fi\n"
-            "exit 0\n",
+            "marker=no\n"
+            'if [ -e "$HOME/notification-teardown-ready" ]; then marker=yes; fi\n'
+            "printf '%s\\n' \"gh $* marker=$marker\" >> \"$HOME/install.log\"\n"
+            "if [ \"$1\" = skill ] && [ \"$2\" = install ]; then\n"
+            "  skill_name=${4#skills/}\n"
+            "  mkdir -p \"$HOME/.copilot/skills/$skill_name\"\n"
+            "  printf '# installed\\n' > \"$HOME/.copilot/skills/$skill_name/SKILL.md\"\n"
+            "fi\n",
             encoding="utf-8",
         )
-        python3.chmod(0o755)
+        gh.chmod(0o755)
         triage_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.notification-triage.plist"
         triage_target.parent.mkdir(parents=True)
         triage_target.symlink_to(triage_plist)
@@ -392,6 +378,15 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn(f"launchctl unload {dependabot_target}", calls)
         self.assertNotIn(f"launchctl load {triage_target}", calls)
         self.assertNotIn(f"launchctl load {dependabot_target}", calls)
+        gh_skill_lines = [
+            entry for entry in calls if entry.startswith("gh skill install ")
+        ]
+        self.assertTrue(gh_skill_lines)
+        self.assertTrue(all("marker=yes" in entry for entry in gh_skill_lines))
+        self.assertLess(
+            calls.index(f"launchctl unload {triage_target}"),
+            calls.index(gh_skill_lines[0]),
+        )
         self.assertFalse(triage_target.exists())
         self.assertFalse(dependabot_target.exists())
 
