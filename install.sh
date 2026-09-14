@@ -129,6 +129,8 @@ if [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; 
   remove_notification_launch_agent "com.zkoppert.triage-dependabot.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.triage-dependabot.plist"
 fi
 
+ensure_notification_worker_runtime || true
+
 # Symlink copilot instructions for Copilot CLI
 if [ -f "$DOTFILES_DIR/.github/copilot-instructions.md" ]; then
   mkdir -p "$HOME/.copilot"
