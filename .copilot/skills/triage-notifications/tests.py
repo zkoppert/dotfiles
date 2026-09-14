@@ -5689,7 +5689,7 @@ def test_classify_author_notification_defaults_to_inbox_when_author_lookup_missi
     assert c.bucket == triage.BUCKET_INBOX
 
 
-def test_classify_author_notification_drops_non_self_authored_dependabot_bump():
+def test_classify_author_notification_keeps_human_authored_dependabot_like_pr():
     notif = _notif(
         "author",
         subject={
@@ -5706,7 +5706,28 @@ def test_classify_author_notification_drops_non_self_authored_dependabot_bump():
         comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
+    assert c.bucket == triage.BUCKET_INBOX
+
+
+def test_classify_author_notification_hands_off_dependabot_authored_bump():
+    notif = _notif(
+        "author",
+        subject={
+            "title": "build(deps): bump actions/checkout from 4 to 5",
+            "url": "https://api.github.com/repos/o/r/pulls/30",
+            "latest_comment_url": None,
+            "type": "PullRequest",
+        },
+    )
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        state_fetcher=lambda _: "open",
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
+        subject_author_fetcher=lambda _: "dependabot[bot]",
+    )
     assert c.bucket == triage.BUCKET_DROP
+    assert c.skip_mark_done is True
 
 
 WATCH_ONLY_REPO = "acme/watch-only"
