@@ -1211,7 +1211,6 @@ def notification_has_new_activity(
     if (
         updated_at
         and updated_at == captured_at
-        and reason_changed
         and (current_reason in Q1_REASONS or current_reason == "review_requested")
     ):
         return True
@@ -2851,326 +2850,17 @@ def retry_pending_github_clears(
 
 
 
-def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
-    """Dry-run preview that mirrors current notifications into a temp ledger."""
-    stats = TriageStats()
-    if not args.dry_run:
-        stats.errors.append("backfill requires --dry-run")
-        return stats
-
-    preview_ledger_path = args.backfill_ledger
-    if preview_ledger_path is None:
-        stats.errors.append("backfill requires --backfill-ledger")
-        return stats
-    if preview_ledger_path.exists() or preview_ledger_path.resolve() == DEFAULT_LEDGER_PATH.resolve():
-        stats.errors.append("backfill requires a fresh non-production --backfill-ledger path")
-        return stats
-    ledger = NotificationLedger(preview_ledger_path)
-
-    try:
-        my_login = get_my_login()
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        json.JSONDecodeError,
-        LookupError,
-    ) as exc:
-        stats.errors.append(f"failed to fetch /user: {exc}")
-        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
-        return stats
-
-    try:
-        notifications = fetch_notifications()
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        json.JSONDecodeError,
-    ) as exc:
-        stats.errors.append(f"failed to fetch notifications: {exc}")
-        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
-        return stats
-
-    stats.fetched = len(notifications)
-    stats.unread = sum(1 for notif in notifications if notif.get("unread"))
-
-    try:
-        data = load_todo(args.todo_file)
-    except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
-        stats.errors.append(f"failed to load todo file: {exc}")
-        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
-        return stats
-
-    deferred_thread_ids: set[str] = set()
-    deferred_canonical_artifacts: set[tuple[str, str, str, int]] = set()
-    comment_snapshot_cache: dict[str, CommentNotificationSnapshot | None] = {}
-    for notif in notifications:
-        thread_id, canonical_url, snapshot = _notification_comment_snapshot(
-            notif,
-            data=data,
-            ledger=ledger,
-            my_login=my_login,
-        )
-        cache_key = _comment_snapshot_cache_key(thread_id, canonical_url)
-        comment_snapshot_cache[cache_key] = snapshot
-        if canonical_url:
-            comment_snapshot_cache[canonical_url] = snapshot
-        if snapshot is not None and not snapshot.history_complete:
-            stats.errors.append(
-                f"incomplete comment history for notification {thread_id or canonical_url}"
-            )
-            if thread_id:
-                deferred_thread_ids.add(thread_id)
-            if canonical_url:
-                canonical_key = _canonical_pr_issue_url_key(canonical_url)
-                if canonical_key is not None:
-                    deferred_canonical_artifacts.add(canonical_key)
-
-    reconcile_tracker_rows_to_ledger(
-        data,
-        ledger=ledger,
-        dry_run=False,
-        stats=stats,
-        deferred_thread_ids=deferred_thread_ids,
-        deferred_canonical_artifacts=deferred_canonical_artifacts,
-    )
-
-    seen_ids = existing_thread_ids(data)
-    for notif in notifications:
-        thread_id = str(notif.get("id") or "")
-        subject = notif.get("subject") or {}
-        canonical_url = web_url(notif)
-        reason = str(notif.get("reason") or "").lower()
-        repo = str((notif.get("repository") or {}).get("full_name") or "")
-        title = str(subject.get("title") or "")
-
-        tracked = None
-        if thread_id and thread_id in seen_ids:
-            tracked = next(
-                (
-                    (section, item)
-                    for section, item in _iter_notification_items_with_sections(data)
-                    if _item_thread_id(item) == thread_id
-                ),
-                None,
-            )
-        canonical_tracked = (
-            None
-            if tracked is not None
-            else _find_todo_item_by_canonical_url(data, canonical_url)
-        )
-        comment_since = None
-        if ledger is not None and thread_id:
-            comment_since = ledger.comment_watermark(
-                source_id=thread_id,
-                canonical_artifact=canonical_url,
-            )
-        if comment_since is None and tracked is not None:
-            comment_since = _bootstrap_comment_since(notif, tracked[1])
-        if comment_since is None and canonical_tracked is not None:
-            comment_since = _bootstrap_comment_since(notif, canonical_tracked[1])
-
-        comment_snapshot = (
-            comment_snapshot_cache.get(thread_id)
-            if thread_id in comment_snapshot_cache
-            else comment_snapshot_cache.get(canonical_url)
-        )
-        if comment_snapshot is not None and not comment_snapshot.history_complete:
-            if comment_snapshot.direct is None and reason not in Q1_REASONS:
-                continue
-
-        classification = classify(
-            notif,
-            my_login=my_login,
-            comment_snapshot_fetcher=(
-                lambda *args, snapshot=comment_snapshot, **kwargs: snapshot
-            ),
-            comment_since=comment_since,
-        )
-
-        tracker_item_id = None
-        tracker_section = None
-        if tracked is not None:
-            tracker_section, tracked_item = tracked
-            tracker_item_id = str(tracked_item.get("id") or "") or None
-        elif canonical_tracked is not None:
-            tracker_section, canonical_item = canonical_tracked
-            tracker_item_id = str(canonical_item.get("id") or "") or None
-
-        tracked_terminal_item = None
-        if tracked is not None and tracker_terminal_disposition(tracked[1], tracker_section or ""):
-            tracked_terminal_item = tracked
-        elif canonical_tracked is not None and tracker_terminal_disposition(
-            canonical_tracked[1], tracker_section or ""
-        ):
-            tracked_terminal_item = canonical_tracked
-        tracked_terminal = tracked_terminal_item is not None
-        tracked_nonterminal = bool(tracked and not tracked_terminal)
-        tracked_notification = tracked[1].get("notification") if tracked else None
-        tracked_direct_ask = bool(
-            tracked_nonterminal
-            and tracked
-            and isinstance(tracked_notification, dict)
-            and _notification_is_direct_ask(tracked_notification)
-        )
-        subject_resolved = classification.bucket == BUCKET_DROP and (
-            "closed" in classification.reason or "merged" in classification.reason
-        )
-        if tracked_direct_ask:
-            subject_resolved = False
-        allow_dependabot_handoff = bool(
-            classification.skip_mark_done
-            and tracked is not None
-            and _is_untouched_q2_review_fallback(tracked[1], tracked[0])
-        )
-        if tracked_terminal_item is not None and classification.bucket in {BUCKET_Q1, BUCKET_Q2, BUCKET_INBOX}:
-            terminal_event_is_new = notification_has_new_activity(
-                notif,
-                tracked_terminal_item[1],
-                allow_reason_change_without_timestamp=False,
-            )
-            if not terminal_event_is_new:
-                continue
-            if ledger is not None and not ledger.readonly:
-                ledger.reopen_actionable(
-                    source_id=thread_id,
-                    canonical_artifact=canonical_url,
-                    reason=reason or classification.reason,
-                    tracker_section=tracker_section or "inbox",
-                )
-        if (
-            tracked_nonterminal
-            and classification.bucket == BUCKET_DROP
-            and not subject_resolved
-            and not allow_dependabot_handoff
-        ):
-            stats.already_tracked += 1
-            continue
-
-        terminal_disposition = None
-        queue_clear = False
-        if classification.bucket == BUCKET_DROP:
-            stats.dropped += 1
-            if classification.skip_mark_done:
-                stats.left_for_dependabot += 1
-                terminal_disposition = None
-                queue_clear = False
-            else:
-                terminal_disposition = (
-                    "completed"
-                    if (
-                        classification.archive_to_done
-                        or "closed" in classification.reason
-                        or "merged" in classification.reason
-                    )
-                    else "irrelevant"
-                )
-                queue_clear = bool(thread_id)
-        elif classification.bucket == BUCKET_Q1:
-            stats.added_q1 += 1
-        elif classification.bucket == BUCKET_Q2:
-            stats.added_q2 += 1
-        else:
-            stats.added_inbox += 1
-
-        _ledger_capture(
-            ledger,
-            dry_run=False,
-            thread_id=thread_id or None,
-            canonical_artifact=canonical_url,
-            classification=(
-                "dependabot_handoff"
-                if classification.skip_mark_done
-                else ("policy_drop" if terminal_disposition else "actionable")
-            ),
-            worker="backfill-preview",
-            title=title,
-            reason=reason,
-            repo=repo,
-            tracker_item_id=tracker_item_id,
-            tracker_section=tracker_section,
-            terminal_disposition=terminal_disposition,
-            queue_clear=queue_clear,
-            event_at=str(notif.get("captured_at") or notif.get("updated_at") or utcnow_iso()),
-        )
-
-    record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
-    return stats
-
-def run(args: argparse.Namespace) -> TriageStats:
-    """Main entrypoint - returns stats so tests can assert behaviour."""
-    stats = TriageStats()
-    if args.backfill and not args.dry_run:
-        stats.errors.append("backfill requires --dry-run")
-        return stats
-    if args.dry_run and args.backfill:
-        return preview_backfill_ledger(args)
-    ledger: NotificationLedger | None = None
-    if args.dry_run:
-        if DEFAULT_LEDGER_PATH.exists():
-            try:
-                ledger = NotificationLedger(DEFAULT_LEDGER_PATH, readonly=True)
-            except (OSError, sqlite3.OperationalError) as exc:
-                stats.errors.append(f"failed to open read-only ledger: {exc}")
-    else:
-        ledger = NotificationLedger(DEFAULT_LEDGER_PATH)
-
-    try:
-        my_login = get_my_login()
-        logger.debug("authenticated as @%s", my_login)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-        stats.errors.append(f"failed to fetch /user: {exc}")
-        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
-        return stats
-
-    try:
-        notifications = fetch_notifications()
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-        stats.errors.append(f"failed to fetch notifications: {exc}")
-        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
-        return stats
-
-    stats.fetched = len(notifications)
-    stats.unread = sum(1 for notif in notifications if notif.get("unread"))
-    logger.info("fetched %d notification(s)", stats.fetched)
-
-    try:
-        data = load_todo(args.todo_file)
-    except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
-        stats.errors.append(f"failed to load todo file: {exc}")
-        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
-        return stats
-
-    deferred_thread_ids: set[str] = set()
-    deferred_canonical_artifacts: set[tuple[str, str, str, int]] = set()
-    comment_snapshot_cache: dict[str, CommentNotificationSnapshot | None] = {}
-    for notif in notifications:
-        thread_id, canonical_url, snapshot = _notification_comment_snapshot(
-            notif,
-            data=data,
-            ledger=ledger,
-            my_login=my_login,
-        )
-        cache_key = _comment_snapshot_cache_key(thread_id, canonical_url)
-        comment_snapshot_cache[cache_key] = snapshot
-        if canonical_url:
-            comment_snapshot_cache[canonical_url] = snapshot
-        if snapshot is not None and not snapshot.history_complete:
-            if thread_id:
-                deferred_thread_ids.add(thread_id)
-            if canonical_url:
-                canonical_key = _canonical_pr_issue_url_key(canonical_url)
-                if canonical_key is not None:
-                    deferred_canonical_artifacts.add(canonical_key)
-
-    reconcile_tracker_rows_to_ledger(
-        data,
-        ledger=ledger,
-        dry_run=args.dry_run,
-        stats=stats,
-        deferred_thread_ids=deferred_thread_ids,
-        deferred_canonical_artifacts=deferred_canonical_artifacts,
-    )
-
+def _plan_notification_mutations(
+    args: argparse.Namespace,
+    notifications: list[dict[str, Any]],
+    data: dict[str, Any],
+    ledger: NotificationLedger | None,
+    my_login: str,
+    stats: TriageStats,
+    comment_snapshot_cache: dict[str, CommentNotificationSnapshot | None],
+    *,
+    ledger_dry_run: bool,
+) -> tuple[TodoMutations, set[str], set[str], set[str], dict[str, list[str]]]:
     seen_ids = existing_thread_ids(data)
     mutations = TodoMutations()
     direct_mention_thread_ids: set[str] = set()
@@ -3394,7 +3084,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     stats.dropped += 1
                     _ledger_capture(
                         ledger,
-                        dry_run=args.dry_run,
+                        dry_run=ledger_dry_run,
                         thread_id=thread_id,
                         canonical_artifact=canonical_url,
                         classification="dependabot_handoff",
@@ -3444,7 +3134,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 stats.dropped += 1
                 _ledger_capture(
                     ledger,
-                    dry_run=args.dry_run,
+                    dry_run=ledger_dry_run,
                     thread_id=thread_id,
                     canonical_artifact=canonical_url,
                     classification="policy_drop",
@@ -3482,7 +3172,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         mark_thread_done(thread_id)
                         _ledger_record_clear_result(
                             ledger,
-                            dry_run=args.dry_run,
+                            dry_run=ledger_dry_run,
                             thread_id=thread_id,
                             canonical_artifact=canonical_url,
                         )
@@ -3495,7 +3185,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         )
                         _ledger_record_clear_result(
                             ledger,
-                            dry_run=args.dry_run,
+                            dry_run=ledger_dry_run,
                             thread_id=thread_id,
                             canonical_artifact=canonical_url,
                             error=exc,
@@ -3517,7 +3207,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             if classification.skip_mark_done:
                 _ledger_capture(
                     ledger,
-                    dry_run=args.dry_run,
+                    dry_run=ledger_dry_run,
                     thread_id=thread_id or None,
                     canonical_artifact=canonical_url,
                     classification="dependabot_handoff",
@@ -3542,7 +3232,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             classification_name = "policy_drop"
             _ledger_capture(
                 ledger,
-                dry_run=args.dry_run,
+                dry_run=ledger_dry_run,
                 thread_id=thread_id or None,
                 canonical_artifact=canonical_url,
                 classification=classification_name,
@@ -3571,7 +3261,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     attempted_thread_ids.add(thread_id)
                     _ledger_record_clear_result(
                         ledger,
-                        dry_run=args.dry_run,
+                        dry_run=ledger_dry_run,
                         thread_id=thread_id,
                         canonical_artifact=canonical_url,
                     )
@@ -3584,7 +3274,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                     _ledger_record_clear_result(
                         ledger,
-                        dry_run=args.dry_run,
+                        dry_run=ledger_dry_run,
                         thread_id=thread_id,
                         canonical_artifact=canonical_url,
                         error=exc,
@@ -3594,7 +3284,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         entry = build_todo_entry(notif, classification, direct_ask=classification.direct_mention)
         _ledger_capture(
             ledger,
-            dry_run=args.dry_run,
+            dry_run=ledger_dry_run,
             thread_id=thread_id or None,
             canonical_artifact=canonical_url,
             classification="actionable",
@@ -3609,6 +3299,190 @@ def run(args: argparse.Namespace) -> TriageStats:
             mutations.add_q2.append(entry)
         else:
             mutations.add_inbox.append(entry)
+    return mutations, direct_mention_thread_ids, reopened_thread_ids, attempted_thread_ids, pending_comment_watermarks
+
+
+def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
+    """Dry-run preview that mirrors current notifications into a temp ledger."""
+    stats = TriageStats()
+    if not args.dry_run:
+        stats.errors.append("backfill requires --dry-run")
+        return stats
+
+    preview_ledger_path = args.backfill_ledger
+    if preview_ledger_path is None:
+        stats.errors.append("backfill requires --backfill-ledger")
+        return stats
+    if preview_ledger_path.exists() or preview_ledger_path.resolve() == DEFAULT_LEDGER_PATH.resolve():
+        stats.errors.append("backfill requires a fresh non-production --backfill-ledger path")
+        return stats
+    ledger = NotificationLedger(preview_ledger_path)
+
+    try:
+        my_login = get_my_login()
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+        LookupError,
+    ) as exc:
+        stats.errors.append(f"failed to fetch /user: {exc}")
+        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+        return stats
+
+    try:
+        notifications = fetch_notifications()
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+    ) as exc:
+        stats.errors.append(f"failed to fetch notifications: {exc}")
+        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+        return stats
+
+    stats.fetched = len(notifications)
+    stats.unread = sum(1 for notif in notifications if notif.get("unread"))
+
+    try:
+        data = load_todo(args.todo_file)
+    except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+        stats.errors.append(f"failed to load todo file: {exc}")
+        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+        return stats
+
+    deferred_thread_ids: set[str] = set()
+    deferred_canonical_artifacts: set[tuple[str, str, str, int]] = set()
+    comment_snapshot_cache: dict[str, CommentNotificationSnapshot | None] = {}
+    for notif in notifications:
+        thread_id, canonical_url, snapshot = _notification_comment_snapshot(
+            notif,
+            data=data,
+            ledger=ledger,
+            my_login=my_login,
+        )
+        cache_key = _comment_snapshot_cache_key(thread_id, canonical_url)
+        comment_snapshot_cache[cache_key] = snapshot
+        if canonical_url:
+            comment_snapshot_cache[canonical_url] = snapshot
+        if snapshot is not None and not snapshot.history_complete:
+            stats.errors.append(
+                f"incomplete comment history for notification {thread_id or canonical_url}"
+            )
+            if thread_id:
+                deferred_thread_ids.add(thread_id)
+            if canonical_url:
+                canonical_key = _canonical_pr_issue_url_key(canonical_url)
+                if canonical_key is not None:
+                    deferred_canonical_artifacts.add(canonical_key)
+
+    reconcile_tracker_rows_to_ledger(
+        data,
+        ledger=ledger,
+        dry_run=False,
+        stats=stats,
+        deferred_thread_ids=deferred_thread_ids,
+        deferred_canonical_artifacts=deferred_canonical_artifacts,
+    )
+
+    _plan_notification_mutations(
+        args=args,
+        notifications=notifications,
+        data=data,
+        ledger=ledger,
+        my_login=my_login,
+        stats=stats,
+        comment_snapshot_cache=comment_snapshot_cache,
+        ledger_dry_run=False,
+    )
+    record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+    return stats
+
+def run(args: argparse.Namespace) -> TriageStats:
+    """Main entrypoint - returns stats so tests can assert behaviour."""
+    stats = TriageStats()
+    if args.backfill and not args.dry_run:
+        stats.errors.append("backfill requires --dry-run")
+        return stats
+    if args.dry_run and args.backfill:
+        return preview_backfill_ledger(args)
+    ledger: NotificationLedger | None = None
+    if args.dry_run:
+        if DEFAULT_LEDGER_PATH.exists():
+            try:
+                ledger = NotificationLedger(DEFAULT_LEDGER_PATH, readonly=True)
+            except (OSError, sqlite3.OperationalError) as exc:
+                stats.errors.append(f"failed to open read-only ledger: {exc}")
+    else:
+        ledger = NotificationLedger(DEFAULT_LEDGER_PATH)
+
+    try:
+        my_login = get_my_login()
+        logger.debug("authenticated as @%s", my_login)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        stats.errors.append(f"failed to fetch /user: {exc}")
+        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+        return stats
+
+    try:
+        notifications = fetch_notifications()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        stats.errors.append(f"failed to fetch notifications: {exc}")
+        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+        return stats
+
+    stats.fetched = len(notifications)
+    stats.unread = sum(1 for notif in notifications if notif.get("unread"))
+    logger.info("fetched %d notification(s)", stats.fetched)
+
+    try:
+        data = load_todo(args.todo_file)
+    except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+        stats.errors.append(f"failed to load todo file: {exc}")
+        record_worker_health_snapshot(ledger=ledger, worker="notification-triage", stats=stats)
+        return stats
+
+    deferred_thread_ids: set[str] = set()
+    deferred_canonical_artifacts: set[tuple[str, str, str, int]] = set()
+    comment_snapshot_cache: dict[str, CommentNotificationSnapshot | None] = {}
+    for notif in notifications:
+        thread_id, canonical_url, snapshot = _notification_comment_snapshot(
+            notif,
+            data=data,
+            ledger=ledger,
+            my_login=my_login,
+        )
+        cache_key = _comment_snapshot_cache_key(thread_id, canonical_url)
+        comment_snapshot_cache[cache_key] = snapshot
+        if canonical_url:
+            comment_snapshot_cache[canonical_url] = snapshot
+        if snapshot is not None and not snapshot.history_complete:
+            if thread_id:
+                deferred_thread_ids.add(thread_id)
+            if canonical_url:
+                canonical_key = _canonical_pr_issue_url_key(canonical_url)
+                if canonical_key is not None:
+                    deferred_canonical_artifacts.add(canonical_key)
+
+    reconcile_tracker_rows_to_ledger(
+        data,
+        ledger=ledger,
+        dry_run=ledger_dry_run,
+        stats=stats,
+        deferred_thread_ids=deferred_thread_ids,
+        deferred_canonical_artifacts=deferred_canonical_artifacts,
+    )
+
+    mutations, direct_mention_thread_ids, reopened_thread_ids, attempted_thread_ids, pending_comment_watermarks = _plan_notification_mutations(
+        args=args,
+        notifications=notifications,
+        data=data,
+        ledger=ledger,
+        my_login=my_login,
+        stats=stats,
+        comment_snapshot_cache=comment_snapshot_cache,
+        ledger_dry_run=args.dry_run,
+    )
 
     for item, section, disposition in items_ready_for_clear(data):
         notif_meta = item["notification"]
@@ -3662,7 +3536,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     continue
                 _ledger_capture(
                     ledger,
-                    dry_run=args.dry_run,
+                    dry_run=ledger_dry_run,
                     thread_id=thread_id,
                     canonical_artifact=terminal_canonical_url,
                     classification="actionable",
@@ -3704,7 +3578,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     attempted_thread_ids.add(thread_id)
                     _ledger_record_clear_result(
                         ledger,
-                        dry_run=args.dry_run,
+                        dry_run=ledger_dry_run,
                         thread_id=thread_id,
                         canonical_artifact=terminal_canonical_url,
                     )
@@ -3725,7 +3599,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             )
             _ledger_record_clear_result(
                 ledger,
-                dry_run=args.dry_run,
+                dry_run=ledger_dry_run,
                 thread_id=thread_id,
                 canonical_artifact=terminal_canonical_url,
                 error=exc,
@@ -3788,7 +3662,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         continue
                     _ledger_capture(
                         ledger,
-                        dry_run=args.dry_run,
+                        dry_run=ledger_dry_run,
                         thread_id=delta.thread_id,
                         canonical_artifact=terminal_canonical_url,
                         classification="policy_drop",
@@ -3819,7 +3693,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                             attempted_thread_ids.add(delta.thread_id)
                             _ledger_record_clear_result(
                                 ledger,
-                                dry_run=args.dry_run,
+                                dry_run=ledger_dry_run,
                                 thread_id=delta.thread_id,
                                 canonical_artifact=terminal_canonical_url,
                             )
@@ -3844,7 +3718,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
                 _ledger_record_clear_result(
                     ledger,
-                    dry_run=args.dry_run,
+                    dry_run=ledger_dry_run,
                     thread_id=delta.thread_id,
                     canonical_artifact=None,
                     error=exc,
@@ -3898,7 +3772,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 applied["url_deduped"],
                 stats,
                 ledger=ledger,
-                dry_run=args.dry_run,
+                dry_run=ledger_dry_run,
                 my_login=my_login,
             )
             if ledger is not None:
@@ -3921,7 +3795,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     continue
                 _ledger_capture(
                     ledger,
-                    dry_run=args.dry_run,
+                    dry_run=ledger_dry_run,
                     thread_id=str(notif_meta.get("thread_id") or "") or None,
                     canonical_artifact=str(notif_meta.get("url") or "") or None,
                     classification="actionable",
@@ -3944,7 +3818,7 @@ def run(args: argparse.Namespace) -> TriageStats:
 
     retry_pending_github_clears(
         ledger,
-        dry_run=args.dry_run,
+        dry_run=ledger_dry_run,
         stats=stats,
         attempted_thread_ids=attempted_thread_ids,
         my_login=my_login,

@@ -6491,6 +6491,28 @@ def test_notification_has_new_activity_treats_same_second_actionable_renewal_as_
     )
 
 
+@pytest.mark.parametrize("reason", ["assign", "review_requested"])
+def test_notification_has_new_activity_treats_same_second_same_reason_renewal_as_new(
+    reason,
+):
+    tracked = {
+        "notification": {
+            "captured_at": "2026-07-01T12:00:00Z",
+            "reason": reason,
+            "terminal_recorded_at": "2026-07-03T12:00:00Z",
+        }
+    }
+    renewed = _notif(reason, updated_at="2026-07-03T12:00:00Z")
+    assert (
+        triage.notification_has_new_activity(
+            renewed,
+            tracked,
+            allow_reason_change_without_timestamp=False,
+        )
+        is True
+    )
+
+
 def test_notification_has_new_activity_uses_completed_boundary():
     tracked = {
         "completed": "2026-07-03T12:00:00Z",
