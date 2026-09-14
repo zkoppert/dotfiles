@@ -1798,11 +1798,9 @@ def _todo_has_active_direct_ownership_in_data(
         notif = item.get("notification")
         if not isinstance(notif, dict):
             continue
-        if thread_id and str(notif.get("thread_id") or "") != thread_id:
-            continue
-        if pr_url and notif.get("url") != pr_url:
-            continue
-        if _notification_is_direct_ask(notif):
+        thread_match = thread_id and str(notif.get("thread_id") or "") == thread_id
+        canonical_match = pr_url and notif.get("url") == pr_url
+        if (thread_match or canonical_match) and _notification_is_direct_ask(notif):
             return True
     return False
 
@@ -1954,7 +1952,6 @@ def _clear_dependabot_notification(
                     canonical_artifact=pr_url,
                     notif=notif,
                     my_login=my_login,
-                    todo_file=args.todo_file,
                 ):
                     return False
                 stats.stale_removed += _cleanup_stale_entries(
@@ -1987,7 +1984,6 @@ def _clear_dependabot_notification(
                 canonical_artifact=pr_url,
                 notif=notif,
                 my_login=my_login,
-                    todo_file=args.todo_file,
             ):
                 return False
             removed = remove_stale_entries(

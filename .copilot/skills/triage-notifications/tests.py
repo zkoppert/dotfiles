@@ -8253,6 +8253,11 @@ def test_preview_backfill_preserves_dependabot_handoff(tmp_path: Path, monkeypat
     monkeypatch.setattr(triage, "fetch_notifications", lambda: [notif])
     monkeypatch.setattr(
         triage,
+        "shared_comment_notification_snapshot",
+        lambda *args, **kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
+    )
+    monkeypatch.setattr(
+        triage,
         "classify",
         lambda *args, **kwargs: triage.Classification(
             triage.BUCKET_DROP,
