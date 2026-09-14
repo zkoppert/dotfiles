@@ -1085,6 +1085,8 @@ def _current_notification_is_clearable(
     if boundary is not None:
         if current_updated_at is not None and current_updated_at <= boundary:
             return True
+        if current_reason in {"mention", "assign"}:
+            return False
         if current_reason == "comment":
             pass
         elif current_updated_at is None:
@@ -1102,7 +1104,17 @@ def _current_notification_is_clearable(
                 return False
             return True
         else:
-            return False
+            classification = classify(
+                current,
+                my_login=my_login,
+                comment_snapshot_fetcher=shared_comment_notification_snapshot,
+                comment_since=(
+                    ledger.comment_watermark(source_id=thread_id, canonical_artifact=url)
+                    if ledger is not None and thread_id
+                    else None
+                ),
+            )
+            return classification.bucket == BUCKET_DROP and not classification.skip_mark_done
     if current_reason != "comment":
         return current_reason in {"subscribed", "state_change", "ci_activity", "author", "watching"}
     classification = classify(
@@ -3156,6 +3168,9 @@ def run(args: argparse.Namespace) -> TriageStats:
         )
         if comment_snapshot is not None and not comment_snapshot.history_complete:
             if comment_snapshot.direct is None and reason not in Q1_REASONS:
+                stats.errors.append(
+                    f"incomplete comment history for notification {thread_id or canonical_url}"
+                )
                 continue
         if (
             thread_id

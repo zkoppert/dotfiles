@@ -6490,6 +6490,37 @@ def test_current_notification_is_clearable_allows_new_drop_after_terminal_bounda
         )
 
 
+def test_current_notification_is_clearable_allows_new_passive_after_terminal_boundary(
+    todo_file,
+):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/4"
+    ledger.capture(
+        source_id="thread-passive",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    ledger.record_terminal(
+        source_id="thread-passive",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-02T12:00:00Z",
+    )
+    current = _notif("ci_activity", id="thread-passive", updated_at="2026-07-03T12:00:00Z")
+    current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/4"
+    current["repository"] = {"full_name": "o/r"}
+    with patch("triage.fetch_notifications", return_value=[current]):
+        assert triage._current_notification_is_clearable(
+            url=artifact,
+            thread_id="thread-passive",
+            reason="ci_activity",
+            ledger=ledger,
+            my_login="zkoppert",
+        )
+
+
 def test_current_notification_is_clearable_rejects_newer_review_requested_after_terminal_boundary(
     todo_file,
 ):
@@ -7307,7 +7338,7 @@ def test_private_aor_non_aor_direct_ping_survives(private_aor_filter):
 
 
 def test_dot_github_repo_preserves_protected_reasons():
-    expected = {"mention": triage.BUCKET_DROP, "assign": triage.BUCKET_DROP, "security_alert": triage.BUCKET_DROP}
+    expected = {"mention": triage.BUCKET_Q1, "assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q1}
     for reason, bucket in expected.items():
         c = _classify(_repo_notif(reason, repo="github/.github"))
         assert c.bucket == bucket, reason
@@ -7330,7 +7361,7 @@ def private_always_drop_repo(monkeypatch):
 
 
 def test_private_always_drop_repo_preserves_protected_reasons(private_always_drop_repo):
-    expected = {"mention": triage.BUCKET_DROP, "assign": triage.BUCKET_DROP, "security_alert": triage.BUCKET_DROP}
+    expected = {"mention": triage.BUCKET_Q1, "assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q1}
     for reason, bucket in expected.items():
         c = _classify(_repo_notif(reason, repo=PRIVATE_ALWAYS_DROP_REPO))
         assert c.bucket == bucket, reason
@@ -7942,6 +7973,37 @@ def test_run_keeps_direct_comment_even_with_incomplete_comment_history(todo_file
     data = yaml.safe_load(todo_file.read_text())
     assert stats.added_q1 == 1
     assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "notif-direct-comment"
+
+
+def test_run_records_error_on_incomplete_comment_history(todo_file: Path, monkeypatch: pytest.MonkeyPatch):
+    notif = _notif(
+        "subscribed",
+        id="notif-incomplete",
+        updated_at="2026-09-14T07:00:00Z",
+        repo="o/r",
+        url="https://api.github.com/repos/o/r/pulls/1",
+    )
+    notif["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/1"
+    notif["subject"]["latest_comment_url"] = "https://api.github.com/repos/o/r/issues/comments/1"
+    monkeypatch.setattr(triage, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(triage, "fetch_notifications", lambda: [notif])
+    monkeypatch.setattr(
+        triage,
+        "shared_comment_notification_snapshot",
+        lambda *args, **kwargs: triage.CommentNotificationSnapshot(None, None, None, False, None),
+    )
+    monkeypatch.setattr(
+        triage,
+        "classify",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("classify should not run")),
+    )
+
+    stats = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    assert any("incomplete comment history" in err for err in stats.errors)
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["inbox"] == []
+    assert data["prioritized"]["q1_do_first"] == []
 
 
 def test_ledger_record_terminal_keeps_first_boundary(todo_file: Path):
