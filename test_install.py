@@ -326,7 +326,7 @@ class InstallScriptTest(unittest.TestCase):
 
         self.assertIn("Skipping babysit-prs launchd agent", result.stdout)
 
-    def test_notification_jobs_are_not_linked_yet(self) -> None:
+    def test_notification_jobs_are_unloaded_before_activation(self) -> None:
         launch_agents = self.repo / "LaunchAgents"
         launch_agents.mkdir()
         triage_plist = launch_agents / "com.zkoppert.notification-triage.plist"
@@ -345,14 +345,21 @@ class InstallScriptTest(unittest.TestCase):
             encoding="utf-8",
         )
         launchctl.chmod(0o755)
+        triage_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.notification-triage.plist"
+        triage_target.parent.mkdir(parents=True)
+        triage_target.symlink_to(triage_plist)
+        dependabot_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.triage-dependabot.plist"
+        dependabot_target.symlink_to(dependabot_plist)
 
         self.run_installer()
 
-        triage_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.notification-triage.plist"
-        dependabot_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.triage-dependabot.plist"
+        calls = (self.home / "launchctl.log").read_text(encoding="utf-8").splitlines()
+        self.assertIn(f"unload {triage_target}", calls)
+        self.assertIn(f"unload {dependabot_target}", calls)
+        self.assertNotIn(f"load {triage_target}", calls)
+        self.assertNotIn(f"load {dependabot_target}", calls)
         self.assertFalse(triage_target.exists())
         self.assertFalse(dependabot_target.exists())
-        self.assertFalse((self.home / "launchctl.log").exists())
 
     def test_accessibility_picker_is_linked_and_loaded_with_private_config(
         self,

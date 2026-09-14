@@ -4,7 +4,7 @@ My personal configuration for macOS and GitHub Codespaces.
 
 ## What does the installer configure?
 
-`install.sh` links the repository's Copilot instructions, local skills, CLI wrappers, and macOS launch agents into their user-level locations. It also provisions the pinned notification-worker Python runtime at `~/.local/share/dotfiles/notification-workers/venv` and verifies `PyYAML` plus `ruamel.yaml` before the GitHub notification agents are activated later by an attended `launchctl load` step. It can also install these tools from a private skill catalog:
+`install.sh` links the repository's Copilot instructions, local skills, and CLI wrappers into their user-level locations. It also provisions the pinned notification-worker Python runtime at `~/.local/share/dotfiles/notification-workers/venv`, verifies `PyYAML` plus `ruamel.yaml`, and removes any existing dotfiles-owned GitHub notification launch-agent symlinks so they stay unloaded until a later attended activation step. It can also install these tools from a private skill catalog:
 
 | Tool | Problem it addresses |
 | --- | --- |

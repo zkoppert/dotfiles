@@ -243,24 +243,41 @@ if [ "$(uname)" = "Darwin" ] && ! command -v terminal-notifier >/dev/null 2>&1; 
   echo "⚠ terminal-notifier is missing - run 'brew install terminal-notifier' to enable clickable triage alerts"
 fi
 
+remove_notification_launch_agent() {
+  local label="$1"
+  local plist_name="$2"
+  local target="$HOME/Library/LaunchAgents/$plist_name"
+  if [ -L "$target" ]; then
+    launchctl unload "$target" >/dev/null 2>&1 || true
+    rm -f "$target"
+    echo "✓ Removed $label launch agent symlink; it stays unloaded until a later attended activation step"
+  elif [ -e "$target" ]; then
+    echo "⚠ $target exists and is not a symlink - skipping"
+  fi
+}
+
+if [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
+  remove_notification_launch_agent "notification-triage" "com.zkoppert.notification-triage.plist"
+  remove_notification_launch_agent "triage-dependabot" "com.zkoppert.triage-dependabot.plist"
+fi
+
 TRIAGE_WRAPPER="$DOTFILES_DIR/bin/notification-triage"
 if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
   mkdir -p "$HOME/.local/bin"
   TRIAGE_BIN_TARGET="$HOME/.local/bin/notification-triage"
-  if [ -L "$TRIAGE_BIN_TARGET" ] || [ ! -e "$TRIAGE_BIN_TARGET" ]; then
+  if [ ! -e "$TRIAGE_BIN_TARGET" ] || [ -L "$TRIAGE_BIN_TARGET" ]; then
     ln -sfn "$TRIAGE_WRAPPER" "$TRIAGE_BIN_TARGET"
     echo "✓ Linked notification-triage → ~/.local/bin/notification-triage"
   else
     echo "⚠ $TRIAGE_BIN_TARGET exists and is not a symlink - skipping"
   fi
-
 fi
 
 DEPENDABOT_WRAPPER="$DOTFILES_DIR/bin/triage-dependabot"
 if [ -x "$DEPENDABOT_WRAPPER" ] && [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
   mkdir -p "$HOME/.local/bin"
   DEPENDABOT_BIN_TARGET="$HOME/.local/bin/triage-dependabot"
-  if [ -L "$DEPENDABOT_BIN_TARGET" ] || [ ! -e "$DEPENDABOT_BIN_TARGET" ]; then
+  if [ ! -e "$DEPENDABOT_BIN_TARGET" ] || [ -L "$DEPENDABOT_BIN_TARGET" ]; then
     ln -sfn "$DEPENDABOT_WRAPPER" "$DEPENDABOT_BIN_TARGET"
     echo "✓ Linked triage-dependabot → ~/.local/bin/triage-dependabot"
   else

@@ -159,9 +159,10 @@ When you move the todo to `status: done`, or move a GitHub-backed item to
 A launchd plist runs the tool every hour on the hour, 24x7. Logs land in
 `~/Library/Logs/notification-triage.log`.
 
-`./install.sh` only links the plist into `~/Library/LaunchAgents`; it does
-not start the hourly job. When you're ready to activate it in a separate
-attended step, run:
+`./install.sh` removes any existing dotfiles-owned notification plist
+symlink from `~/Library/LaunchAgents`; it does not start the hourly job.
+When you're ready to activate it in a separate attended step, recreate the
+symlink and run:
 
 ```bash
 launchctl load ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist
