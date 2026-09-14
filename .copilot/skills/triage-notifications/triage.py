@@ -1702,7 +1702,7 @@ def apply_todo_mutations(
             continue
         section, item = tracked
         terminal = tracker_terminal_disposition(item, section)
-        if not terminal and section == "prioritized.q2_schedule":
+        if not terminal and section in {"prioritized.q1_do_first", "prioritized.q2_schedule"}:
             continue
         replacement_notification = dict(notification)
         if not terminal:

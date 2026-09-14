@@ -3752,6 +3752,48 @@ def test_route_existing_q2_notification_keeps_schedule_order():
     assert applied["tracker_links"] == []
 
 
+def test_route_existing_q2_notification_preserves_fresh_q1_item():
+    item = {
+        "id": "review-3",
+        "status": "pending",
+        "quadrant": "q1_do_first",
+        "notification": {
+            "thread_id": "thr-4",
+            "reason": "mention",
+            "captured_at": "2026-07-07T11:00:00Z",
+            "escalates_at": "2026-07-08T11:00:00Z",
+        },
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {"q1_do_first": [item], "q2_schedule": []},
+        "in_progress": [],
+        "blocked": [],
+        "in_review": [],
+        "done": [],
+    }
+    refreshed = {
+        "id": "review-3",
+        "notification": {
+            "thread_id": "thr-4",
+            "reason": "review_requested",
+            "captured_at": "2026-07-09T11:00:00Z",
+            "escalates_at": "2026-07-10T11:00:00Z",
+        },
+    }
+
+    applied = triage.apply_todo_mutations(
+        data, triage.TodoMutations(route_existing_q2=[refreshed])
+    )
+
+    assert applied["changed"] is False
+    assert data["prioritized"]["q1_do_first"] == [item]
+    assert data["prioritized"]["q2_schedule"] == []
+    assert item["notification"]["reason"] == "mention"
+    assert item["notification"]["captured_at"] == "2026-07-07T11:00:00Z"
+    assert item["notification"]["escalates_at"] == "2026-07-08T11:00:00Z"
+
+
 @pytest.mark.parametrize("active_section", ["in_progress", "blocked", "in_review"])
 def test_route_existing_terminal_inbox_notification_reopens_active_work_to_inbox(
     active_section,
@@ -9033,15 +9075,21 @@ def test_preview_backfill_keeps_terminal_tracker_rows_when_notification_is_not_n
     ]
 
 
-def test_notification_worker_tests_workflow_pins_runner_and_python():
+def test_notification_worker_tests_workflow_pins_container_and_lockfile():
     workflow = yaml.safe_load(
         Path(".github/workflows/notification-worker-tests.yml").read_text()
     )
-    assert workflow["jobs"]["triage-notifications"]["runs-on"] == "ubuntu-24.04"
-    assert workflow["jobs"]["triage-dependabot"]["runs-on"] == "ubuntu-24.04"
-    assert workflow["jobs"]["triage-notifications"]["steps"][1]["with"][
-        "python-version"
-    ] == "3.13.0"
-    assert workflow["jobs"]["triage-dependabot"]["steps"][1]["with"][
-        "python-version"
-    ] == "3.13.0"
+    for job_name in ("triage-notifications", "triage-dependabot"):
+        job = workflow["jobs"][job_name]
+        assert job["runs-on"] == "ubuntu-24.04"
+        assert job["container"]["image"] == (
+            "python:3.13.0-bookworm@sha256:91a40c9db8e53aa8c4cae96c24dc7135835e07c8140de233826ece4442ca8e29"
+        )
+        install_step = next(step for step in job["steps"] if step.get("name") == "Install test dependencies")
+        assert "--require-hashes" in install_step["run"]
+        assert "notification-worker-requirements.lock.txt" in install_step["run"]
+        assert all(
+            not step.get("uses", "").startswith("actions/setup-python@")
+            for step in job["steps"]
+            if isinstance(step, dict)
+        )
