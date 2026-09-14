@@ -185,9 +185,10 @@ DELETE the underlying notification thread.
 The `RunAtLoad` key is false so loading the plist does not trigger an
 immediate run.
 
-`./install.sh` only links the plist into `~/Library/LaunchAgents`; it does
-not start the hourly job. When you're ready to activate it in a separate
-attended step, run:
+`./install.sh` removes any existing dotfiles-owned notification plist
+symlink from `~/Library/LaunchAgents`; it does not start the hourly job.
+When you're ready to activate it in a separate attended step, recreate the
+symlink and run:
 
 ```bash
 launchctl load -w "$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist"

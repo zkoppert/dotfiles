@@ -339,12 +339,46 @@ class InstallScriptTest(unittest.TestCase):
             wrapper = bin_dir / command
             wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
             wrapper.chmod(0o755)
+        activity_log = self.home / "install.log"
         launchctl = self.fake_bin / "launchctl"
         launchctl.write_text(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/launchctl.log\"\n",
+            "#!/bin/sh\n"
+            'if [ "$1" = "unload" ] && [ -e "$HOME/.local/share/dotfiles/notification-workers/venv" ]; then\n'
+            "  printf '%s\\n' \"launchctl $* (runtime already provisioned)\" >> \"$HOME/install.log\"\n"
+            "  exit 1\n"
+            "fi\n"
+            "printf '%s\\n' \"launchctl $*\" >> \"$HOME/install.log\"\n",
             encoding="utf-8",
         )
         launchctl.chmod(0o755)
+        python3 = self.fake_bin / "python3"
+        python3.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then\n'
+            "  target=$3\n"
+            "  mkdir -p \"$target/bin\"\n"
+            "  cat > \"$target/bin/python3\" <<'EOF'\n"
+            "#!/bin/sh\n"
+            "set -eu\n"
+            'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
+            "  exit 0\n"
+            "fi\n"
+            'if [ "$1" = "-" ] || [ "$1" = "-c" ]; then\n'
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n"
+            "EOF\n"
+            "  chmod +x \"$target/bin/python3\"\n"
+            "  exit 0\n"
+            "fi\n"
+            'if [ "$1" = "-" ] || [ "$1" = "-c" ]; then\n'
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        python3.chmod(0o755)
         triage_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.notification-triage.plist"
         triage_target.parent.mkdir(parents=True)
         triage_target.symlink_to(triage_plist)
@@ -353,12 +387,50 @@ class InstallScriptTest(unittest.TestCase):
 
         self.run_installer()
 
-        calls = (self.home / "launchctl.log").read_text(encoding="utf-8").splitlines()
-        self.assertIn(f"unload {triage_target}", calls)
-        self.assertIn(f"unload {dependabot_target}", calls)
-        self.assertNotIn(f"load {triage_target}", calls)
-        self.assertNotIn(f"load {dependabot_target}", calls)
+        calls = activity_log.read_text(encoding="utf-8").splitlines()
+        self.assertIn(f"launchctl unload {triage_target}", calls)
+        self.assertIn(f"launchctl unload {dependabot_target}", calls)
+        self.assertNotIn(f"launchctl load {triage_target}", calls)
+        self.assertNotIn(f"launchctl load {dependabot_target}", calls)
         self.assertFalse(triage_target.exists())
+        self.assertFalse(dependabot_target.exists())
+
+    def test_notification_jobs_only_remove_expected_symlinks(self) -> None:
+        launch_agents = self.repo / "LaunchAgents"
+        launch_agents.mkdir()
+        triage_plist = launch_agents / "com.zkoppert.notification-triage.plist"
+        triage_plist.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
+        dependabot_plist = launch_agents / "com.zkoppert.triage-dependabot.plist"
+        dependabot_plist.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
+        bin_dir = self.repo / "bin"
+        bin_dir.mkdir()
+        for command in ("notification-triage", "triage-dependabot"):
+            wrapper = bin_dir / command
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+        activity_log = self.home / "install.log"
+        launchctl = self.fake_bin / "launchctl"
+        launchctl.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"launchctl $*\" >> \"$HOME/install.log\"\n",
+            encoding="utf-8",
+        )
+        launchctl.chmod(0o755)
+        foreign_target = self.root / "foreign" / "com.zkoppert.notification-triage.plist"
+        foreign_target.parent.mkdir(parents=True)
+        foreign_target.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
+        triage_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.notification-triage.plist"
+        triage_target.parent.mkdir(parents=True)
+        triage_target.symlink_to(foreign_target)
+        dependabot_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.triage-dependabot.plist"
+        dependabot_target.symlink_to(dependabot_plist)
+
+        self.run_installer()
+
+        calls = activity_log.read_text(encoding="utf-8").splitlines()
+        self.assertNotIn(f"launchctl unload {triage_target}", calls)
+        self.assertIn(f"launchctl unload {dependabot_target}", calls)
+        self.assertTrue(triage_target.is_symlink())
+        self.assertEqual(triage_target.resolve(), foreign_target.resolve())
         self.assertFalse(dependabot_target.exists())
 
     def test_accessibility_picker_is_linked_and_loaded_with_private_config(

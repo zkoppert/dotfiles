@@ -233,12 +233,6 @@ if [ -f "$BABYSIT_PLIST" ] && [ "$(uname)" = "Darwin" ]; then
   fi
 fi
 
-if [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
-  if ! ensure_notification_worker_runtime; then
-    echo "⚠ Notification worker runtime is not ready; wrappers will fail preflight until ./install.sh can provision PyYAML and ruamel.yaml"
-  fi
-fi
-
 if [ "$(uname)" = "Darwin" ] && ! command -v terminal-notifier >/dev/null 2>&1; then
   echo "⚠ terminal-notifier is missing - run 'brew install terminal-notifier' to enable clickable triage alerts"
 fi
@@ -246,9 +240,24 @@ fi
 remove_notification_launch_agent() {
   local label="$1"
   local plist_name="$2"
+  local expected_source="$3"
   local target="$HOME/Library/LaunchAgents/$plist_name"
   if [ -L "$target" ]; then
-    launchctl unload "$target" >/dev/null 2>&1 || true
+    local linked_target resolved_target
+    linked_target="$(readlink "$target")"
+    if [[ "$linked_target" = /* ]]; then
+      resolved_target="$linked_target"
+    else
+      resolved_target="$(cd -P "$(dirname "$target")" && pwd -P)/$linked_target"
+    fi
+    if [ "$resolved_target" != "$expected_source" ]; then
+      echo "⚠ $target points to $resolved_target - skipping"
+      return
+    fi
+    if ! launchctl unload "$target" >/dev/null 2>&1; then
+      echo "⚠ failed to unload $target - skipping removal"
+      return
+    fi
     rm -f "$target"
     echo "✓ Removed $label launch agent symlink; it stays unloaded until a later attended activation step"
   elif [ -e "$target" ]; then
@@ -257,8 +266,14 @@ remove_notification_launch_agent() {
 }
 
 if [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
-  remove_notification_launch_agent "notification-triage" "com.zkoppert.notification-triage.plist"
-  remove_notification_launch_agent "triage-dependabot" "com.zkoppert.triage-dependabot.plist"
+  remove_notification_launch_agent "notification-triage" "com.zkoppert.notification-triage.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"
+  remove_notification_launch_agent "triage-dependabot" "com.zkoppert.triage-dependabot.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.triage-dependabot.plist"
+fi
+
+if [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
+  if ! ensure_notification_worker_runtime; then
+    echo "⚠ Notification worker runtime is not ready; wrappers will fail preflight until ./install.sh can provision PyYAML and ruamel.yaml"
+  fi
 fi
 
 TRIAGE_WRAPPER="$DOTFILES_DIR/bin/notification-triage"
