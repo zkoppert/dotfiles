@@ -3919,6 +3919,8 @@ def test_run_rechecks_stale_prune_after_ledger_capture(todo_file):
     assert stats.pruned_stale == 0
     assert current_clearance.call_count == 2
     mark_done.assert_not_called()
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["inbox"][0]["id"] == "stale-1"
 
 
 
@@ -8945,3 +8947,101 @@ def test_reconcile_tracker_rows_to_ledger_reopens_canonical_only_rows(todo_file:
     ]
     assert "terminal_disposition" not in data["inbox"][0]["notification"]
     assert "terminal_recorded_at" not in data["inbox"][0]["notification"]
+
+
+def test_preview_backfill_keeps_terminal_tracker_rows_when_notification_is_not_newer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {
+                    "q1_do_first": [],
+                    "q2_schedule": [],
+                    "q3_delegate": [],
+                    "q4_eliminate": [
+                        {
+                            "id": "terminal-1",
+                            "title": "Closed ask",
+                            "status": "dropped",
+                            "completed": "2026-07-01",
+                            "notification": {
+                                "thread_id": "thread-terminal",
+                                "reason": "subscribed",
+                                "url": "https://github.com/o/r/pull/1",
+                                "repo": "o/r",
+                                "terminal_disposition": "irrelevant",
+                                "terminal_recorded_at": "2026-07-01T12:00:00Z",
+                            },
+                        }
+                    ],
+                },
+                "done": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    preview_ledger = tmp_path / "preview.sqlite"
+    notif = _notif(
+        "assign",
+        id="thread-terminal",
+        updated_at="2026-06-30T08:00:00Z",
+        repo="o/r",
+        url="https://api.github.com/repos/o/r/pulls/1",
+    )
+    notif["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/1"
+    notif["subject"]["latest_comment_url"] = "https://api.github.com/repos/o/r/issues/comments/1"
+    monkeypatch.setattr(triage, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(triage, "fetch_notifications", lambda: [notif])
+    monkeypatch.setattr(
+        triage,
+        "shared_comment_notification_snapshot",
+        lambda *args, **kwargs: triage.CommentNotificationSnapshot(None, None, False, True, None),
+    )
+    monkeypatch.setattr(
+        triage,
+        "classify",
+        lambda *args, **kwargs: triage.Classification(triage.BUCKET_Q1, "assign -> Q1", direct_mention=False),
+    )
+
+    stats = triage.preview_backfill_ledger(
+        triage.parse_args([
+            "--todo-file",
+            str(todo_file),
+            "--dry-run",
+            "--backfill",
+            "--backfill-ledger",
+            str(preview_ledger),
+        ])
+    )
+
+    ledger = triage.NotificationLedger(preview_ledger)
+    rows = ledger._rows(
+        "SELECT classification, terminal_disposition, clear_state FROM notifications WHERE source_id = ?",
+        ("thread-terminal",),
+    )
+    assert stats.added_q1 == 0
+    assert rows == [
+        {
+            "classification": "actionable",
+            "terminal_disposition": "irrelevant",
+            "clear_state": "pending",
+        }
+    ]
+
+
+def test_notification_worker_tests_workflow_pins_runner_and_python():
+    workflow = yaml.safe_load(
+        Path(".github/workflows/notification-worker-tests.yml").read_text()
+    )
+    assert workflow["jobs"]["triage-notifications"]["runs-on"] == "ubuntu-24.04"
+    assert workflow["jobs"]["triage-dependabot"]["runs-on"] == "ubuntu-24.04"
+    assert workflow["jobs"]["triage-notifications"]["steps"][1]["with"][
+        "python-version"
+    ] == "3.13.0"
+    assert workflow["jobs"]["triage-dependabot"]["steps"][1]["with"][
+        "python-version"
+    ] == "3.13.0"

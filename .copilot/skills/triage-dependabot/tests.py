@@ -1145,6 +1145,42 @@ def test_apply_todo_mutations_keeps_newer_active_q1_on_stale_prune() -> None:
     ]
 
 
+def test_apply_todo_mutations_keeps_newer_active_q1_on_stale_prune_by_url() -> None:
+    entry = td.build_flag_entry(
+        _base_pr(number=7, url="https://github.com/o/r/pull/7"),
+        "o/r",
+        {"id": "thread-keep-new", "reason": "subscribed"},
+        td.Decision(td.OUTCOME_FLAG, "needs review"),
+    )
+    entry["notification"]["captured_at"] = "2026-07-10T12:00:00Z"
+    data = {
+        "inbox": [],
+        "done": [],
+        "prioritized": {
+            "q1_do_first": [entry],
+            "q2_schedule": [],
+            "q3_delegate": [],
+        },
+    }
+    mutations = td.TodoMutations(
+        prunes=[
+            td.PruneTodoDelta(
+                thread_id="thread-keep-old",
+                pr_url="https://github.com/o/r/pull/7",
+                captured_at="2026-07-01T12:00:00Z",
+            )
+        ]
+    )
+
+    applied = td.apply_todo_mutations(data, mutations)
+
+    assert applied["changed"] is False
+    assert applied["stale_removed"] == 0
+    assert [item["id"] for item in data["prioritized"]["q1_do_first"]] == [
+        "dependabot-r-pr-7"
+    ]
+
+
 def test_apply_todo_mutations_with_lock_acquires_file_lock(tmp_path: Path) -> None:
     path = tmp_path / "todo.yml"
     path.write_text(

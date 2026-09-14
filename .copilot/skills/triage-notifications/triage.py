@@ -2992,9 +2992,14 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
             tracker_section, canonical_item = canonical_tracked
             tracker_item_id = str(canonical_item.get("id") or "") or None
 
-        tracked_terminal = bool(
-            tracked and tracker_terminal_disposition(tracked[1], tracker_section or "")
-        )
+        tracked_terminal_item = None
+        if tracked is not None and tracker_terminal_disposition(tracked[1], tracker_section or ""):
+            tracked_terminal_item = tracked
+        elif canonical_tracked is not None and tracker_terminal_disposition(
+            canonical_tracked[1], tracker_section or ""
+        ):
+            tracked_terminal_item = canonical_tracked
+        tracked_terminal = tracked_terminal_item is not None
         tracked_nonterminal = bool(tracked and not tracked_terminal)
         tracked_notification = tracked[1].get("notification") if tracked else None
         tracked_direct_ask = bool(
@@ -3013,7 +3018,14 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
             and tracked is not None
             and _is_untouched_q2_review_fallback(tracked[1], tracked[0])
         )
-        if tracked_terminal and classification.bucket in {BUCKET_Q1, BUCKET_Q2, BUCKET_INBOX}:
+        if tracked_terminal_item is not None and classification.bucket in {BUCKET_Q1, BUCKET_Q2, BUCKET_INBOX}:
+            terminal_event_is_new = notification_has_new_activity(
+                notif,
+                tracked_terminal_item[1],
+                allow_reason_change_without_timestamp=False,
+            )
+            if not terminal_event_is_new:
+                continue
             if ledger is not None and not ledger.readonly:
                 ledger.reopen_actionable(
                     source_id=thread_id,
@@ -3439,16 +3451,24 @@ def run(args: argparse.Namespace) -> TriageStats:
                     queue_clear=True,
                     event_at=str(notif.get("captured_at") or notif.get("updated_at") or utcnow_iso()),
                 )
-                mutations.route_existing_drop.append(
-                    PruneDelta(
-                        item_id=str(tracked[1].get("id") or ""),
-                        thread_id=thread_id,
-                        stale_reason=classification.reason,
-                        notification_reason=reason,
-                        section=tracked[0],
-                        captured_at=str(notif.get("updated_at") or utcnow_iso()),
-                    )
+                prune_delta = PruneDelta(
+                    item_id=str(tracked[1].get("id") or ""),
+                    thread_id=thread_id,
+                    stale_reason=classification.reason,
+                    notification_reason=reason,
+                    section=tracked[0],
+                    captured_at=str(notif.get("updated_at") or utcnow_iso()),
                 )
+                current_notif = _current_notification_for_clearance(thread_id=thread_id)
+                if current_notif is None or not _current_notification_is_clearable(
+                    url=canonical_url,
+                    thread_id=thread_id,
+                    reason=str(current_notif.get("reason") or reason),
+                    ledger=ledger,
+                    my_login=my_login,
+                ):
+                    continue
+                mutations.route_existing_drop.append(prune_delta)
                 if not args.dry_run:
                     try:
                         attempted_thread_ids.add(thread_id)

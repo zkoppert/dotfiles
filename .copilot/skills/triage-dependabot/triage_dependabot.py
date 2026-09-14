@@ -2071,27 +2071,35 @@ def apply_todo_mutations(
     }
 
     for prune_delta in mutations.prunes:
-        active_entry = _matching_entry(
-            _active_todo_items(data),
-            {
-                "id": prune_delta.thread_id or prune_delta.pr_url or "",
-                "notification": {"thread_id": prune_delta.thread_id or ""},
-            },
-        )
-        if active_entry is not None and prune_delta.captured_at:
-            active_notif = active_entry.get("notification")
-            active_captured_at = None
-            if isinstance(active_notif, dict):
-                active_captured_at = parse_iso_datetime(
-                    str(active_notif.get("captured_at") or "")
-                )
+        if prune_delta.captured_at:
             prune_boundary = parse_iso_datetime(prune_delta.captured_at)
-            if (
-                active_captured_at is not None
-                and prune_boundary is not None
-                and active_captured_at > prune_boundary
-            ):
-                continue
+            if prune_boundary is not None:
+                target_url = _normalized_github_artifact(prune_delta.pr_url)
+                newer_active_match = False
+                for active_item in _active_todo_items(data):
+                    if not isinstance(active_item, dict):
+                        continue
+                    active_notif = active_item.get("notification")
+                    if not isinstance(active_notif, dict):
+                        continue
+                    thread_match = bool(
+                        prune_delta.thread_id
+                        and str(active_notif.get("thread_id") or "") == prune_delta.thread_id
+                    )
+                    url_match = bool(
+                        target_url is not None
+                        and _normalized_github_artifact(active_notif.get("url")) == target_url
+                    )
+                    if not (thread_match or url_match):
+                        continue
+                    active_captured_at = parse_iso_datetime(
+                        str(active_notif.get("captured_at") or "")
+                    )
+                    if active_captured_at is not None and active_captured_at > prune_boundary:
+                        newer_active_match = True
+                        break
+                if newer_active_match:
+                    continue
         removed = remove_stale_entries(
             data,
             thread_id=prune_delta.thread_id,
