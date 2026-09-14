@@ -1215,6 +1215,7 @@ def notification_has_new_activity(
     if (
         updated_at
         and updated_at == captured_at
+        and reason_changed
         and (current_reason in Q1_REASONS or current_reason == "review_requested")
     ):
         return True

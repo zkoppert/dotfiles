@@ -6545,7 +6545,7 @@ def test_notification_has_new_activity_treats_same_second_actionable_renewal_as_
 
 
 @pytest.mark.parametrize("reason", ["assign", "review_requested"])
-def test_notification_has_new_activity_treats_same_second_same_reason_renewal_as_new(
+def test_notification_has_new_activity_rejects_same_second_same_reason_renewal(
     reason,
 ):
     tracked = {
@@ -6562,7 +6562,7 @@ def test_notification_has_new_activity_treats_same_second_same_reason_renewal_as
             tracked,
             allow_reason_change_without_timestamp=False,
         )
-        is True
+        is False
     )
 
 
