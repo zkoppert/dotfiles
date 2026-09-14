@@ -1122,7 +1122,17 @@ def _current_notification_is_clearable_from_current(
             )
             return classification.bucket == BUCKET_DROP and not classification.skip_mark_done
     if current_reason != "comment":
-        return current_reason in {"subscribed", "state_change", "ci_activity", "author", "watching"}
+        classification = classify(
+            current,
+            my_login=my_login,
+            comment_snapshot_fetcher=shared_comment_notification_snapshot,
+            comment_since=(
+                ledger.comment_watermark(source_id=thread_id, canonical_artifact=url)
+                if ledger is not None and thread_id
+                else None
+            ),
+        )
+        return classification.bucket == BUCKET_DROP and not classification.skip_mark_done
     classification = classify(
         current,
         my_login=my_login,
@@ -2795,8 +2805,6 @@ def retry_pending_github_clears(
         try:
             current = _current_notification_for_clearance(thread_id=thread_id)
             if current is None:
-                if str(row.get("clear_state") or "").lower() == "failed":
-                    continue
                 attempted_thread_ids.add(thread_id)
                 _ledger_record_clear_result(
                     ledger,
@@ -3764,7 +3772,13 @@ def run(args: argparse.Namespace) -> TriageStats:
                     live_notif = live_item.get("notification")
                     if not isinstance(live_notif, dict):
                         continue
+                    terminal_canonical_url = str(
+                        live_notif.get("url") or live_item.get("link") or ""
+                    ) or None
                     current = _current_notification_for_clearance(thread_id=delta.thread_id)
+                    live_terminal_disposition = tracker_terminal_disposition(
+                        live_item, live_section
+                    )
                     if current is not None and not _current_notification_is_clearable(
                         url=None,
                         thread_id=delta.thread_id,
@@ -3777,14 +3791,14 @@ def run(args: argparse.Namespace) -> TriageStats:
                         ledger,
                         dry_run=args.dry_run,
                         thread_id=delta.thread_id,
-                        canonical_artifact=None,
+                        canonical_artifact=terminal_canonical_url,
                         classification="policy_drop",
                         worker="github-pruner",
                         reason=delta.stale_reason,
                         tracker_item_id=delta.item_id or None,
                         tracker_section=live_section or delta.section or None,
-                        terminal_disposition="completed",
-                        queue_clear=True,
+                        terminal_disposition=live_terminal_disposition or "completed",
+                        queue_clear=bool(delta.thread_id),
                         event_at=delta.captured_at or utcnow_iso(),
                     )
                     if not args.dry_run:
@@ -3800,14 +3814,15 @@ def run(args: argparse.Namespace) -> TriageStats:
                         ):
                             continue
                         surviving_prunes.append(delta)
-                        if current_after is not None:
-                            mark_thread_done(delta.thread_id)
+                        if delta.thread_id:
+                            if current_after is not None:
+                                mark_thread_done(delta.thread_id)
                             attempted_thread_ids.add(delta.thread_id)
                             _ledger_record_clear_result(
                                 ledger,
                                 dry_run=args.dry_run,
                                 thread_id=delta.thread_id,
-                                canonical_artifact=None,
+                                canonical_artifact=terminal_canonical_url,
                             )
                     else:
                         surviving_prunes.append(delta)

@@ -9104,3 +9104,137 @@ def test_notification_worker_tests_workflow_uses_matrix_and_lockfile():
         for step in job["steps"]
         if isinstance(step, dict)
     )
+
+
+def test_current_notification_is_clearable_allows_closed_review_requested_without_terminal_boundary(
+    todo_file,
+):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    current = _notif(
+        "review_requested",
+        id="thread-review-open",
+        updated_at="2026-07-03T12:00:00Z",
+    )
+    current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/9"
+    current["repository"] = {"full_name": "o/r"}
+    with patch("triage.fetch_notifications", return_value=[current]), patch(
+        "triage.run_gh",
+        return_value=json.dumps({"state": "closed"}),
+    ):
+        assert triage._current_notification_is_clearable(
+            url="https://github.com/o/r/pull/9",
+            thread_id="thread-review-open",
+            reason="review_requested",
+            ledger=ledger,
+            my_login="zkoppert",
+        )
+
+
+def test_retry_pending_github_clears_marks_failed_thread_cleared_when_thread_is_gone(
+    todo_file,
+):
+    notif = _notif("subscribed")
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    canonical = triage.web_url(notif)
+    ledger.capture(
+        source_id=notif["id"],
+        canonical_artifact=canonical,
+        classification="policy_drop",
+        worker="test",
+    )
+    ledger.record_terminal(
+        source_id=notif["id"],
+        canonical_artifact=canonical,
+        terminal_disposition="irrelevant",
+    )
+    ledger.queue_clear(source_id=notif["id"], canonical_artifact=canonical)
+    ledger.record_clear_failure(
+        source_id=notif["id"],
+        canonical_artifact=canonical,
+        error="HTTP 500",
+    )
+    stats = triage.TriageStats()
+    with patch("triage.fetch_notifications", return_value=[]), patch(
+        "triage.mark_thread_done"
+    ) as mark_done:
+        triage.retry_pending_github_clears(
+            ledger,
+            dry_run=False,
+            stats=stats,
+            attempted_thread_ids=set(),
+            my_login="zkoppert",
+        )
+
+    mark_done.assert_not_called()
+    assert ledger.pending_github_clears() == []
+    rows = ledger._rows(
+        "SELECT clear_state, last_clear_error FROM notifications WHERE source_id = ?",
+        (notif["id"],),
+    )
+    assert rows == [{"clear_state": "succeeded", "last_clear_error": None}]
+
+
+def test_run_prunes_stale_url_only_terminal_row_with_canonical_artifact(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {
+                    "q1_do_first": [],
+                    "q2_schedule": [],
+                    "q3_delegate": [],
+                    "q4_eliminate": [
+                        {
+                            "id": "stale-term",
+                            "title": "Closed ask",
+                            "status": "dropped",
+                            "notification": {
+                                "url": "https://github.com/o/r/pull/3",
+                                "reason": "subscribed",
+                                "repo": "o/r",
+                                "marked_done": True,
+                                "marked_done_at": "2026-07-01T12:00:00Z",
+                                "terminal_recorded_at": "2026-07-01T12:00:00Z",
+                                "terminal_disposition": "irrelevant",
+                            },
+                        }
+                    ],
+                },
+                "done": [],
+            }
+        )
+    )
+    delta = triage.PruneDelta(
+        item_id="stale-term",
+        thread_id=None,
+        stale_reason="merged",
+        notification_reason="subscribed",
+        section="prioritized.q4_eliminate",
+        captured_at="2026-07-02T12:00:00Z",
+    )
+    ledger_file = todo_file.parent / "ledger.sqlite"
+    with (
+        patch("triage.get_my_login", return_value="zkoppert"),
+        patch("triage.fetch_notifications", return_value=[]),
+        patch("triage.collect_stale_notification_prunes", return_value=[delta]),
+        patch("triage.mark_thread_done") as mark_done,
+    ):
+        stats = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    assert stats.pruned_stale == 1
+    mark_done.assert_not_called()
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["prioritized"]["q4_eliminate"] == []
+    ledger = triage.NotificationLedger(ledger_file)
+    rows = ledger._rows(
+        "SELECT canonical_artifact, terminal_disposition, clear_state, tracker_item_id FROM notifications WHERE tracker_item_id = ?",
+        ("stale-term",),
+    )
+    assert rows == [
+        {
+            "canonical_artifact": "https://github.com/o/r/pull/3",
+            "terminal_disposition": "irrelevant",
+            "clear_state": "not_applicable",
+            "tracker_item_id": "stale-term",
+        }
+    ]
