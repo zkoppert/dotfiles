@@ -68,6 +68,7 @@ from notification_worker_common import (
     parse_notification_pages,
     parse_iso_datetime,
     review_request_escalates_at,
+    tracker_item_snapshot,
     utcnow_iso,
 )
 from ruamel.yaml import YAML
@@ -2597,6 +2598,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Enable debug logging.",
     )
+    parser.add_argument(
+        "--log-output",
+        action="store_true",
+        help="Emit summaries and errors as timestamped log records for scheduled runs.",
+    )
     return parser.parse_args(argv)
 
 
@@ -2650,7 +2656,14 @@ def reconcile_tracker_rows_to_ledger(
     """Mirror the current tracker view into the durable notification ledger."""
     deferred_thread_ids = deferred_thread_ids or set()
     deferred_canonical_artifacts = deferred_canonical_artifacts or set()
+    cleanup_snapshots = {
+        snapshot
+        for row in (ledger.pending_tracker_cleanups() if ledger is not None else [])
+        for snapshot in json.loads(row["tracker_cleanup_json"])
+    }
     for section, item in _iter_notification_items_with_sections(data):
+        if tracker_item_snapshot(section, item) in cleanup_snapshots:
+            continue
         notif = item.get("notification")
         if not isinstance(notif, dict):
             continue
@@ -3891,7 +3904,8 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     stats = run(args)
-    print(
+    emit_summary = logger.info if args.log_output else print
+    emit_summary(
         f"fetched={stats.fetched} unread={stats.unread} "
         f"added_q1={stats.added_q1} added_q2={stats.added_q2} "
         f"added_inbox={stats.added_inbox} escalated_review_requests={stats.escalated_review_requests} "
@@ -3904,9 +3918,12 @@ def main(argv: list[str] | None = None) -> int:
             f"{reason}={count}"
             for reason, count in sorted(stats.pruned_by_reason.items())
         )
-        print(f"pruned_breakdown: {breakdown}")
+        emit_summary(f"pruned_breakdown: {breakdown}")
     for err in stats.errors:
-        print(f"ERROR: {err}", file=sys.stderr)
+        if args.log_output:
+            logger.error("%s", err)
+        else:
+            print(f"ERROR: {err}", file=sys.stderr)
     return 1 if stats.errors else 0
 
 

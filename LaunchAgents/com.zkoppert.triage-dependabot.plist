@@ -8,6 +8,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/Users/zkoppert/repos/dotfiles/bin/triage-dependabot</string>
+        <string>--log-output</string>
     </array>
 
     <key>RunAtLoad</key>

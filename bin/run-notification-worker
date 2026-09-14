@@ -17,8 +17,15 @@ resolve_path() {
   cd -P "$(dirname "$source_path")" && pwd
 }
 
+log_error() {
+  local line
+  while IFS= read -r line; do
+    printf '%s ERROR %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$line" >&2
+  done <<< "$1"
+}
+
 if [ "$#" -lt 2 ]; then
-  echo "usage: $0 WORKER SCRIPT_RELATIVE_PATH [ARGS...]" >&2
+  log_error "usage: $0 WORKER SCRIPT_RELATIVE_PATH [ARGS...]"
   exit 64
 fi
 
@@ -36,14 +43,14 @@ script_path="$dotfiles_dir/$script_relative"
 
 if [ ! -x "$runtime_python" ]; then
   message="${worker}: pinned runtime missing at $runtime_python; run ./install.sh to provision notification workers"
-  echo "$message" >&2
+  log_error "$message"
   exit 1
 fi
 
 preflight_error=""
 if ! preflight_error="$("$runtime_python" -c 'import yaml, ruamel.yaml' 2>&1 >/dev/null)"; then
   message="${worker}: pinned runtime failed import preflight at $runtime_python: ${preflight_error:-missing PyYAML or ruamel.yaml}"
-  echo "$message" >&2
+  log_error "$message"
   exit 1
 fi
 

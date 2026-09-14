@@ -402,6 +402,10 @@ def comment_notification_snapshot(
     )
 
 
+def tracker_item_snapshot(section: str, item: dict[str, Any]) -> str:
+    return json.dumps([section, item], sort_keys=True, default=str)
+
+
 class NotificationLedger:
     """Durable local ledger for notification lifecycle state."""
 
@@ -467,6 +471,7 @@ class NotificationLedger:
               clear_attempted_at TEXT,
               cleared_at TEXT,
               comment_watermark TEXT,
+              tracker_cleanup_json TEXT,
               worker TEXT NOT NULL DEFAULT ''
             )
             """)
@@ -498,6 +503,7 @@ class NotificationLedger:
             "clear_attempted_at",
             "cleared_at",
             "comment_watermark",
+            "tracker_cleanup_json",
             "worker",
         ]
         select_columns = [
@@ -532,6 +538,8 @@ class NotificationLedger:
             conn.execute("DROP INDEX IF EXISTS idx_notifications_canonical")
             if "comment_watermark" not in columns:
                 conn.execute("ALTER TABLE notifications ADD COLUMN comment_watermark TEXT")
+            if "tracker_cleanup_json" not in columns:
+                conn.execute("ALTER TABLE notifications ADD COLUMN tracker_cleanup_json TEXT")
             conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_source
                 ON notifications (source_id)
@@ -812,6 +820,7 @@ class NotificationLedger:
                        tracker_section = ?,
                        terminal_disposition = NULL,
                        terminal_recorded_at = NULL,
+                       tracker_cleanup_json = NULL,
                        clear_state = 'not_applicable',
                        clear_attempted_at = NULL,
                        cleared_at = NULL,
@@ -846,6 +855,7 @@ class NotificationLedger:
                 """
                 UPDATE notifications
                    SET clear_state = 'not_applicable',
+                       tracker_cleanup_json = NULL,
                        clear_attempted_at = NULL,
                        cleared_at = NULL,
                        last_clear_error = NULL,
@@ -1184,6 +1194,69 @@ class NotificationLedger:
                AND clear_state IN ('pending', 'failed')
              ORDER BY first_seen_at ASC
             """)
+
+    def queue_tracker_cleanup(
+        self,
+        *,
+        source_id: str | None,
+        canonical_artifact: str | None,
+        snapshots: list[str],
+    ) -> None:
+        if not snapshots:
+            return
+        canonical_artifact = normalize_github_url(canonical_artifact) or canonical_artifact
+        with self._write() as conn:
+            row_id = self._find_row_id(
+                conn, source_id=source_id, canonical_artifact=canonical_artifact
+            )
+            row = conn.execute(
+                "SELECT terminal_disposition FROM notifications WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+            if row is None or row["terminal_disposition"] not in {"completed", "irrelevant"}:
+                raise ValueError("tracker cleanup requires a durable terminal decision")
+            conn.execute(
+                """
+                UPDATE notifications
+                   SET tracker_cleanup_json = COALESCE(tracker_cleanup_json, ?),
+                       clear_state = CASE WHEN tracker_cleanup_json IS NULL
+                                          THEN 'pending' ELSE clear_state END
+                 WHERE id = ?
+                """,
+                (json.dumps(sorted(set(snapshots))), row_id),
+            )
+            conn.commit()
+
+    def pending_tracker_cleanups(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            if self.readonly:
+                columns = {row["name"] for row in conn.execute("PRAGMA table_info(notifications)")}
+                if "tracker_cleanup_json" not in columns:
+                    return []
+            rows = conn.execute(
+                """
+                SELECT id, source_id, canonical_artifact, terminal_recorded_at,
+                       clear_state, tracker_cleanup_json
+                  FROM notifications
+                 WHERE tracker_cleanup_json IS NOT NULL
+                   AND terminal_disposition IN ('completed', 'irrelevant')
+                   AND clear_state IN ('pending', 'failed', 'succeeded')
+                 ORDER BY id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def finish_tracker_cleanup(self, row_id: int, snapshot_json: str) -> None:
+        with self._write() as conn:
+            conn.execute(
+                """
+                UPDATE notifications
+                   SET tracker_cleanup_json = NULL
+                 WHERE id = ? AND tracker_cleanup_json = ?
+                """,
+                (row_id, snapshot_json),
+            )
+            conn.commit()
 
     def health_metrics(self) -> dict[str, Any]:
         actionable_without_tracker_links = self._rows(

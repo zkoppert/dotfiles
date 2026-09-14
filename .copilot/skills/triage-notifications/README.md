@@ -170,7 +170,9 @@ endpoint rather than repeatedly paginating the whole inbox.
 ## Schedule
 
 The launchd plist defines an hourly schedule on the hour, 24x7. Logs land in
-`~/Library/Logs/notification-triage.log`.
+`~/Library/Logs/notification-triage.log`. The schedule passes `--log-output`
+so summaries, prune breakdowns, and errors include timestamps. Ad-hoc runs
+keep the plain stdout summary; runtime preflight errors are always timestamped.
 
 `./install.sh` verifies that owned notification services are unloaded before
 provisioning the runtime or changing worker links. It uses `bootout` if an

@@ -10,7 +10,10 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
+import plistlib
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -2366,6 +2369,200 @@ def test_run_records_error_when_pr_refresh_fails(tmp_path: Path) -> None:
     assert snapshot["last_error_at"] is not None
 
 
+def _terminal_cleanup_case(tmp_path, monkeypatch, route="archived"):
+    from notification_worker_common import fetch_notification_thread
+
+    args = _make_args(tmp_path)
+    repo = "other/r" if route == "unowned" else "o/r"
+    pr_url = f"https://github.com/{repo}/pull/1"
+    notif = {
+        "id": "cleanup-thread",
+        "reason": "subscribed",
+        "updated_at": "2026-07-10T12:00:00Z",
+        "subject": {
+            "type": "PullRequest",
+            "url": f"https://api.github.com/repos/{repo}/pulls/1",
+        },
+    }
+    item = {
+        "id": "old-flag",
+        "title": "Review dependency bump",
+        "source": "dependabot-triage",
+        "status": "pending",
+        "notification": {
+            "thread_id": "older-thread" if route == "excluded" else notif["id"],
+            "url": pr_url,
+            "reason": "subscribed",
+            "captured_at": "2026-07-01T12:00:00Z",
+        },
+    }
+    data = {
+        "inbox": [{"id": "manual", "link": pr_url}],
+        "prioritized": {"q1_do_first": []},
+        "done": [],
+    }
+    bucket = data["prioritized"]["q1_do_first"] if route == "archived" else data["inbox"]
+    bucket.append(item)
+    td.write_todo_atomic(args.todo_file, data)
+    pr = _base_pr(url=pr_url)
+    if route == "excluded":
+        pr["title"] = "Bump super-linter/super-linter from 7.0.0 to 8.0.0"
+    notifications = [notif]
+    deleted = []
+    endpoint = f"/notifications/threads/{notif['id']}"
+
+    def run_gh(command, **_kwargs):
+        if command == ["api", endpoint, "--method", "GET"]:
+            if notifications:
+                return json.dumps(notifications[0])
+            raise subprocess.CalledProcessError(1, "gh", stderr="Not Found (HTTP 404)")
+        if command == ["api", "-X", "DELETE", endpoint]:
+            deleted.append(notif["id"])
+            notifications.clear()
+            return ""
+        raise AssertionError(command)
+
+    monkeypatch.setattr(td, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(td, "fetch_notifications", lambda: list(notifications))
+    monkeypatch.setattr(td, "fetch_notification_thread", fetch_notification_thread)
+    monkeypatch.setattr(td, "fetch_pr", lambda *_args: pr)
+    monkeypatch.setattr(td, "is_archived_repo", lambda _repo: route == "archived")
+    monkeypatch.setattr(td, "run_gh", run_gh)
+    return args, notifications, deleted
+
+
+@pytest.mark.parametrize("route", ["archived", "excluded", "unowned"])
+@pytest.mark.parametrize("failure", ["after_delete", "todo_write"])
+def test_run_recovers_terminal_cleanup_after_notification_disappears(
+    tmp_path, monkeypatch, route, failure
+):
+    args, notifications, deleted = _terminal_cleanup_case(tmp_path, monkeypatch, route)
+    original_todo = args.todo_file.read_bytes()
+    if failure == "after_delete":
+        mark_done = td.mark_thread_done
+
+        def clear_then_crash(*args, **kwargs):
+            mark_done(*args, **kwargs)
+            raise SystemExit("interrupted after DELETE")
+
+        with mock.patch.object(td, "mark_thread_done", side_effect=clear_then_crash):
+            with pytest.raises(SystemExit, match="interrupted after DELETE"):
+                td.run(args)
+    else:
+        with mock.patch.object(td, "write_todo_atomic", side_effect=OSError("disk full")):
+            failed = td.run(args)
+        assert failed.errors == ["failed to write todo file: disk full"]
+    assert notifications == []
+    assert deleted == ["cleanup-thread"]
+    assert args.todo_file.read_bytes() == original_todo
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    pending = ledger.pending_tracker_cleanups()
+    assert len(pending) == 1
+    assert pending[0]["source_id"] == "cleanup-thread"
+
+    before_ledger = td.DEFAULT_LEDGER_PATH.read_bytes()
+    before_state = args.state_file.read_bytes() if args.state_file.exists() else None
+    preview_args = argparse.Namespace(**{**vars(args), "dry_run": True})
+    preview = td.run(preview_args)
+    assert preview.stale_removed == 1
+    assert preview.errors == []
+    assert args.todo_file.read_bytes() == original_todo
+    assert td.DEFAULT_LEDGER_PATH.read_bytes() == before_ledger
+    assert (args.state_file.read_bytes() if args.state_file.exists() else None) == before_state
+
+    recovered = td.run(args)
+    assert recovered.fetched == 0
+    assert recovered.stale_removed == 1
+    assert recovered.errors == []
+    assert td.load_todo(args.todo_file)["inbox"] == [
+        {"id": "manual", "link": pending[0]["canonical_artifact"]}
+    ]
+    assert td.load_todo(args.todo_file)["prioritized"]["q1_do_first"] == []
+    assert ledger.pending_tracker_cleanups() == []
+    record = ledger.notification_record(source_id="cleanup-thread", canonical_artifact=None)
+    assert record["clear_state"] == "succeeded"
+    assert record["terminal_disposition"] == ("completed" if route == "archived" else "irrelevant")
+    assert td.run(args).stale_removed == 0
+    assert deleted == ["cleanup-thread"]
+
+
+@pytest.mark.parametrize("edit", ["move", "status", "renewed_ask"])
+def test_run_terminal_cleanup_preserves_deliberately_reopened_tracker(
+    tmp_path, monkeypatch, edit
+):
+    args, _notifications, deleted = _terminal_cleanup_case(tmp_path, monkeypatch)
+    with mock.patch.object(td, "write_todo_atomic", side_effect=OSError("disk full")):
+        failed = td.run(args)
+    assert failed.errors
+    data = td.load_todo(args.todo_file)
+    item = data["prioritized"]["q1_do_first"][0]
+    if edit == "move":
+        data["prioritized"]["q1_do_first"].remove(item)
+        data["in_progress"] = [item]
+    elif edit == "status":
+        item["status"] = "in_progress"
+    else:
+        item["notification"]["reason"] = "assign"
+        item["notification"]["captured_at"] = "2026-07-11T12:00:00Z"
+    td.write_todo_atomic(args.todo_file, data)
+    reopened = args.todo_file.read_bytes()
+
+    stats = td.run(args)
+
+    assert stats.errors == []
+    assert stats.stale_removed == 0
+    assert args.todo_file.read_bytes() == reopened
+    assert deleted == ["cleanup-thread"]
+    assert td.NotificationLedger(td.DEFAULT_LEDGER_PATH).pending_tracker_cleanups() == []
+
+
+@pytest.mark.parametrize("renewed_assignment", [False, True])
+def test_run_terminal_cleanup_retries_clear_without_repeating_pr_actions(
+    tmp_path, monkeypatch, renewed_assignment
+):
+    args, notifications, deleted = _terminal_cleanup_case(tmp_path, monkeypatch)
+    original_todo = args.todo_file.read_bytes()
+    with mock.patch.object(
+        td, "mark_thread_done",
+        side_effect=subprocess.CalledProcessError(1, "gh", stderr="HTTP 503"),
+    ):
+        failed = td.run(args)
+    assert any("mark-done failed" in error for error in failed.errors)
+    assert args.todo_file.read_bytes() == original_todo
+    if renewed_assignment:
+        notifications[0]["reason"] = "assign"
+        notifications[0]["updated_at"] = "2026-07-11T12:00:00Z"
+    with mock.patch.object(td, "fetch_pr", side_effect=AssertionError("PR action replayed")):
+        recovered = td.run(args)
+    assert recovered.errors == []
+    assert recovered.stale_removed == (0 if renewed_assignment else 1)
+    assert deleted == ([] if renewed_assignment else ["cleanup-thread"])
+    if renewed_assignment:
+        assert args.todo_file.read_bytes() == original_todo
+    assert td.NotificationLedger(td.DEFAULT_LEDGER_PATH).pending_tracker_cleanups() == []
+
+
+def test_run_terminal_cleanup_recovers_after_todo_write_before_acknowledgment(
+    tmp_path, monkeypatch
+):
+    args, notifications, deleted = _terminal_cleanup_case(tmp_path, monkeypatch)
+    with mock.patch.object(
+        td.NotificationLedger, "finish_tracker_cleanup",
+        side_effect=SystemExit("interrupted after todo write"),
+    ):
+        with pytest.raises(SystemExit, match="interrupted after todo write"):
+            td.run(args)
+    assert notifications == []
+    assert td.load_todo(args.todo_file)["prioritized"]["q1_do_first"] == []
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    assert len(ledger.pending_tracker_cleanups()) == 1
+    recovered = td.run(args)
+    assert recovered.errors == []
+    assert recovered.stale_removed == 0
+    assert deleted == ["cleanup-thread"]
+    assert ledger.pending_tracker_cleanups() == []
+
+
 def test_run_cleans_stale_inbox_entries_on_merge(tmp_path: Path) -> None:
     """A pre-existing notif-* entry should be removed after the PR auto-merges."""
     notif = {
@@ -3090,6 +3287,41 @@ def test_run_dry_run_does_not_mutate_or_notify(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # main()
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("errors", [[], ["fixture failure"]])
+def test_main_timestamps_scheduled_output_without_changing_cli_summary(tmp_path, errors):
+    root = Path(__file__).resolve().parents[3]
+    with (root / "LaunchAgents/com.zkoppert.triage-dependabot.plist").open("rb") as stream:
+        schedule = plistlib.load(stream)
+    home = tmp_path / "home"
+    private_config = home / ".copilot/private/triage-repos.yml"
+    private_config.parent.mkdir(parents=True)
+    private_config.write_text("{}\n", encoding="utf-8")
+    code = (
+        "import sys, triage_dependabot as worker\n"
+        f"worker.run = lambda args: worker.TriageStats(fetched=4, unread=2, stale_removed=1, errors={errors!r})\n"
+        "sys.exit(worker.main(sys.argv[1:]))\n"
+    )
+    command = [sys.executable, "-c", code]
+    env = {**os.environ, "HOME": str(home)}
+    cli = subprocess.run(command, cwd=Path(__file__).parent, env=env, capture_output=True, text=True)
+    scheduled = subprocess.run(
+        [*command, *schedule["ProgramArguments"][1:]],
+        cwd=Path(__file__).parent, env=env, capture_output=True, text=True,
+    )
+    assert cli.returncode == scheduled.returncode == (1 if errors else 0)
+    fields = dict(field.split("=", 1) for field in cli.stdout.split())
+    assert fields["fetched"] == "4"
+    assert fields["stale_removed"] == "1"
+    assert cli.stderr == ("ERROR: fixture failure\n" if errors else "")
+    assert scheduled.stdout == ""
+    records = []
+    for line in scheduled.stderr.splitlines():
+        date, time, level, message = line.split(" ", 3)
+        datetime.datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M:%S,%f")
+        records.append((level, message))
+    assert records == [("INFO", cli.stdout.strip())] + [("ERROR", error) for error in errors]
 
 
 def test_main_returns_zero_when_no_errors(

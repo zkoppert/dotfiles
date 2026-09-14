@@ -8,10 +8,13 @@ integration-style tests.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
+import plistlib
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -4262,6 +4265,44 @@ def test_run_handles_empty_notifications(todo_file):
     assert stats.errors == []
 
 
+@pytest.mark.parametrize("errors", [[], ["fixture failure"]])
+def test_main_timestamps_scheduled_output_without_changing_cli_summary(tmp_path, errors):
+    root = Path(__file__).resolve().parents[3]
+    with (root / "LaunchAgents/com.zkoppert.notification-triage.plist").open("rb") as stream:
+        schedule = plistlib.load(stream)
+    home = tmp_path / "home"
+    private_config = home / ".copilot/private/triage-repos.yml"
+    private_config.parent.mkdir(parents=True)
+    private_config.write_text("{}\n", encoding="utf-8")
+    code = (
+        "import sys, triage as worker\n"
+        "worker.run = lambda args: worker.TriageStats("
+        f"fetched=4, unread=2, pruned_stale=2, pruned_by_reason={{'closed': 2}}, errors={errors!r})\n"
+        "sys.exit(worker.main(sys.argv[1:]))\n"
+    )
+    command = [sys.executable, "-c", code]
+    env = {**os.environ, "HOME": str(home)}
+    cli = subprocess.run(command, cwd=Path(__file__).parent, env=env, capture_output=True, text=True)
+    scheduled = subprocess.run(
+        [*command, *schedule["ProgramArguments"][1:]],
+        cwd=Path(__file__).parent, env=env, capture_output=True, text=True,
+    )
+    assert cli.returncode == scheduled.returncode == (1 if errors else 0)
+    cli_lines = cli.stdout.splitlines()
+    fields = dict(field.split("=", 1) for field in cli_lines[0].split())
+    assert fields["fetched"] == "4"
+    assert fields["pruned_stale"] == "2"
+    assert cli_lines[1:] == ["pruned_breakdown: closed=2"]
+    assert cli.stderr == ("ERROR: fixture failure\n" if errors else "")
+    assert scheduled.stdout == ""
+    records = []
+    for line in scheduled.stderr.splitlines():
+        date, time, level, message = line.split(" ", 3)
+        datetime.datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M:%S,%f")
+        records.append((level, message))
+    assert records == [("INFO", line) for line in cli_lines] + [("ERROR", error) for error in errors]
+
+
 def test_main_returns_zero_on_success(todo_file):
     responses = {
         "/user": json.dumps({"login": "zkoppert"}),
@@ -8113,6 +8154,56 @@ def test_ledger_migrates_legacy_source_type_schema(tmp_path: Path):
     ]
 
 
+def test_ledger_cleanup_migrates_previous_schema_without_mutating_readonly_preview(tmp_path):
+    path = tmp_path / "ledger.sqlite"
+    ledger = triage.NotificationLedger(path)
+    ledger.capture(source_id="old-thread", canonical_artifact=None, classification="policy_drop", worker="test")
+    ledger.record_terminal(source_id="old-thread", canonical_artifact=None, terminal_disposition="completed")
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE notifications DROP COLUMN tracker_cleanup_json")
+    before = path.read_bytes()
+    readonly = triage.NotificationLedger(path, readonly=True)
+    assert readonly.pending_tracker_cleanups() == []
+    assert path.read_bytes() == before
+
+    migrated = triage.NotificationLedger(path)
+    snapshot = triage.tracker_item_snapshot("inbox", {"id": "old-item"})
+    migrated.queue_tracker_cleanup(source_id="old-thread", canonical_artifact=None, snapshots=[snapshot])
+    pending = readonly.pending_tracker_cleanups()
+    assert len(pending) == 1
+    assert pending[0]["source_id"] == "old-thread"
+    assert pending[0]["clear_state"] == "pending"
+    assert json.loads(pending[0]["tracker_cleanup_json"]) == [snapshot]
+    assert migrated.notification_record(source_id="old-thread", canonical_artifact=None)["terminal_disposition"] == "completed"
+
+
+def test_ledger_cleanup_requires_terminal_decision(todo_file):
+    ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
+    ledger.capture(source_id="active-thread", canonical_artifact=None, classification="actionable", worker="test")
+    with pytest.raises(ValueError, match="durable terminal decision"):
+        ledger.queue_tracker_cleanup(
+            source_id="active-thread", canonical_artifact=None,
+            snapshots=[triage.tracker_item_snapshot("inbox", {"id": "active-item"})],
+        )
+    assert ledger.pending_tracker_cleanups() == []
+    assert ledger.has_active_actionable_notification(source_id="active-thread", canonical_artifact=None)
+
+
+@pytest.mark.parametrize("worker_name", ["notification-triage", "triage-dependabot"])
+def test_runtime_preflight_wrapper_timestamps_missing_runtime(tmp_path, worker_name):
+    wrapper = Path(__file__).resolve().parents[3] / "bin" / worker_name
+    result = subprocess.run(
+        [str(wrapper), "--help"], capture_output=True, text=True,
+        env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},
+    )
+    assert result.returncode == 1
+    assert result.stdout == ""
+    timestamp, level, message = result.stderr.strip().split(" ", 2)
+    datetime.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")
+    assert level == "ERROR"
+    assert message.startswith(f"{worker_name}: pinned runtime missing")
+
+
 @pytest.mark.parametrize("worker_name", ["notification-triage", "triage-dependabot"])
 def test_runtime_preflight_wrapper_fails_on_missing_python_modules(tmp_path: Path, worker_name):
     home = tmp_path / "home"
@@ -8121,6 +8212,7 @@ def test_runtime_preflight_wrapper_fails_on_missing_python_modules(tmp_path: Pat
     runtime.write_text(
         "#!/bin/sh\n"
         'if [ "$1" = "-c" ]; then\n'
+        "  echo 'Traceback (most recent call last):' 1>&2\n"
         "  echo \"ModuleNotFoundError: No module named 'yaml'\" 1>&2\n"
         "  exit 1\n"
         "fi\n"
@@ -8136,8 +8228,14 @@ def test_runtime_preflight_wrapper_fails_on_missing_python_modules(tmp_path: Pat
     )
 
     assert result.returncode == 1
+    assert result.stdout == ""
     assert "import preflight" in result.stderr
     assert "yaml" in result.stderr
+    assert len(result.stderr.splitlines()) == 2
+    for line in result.stderr.splitlines():
+        timestamp, level, _message = line.split(" ", 2)
+        datetime.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")
+        assert level == "ERROR"
 
 
 @pytest.mark.parametrize("worker_name", ["notification-triage", "triage-dependabot"])
@@ -9265,6 +9363,74 @@ def test_preview_backfill_requires_explicit_ledger_path(tmp_path: Path):
     )
 
     assert stats.errors == ["backfill requires --backfill-ledger"]
+
+
+def _tracker_with_pending_dependabot_cleanup(todo_file, tracker_thread_id="cleanup-thread"):
+    item = {
+        "id": "old-dependabot-flag",
+        "title": "Review dependency bump",
+        "source": "dependabot-triage",
+        "status": "pending",
+        "notification": {
+            "thread_id": tracker_thread_id,
+            "url": "https://github.com/o/r/pull/1",
+            "reason": "subscribed",
+            "captured_at": "2026-07-01T12:00:00Z",
+        },
+    }
+    data = {"inbox": [], "prioritized": {"q1_do_first": [item]}, "done": []}
+    triage.write_todo_atomic(todo_file, data)
+    ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
+    triage._ledger_capture(
+        ledger, dry_run=False, thread_id="cleanup-thread",
+        canonical_artifact=item["notification"]["url"], classification="policy_drop",
+        worker="dependabot-archived-repo", terminal_disposition="completed",
+        queue_clear=True, event_at="2026-07-10T12:00:00Z",
+    )
+    ledger.queue_tracker_cleanup(
+        source_id="cleanup-thread", canonical_artifact=item["notification"]["url"],
+        snapshots=[triage.tracker_item_snapshot("prioritized.q1_do_first", item)],
+    )
+    ledger.record_clear_success(source_id="cleanup-thread", canonical_artifact=None)
+    return ledger
+
+
+@pytest.mark.parametrize("tracker_thread_id", ["cleanup-thread", "previous-thread"])
+def test_run_preserves_dependabot_terminal_decision_while_cleanup_is_pending(
+    todo_file, tracker_thread_id
+):
+    ledger = _tracker_with_pending_dependabot_cleanup(todo_file, tracker_thread_id)
+    before_todo = todo_file.read_bytes()
+    query = "SELECT source_id, classification, terminal_disposition, clear_state FROM notifications"
+    before_record = ledger._rows(query)
+    with patch.object(triage, "get_my_login", return_value="zkoppert"), patch.object(
+        triage, "fetch_notifications", return_value=[]
+    ):
+        stats = triage.run(triage.parse_args([
+            "--todo-file", str(todo_file), "--no-notify", "--no-prune",
+        ]))
+    assert stats.errors == []
+    assert todo_file.read_bytes() == before_todo
+    assert ledger._rows(query) == before_record
+    assert len(ledger.pending_tracker_cleanups()) == 1
+
+
+def test_run_reopens_deliberately_edited_dependabot_cleanup(todo_file):
+    ledger = _tracker_with_pending_dependabot_cleanup(todo_file)
+    data = triage.load_todo(todo_file)
+    data["prioritized"]["q1_do_first"][0]["status"] = "in_progress"
+    triage.write_todo_atomic(todo_file, data)
+    with patch.object(triage, "get_my_login", return_value="zkoppert"), patch.object(
+        triage, "fetch_notifications", return_value=[]
+    ):
+        stats = triage.run(triage.parse_args([
+            "--todo-file", str(todo_file), "--no-notify", "--no-prune",
+        ]))
+    assert stats.errors == []
+    assert ledger.pending_tracker_cleanups() == []
+    assert ledger.has_active_actionable_notification(source_id="cleanup-thread", canonical_artifact=None)
+    assert ledger.notification_record(source_id="cleanup-thread", canonical_artifact=None)["terminal_disposition"] is None
+    assert triage.load_todo(todo_file)["prioritized"]["q1_do_first"][0]["status"] == "in_progress"
 
 
 def test_reconcile_tracker_rows_to_ledger_reopens_terminal_rows(todo_file: Path):

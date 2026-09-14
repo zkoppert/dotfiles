@@ -61,6 +61,7 @@ from notification_worker_common import (
     parse_notification_pages,
     normalize_github_url,
     parse_iso_datetime,
+    tracker_item_snapshot,
     utcnow_iso,
 )
 from ruamel.yaml import YAML
@@ -305,6 +306,7 @@ class PruneTodoDelta:
     thread_id: str | None = None
     pr_url: str | None = None
     captured_at: str = ""
+    expected_snapshots: frozenset[str] | None = None
 
 
 @dataclass
@@ -1503,6 +1505,14 @@ def _safe_mark_thread_done(
                         context,
                     )
                     return False
+                if ledger is not None and not dry_run:
+                    ledger.queue_tracker_cleanup(
+                        source_id=thread_id,
+                        canonical_artifact=canonical_artifact,
+                        snapshots=_tracker_cleanup_snapshots(
+                            data, thread_id=thread_id, pr_url=canonical_artifact
+                        ),
+                    )
         except (OSError, FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
             stats.errors.append(f"failed to reload todo before mark-done for {context}: {exc}")
             return False
@@ -1538,6 +1548,10 @@ def _safe_mark_thread_done(
             thread_id=thread_id,
             canonical_artifact=canonical_artifact,
         )
+        if dry_run and todo_file is not None:
+            stats.stale_removed += _preview_stale_cleanup(
+                data, thread_id=thread_id, pr_url=canonical_artifact
+            )
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         stats.errors.append(f"mark-done failed for {context}: {exc}")
@@ -1613,11 +1627,36 @@ def existing_thread_ids(data: dict[str, Any]) -> set[str]:
     return ids
 
 
+def _todo_buckets(data: dict[str, Any]) -> list[tuple[str, list[Any]]]:
+    buckets = [
+        (key, data.get(key))
+        for key in ("inbox", "done", "in_progress", "blocked", "in_review")
+    ]
+    prioritized = data.get("prioritized")
+    if isinstance(prioritized, dict):
+        buckets.extend((f"prioritized.{key}", items) for key, items in prioritized.items())
+    return [(section, items) for section, items in buckets if isinstance(items, list)]
+
+
+def _stale_entry_match(item: Any, thread_id: str | None, pr_url: str | None) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    notif = item.get("notification")
+    if not isinstance(notif, dict):
+        return None
+    if thread_id and str(notif.get("thread_id") or "") == thread_id:
+        return f"thread_id={thread_id}"
+    if pr_url and notif.get("url") == pr_url:
+        return f"url={pr_url}"
+    return None
+
+
 def remove_stale_entries(
     data: dict[str, Any],
     *,
     thread_id: str | None = None,
     pr_url: str | None = None,
+    expected_snapshots: frozenset[str] | None = None,
 ) -> int:
     """Drop todo entries that point at a notification we just resolved.
 
@@ -1648,18 +1687,6 @@ def remove_stale_entries(
     if not thread_id and not pr_url:
         return 0
 
-    def matches(item: Any) -> tuple[bool, str]:
-        if not isinstance(item, dict):
-            return False, ""
-        notif = item.get("notification")
-        if not isinstance(notif, dict):
-            return False, ""
-        if thread_id and str(notif.get("thread_id") or "") == thread_id:
-            return True, f"thread_id={thread_id}"
-        if pr_url and notif.get("url") == pr_url:
-            return True, f"url={pr_url}"
-        return False, ""
-
     removed = 0
 
     def prune(bucket: str, items: Any) -> None:
@@ -1674,8 +1701,11 @@ def remove_stale_entries(
             return
         kept: list[Any] = []
         for item in items:
-            hit, why = matches(item)
-            if hit:
+            why = _stale_entry_match(item, thread_id, pr_url)
+            if why and (
+                expected_snapshots is None
+                or tracker_item_snapshot(bucket, item) in expected_snapshots
+            ):
                 item_id = item.get("id") if isinstance(item, dict) else None
                 item_title = item.get("title") if isinstance(item, dict) else None
                 logger.info(
@@ -1690,28 +1720,13 @@ def remove_stale_entries(
             kept.append(item)
         items[:] = kept
 
-    for key in ("inbox", "done", "in_progress", "blocked", "in_review"):
-        if key in data:
-            prune(key, data[key])
-    prioritized = data.get("prioritized")
-    if isinstance(prioritized, dict):
-        for quadrant_key, items in list(prioritized.items()):
-            prune(f"prioritized.{quadrant_key}", items)
+    for section, items in _todo_buckets(data):
+        prune(section, items)
     return removed
 
 
 def _iter_todo_items(data: dict[str, Any]) -> list[Any]:
-    items: list[Any] = []
-    for key in ("inbox", "done", "in_progress", "blocked", "in_review"):
-        value = data.get(key)
-        if isinstance(value, list):
-            items.extend(value)
-    prioritized = data.get("prioritized")
-    if isinstance(prioritized, dict):
-        for value in prioritized.values():
-            if isinstance(value, list):
-                items.extend(value)
-    return items
+    return [item for _, items in _todo_buckets(data) for item in items]
 
 
 def _item_thread_id(item: Any) -> str | None:
@@ -1983,11 +1998,10 @@ def _clear_dependabot_notification(
                     my_login=my_login,
                 ):
                     return False
-                stats.stale_removed += _cleanup_stale_entries(
+                stats.stale_removed += _preview_stale_cleanup(
                     data,
                     thread_id=thread_id,
                     pr_url=pr_url,
-                    dry_run=True,
                 )
                 return True
             _ledger_capture(
@@ -2004,7 +2018,15 @@ def _clear_dependabot_notification(
                 queue_clear=True,
                 event_at=str(notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()),
             )
-            if not _safe_mark_thread_done(
+            if ledger is not None:
+                ledger.queue_tracker_cleanup(
+                    source_id=thread_id,
+                    canonical_artifact=pr_url,
+                    snapshots=_tracker_cleanup_snapshots(
+                        data, thread_id=thread_id, pr_url=pr_url
+                    ),
+                )
+            return _safe_mark_thread_done(
                 thread_id,
                 dry_run=dry_run,
                 stats=stats,
@@ -2013,17 +2035,7 @@ def _clear_dependabot_notification(
                 canonical_artifact=pr_url,
                 notif=notif,
                 my_login=my_login,
-            ):
-                return False
-            removed = remove_stale_entries(
-                data,
-                thread_id=thread_id,
-                pr_url=pr_url,
             )
-            if removed:
-                write_todo_atomic(args.todo_file, data)
-                stats.stale_removed += removed
-            return True
     except (OSError, FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
         stats.errors.append(f"failed to update todo file: {exc}")
         return False
@@ -2091,6 +2103,7 @@ def apply_todo_mutations(
             data,
             thread_id=prune_delta.thread_id,
             pr_url=prune_delta.pr_url,
+            expected_snapshots=prune_delta.expected_snapshots,
         )
         if removed:
             applied["stale_removed"] = int(applied["stale_removed"]) + removed
@@ -2389,48 +2402,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Enable debug logging.",
     )
+    parser.add_argument(
+        "--log-output",
+        action="store_true",
+        help="Emit summaries and errors as timestamped log records for scheduled runs.",
+    )
     return parser.parse_args(argv)
 
 
-def _cleanup_stale_entries(
+def _preview_stale_cleanup(
     data: dict[str, Any],
     *,
     thread_id: str | None,
     pr_url: str | None,
-    dry_run: bool,
 ) -> int:
-    """Wrapper that previews the cleanup in dry-run mode and skips mutation.
-
-    Returns the number of entries removed (or that would be removed in dry-run).
-    """
-    if dry_run:
-        # Count without mutating by running the helper on shallow copies of
-        # each bucket. The matching logic only walks one level deep into each
-        # entry, so a shallow copy is enough to prevent in-place removal from
-        # touching the real lists in ``data``.
-        preview = {
-            "inbox": list(data.get("inbox") or []),
-            "done": list(data.get("done") or []),
-            "in_progress": list(data.get("in_progress") or []),
-            "blocked": list(data.get("blocked") or []),
-            "in_review": list(data.get("in_review") or []),
-            "prioritized": {
-                k: list(v or []) for k, v in (data.get("prioritized") or {}).items()
-            },
-        }
-        count = remove_stale_entries(preview, thread_id=thread_id, pr_url=pr_url)
-        if count:
-            logger.info(
-                "dry-run: would remove %d stale todo entry(ies) for thread=%s url=%s",
-                count,
-                thread_id,
-                pr_url,
-            )
-        return count
-    count = remove_stale_entries(data, thread_id=thread_id, pr_url=pr_url)
+    preview = {
+        "inbox": list(data.get("inbox") or []),
+        "done": list(data.get("done") or []),
+        "in_progress": list(data.get("in_progress") or []),
+        "blocked": list(data.get("blocked") or []),
+        "in_review": list(data.get("in_review") or []),
+        "prioritized": {
+            k: list(v or []) for k, v in (data.get("prioritized") or {}).items()
+        },
+    }
+    count = remove_stale_entries(preview, thread_id=thread_id, pr_url=pr_url)
     if count:
         logger.info(
-            "removed %d stale todo entry(ies) for thread=%s url=%s",
+            "dry-run: would remove %d stale todo entry(ies) for thread=%s url=%s",
             count,
             thread_id,
             pr_url,
@@ -2438,33 +2437,104 @@ def _cleanup_stale_entries(
     return count
 
 
-def _record_stale_cleanup(
-    mutations: TodoMutations,
-    stats: TriageStats,
-    todo_file: Path,
+def _tracker_cleanup_snapshots(
+    data: dict[str, Any], *, thread_id: str | None, pr_url: str | None
+) -> list[str]:
+    return [
+        tracker_item_snapshot(section, item)
+        for section, items in _todo_buckets(data)
+        for item in items
+        if _stale_entry_match(item, thread_id, pr_url)
+    ]
+
+
+def _recover_stale_cleanup(
+    args: argparse.Namespace,
     *,
-    thread_id: str | None,
-    pr_url: str | None,
-    dry_run: bool,
-    captured_at: str = "",
-) -> None:
-    """Record or preview stale todo entry removal after a PR is resolved."""
-    if dry_run:
-        try:
-            data = load_todo(todo_file)
-        except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
-            stats.errors.append(f"failed to load todo file: {exc}")
-            return
-        stats.stale_removed += _cleanup_stale_entries(
-            data,
-            thread_id=thread_id,
-            pr_url=pr_url,
-            dry_run=True,
-        )
-        return
-    mutations.prunes.append(
-        PruneTodoDelta(thread_id=thread_id, pr_url=pr_url, captured_at=captured_at)
-    )
+    ledger: NotificationLedger | None,
+    stats: TriageStats,
+    my_login: str,
+    retry_clears: bool = True,
+    skip_thread_ids: set[str] | None = None,
+) -> set[str]:
+    if ledger is None:
+        return set()
+    rows = [
+        row for row in ledger.pending_tracker_cleanups()
+        if (retry_clears or row["clear_state"] == "succeeded")
+        and row["source_id"] not in (skip_thread_ids or set())
+    ]
+    if not rows:
+        return set()
+    attempted: set[str] = set()
+    try:
+        with contextlib.nullcontext() if args.dry_run else _todo_write_lock(args.todo_file):
+            data = load_todo(args.todo_file)
+            mutations = TodoMutations()
+            finished = []
+            for row in rows:
+                thread_id = str(row["source_id"] or "")
+                pr_url = row["canonical_artifact"]
+                attempted.add(thread_id)
+                expected = frozenset(json.loads(row["tracker_cleanup_json"]))
+                current = set(_tracker_cleanup_snapshots(
+                    data, thread_id=thread_id, pr_url=pr_url
+                ))
+                if not current.issubset(expected):
+                    if not args.dry_run:
+                        if row["clear_state"] == "succeeded":
+                            ledger.finish_tracker_cleanup(row["id"], row["tracker_cleanup_json"])
+                        else:
+                            ledger.suspend_pending_clear(
+                                source_id=thread_id, canonical_artifact=pr_url
+                            )
+                    continue
+                if row["clear_state"] != "succeeded":
+                    try:
+                        notif = _current_notification_for_clearance(thread_id=thread_id)
+                        if notif is not None:
+                            if not _safe_mark_thread_done(
+                                thread_id,
+                                dry_run=args.dry_run,
+                                stats=stats,
+                                context=f"stale cleanup {pr_url}",
+                                ledger=ledger,
+                                canonical_artifact=pr_url,
+                                notif=notif,
+                                my_login=my_login,
+                            ):
+                                continue
+                        else:
+                            _ledger_record_clear_result(
+                                ledger, dry_run=args.dry_run,
+                                thread_id=thread_id, canonical_artifact=pr_url,
+                            )
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+                        stats.errors.append(f"stale cleanup revalidation failed for {pr_url}: {exc}")
+                        _ledger_record_clear_result(
+                            ledger, dry_run=args.dry_run, thread_id=thread_id,
+                            canonical_artifact=pr_url, error=exc,
+                        )
+                        continue
+                mutations.prunes.append(PruneTodoDelta(
+                    thread_id=thread_id,
+                    pr_url=pr_url,
+                    captured_at=str(row["terminal_recorded_at"] or ""),
+                    expected_snapshots=expected,
+                ))
+                finished.append(row)
+            applied = apply_todo_mutations(data, mutations)
+            if applied["changed"] and not args.dry_run:
+                write_todo_atomic(args.todo_file, data)
+            stats.stale_removed += applied["stale_removed"]
+            if not args.dry_run:
+                for row in finished:
+                    ledger.finish_tracker_cleanup(row["id"], row["tracker_cleanup_json"])
+        if applied["changed"] and not args.dry_run:
+            commit_todo_changes(args.todo_file, "Record Dependabot triage todo updates")
+    except (OSError, yaml.YAMLError, _RuamelYAMLError) as exc:
+        stats.errors.append(f"failed to write todo file: {exc}")
+    return attempted
 
 
 
@@ -2505,6 +2575,9 @@ def run(args: argparse.Namespace) -> TriageStats:
     stats.fetched = len(notifications)
     stats.unread = sum(1 for notif in notifications if notif.get("unread"))
     logger.info("fetched %d notification(s)", stats.fetched)
+    recovered_thread_ids = _recover_stale_cleanup(
+        args, ledger=ledger, stats=stats, my_login=my_login
+    )
 
     state = load_state(args.state_file)
     now = datetime.datetime.now(datetime.timezone.utc).timestamp()
@@ -2521,6 +2594,8 @@ def run(args: argparse.Namespace) -> TriageStats:
         return coverage_cache[repo]
 
     for notif in notifications:
+        if str(notif.get("id") or "") in recovered_thread_ids:
+            continue
         parsed = parse_pr_subject(notif)
         if parsed is None:
             continue
@@ -2677,7 +2752,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             if pr_url:
                 state[pr_url] = now
             if thread_id:
-                if _safe_mark_thread_done(
+                _safe_mark_thread_done(
                     thread_id,
                     dry_run=args.dry_run,
                     stats=stats,
@@ -2687,16 +2762,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     notif=notif,
                     my_login=my_login,
                     todo_file=args.todo_file,
-                ):
-                    _record_stale_cleanup(
-                        mutations,
-                        stats,
-                        args.todo_file,
-                        thread_id=thread_id,
-                        pr_url=pr_url,
-                        dry_run=args.dry_run,
-                        captured_at=str(notif.get("updated_at") or utcnow_iso()),
-                    )
+                )
             continue
         if not is_owned_repo(repo):
             owner = repo_owner(repo) or "unknown"
@@ -2780,7 +2846,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     event_at=str(notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()),
                 )
                 if thread_id:
-                    if _safe_mark_thread_done(
+                    _safe_mark_thread_done(
                         thread_id,
                         dry_run=args.dry_run,
                         stats=stats,
@@ -2790,16 +2856,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         notif=notif,
                         my_login=my_login,
                         todo_file=args.todo_file,
-                    ):
-                        _record_stale_cleanup(
-                            mutations,
-                            stats,
-                            args.todo_file,
-                            thread_id=thread_id,
-                            pr_url=pr_url,
-                            dry_run=args.dry_run,
-                            captured_at=str(notif.get("updated_at") or utcnow_iso()),
-                        )
+                    )
                 continue
             logger.info(
                 "%s#%d -> skipping excluded dependency %s",
@@ -3009,7 +3066,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     queue_clear=bool(thread_id),
                     event_at=str(notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()),
                 )
-                if _safe_mark_thread_done(
+                _safe_mark_thread_done(
                     thread_id,
                     dry_run=args.dry_run,
                     stats=stats,
@@ -3019,16 +3076,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     notif=notif,
                     my_login=my_login,
                     todo_file=args.todo_file,
-                ):
-                    _record_stale_cleanup(
-                        mutations,
-                        stats,
-                        args.todo_file,
-                        thread_id=thread_id,
-                        pr_url=pr_url,
-                        dry_run=args.dry_run,
-                        captured_at=str(notif.get("updated_at") or utcnow_iso()),
-                    )
+                )
             elif decision.outcome == OUTCOME_LABEL_AND_MERGE:
                 labels = fetch_repo_labels(repo)
                 if "release" in labels:
@@ -3085,7 +3133,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     queue_clear=bool(thread_id),
                     event_at=str(notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()),
                 )
-                if _safe_mark_thread_done(
+                _safe_mark_thread_done(
                     thread_id,
                     dry_run=args.dry_run,
                     stats=stats,
@@ -3095,16 +3143,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     notif=notif,
                     my_login=my_login,
                     todo_file=args.todo_file,
-                ):
-                    _record_stale_cleanup(
-                        mutations,
-                        stats,
-                        args.todo_file,
-                        thread_id=thread_id,
-                        pr_url=pr_url,
-                        dry_run=args.dry_run,
-                        captured_at=str(notif.get("updated_at") or utcnow_iso()),
-                    )
+                )
             elif decision.outcome == OUTCOME_REBASE:
                 if not do_rebase_comment(
                     repo,
@@ -3150,7 +3189,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     queue_clear=bool(thread_id),
                     event_at=str(notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()),
                 )
-                if _safe_mark_thread_done(
+                _safe_mark_thread_done(
                     thread_id,
                     dry_run=args.dry_run,
                     stats=stats,
@@ -3160,16 +3199,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     notif=notif,
                     my_login=my_login,
                     todo_file=args.todo_file,
-                ):
-                    _record_stale_cleanup(
-                        mutations,
-                        stats,
-                        args.todo_file,
-                        thread_id=thread_id,
-                        pr_url=pr_url,
-                        dry_run=args.dry_run,
-                        captured_at=str(notif.get("updated_at") or utcnow_iso()),
-                    )
+                )
             elif decision.outcome == OUTCOME_FLAG:
                 try:
                     action_todo = load_todo(args.todo_file)
@@ -3222,7 +3252,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         queue_clear=True,
                         event_at=str(notif.get("updated_at") or notif.get("captured_at") or utcnow_iso()),
                     )
-                    if _safe_mark_thread_done(
+                    _safe_mark_thread_done(
                         thread_id,
                         dry_run=args.dry_run,
                         stats=stats,
@@ -3232,16 +3262,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         notif=notif,
                         my_login=my_login,
                         todo_file=args.todo_file,
-                    ):
-                        _record_stale_cleanup(
-                            mutations,
-                            stats,
-                            args.todo_file,
-                            thread_id=thread_id,
-                            pr_url=pr_url,
-                            dry_run=args.dry_run,
-                            captured_at=str(notif.get("updated_at") or utcnow_iso()),
-                        )
+                    )
                 stats.skipped += 1
         except BranchProtectionBlocked as exc:
             logger.warning(
@@ -3280,7 +3301,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
             stats.errors.append(f"action {action_context} failed for {pr_url}: {exc}")
 
-    if (mutations.flags or mutations.prunes) and not args.dry_run:
+    if mutations.flags and not args.dry_run:
         try:
             applied = apply_todo_mutations_with_lock(args.todo_file, mutations)
         except (OSError, FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
@@ -3289,7 +3310,6 @@ def run(args: argparse.Namespace) -> TriageStats:
             return stats
         stats.flagged = int(applied["added_flags"])
         stats.already_tracked += int(applied["already_tracked"])
-        stats.stale_removed = int(applied["stale_removed"])
         added_flag_entries = applied["added_entries"]
         active_q1_entries = applied["active_q1_entries"]
         for added_pr_url in applied["added_pr_urls"]:
@@ -3360,6 +3380,11 @@ def run(args: argparse.Namespace) -> TriageStats:
             stats.flagged = int(applied["added_flags"])
             stats.already_tracked += int(applied["already_tracked"])
 
+    _recover_stale_cleanup(
+        args, ledger=ledger, stats=stats, my_login=my_login,
+        retry_clears=False, skip_thread_ids=recovered_thread_ids,
+    )
+
     if not args.dry_run:
         save_state(args.state_file, state)
 
@@ -3385,7 +3410,8 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     stats = run(args)
-    print(
+    emit_summary = logger.info if args.log_output else print
+    emit_summary(
         f"fetched={stats.fetched} unread={stats.unread} dependabot={stats.dependabot} "
         f"merged={stats.merged} labeled={stats.labeled_and_merged} "
         f"rebased={stats.rebased} flagged={stats.flagged} "
@@ -3395,7 +3421,10 @@ def main(argv: list[str] | None = None) -> int:
         f"stale_removed={stats.stale_removed}"
     )
     for err in stats.errors:
-        print(f"ERROR: {err}", file=sys.stderr)
+        if args.log_output:
+            logger.error("%s", err)
+        else:
+            print(f"ERROR: {err}", file=sys.stderr)
     return 1 if stats.errors else 0
 
 

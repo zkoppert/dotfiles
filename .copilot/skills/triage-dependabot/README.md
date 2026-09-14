@@ -170,11 +170,13 @@ Flagged PRs are written using the same notification schema as
 checked against `inbox`, every `prioritized` quadrant, `in_progress`,
 `blocked`, `in_review`, and `done`.
 
-Writes to `todo.yml` are race-safe. The tool completes GitHub API work
-first, then takes an exclusive `todo.yml.lock`, re-reads the file from
-disk, applies only the planned flag and stale-removal deltas, and writes
-with an atomic `os.replace`. That keeps manual edits made during a run
-instead of replaying a stale in-memory snapshot.
+Writes to `todo.yml` use an exclusive `todo.yml.lock`, a fresh read, and
+an atomic `os.replace`. Before clearing a terminal notification, the tool
+records any matching stale entries and their sections in the shared ledger.
+It retries that cleanup even when the notification no longer appears in the
+inbox. Only unchanged tracker snapshots are removed; edits or moves cancel
+the old cleanup intent. General triage does not mistake an unchanged pending
+cleanup for a deliberate reopen.
 
 After a successful write, the tool stages `todo.yml` in the todo repo,
 skips the commit when there is no staged diff, and otherwise creates a
@@ -212,7 +214,9 @@ To unload:
 launchctl unload -w "$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist"
 ```
 
-Logs go to `~/Library/Logs/triage-dependabot.log`.
+Logs go to `~/Library/Logs/triage-dependabot.log`. The schedule passes
+`--log-output` so summaries and errors include timestamps. Ad-hoc runs keep
+the plain stdout summary; runtime preflight errors are always timestamped.
 
 ## Ad-hoc usage
 
