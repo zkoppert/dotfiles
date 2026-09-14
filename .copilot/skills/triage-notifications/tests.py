@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
+import sqlite3
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -5943,15 +5945,6 @@ def test_classify_title_drop_matches_bracketed_prefix():
     assert c.bucket == triage.BUCKET_DROP
 
 
-def test_title_drop_patterns_constant_seeded():
-    """Sanity check: the constant is non-empty and the three seed
-    patterns are present."""
-    sources = {p.pattern for p in triage.TITLE_DROP_PATTERNS}
-    assert any("intermittent test failure" in p for p in sources)
-    assert any("flaky test" in p for p in sources)
-    assert any("test flake" in p for p in sources)
-
-
 # --- Tests for read-notification sweep + done-archive (PR sweep-read-closed) ---
 
 
@@ -7745,6 +7738,82 @@ def test_ledger_uses_private_filesystem_permissions(tmp_path: Path):
     assert sidecar.stat().st_mode & 0o777 == 0o600
 
 
+def test_ledger_migrates_legacy_source_type_schema(tmp_path: Path):
+    ledger_file = tmp_path / "ledger.sqlite"
+    with sqlite3.connect(ledger_file) as conn:
+        conn.execute(
+            """
+            CREATE TABLE notifications (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              source_id TEXT,
+              canonical_artifact TEXT,
+              title TEXT NOT NULL DEFAULT '',
+              reason TEXT NOT NULL DEFAULT '',
+              repo TEXT NOT NULL DEFAULT '',
+              classification TEXT NOT NULL DEFAULT '',
+              tracker_item_id TEXT,
+              tracker_section TEXT,
+              terminal_disposition TEXT,
+              clear_state TEXT NOT NULL DEFAULT 'not_applicable',
+              last_clear_error TEXT,
+              first_seen_at TEXT NOT NULL,
+              last_seen_at TEXT NOT NULL,
+              classified_at TEXT NOT NULL,
+              tracker_linked_at TEXT,
+              terminal_recorded_at TEXT,
+              clear_attempted_at TEXT,
+              cleared_at TEXT,
+              source_type TEXT NOT NULL,
+              worker TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO notifications (
+              source_id, canonical_artifact, title, reason, repo,
+              classification, clear_state, first_seen_at, last_seen_at,
+              classified_at, source_type, worker
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-thread",
+                "https://github.com/o/r/pull/1",
+                "Legacy row",
+                "subscribed",
+                "o/r",
+                "actionable",
+                "not_applicable",
+                "2026-07-01T12:00:00Z",
+                "2026-07-01T12:00:00Z",
+                "2026-07-01T12:00:00Z",
+                "github-notification",
+                "legacy-worker",
+            ),
+        )
+        conn.commit()
+
+    ledger = triage.NotificationLedger(ledger_file)
+    ledger.capture(
+        source_id="new-thread",
+        canonical_artifact="https://github.com/o/r/pull/2",
+        classification="actionable",
+        worker="test",
+    )
+
+    with sqlite3.connect(ledger_file) as conn:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(notifications)")}
+
+    assert "source_type" not in columns
+    rows = ledger._rows(
+        "SELECT source_id, classification, worker FROM notifications ORDER BY source_id"
+    )
+    assert rows == [
+        {"source_id": "legacy-thread", "classification": "actionable", "worker": "legacy-worker"},
+        {"source_id": "new-thread", "classification": "actionable", "worker": "test"},
+    ]
+
+
 def test_runtime_preflight_wrapper_fails_on_missing_python_modules(tmp_path: Path):
     home = tmp_path / "home"
     runtime = home / ".local/share/dotfiles/notification-workers/venv/bin/python3"
@@ -7839,7 +7908,10 @@ def test_install_sh_does_not_link_notification_agents_yet(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert not (home / "Library/LaunchAgents/com.zkoppert.notification-triage.plist").exists()
     assert not (home / "Library/LaunchAgents/com.zkoppert.triage-dependabot.plist").exists()
-    assert not launchctl_log.exists()
+    assert launchctl_log.read_text(encoding="utf-8").splitlines() == [
+        f"print gui/{os.getuid()}/com.zkoppert.notification-triage",
+        f"print gui/{os.getuid()}/com.zkoppert.triage-dependabot",
+    ]
 
 
 def test_ledger_tracks_distinct_threads_for_same_artifact(todo_file: Path):

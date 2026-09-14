@@ -401,36 +401,90 @@ class NotificationLedger:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def _create_notifications_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS notifications (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              source_id TEXT,
+              canonical_artifact TEXT,
+              title TEXT NOT NULL DEFAULT '',
+              reason TEXT NOT NULL DEFAULT '',
+              repo TEXT NOT NULL DEFAULT '',
+              classification TEXT NOT NULL DEFAULT '',
+              tracker_item_id TEXT,
+              tracker_section TEXT,
+              terminal_disposition TEXT,
+              clear_state TEXT NOT NULL DEFAULT 'not_applicable',
+              last_clear_error TEXT,
+              first_seen_at TEXT NOT NULL,
+              last_seen_at TEXT NOT NULL,
+              classified_at TEXT NOT NULL,
+              tracker_linked_at TEXT,
+              terminal_recorded_at TEXT,
+              clear_attempted_at TEXT,
+              cleared_at TEXT,
+              comment_watermark TEXT,
+              worker TEXT NOT NULL DEFAULT ''
+            )
+            """)
+
+    def _migrate_notifications_without_source_type(self, conn: sqlite3.Connection) -> None:
+        conn.execute("ALTER TABLE notifications RENAME TO notifications_legacy")
+        self._create_notifications_table(conn)
+        legacy_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(notifications_legacy)")
+        }
+        insert_columns = [
+            "id",
+            "source_id",
+            "canonical_artifact",
+            "title",
+            "reason",
+            "repo",
+            "classification",
+            "tracker_item_id",
+            "tracker_section",
+            "terminal_disposition",
+            "clear_state",
+            "last_clear_error",
+            "first_seen_at",
+            "last_seen_at",
+            "classified_at",
+            "tracker_linked_at",
+            "terminal_recorded_at",
+            "clear_attempted_at",
+            "cleared_at",
+            "comment_watermark",
+            "worker",
+        ]
+        select_columns = [
+            column if column in legacy_columns else "NULL"
+            for column in insert_columns
+        ]
+        conn.execute(
+            f"""
+            INSERT INTO notifications ({', '.join(insert_columns)})
+            SELECT {', '.join(select_columns)}
+              FROM notifications_legacy
+            """
+        )
+        conn.execute("DROP TABLE notifications_legacy")
+
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS notifications (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  source_id TEXT,
-                  canonical_artifact TEXT,
-                  title TEXT NOT NULL DEFAULT '',
-                  reason TEXT NOT NULL DEFAULT '',
-                  repo TEXT NOT NULL DEFAULT '',
-                  classification TEXT NOT NULL DEFAULT '',
-                  tracker_item_id TEXT,
-                  tracker_section TEXT,
-                  terminal_disposition TEXT,
-                  clear_state TEXT NOT NULL DEFAULT 'not_applicable',
-                  last_clear_error TEXT,
-                  first_seen_at TEXT NOT NULL,
-                  last_seen_at TEXT NOT NULL,
-                  classified_at TEXT NOT NULL,
-                  tracker_linked_at TEXT,
-                  terminal_recorded_at TEXT,
-                  clear_attempted_at TEXT,
-                  cleared_at TEXT,
-                  comment_watermark TEXT,
-                  worker TEXT NOT NULL DEFAULT ''
-                )
-                """)
             columns = {
                 str(row[1]) for row in conn.execute("PRAGMA table_info(notifications)")
             }
+            if "source_type" in columns:
+                self._migrate_notifications_without_source_type(conn)
+                columns = {
+                    str(row[1]) for row in conn.execute("PRAGMA table_info(notifications)")
+                }
+            else:
+                self._create_notifications_table(conn)
+                columns = {
+                    str(row[1]) for row in conn.execute("PRAGMA table_info(notifications)")
+                }
             conn.execute("DROP INDEX IF EXISTS idx_notifications_source")
             conn.execute("DROP INDEX IF EXISTS idx_notifications_canonical")
             if "comment_watermark" not in columns:

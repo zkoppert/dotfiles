@@ -137,6 +137,11 @@ notification_launch_agent_is_unloaded() {
   [[ "$print_output" == *"Could not find service"* ]]
 }
 
+notification_launch_agents_absent() {
+  [ ! -e "$HOME/Library/LaunchAgents/com.zkoppert.notification-triage.plist" ] &&
+    [ ! -e "$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist" ]
+}
+
 notification_launch_agents_ready=true
 if [ "$(uname)" = "Darwin" ]; then
   if [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
@@ -151,6 +156,9 @@ if [ "$(uname)" = "Darwin" ]; then
     notification_launch_agents_ready=false
   fi
   if ! notification_launch_agent_is_unloaded "com.zkoppert.triage-dependabot"; then
+    notification_launch_agents_ready=false
+  fi
+  if ! notification_launch_agents_absent; then
     notification_launch_agents_ready=false
   fi
 fi

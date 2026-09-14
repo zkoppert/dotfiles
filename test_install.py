@@ -526,9 +526,15 @@ class InstallScriptTest(unittest.TestCase):
         self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/venv").exists())
         self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/requirements.sha256").exists())
 
-    def test_notification_jobs_skip_runtime_provisioning_for_loaded_services_in_nonstandard_checkout(self) -> None:
+    def test_notification_jobs_skip_runtime_provisioning_when_launch_agents_still_exist_in_nonstandard_checkout(self) -> None:
         relocated = self.root / "relocated"
         relocated.mkdir()
+        launch_agents = relocated / "LaunchAgents"
+        launch_agents.mkdir()
+        triage_plist = launch_agents / "com.zkoppert.notification-triage.plist"
+        triage_plist.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
+        dependabot_plist = launch_agents / "com.zkoppert.triage-dependabot.plist"
+        dependabot_plist.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
         (relocated / "python").mkdir()
         (relocated / "python" / "notification-worker-requirements.txt").write_text(
             "PyYAML==6.0.2\nruamel.yaml==0.18.6\n",
@@ -544,13 +550,18 @@ class InstallScriptTest(unittest.TestCase):
             "#!/bin/sh\n"
             "printf '%s\\n' \"launchctl $*\" >> \"$HOME/install.log\"\n"
             'if [ "$1" = "print" ]; then\n'
-            "  printf '%s\\n' 'State = running'\n"
-            "  exit 0\n"
+            "  printf '%s\\n' 'Could not find service \"$2\"'\n"
+            "  exit 1\n"
             "fi\n"
             "exit 0\n",
             encoding="utf-8",
         )
         launchctl.chmod(0o755)
+        triage_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.notification-triage.plist"
+        triage_target.parent.mkdir(parents=True)
+        triage_target.symlink_to(triage_plist)
+        dependabot_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.triage-dependabot.plist"
+        dependabot_target.symlink_to(dependabot_plist)
 
         result = subprocess.run(
             [str(relocated_installer)],
