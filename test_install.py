@@ -450,9 +450,6 @@ class InstallScriptTest(unittest.TestCase):
             "  exit 1\n"
             "fi\n"
             'if [ "$1" = "print" ]; then\n'
-            '  case "$2" in\n'
-            '    gui/*/com.zkoppert.notification-triage|gui/*/com.zkoppert.triage-dependabot) exit 0 ;;\n'
-            '  esac\n'
             "  exit 1\n"
             "fi\n"
             "exit 0\n",
@@ -470,20 +467,6 @@ class InstallScriptTest(unittest.TestCase):
         calls = activity_log.read_text(encoding="utf-8").splitlines()
         self.assertIn(f"launchctl unload {triage_target}", calls)
         self.assertIn(f"launchctl unload {dependabot_target}", calls)
-        self.assertTrue(
-            any(
-                entry.startswith("launchctl print gui/")
-                and entry.endswith("/com.zkoppert.notification-triage")
-                for entry in calls
-            )
-        )
-        self.assertTrue(
-            any(
-                entry.startswith("launchctl print gui/")
-                and entry.endswith("/com.zkoppert.triage-dependabot")
-                for entry in calls
-            )
-        )
         self.assertTrue(triage_target.is_symlink())
         self.assertTrue(dependabot_target.is_symlink())
 

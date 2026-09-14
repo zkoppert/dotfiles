@@ -91,9 +91,8 @@ ensure_notification_worker_runtime() {
 }
 
 remove_notification_launch_agent() {
-  local label="$1"
-  local plist_name="$2"
-  local expected_source="$3"
+  local plist_name="$1"
+  local expected_source="$2"
   local target="$HOME/Library/LaunchAgents/$plist_name"
   if [ -L "$target" ]; then
     local linked_target resolved_target
@@ -107,22 +106,20 @@ remove_notification_launch_agent() {
       echo "⚠ $target points to $resolved_target - skipping"
       return
     fi
-    if launchctl unload "$target" >/dev/null 2>&1; then
-      :
-    elif launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+    if ! launchctl unload "$target" >/dev/null 2>&1; then
       echo "⚠ failed to unload $target - skipping removal"
       return
     fi
     rm -f "$target"
-    echo "✓ Removed $label launch agent symlink; it stays unloaded until a later attended activation step"
+    echo "✓ Removed $plist_name launch agent symlink; it stays unloaded until a later attended activation step"
   elif [ -e "$target" ]; then
     echo "⚠ $target exists and is not a symlink - skipping"
   fi
 }
 
 if [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
-  remove_notification_launch_agent "com.zkoppert.notification-triage" "com.zkoppert.notification-triage.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"
-  remove_notification_launch_agent "com.zkoppert.triage-dependabot" "com.zkoppert.triage-dependabot.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.triage-dependabot.plist"
+  remove_notification_launch_agent "com.zkoppert.notification-triage.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"
+  remove_notification_launch_agent "com.zkoppert.triage-dependabot.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.triage-dependabot.plist"
 fi
 
 # Symlink copilot instructions for Copilot CLI

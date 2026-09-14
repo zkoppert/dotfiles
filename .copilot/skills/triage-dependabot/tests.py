@@ -944,6 +944,29 @@ def test_todo_has_active_matching_entry_in_data_normalizes_github_urls() -> None
     ) is True
 
 
+def test_todo_has_active_matching_entry_in_data_treats_q4_as_terminal_veto() -> None:
+    data = {
+        "prioritized": {
+            "q1_do_first": [],
+            "q2_schedule": [],
+            "q3_delegate": [],
+            "q4_eliminate": [
+                {
+                    "notification": {
+                        "thread_id": "OLD",
+                        "url": "https://www.github.com/o/r/pull/1?x=1",
+                    }
+                }
+            ],
+        }
+    }
+    assert td._todo_has_active_matching_entry_in_data(
+        data,
+        thread_id="T-new",
+        pr_url="https://github.com/o/r/pull/1",
+    ) is True
+
+
 def test_todo_has_active_direct_ownership_in_data_normalizes_github_urls() -> None:
     data = {
         "inbox": [],

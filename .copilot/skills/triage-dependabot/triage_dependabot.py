@@ -1791,7 +1791,7 @@ def _todo_has_active_matching_entry_in_data(
     if isinstance(prioritized, dict):
         buckets.extend(
             prioritized.get(quadrant)
-            for quadrant in ("q1_do_first", "q2_schedule", "q3_delegate")
+            for quadrant in ("q1_do_first", "q2_schedule", "q3_delegate", "q4_eliminate")
         )
     for bucket in buckets:
         if not isinstance(bucket, list):

@@ -1199,6 +1199,7 @@ def notification_has_new_activity(
         str(notif.get("reason") or "").lower()
         != str(tracked.get("reason") or "").lower()
     )
+    current_reason = str(notif.get("reason") or "").lower()
     updated_at = parse_iso_datetime(notif.get("updated_at"))
     captured_at = _notification_activity_boundary(tracked_item)
     if captured_at is None:
@@ -1206,6 +1207,13 @@ def notification_has_new_activity(
             reason_changed and allow_reason_change_without_timestamp
         )
     if updated_at and updated_at > captured_at:
+        return True
+    if (
+        updated_at
+        and updated_at == captured_at
+        and reason_changed
+        and (current_reason in Q1_REASONS or current_reason == "review_requested")
+    ):
         return True
     return reason_changed and allow_reason_change_without_timestamp
 
@@ -3046,7 +3054,17 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
                 stats.left_for_dependabot += 1
                 terminal_disposition = None
                 queue_clear = False
-                if ledger is not None and thread_id and not ledger.readonly:
+                if (
+                    tracked_terminal_item is not None
+                    and notification_has_new_activity(
+                        notif,
+                        tracked_terminal_item[1],
+                        allow_reason_change_without_timestamp=False,
+                    )
+                    and ledger is not None
+                    and thread_id
+                    and not ledger.readonly
+                ):
                     ledger.reopen_actionable(
                         source_id=thread_id,
                         canonical_artifact=canonical_url,
