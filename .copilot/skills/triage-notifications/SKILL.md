@@ -29,7 +29,7 @@ dropped and cleared from GitHub, and only personal-action items survive.
    - **KEEP_REASONS** (`review_requested`, `assign`, `author`, `mention`,
      `security_alert`) survive: mention/assign → Q1,
      review_requested → Q2 with one-business-day escalation if it remains
-     untouched, security_alert → Q2, `author` → INBOX.
+     untouched, security_alert → Q1, `author` → INBOX.
    - **Everything else** (`subscribed`, `team_mention`, `comment`,
      `state_change`, `ci_activity`, `manual`, ...) is passive noise and
      **drops** (marked done on GitHub).

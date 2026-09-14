@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install test dependencies
-        run: python3 -m pip install --upgrade pip pytest==9.1.1 -r python/notification-worker-requirements.txt
+        run: python3 -m pip install pytest==9.1.1 -r python/notification-worker-requirements.txt
       - name: Run triage-notifications tests
         run: python3 -m pytest .copilot/skills/triage-notifications/tests.py -q
 
@@ -33,6 +33,6 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install test dependencies
-        run: python3 -m pip install --upgrade pip pytest==9.1.1 -r python/notification-worker-requirements.txt
+        run: python3 -m pip install pytest==9.1.1 -r python/notification-worker-requirements.txt
       - name: Run triage-dependabot tests
         run: python3 -m pytest .copilot/skills/triage-dependabot/tests.py -q

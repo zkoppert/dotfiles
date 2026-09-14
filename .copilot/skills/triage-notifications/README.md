@@ -46,7 +46,7 @@ A series of protected reason routes runs before the noise-only drops:
 1. **Comments** - an exact, case-insensitive `@zkoppert` mention routes to
    Q1. Dependabot comments are left for `triage-dependabot` after their author
    is verified. Incomplete comment history is retained rather than cleared.
-2. **Direct reasons** - `mention` and `assign` route to Q1; `security_alert` routes to Q2.
+2. **Direct reasons** - `mention` and `assign` route to Q1; `security_alert` routes to Q1.
 3. **Review requests** - open, non-Dependabot review requests route to Q2 with
    one-business-day escalation. Verified Dependabot review requests are left
    for `triage-dependabot`.
@@ -101,7 +101,7 @@ The reason table (after the early-exit drops above):
 | ------------------ | ----------------------------------------------- |
 | `mention`          | Q1 (urgent direct ask)                          |
 | `assign`           | Q1                                              |
-| `security_alert`   | Q2 scheduled security alert                     |
+| `security_alert`   | Q1 urgent security alert                        |
 | `review_requested` | Q2 scheduled work; auto-escalate after 1 business day if untouched |
 | `author`           | INBOX (my own open PR/issue, status item)       |
 | `comment`          | Q1 if the body @-mentions me; else DROP         |

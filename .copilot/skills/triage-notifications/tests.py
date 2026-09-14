@@ -150,7 +150,7 @@ def test_classify_mention_on_my_own_pr_goes_to_q1():
     assert c.direct_mention is True
 
 
-def test_classify_security_alert_on_my_own_pr_still_goes_to_q2():
+def test_classify_security_alert_on_my_own_pr_still_goes_to_q1():
     """The signal in a security_alert is the vulnerability, not the
     assignment, so authorship shouldn't downgrade it."""
     c = triage.classify(
@@ -7030,10 +7030,10 @@ def test_classify_private_subscription_subscribed_drops_regardless_of_read_state
     assert c.bucket == triage.BUCKET_DROP
 
 
-def test_classify_private_subscription_security_alert_still_routes_to_q2(
+def test_classify_private_subscription_security_alert_still_routes_to_q1(
     private_subscription_filter,
 ):
-    """security_alert on the private filtered repo must still reach Q2 - vulnerabilities
+    """security_alert on the private filtered repo must still reach Q1 - vulnerabilities
     and secret scans are too important to silently drop."""
     c = triage.classify(
         _private_subscription_notif("security_alert"),
