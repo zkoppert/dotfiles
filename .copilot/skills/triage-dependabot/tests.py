@@ -2134,14 +2134,14 @@ def test_run_cleans_stale_inbox_entries_on_label_and_merge(tmp_path: Path) -> No
 
     args = _make_args(tmp_path)
     args.todo_file.write_text(
-        "inbox: []\n"
+        "inbox:\n"
+        "  - id: notif-q1-stale\n"
+        "    title: review dependabot security PR\n"
+        "    notification:\n"
+        "      thread_id: thread-lam\n"
+        "      url: https://github.com/o/r/pull/3\n"
         "prioritized:\n"
-        "  q1_do_first:\n"
-        "    - id: notif-q1-stale\n"
-        "      title: review dependabot security PR\n"
-        "      notification:\n"
-        "        thread_id: thread-lam\n"
-        "        url: https://github.com/o/r/pull/3\n"
+        "  q1_do_first: []\n"
         "done: []\n",
         encoding="utf-8",
     )

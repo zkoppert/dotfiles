@@ -7218,6 +7218,91 @@ def test_runtime_preflight_wrapper_fails_on_missing_python_modules(tmp_path: Pat
     assert "yaml" in result.stderr
 
 
+def test_install_sh_links_notification_agents_without_loading(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[3]
+    home = tmp_path / "home"
+    dotfiles_link = home / "repos" / "dotfiles"
+    dotfiles_link.parent.mkdir(parents=True)
+    dotfiles_link.symlink_to(repo_root)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    launchctl_log = tmp_path / "launchctl.log"
+    bootstrap_python = tmp_path / "bootstrap-python"
+    bootstrap_python.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then\n'
+        "  target=$3\n"
+        "  mkdir -p \"$target/bin\"\n"
+        "  cat > \"$target/bin/python3\" <<'EOF'\n"
+        "#!/bin/sh\n"
+        'if [ "$1" = "-c" ]; then\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+        "EOF\n"
+        "  chmod +x \"$target/bin/python3\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    bootstrap_python.chmod(0o755)
+
+    scripts = {
+        "uname": "#!/bin/sh\necho Darwin\n",
+        "launchctl": (
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$*\" >> '{launchctl_log}'\n"
+            "exit 0\n"
+        ),
+        "terminal-notifier": "#!/bin/sh\nexit 0\n",
+    }
+    for name, content in scripts.items():
+        script = fake_bin / name
+        script.write_text(content, encoding="utf-8")
+        script.chmod(0o755)
+
+    env = {
+        "HOME": str(home),
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "NOTIFICATION_BOOTSTRAP_PYTHON": str(bootstrap_python),
+    }
+    result = subprocess.run(
+        ["bash", str(dotfiles_link / "install.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (home / "Library/LaunchAgents/com.zkoppert.notification-triage.plist").is_symlink()
+    assert (home / "Library/LaunchAgents/com.zkoppert.triage-dependabot.plist").is_symlink()
+    launchctl_invocations = [
+        line.split()
+        for line in (
+            launchctl_log.read_text(encoding="utf-8").splitlines()
+            if launchctl_log.exists()
+            else []
+        )
+    ]
+    assert not any(
+        parts and parts[0] == "load" and any(
+            plist in parts
+            for plist in (
+                "com.zkoppert.notification-triage.plist",
+                "com.zkoppert.triage-dependabot.plist",
+            )
+        )
+        for parts in launchctl_invocations
+    )
+
+
 def test_ledger_tracks_distinct_threads_for_same_artifact(todo_file: Path):
     ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
     artifact = "https://github.com/o/r/pull/1"

@@ -159,8 +159,19 @@ When you move the todo to `status: done`, or move a GitHub-backed item to
 A launchd plist runs the tool every hour on the hour, 24x7. Logs land in
 `~/Library/Logs/notification-triage.log`.
 
-To pause: `launchctl unload ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist`
-To resume: `launchctl load ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist`
+`./install.sh` only links the plist into `~/Library/LaunchAgents`; it does
+not start the hourly job. When you're ready to activate it in a separate
+attended step, run:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist
+```
+
+To pause:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist
+```
 
 ## Pruning stale notifications
 

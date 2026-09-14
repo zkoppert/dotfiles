@@ -910,7 +910,7 @@ class NotificationLedger:
                 """
                 UPDATE notifications
                    SET clear_state = CASE
-                           WHEN clear_state = 'succeeded' THEN clear_state
+                           WHEN clear_state IN ('succeeded', 'cleared') THEN clear_state
                            WHEN clear_state = 'failed' THEN clear_state
                            ELSE 'pending'
                         END,
@@ -946,17 +946,31 @@ class NotificationLedger:
                     worker="clear-success",
                     now=now,
                 )
+            terminal_disposition = None
+            row = conn.execute(
+                """
+                SELECT terminal_disposition
+                  FROM notifications
+                 WHERE id = ?
+                """,
+                (row_id,),
+            ).fetchone()
+            if row is not None:
+                terminal_disposition = row[0]
+            clear_state = (
+                'cleared' if terminal_disposition == 'tracked_elsewhere' else 'succeeded'
+            )
             conn.execute(
                 """
                 UPDATE notifications
-                   SET clear_state = 'succeeded',
+                   SET clear_state = ?,
                        last_clear_error = NULL,
                        clear_attempted_at = ?,
                        cleared_at = ?,
                        last_seen_at = ?
                  WHERE id = ?
                 """,
-                (now, now, now, row_id),
+                (clear_state, now, now, now, row_id),
             )
             conn.commit()
 

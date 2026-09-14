@@ -1747,7 +1747,6 @@ def _todo_has_active_matching_entry_in_data(
         return False
 
     buckets = [
-        data.get("inbox"),
         data.get("in_progress"),
         data.get("blocked"),
         data.get("in_review"),
@@ -1765,7 +1764,6 @@ def _todo_has_active_matching_entry_in_data(
             if matches(item):
                 return True
     return False
-
 
 
 def _active_todo_items(data: dict[str, Any]) -> list[Any]:
@@ -1807,8 +1805,33 @@ def _comment_notification_still_clearable(
         return False
     current_reason = str(current.get("reason") or "").lower()
     original_reason = str(notif.get("reason") or "").lower()
-    if current_reason != original_reason:
+    if current_reason in {"mention", "assign"}:
         return False
+    if current_reason != "comment":
+        subject = current.get("subject") or {}
+        subject_url = str(subject.get("url") or "")
+        latest_url = str(subject.get("latest_comment_url") or "")
+        probe = dict(current)
+        probe_subject = dict(subject)
+        if subject_url and not latest_url:
+            probe_subject["latest_comment_url"] = f"{subject_url.rstrip('/')}/comments"
+        probe["subject"] = probe_subject
+        try:
+            snapshot = shared_comment_notification_snapshot(
+                probe,
+                my_login=my_login,
+                run_gh=run_gh,
+                since=(
+                    ledger.comment_watermark(source_id=thread_id, canonical_artifact=pr_url)
+                    if ledger is not None
+                    else None
+                ),
+            )
+        except Exception:
+            return True
+        if snapshot is not None and snapshot.direct is True:
+            return False
+        return True
     record = (
         ledger.notification_record(source_id=thread_id, canonical_artifact=pr_url)
         if ledger is not None
@@ -1818,15 +1841,7 @@ def _comment_notification_still_clearable(
     if record is not None:
         boundary = parse_iso_datetime(str(record.get("terminal_recorded_at") or ""))
     current_updated_at = parse_iso_datetime(current.get("updated_at"))
-    if current_reason in {"mention", "assign"}:
-        return False
-    if (
-        boundary is not None
-        and current_updated_at is not None
-        and current_updated_at > boundary
-        and current_reason not in EXCLUDED_DEP_AUTO_CLEAR_REASONS
-        and current_reason != "comment"
-    ):
+    if boundary is not None and current_updated_at is not None and current_updated_at > boundary:
         return False
     subject = current.get("subject") or {}
     subject_url = str(subject.get("url") or "")
@@ -1851,7 +1866,7 @@ def _comment_notification_still_clearable(
         since=comment_since,
     )
     if snapshot is None:
-        return True
+        return False
     return bool(snapshot.history_complete and snapshot.direct is False)
 
 
@@ -2836,18 +2851,6 @@ def run(args: argparse.Namespace) -> TriageStats:
             ):
                 stats.skipped += 1
                 continue
-            if ledger is not None and ledger.has_active_actionable_notification(
-                source_id=thread_id or None,
-                canonical_artifact=pr_url,
-            ):
-                logger.info(
-                    "%s#%d -> preserving active actionable notification for %s",
-                    repo,
-                    number,
-                    thread_id or pr_url or repo,
-                )
-                stats.skipped += 1
-                continue
             fresh_pr = fetch_pr(repo, number)
             if fresh_pr is None:
                 stats.errors.append(f"failed to refresh {pr_url} before action")
@@ -2894,22 +2897,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
                 stats.skipped += 1
                 continue
-            try:
-                action_todo = load_todo(args.todo_file)
-            except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
-                stats.errors.append(f"failed to reload todo before action for {pr_url}: {exc}")
-                continue
-            if _todo_has_active_matching_entry_in_data(
-                action_todo, thread_id=thread_id or None, pr_url=pr_url
-            ):
-                logger.info(
-                    "%s#%d -> preserving active todo ownership for %s",
-                    repo,
-                    number,
-                    thread_id or pr_url or repo,
-                )
-                stats.skipped += 1
-                continue
             fresh_pr = fetch_pr(repo, number)
             if fresh_pr is None:
                 stats.errors.append(f"failed to refresh {pr_url} before action")
@@ -2937,22 +2924,6 @@ def run(args: argparse.Namespace) -> TriageStats:
             ):
                 logger.info(
                     "%s#%d -> preserving active actionable notification for %s",
-                    repo,
-                    number,
-                    thread_id or pr_url or repo,
-                )
-                stats.skipped += 1
-                continue
-            try:
-                action_todo = load_todo(args.todo_file)
-            except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
-                stats.errors.append(f"failed to reload todo before action for {pr_url}: {exc}")
-                continue
-            if _todo_has_active_matching_entry_in_data(
-                action_todo, thread_id=thread_id or None, pr_url=pr_url
-            ):
-                logger.info(
-                    "%s#%d -> preserving active todo ownership for %s",
                     repo,
                     number,
                     thread_id or pr_url or repo,
@@ -2989,13 +2960,28 @@ def run(args: argparse.Namespace) -> TriageStats:
                         return "preserving active todo ownership"
                     return None
 
+                try:
+                    action_todo = load_todo(args.todo_file)
+                except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+                    stats.errors.append(f"failed to reload todo before action for {pr_url}: {exc}")
+                    continue
+                if _todo_has_active_matching_entry_in_data(
+                    action_todo, thread_id=thread_id or None, pr_url=pr_url
+                ):
+                    logger.info(
+                        "%s#%d -> preserving active todo ownership for %s",
+                        repo,
+                        number,
+                        thread_id or pr_url or repo,
+                    )
+                    stats.skipped += 1
+                    continue
                 merged = do_merge(
                     repo,
                     number,
                     dry_run=args.dry_run,
                     my_login=my_login,
                     head_sha=pr.get("headRefOid"),
-                    action_guard=merge_guard_reason,
                 )
                 state[pr_url] = now
                 if not merged:
@@ -3101,7 +3087,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                         number,
                         "release",
                         dry_run=args.dry_run,
-                        action_guard=mutation_guard_reason,
                     )
                 final_notif = _current_notification_for_clearance(thread_id=thread_id or None)
                 if thread_id and final_notif is None:
@@ -3150,7 +3135,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                     dry_run=args.dry_run,
                     my_login=my_login,
                     head_sha=pr.get("headRefOid"),
-                    action_guard=mutation_guard_reason,
                 )
                 state[pr_url] = now
                 if not merged:
@@ -3226,27 +3210,10 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                     stats.skipped += 1
                     continue
-                try:
-                    action_todo = load_todo(args.todo_file)
-                except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
-                    stats.errors.append(f"failed to reload todo before action for {pr_url}: {exc}")
-                    continue
-                if _todo_has_active_matching_entry_in_data(
-                    action_todo, thread_id=thread_id or None, pr_url=pr_url
-                ):
-                    logger.info(
-                        "%s#%d -> preserving active todo ownership for %s",
-                        repo,
-                        number,
-                        thread_id or pr_url or repo,
-                    )
-                    stats.skipped += 1
-                    continue
                 do_rebase_comment(
                     repo,
                     number,
                     dry_run=args.dry_run,
-                    action_guard=mutation_guard_reason,
                 )
                 stats.rebased += 1
                 state[pr_url] = now
@@ -3287,27 +3254,10 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                     stats.skipped += 1
                     continue
-                try:
-                    action_todo = load_todo(args.todo_file)
-                except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
-                    stats.errors.append(f"failed to reload todo before action for {pr_url}: {exc}")
-                    continue
-                if _todo_has_active_matching_entry_in_data(
-                    action_todo, thread_id=thread_id or None, pr_url=pr_url
-                ):
-                    logger.info(
-                        "%s#%d -> preserving active todo ownership for %s",
-                        repo,
-                        number,
-                        thread_id or pr_url or repo,
-                    )
-                    stats.skipped += 1
-                    continue
                 do_dependabot_close(
                     repo,
                     number,
                     dry_run=args.dry_run,
-                    action_guard=mutation_guard_reason,
                 )
                 stats.closed_prerelease += 1
                 state[pr_url] = now
@@ -3345,6 +3295,22 @@ def run(args: argparse.Namespace) -> TriageStats:
                         captured_at=str(notif.get("updated_at") or utcnow_iso()),
                     )
             elif decision.outcome == OUTCOME_FLAG:
+                try:
+                    action_todo = load_todo(args.todo_file)
+                except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+                    stats.errors.append(f"failed to reload todo before action for {pr_url}: {exc}")
+                    continue
+                if _todo_has_active_matching_entry_in_data(
+                    action_todo, thread_id=thread_id or None, pr_url=pr_url
+                ):
+                    logger.info(
+                        "%s#%d -> preserving active todo ownership for %s",
+                        repo,
+                        number,
+                        thread_id or pr_url or repo,
+                    )
+                    stats.already_tracked += 1
+                    continue
                 _ledger_capture(
                     ledger,
                     dry_run=args.dry_run,

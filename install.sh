@@ -12,6 +12,10 @@ NOTIFICATION_REQUIREMENTS="$DOTFILES_DIR/python/notification-worker-requirements
 NOTIFICATION_REQUIREMENTS_STAMP="$NOTIFICATION_RUNTIME_ROOT/requirements.sha256"
 
 pick_notification_bootstrap_python() {
+  if [ -n "${NOTIFICATION_BOOTSTRAP_PYTHON:-}" ] && [ -x "$NOTIFICATION_BOOTSTRAP_PYTHON" ]; then
+    printf '%s\n' "$NOTIFICATION_BOOTSTRAP_PYTHON"
+    return 0
+  fi
   local candidates=(
     "/opt/homebrew/bin/python3.13"
     "/opt/homebrew/bin/python3.12"
@@ -233,11 +237,8 @@ if [ -f "$BABYSIT_PLIST" ] && [ "$(uname)" = "Darwin" ]; then
   fi
 fi
 
-NOTIFICATION_RUNTIME_READY=0
 if [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
-  if ensure_notification_worker_runtime; then
-    NOTIFICATION_RUNTIME_READY=1
-  else
+  if ! ensure_notification_worker_runtime; then
     echo "⚠ Notification worker runtime is not ready; wrappers will fail preflight until ./install.sh can provision PyYAML and ruamel.yaml"
   fi
 fi
@@ -266,17 +267,8 @@ if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = 
     mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
     PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.notification-triage.plist"
     if [ -L "$PLIST_TARGET" ] || [ ! -e "$PLIST_TARGET" ]; then
-      launchctl unload "$PLIST_TARGET" >/dev/null 2>&1 || true
       ln -sfn "$TRIAGE_PLIST" "$PLIST_TARGET"
-      if [ "$NOTIFICATION_RUNTIME_READY" -eq 1 ]; then
-        if launchctl load "$PLIST_TARGET" 2>/dev/null; then
-          echo "✓ Loaded launchd agent com.zkoppert.notification-triage"
-        else
-          echo "⚠ launchctl load failed for $PLIST_TARGET - check 'launchctl error' and ~/Library/Logs/notification-triage.log"
-        fi
-      else
-        echo "⚠ Linked com.zkoppert.notification-triage but did not load it because the notification worker runtime is not healthy"
-      fi
+      echo "✓ Linked com.zkoppert.notification-triage; keep it unloaded until the separate attended activation step"
     else
       echo "⚠ $PLIST_TARGET exists and is not a symlink - skipping (delete it manually if you want the dotfiles version)"
     fi
@@ -299,17 +291,8 @@ if [ -x "$DEPENDABOT_WRAPPER" ] && [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR
     mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
     DEPENDABOT_PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist"
     if [ -L "$DEPENDABOT_PLIST_TARGET" ] || [ ! -e "$DEPENDABOT_PLIST_TARGET" ]; then
-      launchctl unload "$DEPENDABOT_PLIST_TARGET" >/dev/null 2>&1 || true
       ln -sfn "$DEPENDABOT_PLIST" "$DEPENDABOT_PLIST_TARGET"
-      if [ "$NOTIFICATION_RUNTIME_READY" -eq 1 ]; then
-        if launchctl load "$DEPENDABOT_PLIST_TARGET" 2>/dev/null; then
-          echo "✓ Loaded launchd agent com.zkoppert.triage-dependabot"
-        else
-          echo "⚠ launchctl load failed for $DEPENDABOT_PLIST_TARGET - check ~/Library/Logs/triage-dependabot.log"
-        fi
-      else
-        echo "⚠ Linked com.zkoppert.triage-dependabot but did not load it because the notification worker runtime is not healthy"
-      fi
+      echo "✓ Linked com.zkoppert.triage-dependabot; keep it unloaded until the separate attended activation step"
     else
       echo "⚠ $DEPENDABOT_PLIST_TARGET exists and is not a symlink - skipping"
     fi

@@ -699,7 +699,7 @@ def classify(
 
     dependabot_bump = subject_type == "pullrequest" and is_dependabot_bump(title)
     dependabot_bump_author = None
-    if dependabot_bump:
+    if dependabot_bump and repo_full.lower() not in WATCH_ONLY_DEPENDABOT_MARK_DONE_REPOS:
         dependabot_bump_author = subject_author_fetcher(notif)
 
     snapshot = None
@@ -757,12 +757,29 @@ def classify(
                 "Dependabot bump - author lookup unavailable",
                 skip_mark_done=True,
             )
+        override = repo_override(repo_full, reason, title)
+        if override is not None:
+            return override
         state = state_fetcher(notif)
         if state in CLOSED_STATES:
             return Classification(BUCKET_DROP, f"comment on {state} {subject_type}")
         if is_super_linter(author, body):
             return Classification(BUCKET_DROP, "super-linter comment without @mention")
         return Classification(BUCKET_DROP, "comment without a direct @mention")
+
+    if reason == "assign" and subject_type == "pullrequest":
+        state = state_fetcher(notif)
+        if state in CLOSED_STATES:
+            archive = False
+            if subject_type == "pullrequest":
+                author = subject_author_fetcher(notif)
+                if author and author.lower() == my_login.lower():
+                    archive = True
+            return Classification(
+                BUCKET_DROP,
+                f"assign on {state} {subject_type}",
+                archive_to_done=archive,
+            )
 
     if reason in Q1_REASONS:
         return Classification(
@@ -777,13 +794,9 @@ def classify(
             return Classification(
                 BUCKET_DROP, f"review_requested on {state} {subject_type}"
             )
+        if repo_full.lower() in WATCH_ONLY_DEPENDABOT_MARK_DONE_REPOS and dependabot_bump:
+            return Classification(BUCKET_Q2, "review_requested - scheduled review")
         if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
-            repo_lc = repo_full.lower()
-            if repo_lc in WATCH_ONLY_DEPENDABOT_MARK_DONE_REPOS:
-                return Classification(
-                    BUCKET_DROP,
-                    f"{repo_full}: watch-only Dependabot bump - mark done",
-                )
             return Classification(
                 BUCKET_DROP,
                 "Dependabot version bump - left unread for triage-dependabot",
@@ -794,7 +807,7 @@ def classify(
     if reason == "security_alert":
         return Classification(BUCKET_Q2, "security_alert - scheduled security alert")
 
-    if dependabot_bump_author and is_dependabot_author(dependabot_bump_author):
+    if dependabot_bump:
         # Dependabot version-bump PRs: drop from the inbox but normally NEVER
         # mark the GitHub notification done - triage-dependabot consumes those
         # threads and needs them unread. Watch-only repos from private config
@@ -808,17 +821,17 @@ def classify(
                     f"{repo_full}: watch-only Dependabot bump - mark done",
                 )
         elif reason not in TITLE_DROP_PROTECTED_REASONS:
+            if dependabot_bump_author is None:
+                return Classification(
+                    BUCKET_DROP,
+                    "Dependabot bump - author lookup unavailable",
+                    skip_mark_done=True,
+                )
             return Classification(
                 BUCKET_DROP,
                 "Dependabot version bump - left unread for triage-dependabot",
                 skip_mark_done=True,
             )
-    elif dependabot_bump and dependabot_bump_author is None:
-        return Classification(
-            BUCKET_DROP,
-            "Dependabot bump - author lookup unavailable",
-            skip_mark_done=True,
-        )
 
     # Title-pattern drop: repetitive system-generated noise (flaky-test
     # reports) and routine `Enable Dependabot` config PRs. Mention/assign
@@ -993,10 +1006,12 @@ def _notification_activity_boundary(
 def _current_notification_for_clearance(
     *,
     thread_id: str | None,
+    notifications: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     if not thread_id:
         return None
-    for current in fetch_notifications():
+    current_notifications = notifications if notifications is not None else fetch_notifications()
+    for current in current_notifications:
         if str(current.get("id") or "") == thread_id:
             return current
     return None
@@ -1009,20 +1024,12 @@ def _current_notification_is_clearable(
     reason: str,
     ledger: NotificationLedger | None,
     my_login: str,
+    notifications: list[dict[str, Any]] | None = None,
 ) -> bool:
-    current = _current_notification_for_clearance(thread_id=thread_id)
-    if current is None:
-        return False
-    current_reason = str(current.get("reason") or "").lower()
-    original_reason = str(reason or "").lower()
-    if current_reason != original_reason:
-        return False
-    comment_since = None
-    if ledger is not None and thread_id:
-        comment_since = ledger.comment_watermark(
-            source_id=thread_id,
-            canonical_artifact=url,
-        )
+    current = _current_notification_for_clearance(
+        thread_id=thread_id,
+        notifications=notifications,
+    )
     record = (
         ledger.notification_record(source_id=thread_id, canonical_artifact=url)
         if ledger is not None
@@ -1031,47 +1038,46 @@ def _current_notification_is_clearable(
     boundary = None
     if record is not None:
         boundary = parse_iso_datetime(str(record.get("terminal_recorded_at") or ""))
-    if comment_since is None and boundary is not None:
-        comment_since = _bootstrap_comment_since(
-            current,
-            {"notification": {"terminal_recorded_at": boundary.isoformat().replace("+00:00", "Z")}},
-        )
+    if current is None:
+        return record is not None and boundary is not None
+    current_reason = str(current.get("reason") or "").lower()
+    current_updated_at = parse_iso_datetime(current.get("updated_at"))
+    if current_reason in {"mention", "assign"} and boundary is None:
+        return False
+    if boundary is not None:
+        if current_updated_at is not None and current_updated_at <= boundary:
+            return True
+        if current_reason == "comment":
+            pass
+        elif current_updated_at is None:
+            snapshot = shared_comment_notification_snapshot(
+                current,
+                my_login=my_login,
+                run_gh=run_gh,
+                since=(
+                    ledger.comment_watermark(source_id=thread_id, canonical_artifact=url)
+                    if ledger is not None and thread_id
+                    else None
+                ),
+            )
+            if snapshot is not None and snapshot.direct is True:
+                return False
+            return True
+        else:
+            return False
+    if current_reason != "comment":
+        return current_reason in {"subscribed", "state_change", "ci_activity", "author", "watching"}
     classification = classify(
         current,
         my_login=my_login,
         comment_snapshot_fetcher=shared_comment_notification_snapshot,
-        comment_since=comment_since,
+        comment_since=(
+            ledger.comment_watermark(source_id=thread_id, canonical_artifact=url)
+            if ledger is not None and thread_id
+            else None
+        ),
     )
-    if current_reason in {"mention", "assign"}:
-        return False
-    if record is None or boundary is None:
-        if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
-            return False
-    else:
-        current_updated_at = parse_iso_datetime(current.get("updated_at"))
-        if current_updated_at is not None and current_updated_at > boundary:
-            if classification.bucket != BUCKET_DROP or classification.skip_mark_done:
-                return False
-    subject = current.get("subject") or {}
-    latest_url = str(subject.get("latest_comment_url") or "")
-    if latest_url:
-        probe = dict(current)
-        probe_subject = dict(subject)
-        probe_subject["latest_comment_url"] = latest_url
-        probe["subject"] = probe_subject
-        snapshot = shared_comment_notification_snapshot(
-            probe,
-            my_login=my_login,
-            run_gh=run_gh,
-            since=comment_since,
-        )
-        if snapshot is not None and (
-            not snapshot.history_complete or snapshot.direct is True
-        ):
-            return False
-    elif current.get("reason") == "comment":
-        return False
-    return True
+    return classification.bucket == BUCKET_DROP and not classification.skip_mark_done
 
 
 def _is_untouched_q2_review_fallback(
@@ -2355,7 +2361,7 @@ def _stale_notification_prune_delta(
     if action != STALE_DROP:
         return None
     notification_reason = (notif.get("reason") or "").lower()
-    if notification_reason in {"mention", "assign", "comment"}:
+    if section == "prioritized.q1_do_first" and notification_reason == "comment":
         return None
     archive_entry = None
     if parsed.get("kind") == "pr" and notification_reason == "author":
@@ -2529,9 +2535,11 @@ def reconcile_tracker_rows_to_ledger(
                 (recorded or {}).get("terminal_recorded_at")
                 or notif.get("terminal_recorded_at")
                 or notif.get("marked_done_at")
+                or item.get("completed")
                 or notif.get("captured_at")
                 or notif.get("updated_at")
                 or item.get("added")
+                or utcnow_iso()
             )
             if terminal_recorded_at:
                 terminal_recorded_at = str(terminal_recorded_at)
@@ -2665,6 +2673,8 @@ def retry_pending_github_clears(
         try:
             current = _current_notification_for_clearance(thread_id=thread_id)
             if current is None:
+                if str(row.get("clear_state") or "").lower() == "failed":
+                    continue
                 attempted_thread_ids.add(thread_id)
                 _ledger_record_clear_result(
                     ledger,
@@ -2792,6 +2802,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         if comment_since is None and canonical_tracked is not None:
             comment_since = _bootstrap_comment_since(notif, canonical_tracked[1])
 
+        dependabot_bump = is_dependabot_bump(title)
         comment_snapshot = None
         if reason == "comment":
             comment_snapshot = shared_comment_notification_snapshot(
@@ -2800,16 +2811,20 @@ def run(args: argparse.Namespace) -> TriageStats:
                 run_gh=run_gh,
                 since=comment_since,
             )
-            if comment_snapshot is not None and not comment_snapshot.history_complete:
-                if comment_snapshot.direct is not True:
-                    if thread_id:
-                        protected_actionable_thread_ids.add(thread_id)
-                    if ledger is not None and thread_id:
-                        ledger.suspend_pending_clear(
-                            source_id=thread_id,
-                            canonical_artifact=canonical_url,
-                        )
-                    continue
+            if (
+                comment_snapshot is not None
+                and not comment_snapshot.history_complete
+                and comment_snapshot.direct is not True
+                and not dependabot_bump
+            ):
+                if thread_id:
+                    protected_actionable_thread_ids.add(thread_id)
+                if ledger is not None and thread_id:
+                    ledger.suspend_pending_clear(
+                        source_id=thread_id,
+                        canonical_artifact=canonical_url,
+                    )
+                continue
             if (
                 thread_id
                 and comment_snapshot is not None
@@ -2958,7 +2973,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
                 reopened_thread_ids.add(thread_id)
             elif classification.bucket == BUCKET_DROP and tracked:
-                stats.dropped += 1
                 disposition = (
                     "completed"
                     if (
@@ -2969,6 +2983,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     else "irrelevant"
                 )
                 if classification.skip_mark_done:
+                    stats.dropped += 1
                     _ledger_capture(
                         ledger,
                         dry_run=args.dry_run,
@@ -2996,6 +3011,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
                     stats.left_for_dependabot += 1
                     stats.already_tracked += 1
+                    if thread_id:
+                        attempted_thread_ids.add(thread_id)
                     continue
                 if not _current_notification_is_clearable(
                     url=canonical_url,
@@ -3221,7 +3238,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         )
         if not args.dry_run:
             current_notif = _current_notification_for_clearance(thread_id=thread_id)
-            if current_notif is None or not _current_notification_is_clearable(
+            if current_notif is not None and not _current_notification_is_clearable(
                 url=terminal_canonical_url,
                 thread_id=thread_id,
                 reason=str(current_notif.get("reason") or notif_meta.get("reason") or ""),
@@ -3275,11 +3292,10 @@ def run(args: argparse.Namespace) -> TriageStats:
         ]
         surviving_prunes: list[PruneDelta] = []
         for delta in mutations.prune:
-            current = _current_notification_for_clearance(thread_id=delta.thread_id)
-            if current is None:
-                surviving_prunes.append(delta)
+            if delta.thread_id and delta.thread_id in attempted_thread_ids:
                 continue
-            if not _current_notification_is_clearable(
+            current = _current_notification_for_clearance(thread_id=delta.thread_id)
+            if current is not None and not _current_notification_is_clearable(
                 url=None,
                 thread_id=delta.thread_id,
                 reason=delta.notification_reason or delta.stale_reason,
@@ -3288,8 +3304,6 @@ def run(args: argparse.Namespace) -> TriageStats:
             ):
                 continue
             surviving_prunes.append(delta)
-            if delta.thread_id and delta.thread_id in attempted_thread_ids:
-                continue
             _ledger_capture(
                 ledger,
                 dry_run=args.dry_run,
@@ -3305,15 +3319,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 event_at=delta.captured_at or utcnow_iso(),
             )
             if not args.dry_run:
-                current = _current_notification_for_clearance(thread_id=delta.thread_id)
-                if current is None or not _current_notification_is_clearable(
-                    url=None,
-                    thread_id=delta.thread_id,
-                    reason=str(current.get("reason") or delta.notification_reason or delta.stale_reason),
-                    ledger=ledger,
-                    my_login=my_login,
-                ):
-                    continue
                 try:
                     mark_thread_done(delta.thread_id)
                     attempted_thread_ids.add(delta.thread_id)
