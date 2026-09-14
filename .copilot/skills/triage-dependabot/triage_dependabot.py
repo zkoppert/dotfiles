@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Triage Dependabot PRs surfaced via GitHub notifications.
 
-For each unread notification whose subject is a PullRequest authored by
-``dependabot[bot]``, this tool fetches the PR and decides one of four
-outcomes:
+For each read or unread notification whose subject is a PullRequest authored
+by ``dependabot[bot]``, this tool fetches the PR and decides one of five
+action outcomes, or skips it:
 
 - ``merge`` - enable auto-merge via squash + delete branch.
 - ``rebase`` - comment ``@dependabot rebase`` (suppressed if the prior
@@ -11,6 +11,7 @@ outcomes:
   spamming the PR).
 - ``label-and-merge`` - add the ``release`` label (when the repo defines
   one and the change is security-related) and enable auto-merge.
+- ``close-prerelease`` - close an unstable prerelease bump.
 - ``flag-for-review`` - write a Q1 entry to
   ``~/repos/zkoppert-todo/todo.yml`` so a human reviews the PR.
 
@@ -56,6 +57,8 @@ from notification_worker_common import comment_notification_snapshot as shared_c
 from notification_worker_common import ledger_capture as _ledger_capture
 from notification_worker_common import (
     ledger_record_clear_result as _ledger_record_clear_result,
+    fetch_notification_thread,
+    parse_notification_pages,
     normalize_github_url,
     parse_iso_datetime,
     utcnow_iso,
@@ -349,21 +352,7 @@ def fetch_notifications() -> list[dict[str, Any]]:
     still dedupes work across ticks.
     """
     raw = run_gh(["api", "/notifications?all=true", "--paginate", "--slurp"]).strip()
-    if not raw:
-        return []
-    try:
-        pages = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        logger.warning("fetch_notifications: could not parse slurp output: %s", exc)
-        return []
-    merged: list[dict[str, Any]] = []
-    if isinstance(pages, list):
-        for page in pages:
-            if isinstance(page, list):
-                merged.extend(page)
-            elif isinstance(page, dict):
-                merged.append(page)
-    return merged
+    return parse_notification_pages(raw)
 
 
 def fetch_pr(repo: str, number: int) -> dict[str, Any] | None:
@@ -1518,13 +1507,19 @@ def _safe_mark_thread_done(
             stats.errors.append(f"failed to reload todo before mark-done for {context}: {exc}")
             return False
     if notif is not None and my_login:
-        if not _comment_notification_still_clearable(
-            notif,
-            ledger=ledger,
-            my_login=my_login,
-            thread_id=thread_id,
-            pr_url=canonical_artifact or "",
-        ):
+        try:
+            clearable = _comment_notification_still_clearable(
+                notif, ledger=ledger, my_login=my_login,
+                thread_id=thread_id, pr_url=canonical_artifact or "",
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+            stats.errors.append(f"mark-done revalidation failed for {context}: {exc}")
+            _ledger_record_clear_result(
+                ledger, dry_run=dry_run, thread_id=thread_id,
+                canonical_artifact=canonical_artifact, error=exc,
+            )
+            return False
+        if not clearable:
             logger.info(
                 "skipping mark-done for %s because the current comment is no longer clearable",
                 context,
@@ -1843,10 +1838,9 @@ def _current_notification_for_clearance(
     *,
     thread_id: str | None,
 ) -> dict[str, Any] | None:
-    for current in fetch_notifications():
-        if thread_id and str(current.get("id") or "") == thread_id:
-            return current
-    return None
+    if not thread_id:
+        return None
+    return fetch_notification_thread(thread_id, run_gh=run_gh)
 
 
 def _comment_notification_signature(notification: dict[str, Any]) -> tuple[str, str, str, str]:
@@ -1870,21 +1864,12 @@ def _comment_notification_still_clearable_from_current(
     if current is None:
         return False
     current_reason = str(current.get("reason") or "").lower()
-    original_reason = str(current.get("reason") or "").lower()
     if current_reason in {"mention", "assign"}:
         return False
     if current_reason != "comment":
-        subject = current.get("subject") or {}
-        subject_url = str(subject.get("url") or "")
-        latest_url = str(subject.get("latest_comment_url") or "")
-        probe = dict(current)
-        probe_subject = dict(subject)
-        if subject_url and not latest_url:
-            probe_subject["latest_comment_url"] = f"{subject_url.rstrip('/')}/comments"
-        probe["subject"] = probe_subject
         try:
             snapshot = shared_comment_notification_snapshot(
-                probe,
+                current,
                 my_login=my_login,
                 run_gh=run_gh,
                 since=(
@@ -1968,7 +1953,9 @@ def _clear_dependabot_notification(
     try:
         with _todo_write_lock(args.todo_file):
             data = load_todo(args.todo_file)
-            if _todo_has_active_direct_ownership_in_data(
+            if _todo_has_active_matching_entry_in_data(
+                data, thread_id=thread_id, pr_url=pr_url
+            ) or _todo_has_active_direct_ownership_in_data(
                 data, thread_id=thread_id, pr_url=pr_url
             ):
                 return False
@@ -2802,7 +2789,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         canonical_artifact=pr_url,
                         notif=notif,
                         my_login=my_login,
-                    todo_file=args.todo_file,
+                        todo_file=args.todo_file,
                     ):
                         _record_stale_cleanup(
                             mutations,
@@ -2868,6 +2855,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             logger.info("cooldown active for %s, skipping", pr_url)
             continue
 
+        action_context = "preflight"
         try:
             fresh_notif = _current_notification_for_clearance(thread_id=thread_id or None)
             if thread_id and fresh_notif is None:
@@ -2920,19 +2908,6 @@ def run(args: argparse.Namespace) -> TriageStats:
             current_notif = latest_notif or fresh_notif or notif
 
             def mutation_guard_reason() -> str | None:
-                guarded_notif = _current_notification_for_clearance(
-                    thread_id=thread_id or None
-                )
-                if thread_id and guarded_notif is None:
-                    return f"notification disappeared before action for {pr_url}"
-                if thread_id and not _comment_notification_still_clearable(
-                    guarded_notif or current_notif,
-                    ledger=ledger,
-                    my_login=my_login,
-                    thread_id=thread_id,
-                    pr_url=pr_url,
-                ):
-                    return "notification no longer clearable"
                 if ledger is not None and ledger.has_active_actionable_notification(
                     source_id=thread_id or None,
                     canonical_artifact=pr_url,
@@ -2946,6 +2921,16 @@ def run(args: argparse.Namespace) -> TriageStats:
                     action_todo, thread_id=thread_id or None, pr_url=pr_url
                 ):
                     return "preserving active todo ownership"
+                # History inspection must precede the final reason/cursor refresh;
+                # no ledger or tracker reads may follow it before mutation.
+                if not thread_id or not _comment_notification_still_clearable(
+                    current_notif,
+                    ledger=ledger,
+                    my_login=my_login,
+                    thread_id=thread_id,
+                    pr_url=pr_url,
+                ):
+                    return "notification no longer clearable"
                 return None
 
             fresh_pr = fetch_pr(repo, number)
@@ -2962,6 +2947,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 use_copilot=use_copilot,
                 notif_reason=latest_reason,
             )
+            action_context = decision.outcome
             logger.info(
                 "%s#%d -> %s (%s)",
                 repo,
@@ -3245,7 +3231,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                         canonical_artifact=pr_url,
                         notif=notif,
                         my_login=my_login,
-                    todo_file=args.todo_file,
+                        todo_file=args.todo_file,
                     ):
                         _record_stale_cleanup(
                             mutations,
@@ -3291,8 +3277,8 @@ def run(args: argparse.Namespace) -> TriageStats:
                 cooldown_offset = BRANCH_PROTECTION_COOLDOWN_SECONDS
                 cooldown_offset -= ACTION_COOLDOWN_SECONDS
                 state[pr_url] = now + cooldown_offset
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            stats.errors.append(f"action {decision.outcome} failed for {pr_url}: {exc}")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+            stats.errors.append(f"action {action_context} failed for {pr_url}: {exc}")
 
     if (mutations.flags or mutations.prunes) and not args.dry_run:
         try:

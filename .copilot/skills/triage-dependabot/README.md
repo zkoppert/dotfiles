@@ -1,7 +1,7 @@
 # triage-dependabot
 
 Hourly skill that scans GitHub notifications, filters to Dependabot PRs,
-and applies one of four discrete outcomes per PR. It is the companion to
+and applies one of five action outcomes per PR, or skips it. It is the companion to
 the `triage-notifications` skill, focused entirely on the dependency
 upgrade firehose so I stop hand-merging routine bumps and stop letting
 risky ones rot.
@@ -23,9 +23,9 @@ For each notification from `gh api /notifications?all=true` whose subject is a
 
 | Condition | Outcome |
 | --- | --- |
+| Notification reason is `mention` or `assign`, or a comment contains a direct mention | hand off to general notification triage before any terminal action |
 | PR closed or merged | skip and mark notification done |
 | Repo owner is not `github`, `github-community-projects`, or `zkoppert` AND notification reason is `review_requested`, `subscribed`, or `ci_activity` | skip and mark notification done |
-| Notification reason is `mention` or `assign`, or a `comment` contains a direct mention | hand off to general notification triage before any terminal action |
 | Notification reason is `comment` with complete history and no direct mention | continue through the Dependabot decision tree |
 | Repo owner is not `github`, `github-community-projects`, or `zkoppert` AND notification reason is not passive | skip, leave notification in inbox for direct response |
 | Title or body references an excluded dependency (e.g. `super-linter/super-linter`) AND notification reason is `review_requested`, `subscribed`, or `ci_activity` | skip and mark notification done |
@@ -39,6 +39,14 @@ For each notification from `gh api /notifications?all=true` whose subject is a
 | CI status failing | flag-for-review |
 | Security release (Copilot sub-agent or regex on title/body) AND repo defines a `release` label | label-and-merge |
 | Otherwise | merge |
+
+The existing decision tree stays separate from general notification triage.
+Before each approval, merge, label, rebase, or close, the guard checks ledger
+and tracker ownership, inspects relevant comment history, then makes a final
+single-thread read of the notification reason, update timestamp, subject, and
+latest-comment URL. New direct asks veto the mutation. Notifications without
+comment evidence do not trigger unrelated comment-collection requests;
+incomplete relevant history is retained rather than assumed non-direct.
 
 The script never auto-merges when uncertainty exists; sub-agent
 timeouts, unknown bump kinds, and missing coverage signals all route to
@@ -140,8 +148,9 @@ conservative default.
 The shared notification ledger also carries a machine-readable health
 snapshot for Dependabot runs. It includes last success/error timestamps,
 notification totals, actionables without tracker links, clear failures,
-and stale dropped items so the hourly job can be inspected without
-opening the database manually.
+and dropped items that remain uncleared. These are the last observed intake
+counts. See the [read-only health query](../triage-notifications/README.md#health-and-backfill-preview).
+Normal dry runs do not modify an existing ledger or its health snapshot.
 
 ## Per-PR cooldown
 
@@ -181,12 +190,15 @@ DELETE the underlying notification thread.
 
 ## Schedule
 
-`com.zkoppert.triage-dependabot.plist` runs hourly on the hour, 24x7.
+`com.zkoppert.triage-dependabot.plist` defines an hourly schedule on the hour, 24x7.
 The `RunAtLoad` key is false so loading the plist does not trigger an
 immediate run.
 
-`./install.sh` removes any existing dotfiles-owned notification plist
-symlink from `~/Library/LaunchAgents`; it does not start the hourly job.
+`./install.sh` verifies owned notification jobs are absent before changing
+worker links or provisioning the runtime, using `bootout` when `unload` is
+insufficient. If it cannot verify absence, installation fails. It preserves
+foreign jobs and links, removes owned notification-agent symlinks, and never
+starts these hourly schedules.
 When you're ready to activate it in a separate attended step, recreate the
 symlink and run:
 
@@ -240,7 +252,9 @@ The script reads only repos accessible to the authenticated `gh` user.
 Sub-agent invocations send the PR title and the first 4000 characters of
 the body to Copilot CLI; nothing else leaves the local machine. The
 state file in `~/Library/Logs` is a flat JSON map of PR url to
-timestamp.
+timestamp. The shared ledger and health snapshots also contain notification
+titles and URLs; keep them private. The default ledger directory uses mode
+`0700`, and its database and SQLite sidecars use mode `0600`.
 
 ## Tests
 

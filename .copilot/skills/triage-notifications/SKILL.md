@@ -66,8 +66,9 @@ dropped and cleared from GitHub, and only personal-action items survive.
    mention. Selecting it opens the GitHub subject URL. Other actionable
    reasons, already tracked items, no-op runs, and dry runs stay silent.
 
-A launchd job (`com.zkoppert.notification-triage.plist`) runs this hourly,
-24x7. This skill is for ad-hoc runs in between.
+The launchd definition (`com.zkoppert.notification-triage.plist`) schedules
+hourly runs, 24x7, but the installer leaves it unloaded. Live activation and
+migration require a separate attended step; use fixtures for validation.
 
 ## How to run
 

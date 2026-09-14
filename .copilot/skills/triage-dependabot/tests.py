@@ -25,6 +25,19 @@ def _isolate_notification_state(
 ) -> None:
     monkeypatch.setattr(td, "DEFAULT_LEDGER_PATH", tmp_path / "ledger.sqlite")
 
+    # Run-level fixtures supply a changing feed; keep that fake at the read
+    # boundary, not inside ownership or mutation guards.
+    def thread_snapshot(thread_id, *, run_gh):
+        return next((n for n in td.fetch_notifications() if str(n.get("id") or "") == thread_id), None)
+
+    monkeypatch.setattr(td, "fetch_notification_thread", thread_snapshot)
+    real_run = subprocess.run
+    def deny_unmocked_external_commands(command, *args, **kwargs):
+        if isinstance(command, (list, tuple)) and Path(command[0]).name in {"gh", "copilot", "launchctl", "osascript", "terminal-notifier"}:
+            pytest.fail(f"Unmocked external command: {Path(command[0]).name}")
+        return real_run(command, *args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", deny_unmocked_external_commands)
+
 
 @pytest.fixture(autouse=True)
 def _treat_fixture_owners_as_owned(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1665,8 +1678,8 @@ def test_fetch_notifications_empty_when_no_output() -> None:
 
 
 def test_fetch_notifications_handles_bad_json() -> None:
-    with mock.patch.object(td, "run_gh", return_value="not json"):
-        assert td.fetch_notifications() == []
+    with mock.patch.object(td, "run_gh", return_value="not json"), pytest.raises(json.JSONDecodeError):
+        td.fetch_notifications()
 
 
 def test_fetch_pr_returns_parsed_json() -> None:
@@ -1794,6 +1807,80 @@ def _make_args(tmp_path: Path, **overrides: Any) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
+@pytest.mark.parametrize("outcome", [
+    td.OUTCOME_MERGE, td.OUTCOME_LABEL_AND_MERGE,
+    td.OUTCOME_REBASE, td.OUTCOME_CLOSE_PRERELEASE,
+])
+@pytest.mark.parametrize("arrival_during", ["ledger", "todo", "history"])
+def test_run_rechecks_late_assignment_after_all_ownership_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, arrival_during: str,
+) -> None:
+    args = _make_args(tmp_path)
+    before_todo = args.todo_file.read_bytes()
+    notif = {
+        "id": "late-assignment", "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/1",
+            "latest_comment_url": "https://api.github.com/repos/o/r/issues/comments/1",
+        },
+    }
+    current = dict(notif)
+    pr = _base_pr(number=1, url="https://github.com/o/r/pull/1", headRefOid="head")
+    pr_reads = 0
+    writes: list[list[str]] = []
+
+    def fetch_pr(*_args):
+        nonlocal pr_reads
+        pr_reads += 1
+        return pr
+
+    def arrive(phase):
+        if pr_reads >= 3 and arrival_during == phase:
+            current["reason"] = "assign"
+
+    original_owned = td.NotificationLedger.has_active_actionable_notification
+    def check_ledger(self, **kwargs):
+        result = original_owned(self, **kwargs)
+        arrive("ledger")
+        return result
+
+    original_load = td.load_todo
+    def load_todo(path):
+        data = original_load(path)
+        arrive("todo")
+        return data
+
+    def history(*_args, **_kwargs):
+        from notification_worker_common import CommentNotificationSnapshot
+        arrive("history")
+        return CommentNotificationSnapshot(None, None, False, True)
+
+    def run_gh(command, **_kwargs):
+        if command[:2] == ["pr", "view"]:
+            return json.dumps({"headRefOid": "head", "reviews": []})
+        writes.append(command)
+        return ""
+
+    monkeypatch.setattr(td, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(td, "fetch_notifications", lambda: [dict(current)])
+    monkeypatch.setattr(td, "fetch_pr", fetch_pr)
+    monkeypatch.setattr(td, "fetch_repo_labels", lambda _repo: {"release"})
+    monkeypatch.setattr(td, "decide", lambda *_a, **_k: td.Decision(outcome, "fixture"))
+    monkeypatch.setattr(td.NotificationLedger, "has_active_actionable_notification", check_ledger)
+    monkeypatch.setattr(td, "load_todo", load_todo)
+    monkeypatch.setattr(td, "shared_comment_notification_snapshot", history)
+    monkeypatch.setattr(td, "run_gh", run_gh)
+
+    stats = td.run(args)
+
+    assert current["reason"] == "assign", "the race must actually occur"
+    assert writes == []
+    assert (stats.merged, stats.labeled_and_merged, stats.rebased, stats.closed_prerelease) == (0, 0, 0, 0)
+    assert td.load_state(args.state_file) == {}
+    assert args.todo_file.read_bytes() == before_todo
+
+
 def test_run_end_to_end_merges_and_flags(tmp_path: Path) -> None:
     """Drive run() through one MERGE and one FLAG outcome."""
     notif_merge = {
@@ -1847,7 +1934,7 @@ def test_run_end_to_end_merges_and_flags(tmp_path: Path) -> None:
     assert stats.merged == 1
     assert stats.flagged == 1
     do_merge_mock.assert_called_once_with(
-        "o/r1", 1, dry_run=False, my_login="zkoppert", head_sha=None
+        "o/r1", 1, dry_run=False, my_login="zkoppert", head_sha=None, action_guard=mock.ANY
     )
     mark_done_mock.assert_called_once_with("thread-merge", dry_run=False)
     notify_mock.assert_called_once_with(
@@ -2110,7 +2197,8 @@ def test_run_rechecks_current_notification_before_merging(tmp_path: Path) -> Non
 def test_run_skips_merge_when_active_todo_exists_before_mutation(
     tmp_path: Path,
 ) -> None:
-    todo = tmp_path / "todo.yml"
+    args = _make_args(tmp_path)
+    todo = args.todo_file
     todo.write_text(
         "inbox: []\n"
         "prioritized:\n"
@@ -2134,27 +2222,19 @@ def test_run_skips_merge_when_active_todo_exists_before_mutation(
         },
     }
     pr = _base_pr(number=904, url="https://github.com/o/r1/pull/904")
-    args = _make_args(tmp_path)
-    args.todo_file = todo
 
     with mock.patch.object(
         td, "get_my_login", return_value="zkoppert"
     ), mock.patch.object(
         td, "fetch_notifications", return_value=[notif]
     ), mock.patch.object(
-        td, "_comment_notification_still_clearable",
-        return_value=True,
-    ), mock.patch.object(
-        td, "_todo_has_active_matching_entry_in_data",
-        return_value=True,
-    ), mock.patch.object(
         td, "decide",
         return_value=td.Decision(td.OUTCOME_MERGE, "merge now"),
     ), mock.patch.object(
         td, "fetch_pr", return_value=pr
     ) as fetch_pr_mock, mock.patch.object(
-        td, "do_merge"
-    ) as merge_mock, mock.patch.object(
+        td, "run_gh", return_value="{}"
+    ) as gh_mock, mock.patch.object(
         td, "mark_thread_done"
     ) as mark_mock:
         stats = td.run(args)
@@ -2162,7 +2242,7 @@ def test_run_skips_merge_when_active_todo_exists_before_mutation(
     assert stats.dependabot == 1
     assert stats.skipped == 1
     fetch_pr_mock.assert_has_calls([mock.call("o/r1", 904), mock.call("o/r1", 904)])
-    merge_mock.assert_not_called()
+    gh_mock.assert_not_called()
     mark_mock.assert_not_called()
     snapshot = td.NotificationLedger(td.DEFAULT_LEDGER_PATH).health_snapshot(
         worker="triage-dependabot"
@@ -2660,7 +2740,7 @@ def test_run_handles_label_and_merge_with_release_label(tmp_path: Path) -> None:
         stats = td.run(args)
 
     assert stats.labeled_and_merged == 1
-    add_label_mock.assert_called_once_with("o/r", 3, "release", dry_run=False)
+    add_label_mock.assert_called_once_with("o/r", 3, "release", dry_run=False, action_guard=mock.ANY)
     do_merge_mock.assert_called_once()
 
 
@@ -3112,6 +3192,8 @@ def _run_skipped_super_linter_with_reason(
             "url": "https://api.github.com/repos/o/r/pulls/42",
         },
     }
+    if comment_pages is not None:
+        notif["subject"]["latest_comment_url"] = "https://api.github.com/repos/o/r/issues/comments/1"
     pr = _base_pr(
         number=42,
         url="https://github.com/o/r/pull/42",
@@ -5358,7 +5440,7 @@ def test_run_closes_prerelease_and_marks_notification_done(tmp_path: Path) -> No
     assert stats.flagged == 0
     assert stats.errors == []
     close_mock.assert_called_once_with(
-        "github-community-projects/stale-repos", 520, dry_run=False
+        "github-community-projects/stale-repos", 520, dry_run=False, action_guard=mock.ANY
     )
     merge_mock.assert_not_called()
     mark_done_mock.assert_called_once_with("thread-prerelease", dry_run=False)
@@ -5609,3 +5691,48 @@ def test_run_closes_prerelease_dry_run_does_not_post(tmp_path: Path) -> None:
             cmd[0] == "api" and "-X" in cmd and "DELETE" in cmd
         ), f"unexpected DELETE call: {cmd}"
     assert not args.state_file.exists()
+
+
+@pytest.mark.parametrize("error", [
+    subprocess.CalledProcessError(1, "gh", stderr="HTTP 503"),
+    subprocess.TimeoutExpired("gh", 20),
+    json.JSONDecodeError("bad thread response", "[]", 0),
+])
+def test_run_records_thread_preflight_failure_without_mutation(tmp_path, monkeypatch, error):
+    args = _make_args(tmp_path)
+    notif = {"id": "thread-1", "reason": "subscribed", "subject": {"type": "PullRequest", "url": "https://api.github.com/repos/o/r/pulls/1"}}
+    monkeypatch.setattr(td, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(td, "fetch_notifications", lambda: [notif])
+    monkeypatch.setattr(td, "fetch_pr", lambda *_a: _base_pr(number=1, url="https://github.com/o/r/pull/1"))
+    with mock.patch.object(td, "fetch_notification_thread", side_effect=error), mock.patch.object(td, "run_gh") as gh:
+        stats = td.run(args)
+    assert any("action preflight failed" in message for message in stats.errors)
+    assert td.load_state(args.state_file) == {}
+    assert stats.merged == stats.rebased == stats.closed_prerelease == 0
+    gh.assert_not_called()
+    assert td.NotificationLedger(td.DEFAULT_LEDGER_PATH).health_snapshot(worker="triage-dependabot")["last_error"] == stats.errors[-1]
+
+
+def test_merge_without_comment_evidence_does_not_depend_on_comment_endpoints(tmp_path, monkeypatch):
+    args = _make_args(tmp_path)
+    notif = {"id": "thread-1", "reason": "subscribed", "subject": {"type": "PullRequest", "url": "https://api.github.com/repos/o/r/pulls/1"}}
+    pr = _base_pr(number=1, url="https://github.com/o/r/pull/1", headRefOid="head")
+    writes = []
+    def run_gh(command, **kwargs):
+        if command[:2] == ["pr", "view"]:
+            return json.dumps({"headRefOid": "head", "reviews": []})
+        if command[:1] == ["api"]:
+            raise subprocess.CalledProcessError(1, "gh", stderr="HTTP 503")
+        writes.append(command[:2])
+        return ""
+    monkeypatch.setattr(td, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(td, "fetch_notifications", lambda: [notif])
+    monkeypatch.setattr(td, "fetch_pr", lambda *_a: pr)
+    monkeypatch.setattr(td, "run_gh", run_gh)
+    stats = td.run(args)
+    assert stats.errors == []
+    assert writes == [["pr", "review"], ["pr", "merge"]]
+    assert td.load_state(args.state_file)[pr["url"]] > 0
+    row = td.NotificationLedger(td.DEFAULT_LEDGER_PATH).notification_record(source_id="thread-1", canonical_artifact=pr["url"])
+    assert row["terminal_disposition"] is None
+    assert row["clear_state"] == "not_applicable"

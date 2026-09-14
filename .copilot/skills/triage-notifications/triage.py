@@ -6,14 +6,14 @@ unread), this tool:
 
 1. Classifies it as one of:
    - DROP            (safe to mark-done without confirmation)
-   - QUADRANT_Q1     (high-confidence: actionable now, goes straight to Q1)
-   - INBOX           (actionable but needs human triage)
-2. For DROP items: marks the thread done on GitHub (deletes from inbox).
-3. For Q1/INBOX items: adds an entry to ~/repos/zkoppert-todo/todo.yml
+   - QUADRANT_Q1     (urgent direct asks and security alerts)
+   - QUADRANT_Q2     (ordinary review requests with age escalation)
+   - INBOX           (other actionable work needing human triage)
+2. For DROP items: records a durable disposition before clearing GitHub.
+3. For Q1/Q2/INBOX items: adds an entry to ~/repos/zkoppert-todo/todo.yml
    (deduped by notification thread_id and tracked PR/issue URLs).
-4. Scans active todos for items in `done` status with a recorded
-   notification thread_id and marks those notifications done on GitHub
-   (the "mark-done-on-completed" loop).
+4. Reconciles completed, Q4, and dropped tracker items with the ledger,
+   then clears unchanged threads or settles confirmed-absent ones locally.
 5. Triggers a clickable macOS notification for each newly added direct mention.
 
 Designed to be safe to re-run (consistent: a second run produces no
@@ -43,6 +43,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, TypedDict
 from urllib.parse import urlparse
@@ -63,6 +64,8 @@ from notification_worker_common import (
 from notification_worker_common import (
     CommentNotificationSnapshot,
     comment_notification_snapshot as shared_comment_notification_snapshot,
+    fetch_notification_thread,
+    parse_notification_pages,
     parse_iso_datetime,
     review_request_escalates_at,
     utcnow_iso,
@@ -140,15 +143,9 @@ TITLE_DROP_PATTERNS: list[re.Pattern[str]] = [
 # issue, surface it instead of silently dropping.
 TITLE_DROP_PROTECTED_REASONS: set[str] = {"mention", "assign"}
 
-# Reasons that get a subject-state check at classify time. If the PR / issue
-# is already closed/merged when the notification first arrives, drop it
-# instead of routing to a quadrant or inbox - there is nothing left to do.
-# Only KEEP_REASONS that could otherwise be surfaced need this check:
-# `author` so I can archive my own merged PRs, and review_requested /
-# mention / assign so a stale directed ping doesn't reach the inbox.
-# Passive reasons (team_mention, manual, subscribed, ...) are skipped here
-# because they default-drop regardless of subject state, so paying for a
-# state fetch on them would be wasted work.
+# Direct asks route before closed-subject checks: closing a PR does not
+# answer a later mention or assignment. Review requests have their own
+# state check; the late check also lets author updates archive shipped work.
 STATEFUL_REASONS: set[str] = {
     "review_requested",
     "mention",
@@ -159,7 +156,8 @@ STATEFUL_REASONS: set[str] = {
 # Dependabot version-bump PRs. These drop from the inbox but are NEVER
 # marked done on GitHub: a separate dependency-handler tool
 # (triage-dependabot) consumes those notifications, so this tool must
-# leave them unread. Detection is title-based (no extra API call) because
+# leave them unread. Titles identify candidates; an author lookup confirms
+# Dependabot ownership, and an unavailable lookup retains the thread.
 # Dependabot uses stable title shapes: conventional-commit
 # `build(deps): ...` / `chore(deps-dev): ...` / super-linter's
 # `deps(<ecosystem>): bump ...` and `ci(<scope>): bump ...`, the classic
@@ -414,7 +412,7 @@ class TriageStats:
 
 @dataclass
 class MarkDoneDelta:
-    """A local todo notification flag to set after GitHub accepted DELETE."""
+    """Local completion metadata after DELETE or a confirmed-absent thread."""
 
     item_id: str
     thread_id: str
@@ -592,21 +590,7 @@ def fetch_notifications() -> list[dict[str, Any]]:
     # `--slurp` returns a JSON array-of-arrays (one inner array per page),
     # which is safe to parse regardless of titles that contain `][`.
     raw = run_gh(["api", "/notifications?all=true", "--paginate", "--slurp"]).strip()
-    if not raw:
-        return []
-    try:
-        pages = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        logger.warning("fetch_notifications: could not parse slurp output: %s", exc)
-        return []
-    merged: list[dict[str, Any]] = []
-    if isinstance(pages, list):
-        for page in pages:
-            if isinstance(page, list):
-                merged.extend(page)
-            elif isinstance(page, dict):
-                merged.append(page)
-    return merged
+    return parse_notification_pages(raw)
 
 
 def fetch_thread_state(notif: dict[str, Any]) -> str | None:
@@ -624,7 +608,11 @@ def fetch_thread_state(notif: dict[str, Any]) -> str | None:
     path = url.replace("https://api.github.com", "")
     try:
         out = run_gh(["api", path], timeout=20)
-        return (json.loads(out).get("state") or "").lower()
+        payload = json.loads(out)
+        if not isinstance(payload, dict):
+            logger.warning("fetch_thread_state: expected an object for %s", path)
+            return None
+        return (payload.get("state") or "").lower()
     except (
         subprocess.CalledProcessError,
         subprocess.TimeoutExpired,
@@ -722,6 +710,8 @@ def classify(
                 f"@mention in comment by @{snapshot.author}",
                 direct_mention=True,
             )
+        if snapshot is not None and not snapshot.history_complete and reason not in Q1_REASONS | {"comment"}:
+            return Classification(BUCKET_INBOX, "comment history incomplete")
 
     if reason == "comment":
         if not snapshot_loaded and comment_snapshot_fetcher is not None:
@@ -1003,11 +993,9 @@ def _current_notification_for_clearance(
 ) -> dict[str, Any] | None:
     if not thread_id:
         return None
-    current_notifications = notifications if notifications is not None else fetch_notifications()
-    for current in current_notifications:
-        if str(current.get("id") or "") == thread_id:
-            return current
-    return None
+    if notifications is not None:
+        return next((current for current in notifications if str(current.get("id") or "") == thread_id), None)
+    return fetch_notification_thread(thread_id, run_gh=run_gh)
 
 
 def _notification_comment_snapshot(
@@ -1085,7 +1073,7 @@ def _current_notification_is_clearable_from_current(
     if record is not None:
         boundary = parse_iso_datetime(str(record.get("terminal_recorded_at") or ""))
     if current is None:
-        return record is not None and boundary is not None
+        return bool(record and record.get("terminal_disposition") and boundary is not None)
     current_reason = str(current.get("reason") or "").lower()
     current_updated_at = parse_iso_datetime(str(current.get("updated_at") or ""))
     if current_reason in {"mention", "assign"} and boundary is None:
@@ -1106,7 +1094,7 @@ def _current_notification_is_clearable_from_current(
                             else None
                         ),
                     )
-                    if snapshot is not None and snapshot.direct is True:
+                    if snapshot is not None and not (snapshot.history_complete and snapshot.direct is False):
                         return False
                 return True
         if current_reason in {"mention", "assign"}:
@@ -1124,9 +1112,7 @@ def _current_notification_is_clearable_from_current(
                     else None
                 ),
             )
-            if snapshot is not None and snapshot.direct is True:
-                return False
-            return True
+            return snapshot is None or bool(snapshot.history_complete and snapshot.direct is False)
         else:
             classification = classify(
                 current,
@@ -1152,7 +1138,13 @@ def _current_notification_is_clearable_from_current(
     return classification.bucket == BUCKET_DROP and not classification.skip_mark_done
 
 
-def _current_notification_is_clearable(
+class NotificationClearance(Enum):
+    BLOCKED = "blocked"
+    CLEARABLE = "clearable"
+    CONFIRMED_ABSENT = "confirmed_absent"
+
+
+def _current_notification_clearance(
     *,
     url: str | None,
     thread_id: str | None,
@@ -1160,7 +1152,7 @@ def _current_notification_is_clearable(
     ledger: NotificationLedger | None,
     my_login: str,
     notifications: list[dict[str, Any]] | None = None,
-) -> bool:
+) -> NotificationClearance:
     current = _current_notification_for_clearance(
         thread_id=thread_id,
         notifications=notifications,
@@ -1173,13 +1165,41 @@ def _current_notification_is_clearable(
         ledger=ledger,
         my_login=my_login,
     ):
-        return False
+        return NotificationClearance.BLOCKED
     fresh_current = _current_notification_for_clearance(thread_id=thread_id)
     if fresh_current is None:
-        return False
+        if _current_notification_is_clearable_from_current(
+            None,
+            url=url,
+            thread_id=thread_id,
+            reason=reason,
+            ledger=ledger,
+            my_login=my_login,
+        ):
+            return NotificationClearance.CONFIRMED_ABSENT
+        return NotificationClearance.BLOCKED
     if _notification_clearability_signature(fresh_current) != _notification_clearability_signature(current or {}):
-        return False
-    return True
+        return NotificationClearance.BLOCKED
+    return NotificationClearance.CLEARABLE
+
+
+def _current_notification_is_clearable(
+    *,
+    url: str | None,
+    thread_id: str | None,
+    reason: str,
+    ledger: NotificationLedger | None,
+    my_login: str,
+    notifications: list[dict[str, Any]] | None = None,
+) -> bool:
+    return _current_notification_clearance(
+        url=url,
+        thread_id=thread_id,
+        reason=reason,
+        ledger=ledger,
+        my_login=my_login,
+        notifications=notifications,
+    ) is NotificationClearance.CLEARABLE
 
 
 def _is_untouched_q2_review_fallback(
@@ -1506,11 +1526,14 @@ def _remove_pruned_entry(data: dict[str, Any], delta: PruneDelta) -> int:
 
 
 def _mark_local_notification_done(data: dict[str, Any], delta: MarkDoneDelta) -> bool:
-    for item in _iter_todo_items(data):
-        if not isinstance(item, dict):
-            continue
+    for section, item in _iter_notification_items_with_sections(data):
         if item.get("id") != delta.item_id and _item_thread_id(item) != delta.thread_id:
             continue
+        if delta.terminal_disposition and (
+            _item_thread_id(item) != delta.thread_id
+            or tracker_terminal_disposition(item, section) != delta.terminal_disposition
+        ):
+            return False
         notif = item.get("notification")
         if not isinstance(notif, dict):
             continue
@@ -2808,63 +2831,61 @@ def retry_pending_github_clears(
     stats: TriageStats,
     attempted_thread_ids: set[str],
     my_login: str,
+    protected_thread_ids: set[str] | None = None,
+    todo_file: Path | None = None,
 ) -> None:
     if ledger is None:
         return
+    protected_thread_ids = protected_thread_ids or set()
     for row in ledger.pending_github_clears():
         thread_id = str(row.get("source_id") or "")
         canonical = row.get("canonical_artifact")
-        if not thread_id or thread_id in attempted_thread_ids:
+        if (
+            not thread_id
+            or thread_id in attempted_thread_ids
+            or thread_id in protected_thread_ids
+            or not row.get("terminal_disposition")
+        ):
             continue
         try:
-            current = _current_notification_for_clearance(thread_id=thread_id)
-            if current is None:
+            with _todo_write_lock(todo_file) if todo_file is not None else contextlib.nullcontext():
+                if todo_file is not None:
+                    current_data = load_todo(todo_file)
+                    matching = [
+                        (section, item)
+                        for section, item in _iter_notification_items_with_sections(current_data)
+                        if _item_thread_id(item) == thread_id
+                    ]
+                    if not matching and canonical:
+                        by_url = _find_todo_item_by_canonical_url(current_data, canonical)
+                        matching = [by_url] if by_url is not None else []
+                    if any(not tracker_terminal_disposition(item, section) for section, item in matching):
+                        continue
                 attempted_thread_ids.add(thread_id)
+                clearance = _current_notification_clearance(
+                    url=canonical,
+                    thread_id=thread_id,
+                    reason=str(row.get("reason") or ""),
+                    ledger=ledger,
+                    my_login=my_login,
+                )
+                if clearance is NotificationClearance.BLOCKED:
+                    continue
+                if not dry_run and clearance is NotificationClearance.CLEARABLE:
+                    mark_thread_done(thread_id)
                 _ledger_record_clear_result(
                     ledger,
                     dry_run=dry_run,
                     thread_id=thread_id,
                     canonical_artifact=canonical,
                 )
-                continue
-            if not _current_notification_is_clearable(
-                url=canonical,
-                thread_id=thread_id,
-                reason=str(row.get("reason") or ""),
-                ledger=ledger,
-                my_login=my_login,
-            ):
-                continue
-            current = _current_notification_for_clearance(thread_id=thread_id)
-            if current is None:
-                attempted_thread_ids.add(thread_id)
-                _ledger_record_clear_result(
-                    ledger,
-                    dry_run=dry_run,
-                    thread_id=thread_id,
-                    canonical_artifact=canonical,
-                )
-                continue
-            if not _current_notification_is_clearable(
-                url=canonical,
-                thread_id=thread_id,
-                reason=str(current.get("reason") or ""),
-                ledger=ledger,
-                my_login=my_login,
-            ):
-                continue
-            if not dry_run:
-                mark_thread_done(thread_id)
-            attempted_thread_ids.add(thread_id)
-            _ledger_record_clear_result(
-                ledger,
-                dry_run=dry_run,
-                thread_id=thread_id,
-                canonical_artifact=canonical,
-            )
         except (
+            OSError,
+            yaml.YAMLError,
+            _RuamelYAMLError,
             subprocess.CalledProcessError,
             subprocess.TimeoutExpired,
+            json.JSONDecodeError,
         ) as exc:
             stats.errors.append(f"mark-done retry failed for thread {thread_id}: {exc}")
             _ledger_record_clear_result(
@@ -2940,6 +2961,8 @@ def _plan_notification_mutations(
                 f"incomplete comment history for notification {thread_id or canonical_url}"
             )
             if comment_snapshot.direct is None and reason not in Q1_REASONS:
+                if ledger is not None and not ledger_dry_run:
+                    ledger.suspend_pending_clear(source_id=thread_id or None, canonical_artifact=canonical_url)
                 continue
         if (
             thread_id
@@ -3027,6 +3050,9 @@ def _plan_notification_mutations(
             )
             if tracked_direct_ask:
                 subject_resolved = False
+            if tracked_urgent and tracked_direct_ask and not renewed:
+                stats.already_tracked += 1
+                continue
             if (
                 tracked_urgent
                 and classification.bucket != BUCKET_Q1
@@ -3140,25 +3166,6 @@ def _plan_notification_mutations(
                     if thread_id:
                         attempted_thread_ids.add(thread_id)
                     continue
-                if not _current_notification_is_clearable(
-                    url=canonical_url,
-                    thread_id=thread_id,
-                    reason=reason,
-                    ledger=ledger,
-                    my_login=my_login,
-                ):
-                    stats.already_tracked += 1
-                    continue
-                current_notif = _current_notification_for_clearance(thread_id=thread_id)
-                if current_notif is None or not _current_notification_is_clearable(
-                    url=canonical_url,
-                    thread_id=thread_id,
-                    reason=str(current_notif.get("reason") or reason),
-                    ledger=ledger,
-                    my_login=my_login,
-                ):
-                    stats.already_tracked += 1
-                    continue
                 stats.dropped += 1
                 _ledger_capture(
                     ledger,
@@ -3184,20 +3191,18 @@ def _plan_notification_mutations(
                     section=tracked[0],
                     captured_at=str(notif.get("updated_at") or utcnow_iso()),
                 )
-                current_notif = _current_notification_for_clearance(thread_id=thread_id)
-                if current_notif is None or not _current_notification_is_clearable(
-                    url=canonical_url,
-                    thread_id=thread_id,
-                    reason=str(current_notif.get("reason") or reason),
-                    ledger=ledger,
-                    my_login=my_login,
-                ):
-                    continue
-                mutations.route_existing_drop.append(prune_delta)
                 if not args.dry_run:
                     try:
                         attempted_thread_ids.add(thread_id)
-                        mark_thread_done(thread_id)
+                        clearance = _current_notification_clearance(
+                            url=canonical_url, thread_id=thread_id, reason=reason,
+                            ledger=ledger, my_login=my_login, notifications=[notif],
+                        )
+                        if clearance is NotificationClearance.BLOCKED:
+                            continue
+                        mutations.route_existing_drop.append(prune_delta)
+                        if clearance is NotificationClearance.CLEARABLE:
+                            mark_thread_done(thread_id)
                         _ledger_record_clear_result(
                             ledger,
                             dry_run=ledger_dry_run,
@@ -3207,6 +3212,7 @@ def _plan_notification_mutations(
                     except (
                         subprocess.CalledProcessError,
                         subprocess.TimeoutExpired,
+                        json.JSONDecodeError,
                     ) as exc:
                         stats.errors.append(
                             f"mark-done failed for thread {thread_id}: {exc}"
@@ -3218,6 +3224,8 @@ def _plan_notification_mutations(
                             canonical_artifact=canonical_url,
                             error=exc,
                         )
+                else:
+                    mutations.route_existing_drop.append(prune_delta)
                 stats.already_tracked += 1
                 continue
 
@@ -3248,15 +3256,6 @@ def _plan_notification_mutations(
                 )
                 stats.left_for_dependabot += 1
                 continue
-            if not _current_notification_is_clearable(
-                url=canonical_url,
-                thread_id=thread_id,
-                reason=reason,
-                ledger=ledger,
-                my_login=my_login,
-            ):
-                stats.already_tracked += 1
-                continue
             classification_name = "policy_drop"
             _ledger_capture(
                 ledger,
@@ -3275,18 +3274,16 @@ def _plan_notification_mutations(
             if classification.archive_to_done:
                 mutations.add_done.append(build_done_archive_entry(notif))
             if not args.dry_run:
-                current_notif = _current_notification_for_clearance(thread_id=thread_id)
-                if current_notif is None or not _current_notification_is_clearable(
-                    url=canonical_url,
-                    thread_id=thread_id,
-                    reason=str(current_notif.get("reason") or reason),
-                    ledger=ledger,
-                    my_login=my_login,
-                ):
-                    continue
                 try:
-                    mark_thread_done(thread_id)
                     attempted_thread_ids.add(thread_id)
+                    clearance = _current_notification_clearance(
+                        url=canonical_url, thread_id=thread_id, reason=reason,
+                        ledger=ledger, my_login=my_login, notifications=[notif],
+                    )
+                    if clearance is NotificationClearance.BLOCKED:
+                        continue
+                    if clearance is NotificationClearance.CLEARABLE:
+                        mark_thread_done(thread_id)
                     _ledger_record_clear_result(
                         ledger,
                         dry_run=ledger_dry_run,
@@ -3296,6 +3293,7 @@ def _plan_notification_mutations(
                 except (
                     subprocess.CalledProcessError,
                     subprocess.TimeoutExpired,
+                    json.JSONDecodeError,
                 ) as exc:
                     stats.errors.append(
                         f"mark-done failed for thread {thread_id}: {exc}"
@@ -3341,8 +3339,15 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
     if preview_ledger_path is None:
         stats.errors.append("backfill requires --backfill-ledger")
         return stats
-    if preview_ledger_path.exists() or preview_ledger_path.resolve() == DEFAULT_LEDGER_PATH.resolve():
+    if preview_ledger_path.exists() or preview_ledger_path.is_symlink() or preview_ledger_path.resolve() == DEFAULT_LEDGER_PATH.resolve():
         stats.errors.append("backfill requires a fresh non-production --backfill-ledger path")
+        return stats
+    try:
+        preview_ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(preview_ledger_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+    except OSError as exc:
+        stats.errors.append(f"cannot create fresh backfill ledger: {exc}")
         return stats
     ledger = NotificationLedger(preview_ledger_path)
 
@@ -3562,25 +3567,16 @@ def run(args: argparse.Namespace) -> TriageStats:
                 if tracker_terminal_disposition(live_item, live_section) != disposition:
                     continue
                 live_notif = live_item.get("notification")
-                if not isinstance(live_notif, dict):
+                if not isinstance(live_notif, dict) or _item_thread_id(live_item) != thread_id:
                     continue
-                if not _current_notification_is_clearable(
-                    url=terminal_canonical_url,
-                    thread_id=thread_id,
-                    reason=str(live_notif.get("reason") or notif_meta.get("reason") or ""),
-                    ledger=ledger,
-                    my_login=my_login,
-                ):
-                    continue
-                current_notif = _current_notification_for_clearance(thread_id=thread_id)
-                if current_notif is not None and not _current_notification_is_clearable(
-                    url=terminal_canonical_url,
-                    thread_id=thread_id,
-                    reason=str(current_notif.get("reason") or live_notif.get("reason") or notif_meta.get("reason") or ""),
-                    ledger=ledger,
-                    my_login=my_login,
-                ):
-                    continue
+                terminal_canonical_url = str(live_notif.get("url") or live_item.get("link") or "") or None
+                terminal_recorded_at = str(
+                    notif_meta.get("terminal_recorded_at")
+                    or live_notif.get("terminal_recorded_at")
+                    or live_notif.get("captured_at")
+                    or live_notif.get("updated_at")
+                    or utcnow_iso()
+                )
                 _ledger_capture(
                     ledger,
                     dry_run=ledger_dry_run,
@@ -3595,41 +3591,36 @@ def run(args: argparse.Namespace) -> TriageStats:
                     tracker_section=live_section,
                     terminal_disposition=disposition,
                     queue_clear=True,
-                    event_at=str(live_notif.get("captured_at") or live_notif.get("updated_at") or utcnow_iso()),
+                    event_at=terminal_recorded_at,
                 )
-                mark_done_delta = MarkDoneDelta(
-                    item_id=str(live_item.get("id") or ""),
+                attempted_thread_ids.add(thread_id)
+                clearance = _current_notification_clearance(
+                    url=terminal_canonical_url,
                     thread_id=thread_id,
-                    marked_done_at=datetime.date.today().isoformat(),
-                    terminal_recorded_at=utcnow_iso(),
-                    terminal_disposition=disposition,
+                    reason=str(live_notif.get("reason") or notif_meta.get("reason") or ""),
+                    ledger=ledger,
+                    my_login=my_login,
                 )
-                current_after = None
+                if clearance is NotificationClearance.BLOCKED:
+                    continue
                 if not args.dry_run:
-                    current_after = _current_notification_for_clearance(thread_id=thread_id)
-                    if current_after is not None and not _current_notification_is_clearable(
-                        url=terminal_canonical_url,
-                        thread_id=thread_id,
-                        reason=str(
-                            current_after.get("reason")
-                            or live_notif.get("reason")
-                            or notif_meta.get("reason")
-                            or ""
-                        ),
-                        ledger=ledger,
-                        my_login=my_login,
-                    ):
-                        continue
-                if not args.dry_run:
-                    mark_thread_done(thread_id)
-                    attempted_thread_ids.add(thread_id)
+                    if clearance is NotificationClearance.CLEARABLE:
+                        mark_thread_done(thread_id)
                     _ledger_record_clear_result(
                         ledger,
                         dry_run=ledger_dry_run,
                         thread_id=thread_id,
                         canonical_artifact=terminal_canonical_url,
                     )
-                mutations.mark_done.append(mark_done_delta)
+                mutations.mark_done.append(
+                    MarkDoneDelta(
+                        item_id=str(live_item.get("id") or ""),
+                        thread_id=thread_id,
+                        marked_done_at=datetime.date.today().isoformat(),
+                        terminal_recorded_at=terminal_recorded_at,
+                        terminal_disposition=disposition,
+                    )
+                )
         except (
             FileNotFoundError,
             yaml.YAMLError,
@@ -3640,6 +3631,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         except (
             subprocess.CalledProcessError,
             subprocess.TimeoutExpired,
+            json.JSONDecodeError,
         ) as exc:
             stats.errors.append(
                 f"mark-done-on-completed failed for thread {thread_id}: {exc}"
@@ -3759,6 +3751,7 @@ def run(args: argparse.Namespace) -> TriageStats:
             except (
                 subprocess.CalledProcessError,
                 subprocess.TimeoutExpired,
+                json.JSONDecodeError,
             ) as exc:
                 stats.errors.append(
                     f"prune mark-done failed for thread {delta.thread_id}: {exc}"
@@ -3869,6 +3862,8 @@ def run(args: argparse.Namespace) -> TriageStats:
         stats=stats,
         attempted_thread_ids=attempted_thread_ids,
         my_login=my_login,
+        protected_thread_ids=deferred_thread_ids | reopened_thread_ids,
+        todo_file=args.todo_file,
     )
 
     if not args.no_notify and not args.dry_run:

@@ -14,10 +14,10 @@ NOTIFICATION_REQUIREMENTS_STAMP="$NOTIFICATION_RUNTIME_ROOT/requirements.sha256"
 
 pick_notification_bootstrap_python() {
   local candidates=(
+    "python3"
     "/opt/homebrew/bin/python3.13"
     "/opt/homebrew/bin/python3.12"
     "/opt/homebrew/bin/python3.11"
-    "python3"
   )
   local candidate
   for candidate in "${candidates[@]}"; do
@@ -90,6 +90,14 @@ ensure_notification_worker_runtime() {
   echo "✓ Provisioned notification worker runtime at $NOTIFICATION_RUNTIME_VENV"
 }
 
+bootout_notification_launch_agent() {
+  local service print_output print_status=0
+  service="gui/$(id -u)/$1"
+  launchctl bootout "$service" >/dev/null 2>&1 || true
+  print_output="$(launchctl print "$service" 2>&1)" || print_status=$?
+  [ "$print_status" -ne 0 ] && [[ "$print_output" == *"Could not find service"* ]]
+}
+
 remove_notification_launch_agent() {
   local plist_name="$1"
   local expected_source="$2"
@@ -107,19 +115,20 @@ remove_notification_launch_agent() {
       echo "⚠ $target points to $resolved_target - skipping"
       return 1
     fi
-    if launchctl unload "$target" >/dev/null 2>&1; then
-      rm -f "$target"
-      echo "✓ Removed $plist_name launch agent symlink; it stays unloaded until a later attended activation step"
-      return 0
+    local print_status=0
+    launchctl unload "$target" >/dev/null 2>&1 || true
+    print_output="$(launchctl print "gui/$(id -u)/$launchctl_label" 2>&1)" || print_status=$?
+    if [ "$print_status" -ne 0 ] && [[ "$print_output" == *"Could not find service"* ]]; then
+      :
+    elif [ "$print_status" -eq 0 ] && bootout_notification_launch_agent "$launchctl_label"; then
+      :
+    else
+      echo "⚠ Cannot confirm $launchctl_label is unloaded; preserving $target" >&2
+      return 1
     fi
-    print_output="$(launchctl print "gui/$(id -u)/$launchctl_label" 2>&1)" || true
-    if [[ "$print_output" == *"Could not find service"* ]]; then
-      rm -f "$target"
-      echo "✓ Removed $plist_name launch agent symlink; it stays unloaded until a later attended activation step"
-      return 0
-    fi
-    echo "⚠ failed to unload $target - skipping removal"
-    return 1
+    rm -f "$target"
+    echo "✓ Removed $plist_name launch agent symlink; it stays unloaded until a later attended activation step"
+    return 0
   elif [ -e "$target" ]; then
     echo "⚠ $target exists and is not a symlink - skipping"
     return 1
@@ -129,7 +138,7 @@ remove_notification_launch_agent() {
 
 notification_launch_agent_is_unloaded() {
   local launchctl_label="$1"
-  local print_output
+  local print_output print_status=0 program
   local target="$HOME/Library/LaunchAgents/$launchctl_label.plist"
   if [ -e "$target" ] || [ -L "$target" ]; then
     return 1
@@ -137,16 +146,15 @@ notification_launch_agent_is_unloaded() {
   if ! command -v launchctl >/dev/null 2>&1; then
     return 1
   fi
-  print_output="$(launchctl print "gui/$(id -u)/$launchctl_label" 2>&1)" || true
-  if [[ "$print_output" == *"Could not find service"* ]]; then
+  print_output="$(launchctl print "gui/$(id -u)/$launchctl_label" 2>&1)" || print_status=$?
+  if [ "$print_status" -ne 0 ] && [[ "$print_output" == *"Could not find service"* ]]; then
     return 0
   fi
-  if launchctl bootout "gui/$(id -u)/$launchctl_label" >/dev/null 2>&1; then
-    print_output="$(launchctl print "gui/$(id -u)/$launchctl_label" 2>&1)" || true
-    [[ "$print_output" == *"Could not find service"* ]]
-  else
-    return 1
-  fi
+  # A label alone is not ownership: a removed plist may belong to another checkout.
+  [ "$print_status" -eq 0 ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ] || return 1
+  program="$(printf '%s\n' "$print_output" | awk -F ' = ' '$1 ~ /^[[:space:]]*program$/ { print $2; exit }')"
+  [ "$program" = "$DOTFILES_DIR/bin/${launchctl_label#com.zkoppert.}" ] || return 1
+  bootout_notification_launch_agent "$launchctl_label"
 }
 
 notification_launch_agents_absent() {
@@ -180,7 +188,8 @@ fi
 if [ "$notification_launch_agents_ready" = true ]; then
   ensure_notification_worker_runtime || true
 else
-  echo "⚠ Notification worker runtime provisioning skipped until notification launch agents are confirmed unloaded"
+  echo "⚠ Installation stopped: notification launch agents are not confirmed unloaded" >&2
+  exit 1
 fi
 
 # Symlink copilot instructions for Copilot CLI

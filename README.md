@@ -4,7 +4,11 @@ My personal configuration for macOS and GitHub Codespaces.
 
 ## What does the installer configure?
 
-`install.sh` links the repository's Copilot instructions, local skills, and CLI wrappers into their user-level locations. It also provisions the pinned notification-worker Python runtime at `~/.local/share/dotfiles/notification-workers/venv`, verifies `PyYAML` plus `ruamel.yaml`, and removes any existing dotfiles-owned GitHub notification launch-agent symlinks so they stay unloaded until a later attended activation step. It can also install these tools from a private skill catalog:
+`install.sh` links the repository's Copilot instructions, local skills, and CLI wrappers into their user-level locations. Before changing worker links or the runtime, it unloads existing dotfiles-owned GitHub notification LaunchAgents and verifies they are absent. If `unload` leaves an owned service registered, it tries `bootout` and verifies again. An unverified teardown stops installation with a nonzero exit; foreign links and services are not stopped or replaced. Nonstandard checkouts do not stop existing services.
+
+Once those checks pass, the installer provisions `~/.local/share/dotfiles/notification-workers/venv` and verifies the pinned `PyYAML` and `ruamel.yaml` dependencies. It removes owned notification-agent symlinks and never loads their hourly schedules. Activation remains a separate attended step. See the [GitHub notification worker documentation](.copilot/skills/triage-notifications/README.md) for health inspection and a fresh-file backfill preview. Slack intake is not included.
+
+The installer can also install these tools from a private skill catalog:
 
 | Tool | Problem it addresses |
 | --- | --- |

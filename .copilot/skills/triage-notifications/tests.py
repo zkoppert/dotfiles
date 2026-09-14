@@ -8,7 +8,6 @@ integration-style tests.
 
 from __future__ import annotations
 
-import datetime
 import json
 import os
 import sqlite3
@@ -24,6 +23,19 @@ import yaml
 @pytest.fixture(autouse=True)
 def _isolate_notification_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(triage, "DEFAULT_LEDGER_PATH", tmp_path / "ledger.sqlite")
+
+    # Run-level fixtures provide a changing inbox feed. The real single-thread
+    # REST adapter and request budget are exercised separately below.
+    def thread_snapshot(thread_id, *, run_gh):
+        return next((n for n in triage.fetch_notifications() if str(n.get("id") or "") == thread_id), None)
+
+    monkeypatch.setattr(triage, "fetch_notification_thread", thread_snapshot)
+    real_run = subprocess.run
+    def deny_unmocked_external_commands(command, *args, **kwargs):
+        if isinstance(command, (list, tuple)) and Path(command[0]).name in {"gh", "copilot", "launchctl", "osascript", "terminal-notifier"}:
+            pytest.fail(f"Unmocked external command: {Path(command[0]).name}")
+        return real_run(command, *args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", deny_unmocked_external_commands)
 
 
 # ----------------------------------------------------------------------
@@ -93,6 +105,14 @@ def _notif(reason: str, **overrides) -> dict:
     }
     base.update(overrides)
     return base
+
+
+def _terminal_notif(thread_id: str, number: int, *, reason="review_requested", repo="o/r") -> dict:
+    return _notif(
+        reason, id=thread_id, updated_at="2026-07-01T12:00:00Z",
+        subject={"title": "Tracked work", "type": "PullRequest", "url": f"https://api.github.com/repos/{repo}/pulls/{number}"},
+        repository={"full_name": repo},
+    )
 
 
 def test_classify_mention_goes_to_q1():
@@ -1630,7 +1650,10 @@ def _gh_returns(responses: dict[str, str]):
             after = [a for a in cmd[idx + 1 :] if not a.startswith("-")]
             if after:
                 path = after[0]
-        text = responses.get(path or "", "")
+        # Empty comment collections are valid paginated API responses, not
+        # malformed empty stdout. Failure scenarios explicitly raise or override.
+        default = "[]" if path and path.endswith(("/comments", "/reviews")) else ""
+        text = responses.get(path or "", default)
         return subprocess.CompletedProcess(cmd, 0, stdout=text, stderr="")
 
     return fake_run
@@ -1874,7 +1897,72 @@ def test_run_marks_done_ready_terminal_item_without_notifications(todo_file):
     updated = yaml.safe_load(todo_file.read_text())
     assert stats.marked_done == 1
     assert updated["done"][0]["notification"]["marked_done"] is True
-    assert any("/notifications/threads/done-1" in " ".join(call) for call in delete_calls)
+    assert delete_calls == []
+    ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
+    assert ledger.notification_record(source_id="done-1", canonical_artifact=None)["clear_state"] == "succeeded"
+    before = todo_file.read_bytes()
+    with patch("triage.subprocess.run", side_effect=fake_run):
+        replay = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+    assert replay.marked_done == 0
+    assert todo_file.read_bytes() == before
+    assert delete_calls == []
+
+
+@pytest.mark.parametrize("failed_clear", [False, True])
+@pytest.mark.parametrize("reason", ["mention", "assign", "review_requested"])
+def test_run_settles_absent_dropped_threads_without_delete(todo_file, failed_clear, reason):
+    item = {
+        "id": "terminal-ask",
+        "status": "dropped",
+        "notification": {
+            "thread_id": "absent-1",
+            "reason": reason,
+            "url": "https://github.com/o/r/pull/9",
+            "captured_at": "2026-07-02T12:00:00Z",
+        },
+    }
+    todo_file.write_text(yaml.safe_dump({"inbox": [item], "prioritized": {}, "done": []}))
+    ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH)
+    if failed_clear:
+        triage._ledger_capture(
+            ledger, dry_run=False, thread_id="absent-1",
+            canonical_artifact=item["notification"]["url"], classification="actionable",
+            worker="test", terminal_disposition="irrelevant", queue_clear=True,
+        )
+        ledger.record_clear_failure(source_id="absent-1", canonical_artifact=None, error="timeout")
+    with patch("triage.get_my_login", return_value="zkoppert"), patch(
+        "triage.fetch_notifications", return_value=[]
+    ), patch("triage.mark_thread_done") as delete:
+        stats = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify", "--no-prune"]))
+    assert stats.errors == []
+    assert stats.marked_done == 1
+    assert ledger.pending_github_clears() == []
+    updated = yaml.safe_load(todo_file.read_text())["inbox"][0]["notification"]
+    assert updated["marked_done"] is True
+    assert updated["terminal_disposition"] == "irrelevant"
+    delete.assert_not_called()
+
+
+@pytest.mark.parametrize("lookup_error", [
+    subprocess.CalledProcessError(1, "gh", stderr="HTTP 500"),
+    subprocess.TimeoutExpired("gh", 20),
+])
+def test_run_does_not_settle_terminal_thread_after_lookup_failure(todo_file, lookup_error):
+    item = {
+        "id": "terminal-ask", "status": "done",
+        "notification": {"thread_id": "unverified-1", "reason": "mention"},
+    }
+    todo_file.write_text(yaml.safe_dump({"done": [item], "inbox": [], "prioritized": {}}))
+    with patch("triage.get_my_login", return_value="zkoppert"), patch(
+        "triage.fetch_notifications", side_effect=[[], lookup_error]
+    ), patch("triage.mark_thread_done") as delete:
+        stats = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify", "--no-prune"]))
+    assert stats.marked_done == 0
+    assert stats.errors
+    assert "marked_done" not in yaml.safe_load(todo_file.read_text())["done"][0]["notification"]
+    row = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH).pending_github_clears()[0]
+    assert row["clear_state"] == "failed"
+    delete.assert_not_called()
 
 
 def test_run_reopens_legacy_terminal_item_for_renewed_direct_mention(todo_file):
@@ -1921,6 +2009,7 @@ def test_run_reopens_legacy_terminal_item_for_renewed_direct_mention(todo_file):
         "thread_id": "1001",
         "reason": "mention",
         "captured_at": "2026-07-06T15:00:00Z",
+        "direct_ask": True,
     }
 
 
@@ -2944,12 +3033,13 @@ def test_run_comment_history_failure_routes_direct_mention_to_q1(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 0
+    assert stats.added_q1 == 1
     assert stats.added_inbox == 0
+    assert any("incomplete comment history" in error for error in stats.errors)
     data = yaml.safe_load(todo_file.read_text())
     assert data["inbox"] == []
-    assert data["prioritized"]["q1_do_first"] == []
-    notify_mock.assert_not_called()
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["direct_ask"] is True
+    notify_mock.assert_called_once()
 
 
 def test_run_comment_history_incomplete_defers_until_recovery(todo_file):
@@ -3250,7 +3340,7 @@ def test_retry_pending_github_clears_marks_missing_thread_cleared_after_revalida
     current = _notif("review_requested", id=notif["id"], updated_at="2026-07-03T12:00:00Z")
     with patch(
         "triage.fetch_notifications",
-        side_effect=[[current], [current], [current], []],
+        side_effect=[[current], []],
     ), patch(
         "triage.shared_comment_notification_snapshot",
         return_value=triage.CommentNotificationSnapshot(None, None, False, True),
@@ -3409,6 +3499,7 @@ def test_run_dry_run_does_not_write(todo_file):
     ) as notify_mock:
         args = triage.parse_args(["--todo-file", str(todo_file), "--dry-run"])
         stats = triage.run(args)
+    assert stats.added_q1 == 1
     assert todo_file.read_text() == before
     assert not triage.DEFAULT_LEDGER_PATH.exists()
     notify_mock.assert_not_called()
@@ -4068,9 +4159,11 @@ def test_run_marks_done_on_completed(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
 
-    assert stats.dropped == 1
-    assert stats.marked_done == 0
-    assert any("/notifications/threads/777" in p for p in delete_paths)
+    assert stats.dropped == 0
+    assert stats.marked_done == 1
+    assert delete_paths.count("/notifications/threads/777") == 1
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["marked_done"] is True
 
 
 def test_run_rechecks_terminal_clearance_before_marking_done(todo_file):
@@ -4932,7 +5025,10 @@ def test_run_reports_prunes_from_applied_deltas_after_manual_edit(todo_file):
             )
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    with patch("triage.subprocess.run", side_effect=fake_run):
+    with patch("triage.subprocess.run", side_effect=fake_run), patch(
+        "triage._current_notification_for_clearance",
+        return_value=_terminal_notif("thr-42", 42, reason="author", repo="github/example"),
+    ):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
 
@@ -5152,6 +5248,7 @@ def test_run_bucket_drop_handles_mark_done_timeout(todo_file):
     # not just CalledProcessError. Otherwise a slow GitHub DELETE crashes
     # the whole run before the YAML write happens.
     notif = _notif("ci_activity", id="555")
+    notif["subject"].pop("latest_comment_url")
 
     def fake_run(cmd, *args, **kwargs):
         if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
@@ -5211,7 +5308,9 @@ def test_run_marks_done_on_completed_handles_timeout(todo_file):
             cmd, 0, stdout=responses.get(path, ""), stderr=""
         )
 
-    with patch("triage.subprocess.run", side_effect=fake_run):
+    with patch("triage.subprocess.run", side_effect=fake_run), patch(
+        "triage.fetch_notifications", return_value=[_terminal_notif("777", 777)]
+    ):
         args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
     assert any(
@@ -6131,9 +6230,8 @@ def test_classify_drop_sets_archive_to_done_when_zack_is_pr_author():
     assert c.archive_to_done is True
 
 
-def test_classify_drop_does_not_archive_when_zack_is_not_author():
-    """A closed/merged PR somebody else authored still drops, but never
-    archives - those aren't my completed work."""
+def test_classify_closed_assignment_is_urgent_without_archiving_others():
+    """A closed subject does not revoke a direct ask or become my shipped work."""
     c = triage.classify(
         _read_notif("assign"),
         my_login="zkoppert",
@@ -6141,7 +6239,7 @@ def test_classify_drop_does_not_archive_when_zack_is_not_author():
         comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "andimiya",
     )
-    assert c.bucket == triage.BUCKET_DROP
+    assert c.bucket == triage.BUCKET_Q1
     assert c.archive_to_done is False
 
 
@@ -6749,6 +6847,7 @@ def test_current_notification_is_clearable_allows_new_passive_after_terminal_bou
     )
     current = _notif("ci_activity", id="thread-passive", updated_at="2026-07-03T12:00:00Z")
     current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/4"
+    current["subject"].pop("latest_comment_url")
     current["repository"] = {"full_name": "o/r"}
     with patch("triage.fetch_notifications", return_value=[current]):
         assert triage._current_notification_is_clearable(
@@ -6927,8 +7026,11 @@ def test_current_notification_is_clearable_rejects_newer_review_requested_after_
         updated_at="2026-07-03T12:00:00Z",
     )
     current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/3"
+    current["subject"].pop("latest_comment_url")
     current["repository"] = {"full_name": "o/r"}
-    with patch("triage.fetch_notifications", return_value=[current]):
+    with patch("triage.fetch_notifications", return_value=[current]), patch(
+        "triage.run_gh", return_value=json.dumps({"state": "open"})
+    ):
         assert (
             triage._current_notification_is_clearable(
                 url=artifact,
@@ -7120,11 +7222,10 @@ def test_prune_archives_self_authored_pr_to_done():
 
 
 def test_prune_does_not_archive_non_author_pr():
-    """A tracked PR with reason!=author (e.g., mention, review_requested)
-    still drops on close but must not get archived as my work."""
+    """A stale review request can drop without archiving someone else's work."""
     stats = triage.TriageStats()
-    entry = _stale_self_authored_entry("mention-pr", 99)
-    entry["notification"]["reason"] = "mention"
+    entry = _stale_self_authored_entry("review-pr", 99)
+    entry["notification"]["reason"] = "review_requested"
     data = {"inbox": [entry], "prioritized": {}, "done": []}
     with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
         "triage.mark_thread_done"
@@ -7839,7 +7940,7 @@ def test_dependabot_bump_classify_skips_mark_done():
         "chore(dev-docker): bump node from 26.1.0-bookworm to 26.1.0-trixie",
         "ci(github-actions): bump the dev-ci-tools group across 1 directory",
     ):
-        c = _classify(_repo_notif("subscribed", repo="some-org/x", title=title))
+        c = _classify(_repo_notif("subscribed", repo="some-org/x", title=title), author="dependabot[bot]")
         assert c.bucket == triage.BUCKET_DROP, title
         assert c.skip_mark_done is True, title
 
@@ -8012,7 +8113,8 @@ def test_ledger_migrates_legacy_source_type_schema(tmp_path: Path):
     ]
 
 
-def test_runtime_preflight_wrapper_fails_on_missing_python_modules(tmp_path: Path):
+@pytest.mark.parametrize("worker_name", ["notification-triage", "triage-dependabot"])
+def test_runtime_preflight_wrapper_fails_on_missing_python_modules(tmp_path: Path, worker_name):
     home = tmp_path / "home"
     runtime = home / ".local/share/dotfiles/notification-workers/venv/bin/python3"
     runtime.parent.mkdir(parents=True)
@@ -8026,7 +8128,7 @@ def test_runtime_preflight_wrapper_fails_on_missing_python_modules(tmp_path: Pat
         encoding="utf-8",
     )
     runtime.chmod(0o755)
-    wrapper = Path(__file__).resolve().parents[3] / "bin" / "notification-triage"
+    wrapper = Path(__file__).resolve().parents[3] / "bin" / worker_name
     env = {"HOME": str(home), "PATH": "/usr/bin:/bin"}
 
     result = subprocess.run(
@@ -8036,6 +8138,30 @@ def test_runtime_preflight_wrapper_fails_on_missing_python_modules(tmp_path: Pat
     assert result.returncode == 1
     assert "import preflight" in result.stderr
     assert "yaml" in result.stderr
+
+
+@pytest.mark.parametrize("worker_name", ["notification-triage", "triage-dependabot"])
+def test_wrapper_uses_pinned_runtime_with_spaces_in_home(tmp_path, worker_name):
+    home = tmp_path / "home with spaces"
+    runtime = home / ".local/share/dotfiles/notification-workers/venv/bin/python3"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(
+        '#!/bin/sh\n'
+        'printf "%s\\n" "$*" >> "$HOME/runtime-calls"\n'
+        'if [ "$1" = "-c" ]; then exit 0; fi\n'
+        'printf "pinned runtime executed\\n"\n',
+        encoding="utf-8",
+    )
+    runtime.chmod(0o755)
+    root = Path(__file__).resolve().parents[3]
+    wrapper = root / "bin" / worker_name
+    result = subprocess.run([str(wrapper), "--help"], env={"HOME": str(home), "PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "pinned runtime executed\n"
+    script = ".copilot/skills/triage-notifications/triage.py" if worker_name == "notification-triage" else ".copilot/skills/triage-dependabot/triage_dependabot.py"
+    assert (home / "runtime-calls").read_text().splitlines() == [
+        "-c import yaml, ruamel.yaml", f"{root / script} --help",
+    ]
 
 
 def test_install_sh_does_not_link_notification_agents_yet(tmp_path: Path):
@@ -8285,7 +8411,7 @@ def test_preview_backfill_ledger_reconciles_tracker_rows(tmp_path: Path, monkeyp
         {
             "source_id": "notif-1",
             "tracker_item_id": "tracked-one",
-            "tracker_section": "inbox",
+            "tracker_section": "prioritized.q1_do_first",
         }
     ]
     snapshot = ledger.health_snapshot(worker="notification-triage")
@@ -8884,18 +9010,15 @@ def test_run_q4_item_records_irrelevant_and_clears_notification(todo_file: Path)
             }
         )(cmd, *args, **kwargs)
 
-    with patch("triage.subprocess.run", side_effect=fake_run):
-        args = triage.parse_args(
-            [
-                "--todo-file",
-                str(todo_file),
-                "--no-notify",
-            ]
-        )
+    with patch("triage.subprocess.run", side_effect=fake_run), patch(
+        "triage.fetch_notifications", return_value=[_terminal_notif("q4-1", 1)]
+    ):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
 
+    assert stats.errors == []
     assert stats.marked_done == 1
-    assert any("/notifications/threads/q4-1" in path for path in delete_paths)
+    assert delete_paths.count("/notifications/threads/q4-1") == 1
     data = yaml.safe_load(todo_file.read_text())
     item = data["prioritized"]["q4_eliminate"][0]
     assert item["notification"]["marked_done"] is True
@@ -8945,14 +9068,10 @@ def test_run_preserves_clear_failure_for_dropped_item(todo_file: Path):
             }
         )(cmd, *args, **kwargs)
 
-    with patch("triage.subprocess.run", side_effect=fake_run):
-        args = triage.parse_args(
-            [
-                "--todo-file",
-                str(todo_file),
-                "--no-notify",
-            ]
-        )
+    with patch("triage.subprocess.run", side_effect=fake_run), patch(
+        "triage.fetch_notifications", return_value=[_terminal_notif("q4-fail", 2)]
+    ):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
 
     assert stats.marked_done == 0
@@ -9009,7 +9128,7 @@ def test_run_retries_pending_clear_without_duplicating_tracker_item(todo_file: P
         canonical_artifact="https://github.com/o/r/pull/9",
     )
     delete_paths: list[str] = []
-    notif = _notif("mention", id="retry-1")
+    notif = _terminal_notif("retry-1", 9)
 
     def fake_run(cmd, *args, **kwargs):
         if cmd[:2] == ["gh", "api"] and "-X" in cmd and "DELETE" in cmd:
@@ -9081,18 +9200,15 @@ def test_run_clears_dependabot_tracked_item_when_dropped(todo_file: Path):
             }
         )(cmd, *args, **kwargs)
 
-    with patch("triage.subprocess.run", side_effect=fake_run):
-        args = triage.parse_args(
-            [
-                "--todo-file",
-                str(todo_file),
-                "--no-notify",
-            ]
-        )
+    with patch("triage.subprocess.run", side_effect=fake_run), patch(
+        "triage.fetch_notifications", return_value=[_terminal_notif("dep-couple-1", 12)]
+    ):
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
         stats = triage.run(args)
 
+    assert stats.errors == []
     assert stats.marked_done == 1
-    assert any("/notifications/threads/dep-couple-1" in path for path in delete_paths)
+    assert delete_paths.count("/notifications/threads/dep-couple-1") == 1
     ledger = triage.NotificationLedger(ledger_file)
     rows = ledger._rows(
         "SELECT clear_state, terminal_disposition FROM notifications WHERE source_id = ?",
@@ -9485,3 +9601,220 @@ def test_run_prunes_stale_url_only_terminal_row_with_canonical_artifact(todo_fil
             "tracker_item_id": "stale-term",
         }
     ]
+
+
+@pytest.mark.parametrize("worker_name", ["triage", "triage_dependabot"])
+def test_worker_thread_refresh_uses_single_thread_rest_response(worker_name, monkeypatch):
+    import importlib
+    from notification_worker_common import fetch_notification_thread
+
+    worker = importlib.import_module(worker_name)
+    notification = _terminal_notif("thread-1", 1)
+    requests = []
+    def run_gh(command, **kwargs):
+        requests.append(command)
+        return json.dumps(notification)
+
+    monkeypatch.setattr(worker, "fetch_notification_thread", fetch_notification_thread)
+    monkeypatch.setattr(worker, "run_gh", run_gh)
+    with patch.object(worker, "fetch_notifications", side_effect=AssertionError("unexpected full-inbox refetch")):
+        assert worker._current_notification_for_clearance(thread_id="thread-1") == notification
+    assert requests == [["api", "/notifications/threads/thread-1", "--method", "GET"]]
+
+
+@pytest.mark.parametrize("payload", ["", "null", "[]", "{}", '{"id":"wrong"}', "not json"])
+def test_thread_refresh_rejects_malformed_payload_instead_of_confirming_absence(payload):
+    from notification_worker_common import fetch_notification_thread
+    with pytest.raises(json.JSONDecodeError):
+        fetch_notification_thread("thread-1", run_gh=lambda *_a, **_k: payload)
+
+
+def test_thread_refresh_confirms_only_http_404_absence():
+    from notification_worker_common import fetch_notification_thread
+    missing = subprocess.CalledProcessError(1, "gh", stderr="gh: Not Found (HTTP 404)")
+    with patch("triage.run_gh", side_effect=missing):
+        assert fetch_notification_thread("thread-1", run_gh=triage.run_gh) is None
+    for failure in (
+        subprocess.CalledProcessError(1, "gh", stderr="HTTP 500"),
+        subprocess.CalledProcessError(1, "gh", stderr="HTTP 403"),
+        subprocess.TimeoutExpired("gh", 20),
+    ):
+        with patch("triage.run_gh", side_effect=failure), pytest.raises(type(failure)):
+            fetch_notification_thread("thread-1", run_gh=triage.run_gh)
+
+
+def test_policy_drop_pass_reads_inventory_once_and_refreshes_only_candidate_threads(todo_file, monkeypatch):
+    from notification_worker_common import fetch_notification_thread
+    notifications = [_terminal_notif(str(i), i, reason="ci_activity") for i in range(1, 201)]
+    remaining = {n["id"]: n for n in notifications}
+    inventory_reads = 0
+    thread_reads = 0
+    deletes = []
+
+    def run_gh(command, **kwargs):
+        nonlocal inventory_reads, thread_reads
+        if command[:2] == ["api", "/user"]:
+            return json.dumps({"login": "zkoppert"})
+        if command[:2] == ["api", "/notifications?all=true"]:
+            inventory_reads += 1
+            return json.dumps([notifications])
+        if command[:3] == ["api", "-X", "DELETE"]:
+            thread_id = command[-1].rsplit("/", 1)[-1]
+            record = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH, readonly=True).notification_record(
+                source_id=thread_id, canonical_artifact=None,
+            )
+            assert record["terminal_disposition"] == "irrelevant"
+            assert record["clear_state"] == "pending"
+            deletes.append(remaining.pop(thread_id))
+            return ""
+        if command[:1] == ["api"] and command[1].startswith("/notifications/threads/"):
+            thread_reads += 1
+            return json.dumps(remaining[command[1].rsplit("/", 1)[-1]])
+        raise AssertionError(command)
+
+    monkeypatch.setattr(triage, "fetch_notification_thread", fetch_notification_thread)
+    monkeypatch.setattr(triage, "run_gh", run_gh)
+    stats = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify", "--no-prune"]))
+    assert stats.errors == []
+    assert stats.dropped == len(deletes) == 200
+    assert inventory_reads == 1
+    assert thread_reads == 200
+    assert remaining == {}
+    ledger = triage.NotificationLedger(triage.DEFAULT_LEDGER_PATH, readonly=True)
+    assert ledger.health_snapshot(worker="notification-triage")["notification_counts"]["succeeded"] == 200
+
+
+@pytest.mark.parametrize("operation", [
+    "link_tracker", "record_terminal", "queue_clear", "record_clear_success",
+    "record_clear_failure", "record_comment_watermark",
+])
+def test_ledger_concurrent_first_writes_share_one_source_row(tmp_path, operation):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    ledger = triage.NotificationLedger(tmp_path / "ledger.sqlite")
+    barrier = Barrier(8)
+    arguments = {
+        "link_tracker": {"tracker_item_id": "todo-1", "tracker_section": "inbox"},
+        "record_terminal": {"terminal_disposition": "irrelevant"},
+        "queue_clear": {},
+        "record_clear_success": {},
+        "record_clear_failure": {"error": "fixture timeout"},
+        "record_comment_watermark": {"comment_watermark": json.dumps({"stream": "issue_comments", "ts": "2026-07-01T12:00:00Z", "id": 1})},
+    }
+    def write(_worker):
+        barrier.wait(timeout=10)
+        getattr(ledger, operation)(source_id="thread-1", canonical_artifact="https://github.com/o/r/pull/1", **arguments[operation])
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        list(workers.map(write, range(8)))
+    assert ledger._rows("SELECT source_id FROM notifications") == [{"source_id": "thread-1"}]
+
+
+def test_ledger_comment_watermarks_never_move_backwards(tmp_path):
+    ledger = triage.NotificationLedger(tmp_path / "ledger.sqlite")
+    def record(stream, stamp, comment_id):
+        ledger.record_comment_watermark(source_id="thread-1", canonical_artifact=None, comment_watermark=json.dumps({"stream": stream, "ts": stamp, "id": comment_id}))
+    record("issue_comments", "2026-07-02T12:00:00Z", 8)
+    record("pull_reviews", "2026-07-01T12:00:00Z", 3)
+    record("issue_comments", "2026-07-01T12:00:00Z", 9)
+    record("issue_comments", "2026-07-02T12:00:00Z", 7)
+    watermarks = json.loads(ledger.comment_watermark(source_id="thread-1", canonical_artifact=None))
+    assert watermarks == {
+        "issue_comments": {"ts": "2026-07-02T12:00:00Z", "id": 8},
+        "pull_reviews": {"ts": "2026-07-01T12:00:00Z", "id": 3},
+    }
+
+
+def test_run_recovers_local_metadata_after_remote_clear_and_tracker_write_crash(todo_file, monkeypatch):
+    from notification_worker_common import fetch_notification_thread
+    notification = _terminal_notif("crash-1", 1, reason="mention")
+    item = {
+        "id": "terminal-ask", "status": "dropped",
+        "notification": {"thread_id": "crash-1", "reason": "mention", "captured_at": notification["updated_at"]},
+    }
+    todo_file.write_text(yaml.safe_dump({"inbox": [item], "prioritized": {}, "done": []}))
+    present = True
+    deletes = 0
+    def run_gh(command, **kwargs):
+        nonlocal present, deletes
+        if command[:2] == ["api", "/user"]:
+            return json.dumps({"login": "zkoppert"})
+        if command[:2] == ["api", "/notifications?all=true"]:
+            return json.dumps([[notification]] if present else [])
+        if command[:3] == ["api", "-X", "DELETE"]:
+            deletes += 1
+            present = False
+            return ""
+        if command[:2] == ["api", "/notifications/threads/crash-1"]:
+            if present:
+                return json.dumps(notification)
+            raise subprocess.CalledProcessError(1, "gh", stderr="HTTP 404")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(triage, "fetch_notification_thread", fetch_notification_thread)
+    monkeypatch.setattr(triage, "run_gh", run_gh)
+    args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify", "--no-prune"])
+    with patch("triage.apply_todo_mutations_with_lock", side_effect=OSError("crash after DELETE")):
+        first = triage.run(args)
+    assert first.errors and deletes == 1
+    assert "marked_done" not in yaml.safe_load(todo_file.read_text())["inbox"][0]["notification"]
+    second = triage.run(args)
+    assert second.errors == []
+    assert second.marked_done == 1
+    assert deletes == 1
+    assert yaml.safe_load(todo_file.read_text())["inbox"][0]["notification"]["marked_done"] is True
+
+
+@pytest.mark.parametrize("worker_name", ["triage", "triage_dependabot"])
+@pytest.mark.parametrize("payload", ["not json", "null", "{}", '[1]', '[[null]]'])
+def test_worker_health_does_not_report_success_for_malformed_intake(todo_file, monkeypatch, worker_name, payload):
+    import importlib
+    worker = importlib.import_module(worker_name)
+    ledger_path = todo_file.parent / f"{worker_name}.sqlite"
+    ledger = triage.NotificationLedger(ledger_path)
+    ledger.record_health_snapshot(worker="notification-triage" if worker_name == "triage" else "triage-dependabot", snapshot={"last_success_at": "2026-07-01T12:00:00Z"})
+    monkeypatch.setattr(worker, "DEFAULT_LEDGER_PATH", ledger_path)
+    monkeypatch.setattr(worker, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(worker, "run_gh", lambda *_a, **_k: payload)
+    before = todo_file.read_bytes()
+    stats = worker.run(worker.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+    assert stats.errors
+    assert todo_file.read_bytes() == before
+    snapshot = ledger.health_snapshot(worker="notification-triage" if worker_name == "triage" else "triage-dependabot")
+    assert snapshot["last_success_at"] == "2026-07-01T12:00:00Z"
+    assert snapshot["last_error"] == stats.errors[-1]
+    assert snapshot["last_error_at"]
+
+
+@pytest.mark.parametrize("target_exists", [False, True])
+def test_backfill_refuses_symlink_destinations_without_mutation(tmp_path, target_exists):
+    target = tmp_path / "another-ledger.sqlite"
+    if target_exists:
+        target.write_bytes(b"untouched ledger")
+        target.chmod(0o640)
+    output = tmp_path / "preview.sqlite"
+    output.symlink_to(target)
+    with patch("triage.get_my_login", side_effect=AssertionError("unexpected GitHub read")):
+        stats = triage.preview_backfill_ledger(triage.parse_args(["--dry-run", "--backfill", "--backfill-ledger", str(output)]))
+    assert stats.errors == ["backfill requires a fresh non-production --backfill-ledger path"]
+    assert output.is_symlink()
+    assert target.exists() is target_exists
+    if target_exists:
+        assert target.read_bytes() == b"untouched ledger"
+        assert target.stat().st_mode & 0o777 == 0o640
+
+
+def test_backfill_does_not_overwrite_a_concurrently_created_destination(tmp_path, monkeypatch):
+    output = tmp_path / "preview.sqlite"
+    original_open = os.open
+    def concurrent_create(path, flags, mode=0o777):
+        assert Path(path) == output
+        output.write_bytes(b"another preview won")
+        output.chmod(0o640)
+        return original_open(path, flags, mode)
+    monkeypatch.setattr(triage.os, "open", concurrent_create)
+    with patch("triage.get_my_login", side_effect=AssertionError("unexpected GitHub read")):
+        stats = triage.preview_backfill_ledger(triage.parse_args(["--dry-run", "--backfill", "--backfill-ledger", str(output)]))
+    assert stats.errors and "cannot create fresh backfill ledger" in stats.errors[0]
+    assert output.read_bytes() == b"another preview won"
+    assert output.stat().st_mode & 0o777 == 0o640

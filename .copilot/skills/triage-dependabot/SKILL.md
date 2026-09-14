@@ -60,8 +60,9 @@ upgrades or seeing a backlog of dependabot notifications.
    `flag-for-review` entry. Selecting it opens the PR URL. Routine actions,
    already tracked flags, no-op runs, and dry runs stay silent.
 
-A launchd job (`com.zkoppert.triage-dependabot.plist`) runs this hourly,
-24x7. This skill is for ad-hoc runs in between.
+The launchd definition (`com.zkoppert.triage-dependabot.plist`) schedules
+hourly runs, 24x7, but the installer leaves it unloaded. Live activation and
+migration require a separate attended step; use fixtures for validation.
 
 ## How to run
 

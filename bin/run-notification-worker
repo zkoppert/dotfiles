@@ -41,7 +41,7 @@ if [ ! -x "$runtime_python" ]; then
 fi
 
 preflight_error=""
-if ! preflight_error="$($runtime_python -c 'import yaml, ruamel.yaml' 2>&1 >/dev/null)"; then
+if ! preflight_error="$("$runtime_python" -c 'import yaml, ruamel.yaml' 2>&1 >/dev/null)"; then
   message="${worker}: pinned runtime failed import preflight at $runtime_python: ${preflight_error:-missing PyYAML or ruamel.yaml}"
   echo "$message" >&2
   exit 1

@@ -10,8 +10,9 @@ second run produces no duplicate todos and no spurious mark-dones.
 
 ## What problem this solves
 
-I get a lot of GitHub notifications and miss the important ones. This
-tool runs hourly, 24x7, and does an aggressive "bulk triage": it drops
+I get a lot of GitHub notifications and miss the important ones. The
+configured schedule is hourly, 24x7, but stays unloaded until attended activation.
+Each run does an aggressive "bulk triage": it drops
 the passive subscription noise (and clears those GitHub notifications),
 routes direct asks into Q1, keeps ordinary review requests in Q2 with a
 one-business-day escalation path, and leaves Dependabot bumps for a
@@ -39,7 +40,8 @@ The core policy is **KEEP_REASONS default-drop**: only directed,
 personal-action reasons survive. Everything else is passive subscription
 noise that drops and is marked done on GitHub.
 
-`KEEP_REASONS = {review_requested, assign, author, mention, security_alert}`
+`KEEP_REASONS = {review_requested, assign, author, mention}`; the earlier
+Q1 route also protects `security_alert`.
 
 A series of protected reason routes runs before the noise-only drops:
 
@@ -149,18 +151,33 @@ When you move the todo to `status: done`, or move a GitHub-backed item to
 
 1. Record the terminal disposition in the local ledger (`completed` or
    `irrelevant`) before any GitHub mutation.
-2. DELETE `/notifications/threads/{thread_id}` to mark it done on GitHub
-   (removes it from the inbox and moves it to the Done tab).
+2. Re-read tracker ownership under its lock, check the current notification,
+   and DELETE `/notifications/threads/{thread_id}` only if it is still clearable.
+   A confirmed HTTP 404 settles an already-absent thread without DELETE;
+   timeouts, API errors, and malformed responses never count as absence.
 3. Add `marked_done: true`, `marked_done_at: <today>`, and the terminal
-   disposition to the `notification` block so it isn't cleared twice.
+   disposition to the `notification` block. If the remote clear succeeded but
+   the tracker write failed, the next run repairs this metadata without a
+   second DELETE.
+
+An unchanged direct mention or assignment can clear after explicit Q4/dropped
+or completed disposition, including an unchanged event at the recorded
+boundary. A renewed reason, timestamp, or comment requires revalidation rather
+than reusing the earlier clear decision. Failed clears stay in the ledger for
+retry. Each run lists the inbox once; clearance refreshes use the single-thread
+endpoint rather than repeatedly paginating the whole inbox.
 
 ## Schedule
 
-A launchd plist runs the tool every hour on the hour, 24x7. Logs land in
+The launchd plist defines an hourly schedule on the hour, 24x7. Logs land in
 `~/Library/Logs/notification-triage.log`.
 
-`./install.sh` removes any existing dotfiles-owned notification plist
-symlink from `~/Library/LaunchAgents`; it does not start the hourly job.
+`./install.sh` verifies that owned notification services are unloaded before
+provisioning the runtime or changing worker links. It uses `bootout` if an
+owned service remains registered after `unload`, and stops installation if
+absence cannot be verified. Foreign links and services are preserved.
+The installer removes owned plist symlinks from `~/Library/LaunchAgents` and
+never starts the hourly jobs.
 When you're ready to activate it in a separate attended step, recreate the
 symlink and run:
 
@@ -178,9 +195,15 @@ launchctl unload ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist
 
 The workers write a machine-readable health snapshot into the shared local
 ledger (`~/Library/Application Support/notification-workers/ledger.sqlite`).
-It records the last success/error timestamps plus the current counts for
-actionable items without tracker links, clear failures, stale dropped items,
-and the current notification totals.
+It records last success/error timestamps, actionable items without tracker
+links, clear failures, and dropped items not yet cleared. Notification totals
+are the last observed intake counts, not a new post-clear GitHub inventory.
+Read the stored JSON without modifying the database:
+
+```bash
+sqlite3 -readonly "$HOME/Library/Application Support/notification-workers/ledger.sqlite" \
+  "SELECT json_object('worker', worker, 'updated_at', updated_at, 'health', json(snapshot_json)) FROM notification_health;"
+```
 
 To preview a ledger backfill without mutating GitHub or `todo.yml`, run:
 
@@ -188,6 +211,13 @@ To preview a ledger backfill without mutating GitHub or `todo.yml`, run:
 ~/repos/dotfiles/bin/notification-triage --dry-run --backfill \
   --backfill-ledger /tmp/notification-backfill.sqlite
 ```
+
+The destination must be fresh and cannot be the production ledger or a symlink.
+The preview reconciles by thread ID first, then canonical GitHub URL, and
+records the projected tracker links and terminal decisions in that new file.
+It does not modify the current tracker or existing ledger, clear notifications,
+or activate schedules. Normal `--dry-run` does not write health or ledger state.
+A live migration is not part of this delivery.
 
 ## Pruning stale notifications
 
@@ -259,9 +289,11 @@ GitHub access:
 
 ## Privacy
 
-`todo.yml` is private, so real notification titles and URLs land in it.
-If you ever make that file public, redact entries with
-`source: github-notification` first.
+Both `todo.yml` and the local ledger contain notification titles, repository
+names, and URLs. The default ledger directory uses mode `0700`; the database
+and its SQLite sidecars use mode `0600`. Health snapshots contain the same
+private metadata. Do not publish the ledger or raw health output. If you make
+`todo.yml` public, redact notification-backed entries first.
 
 ## Tests
 

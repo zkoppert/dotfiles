@@ -16,6 +16,12 @@ class InstallScriptTest(unittest.TestCase):
     """Exercise install.sh in an isolated home directory."""
 
     RC_FILES = (".zshrc", ".bashrc", ".bash_profile")
+    NO_SERVICES = (
+        'if [ "$1" = "print" ]; then\n'
+        '  printf \'Could not find service "%s"\\n\' "$2" >&2\n'
+        '  exit 1\n'
+        'fi\n'
+    )
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -289,7 +295,7 @@ class InstallScriptTest(unittest.TestCase):
 
         launchctl = self.fake_bin / "launchctl"
         launchctl.write_text(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/launchctl.log\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/launchctl.log\"\n" + self.NO_SERVICES,
             encoding="utf-8",
         )
         launchctl.chmod(0o755)
@@ -430,7 +436,7 @@ class InstallScriptTest(unittest.TestCase):
         activity_log = self.home / "install.log"
         launchctl = self.fake_bin / "launchctl"
         launchctl.write_text(
-            "#!/bin/sh\nprintf '%s\\n' \"launchctl $*\" >> \"$HOME/install.log\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"launchctl $*\" >> \"$HOME/install.log\"\n" + self.NO_SERVICES,
             encoding="utf-8",
         )
         launchctl.chmod(0o755)
@@ -443,9 +449,12 @@ class InstallScriptTest(unittest.TestCase):
         dependabot_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.triage-dependabot.plist"
         dependabot_target.symlink_to(dependabot_plist)
 
-        self.run_installer()
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            self.run_installer()
+        self.assertIn("Installation stopped", error.exception.stderr)
 
         calls = activity_log.read_text(encoding="utf-8").splitlines()
+        self.assertNotIn(f"launchctl bootout gui/{os.getuid()}/com.zkoppert.notification-triage", calls)
         self.assertNotIn(f"launchctl unload {triage_target}", calls)
         self.assertIn(f"launchctl unload {dependabot_target}", calls)
         self.assertTrue(triage_target.is_symlink())
@@ -490,6 +499,83 @@ class InstallScriptTest(unittest.TestCase):
         self.assertFalse(triage_target.exists())
         self.assertFalse(dependabot_target.exists())
 
+    def exercise_owned_notification_bootout(
+        self, *, unload_status: int = 1, bootout_status: int = 0, removes: bool = True,
+    ) -> tuple[subprocess.CompletedProcess[str], list[Path], list[str]]:
+        requirements = self.repo / "python/notification-worker-requirements.txt"
+        requirements.parent.mkdir(parents=True)
+        requirements.write_text("PyYAML==6.0.2\nruamel.yaml==0.18.10\n", encoding="utf-8")
+        targets = []
+        for worker in ("notification-triage", "triage-dependabot"):
+            name = f"com.zkoppert.{worker}.plist"
+            source = self.repo / "LaunchAgents" / name
+            source.parent.mkdir(exist_ok=True)
+            source.write_text('<plist version="1.0"></plist>\n', encoding="utf-8")
+            target = self.home / "Library/LaunchAgents" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(source)
+            targets.append(target)
+        launchctl = self.fake_bin / "launchctl"
+        launchctl.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$*" >> "$HOME/launchctl.log"\n'
+            'marker="$HOME/bootedout-${2##*/}"\n'
+            'case "$1" in\n'
+            f'  unload) exit {unload_status} ;;\n'
+            '  print)\n'
+            '    if [ -e "$marker" ]; then\n'
+            '      printf \'Could not find service "%s"\\n\' "$2" >&2\n'
+            '      exit 1\n'
+            '    fi\n'
+            "    printf 'state = running\\n'\n"
+            '    exit 0 ;;\n'
+            '  bootout)\n'
+            + ('    : > "$marker"\n' if removes else '')
+            + f'    exit {bootout_status} ;;\n'
+            + 'esac\n',
+            encoding="utf-8",
+        )
+        launchctl.chmod(0o755)
+        result = subprocess.run(
+            [str(self.installer)], cwd=self.repo, env=self.env,
+            capture_output=True, text=True, check=False,
+        )
+        calls = (self.home / "launchctl.log").read_text().splitlines()
+        return result, targets, calls
+
+    def test_owned_running_notification_jobs_boot_out_when_unload_fails(self) -> None:
+        result, targets, calls = self.exercise_owned_notification_bootout()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for target in targets:
+            service = f"gui/{os.getuid()}/{target.stem}"
+            self.assertIn(f"bootout {service}", calls)
+            self.assertGreaterEqual(calls.count(f"print {service}"), 2)
+            self.assertFalse(target.is_symlink())
+        self.assertFalse(any(call.startswith("load ") for call in calls))
+        self.assertIn("Provisioned notification worker runtime", result.stdout)
+
+    def test_owned_notification_unload_success_still_requires_absence(self) -> None:
+        result, targets, calls = self.exercise_owned_notification_bootout(unload_status=0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sum(call.startswith("bootout ") for call in calls), 2)
+        self.assertTrue(all(not target.is_symlink() for target in targets))
+
+    def test_owned_notification_bootout_failure_stops_installation(self) -> None:
+        result, targets, calls = self.exercise_owned_notification_bootout(bootout_status=1, removes=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Installation stopped", result.stderr)
+        self.assertTrue(all(target.is_symlink() for target in targets))
+        self.assertEqual(sum(call.startswith("bootout ") for call in calls), 2)
+        self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/venv").exists())
+        self.assertFalse((self.home / "gh.log").exists())
+
+    def test_owned_notification_bootout_success_without_absence_stops_installation(self) -> None:
+        result, targets, _calls = self.exercise_owned_notification_bootout(removes=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Installation stopped", result.stderr)
+        self.assertTrue(all(target.is_symlink() for target in targets))
+        self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/venv").exists())
+
     def test_notification_jobs_stay_linked_when_unload_cannot_be_verified(self) -> None:
         requirements = self.repo / "python" / "notification-worker-requirements.txt"
         requirements.parent.mkdir(parents=True)
@@ -528,7 +614,9 @@ class InstallScriptTest(unittest.TestCase):
         dependabot_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.triage-dependabot.plist"
         dependabot_target.symlink_to(dependabot_plist)
 
-        self.run_installer()
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            self.run_installer()
+        self.assertIn("Installation stopped", error.exception.stderr)
 
         calls = activity_log.read_text(encoding="utf-8").splitlines()
         self.assertIn(f"launchctl unload {triage_target}", calls)
@@ -577,16 +665,14 @@ class InstallScriptTest(unittest.TestCase):
             [str(relocated_installer)],
             cwd=relocated,
             env=self.env,
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
         )
 
+        self.assertEqual(result.returncode, 1)
         self.assertFalse(activity_log.exists())
-        self.assertIn(
-            "Notification worker runtime provisioning skipped until notification launch agents are confirmed unloaded",
-            result.stdout,
-        )
+        self.assertIn("Installation stopped", result.stderr)
         self.assertTrue(triage_target.is_symlink())
         self.assertTrue(dependabot_target.is_symlink())
         self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/venv").exists())
@@ -604,7 +690,9 @@ class InstallScriptTest(unittest.TestCase):
             "printf '%s\\n' \"launchctl $*\" >> \"$HOME/install.log\"\n"
             'label_key=$(printf "%s" "$2" | tr "/" "_")\n'
             'marker="$HOME/bootedout-$label_key"\n'
+            'worker=${2##*/com.zkoppert.}\n'
             'if [ "$1" = "print" ]; then\n'
+            '  printf "program = %s\\n" "$HOME/repos/dotfiles/bin/$worker"\n'
             '  if [ -e "$marker" ]; then\n'
             "    printf '%s\\n' 'Could not find service \"$2\"'\n"
             "    exit 1\n"
@@ -673,7 +761,7 @@ class InstallScriptTest(unittest.TestCase):
         config.chmod(0o600)
         launchctl = self.fake_bin / "launchctl"
         launchctl.write_text(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/launchctl.log\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/launchctl.log\"\n" + self.NO_SERVICES,
             encoding="utf-8",
         )
         launchctl.chmod(0o755)
@@ -773,7 +861,7 @@ class InstallScriptTest(unittest.TestCase):
         plist_target.symlink_to(source_plist)
         launchctl = self.fake_bin / "launchctl"
         launchctl.write_text(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/launchctl.log\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/launchctl.log\"\n" + self.NO_SERVICES,
             encoding="utf-8",
         )
         launchctl.chmod(0o755)
@@ -853,7 +941,7 @@ class InstallScriptTest(unittest.TestCase):
         plist_target.symlink_to(source_plist)
         launchctl = self.fake_bin / "launchctl"
         launchctl.write_text(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/launchctl.log\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/launchctl.log\"\n" + self.NO_SERVICES,
             encoding="utf-8",
         )
         launchctl.chmod(0o755)

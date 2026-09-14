@@ -7,6 +7,7 @@ wrappers can rely on it after the pinned runtime passes import preflight.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import json
 import os
@@ -96,6 +97,42 @@ def review_request_escalates_at(captured_at: str | None) -> str | None:
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+def parse_notification_pages(raw: str) -> list[dict[str, Any]]:
+    if not raw.strip():
+        return []
+    pages = json.loads(raw)
+    if not isinstance(pages, list):
+        raise json.JSONDecodeError("Expected notification pages", raw, 0)
+    notifications = []
+    for page in pages:
+        entries = page if isinstance(page, list) else [page]
+        if any(not isinstance(entry, dict) for entry in entries):
+            raise json.JSONDecodeError("Expected notification objects", raw, 0)
+        notifications.extend(entries)
+    return notifications
+
+
+def fetch_notification_thread(thread_id: str, *, run_gh) -> dict[str, Any] | None:
+    """Read one thread; only an explicit HTTP 404 confirms absence."""
+    endpoint = f"/notifications/threads/{thread_id}"
+    try:
+        raw = run_gh(["api", endpoint, "--method", "GET"], timeout=20)
+    except subprocess.CalledProcessError as exc:
+        if re.search(r"\bHTTP 404\b", exc.stderr or ""):
+            return None
+        raise
+    current = json.loads(raw)
+    if (
+        not isinstance(current, dict)
+        or str(current.get("id") or "") != thread_id
+        or not isinstance(current.get("reason"), str)
+        or not current["reason"]
+        or not isinstance(current.get("subject"), dict)
+    ):
+        raise json.JSONDecodeError("Invalid notification thread response", raw, 0)
+    return current
 
 
 def _comment_stream_key_for_path(path: str, subject_type: str) -> str | None:
@@ -401,6 +438,12 @@ class NotificationLedger:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @contextlib.contextmanager
+    def _write(self):
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            yield conn
+
     def _create_notifications_table(self, conn: sqlite3.Connection) -> None:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS notifications (
@@ -471,7 +514,7 @@ class NotificationLedger:
         conn.execute("DROP TABLE notifications_legacy")
 
     def _ensure_schema(self) -> None:
-        with self._connect() as conn:
+        with self._write() as conn:
             columns = {
                 str(row[1]) for row in conn.execute("PRAGMA table_info(notifications)")
             }
@@ -627,8 +670,7 @@ class NotificationLedger:
         canonical_artifact = (
             normalize_github_url(canonical_artifact) or canonical_artifact
         )
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self._write() as conn:
             row_id = self._find_row_id(
                 conn,
                 source_id=source_id,
@@ -699,7 +741,7 @@ class NotificationLedger:
         canonical_artifact = (
             normalize_github_url(canonical_artifact) or canonical_artifact
         )
-        with self._connect() as conn:
+        with self._write() as conn:
             row_id = self._find_row_id(
                 conn,
                 source_id=source_id,
@@ -739,8 +781,7 @@ class NotificationLedger:
             normalize_github_url(canonical_artifact) or canonical_artifact
         )
         now = utcnow_iso()
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+        with self._write() as conn:
             row_id = self._find_row_id(
                 conn,
                 source_id=source_id,
@@ -793,7 +834,7 @@ class NotificationLedger:
             normalize_github_url(canonical_artifact) or canonical_artifact
         )
         now = utcnow_iso()
-        with self._connect() as conn:
+        with self._write() as conn:
             row_id = self._find_row_id(
                 conn,
                 source_id=source_id,
@@ -886,7 +927,7 @@ class NotificationLedger:
         canonical_artifact = (
             normalize_github_url(canonical_artifact) or canonical_artifact
         )
-        with self._connect() as conn:
+        with self._write() as conn:
             row_id = self._find_row_id(
                 conn,
                 source_id=source_id,
@@ -906,6 +947,14 @@ class NotificationLedger:
                 (row_id,),
             ).fetchone()
             state = _parse_comment_watermarks(str(row["comment_watermark"]) if row and row["comment_watermark"] else None)
+            previous = state.get(stream_key)
+            if previous is not None:
+                previous_stamp, previous_id = previous
+                if previous_stamp is not None:
+                    if stamp is None or (stamp, comment_id) <= (previous_stamp, previous_id):
+                        return
+                elif stamp is None and comment_id <= previous_id:
+                    return
             state[stream_key] = (stamp, comment_id)
             payload = {
                 stream: {
@@ -938,7 +987,7 @@ class NotificationLedger:
         canonical_artifact = (
             normalize_github_url(canonical_artifact) or canonical_artifact
         )
-        with self._connect() as conn:
+        with self._write() as conn:
             row_id = self._find_row_id(
                 conn,
                 source_id=source_id,
@@ -979,7 +1028,7 @@ class NotificationLedger:
         canonical_artifact = (
             normalize_github_url(canonical_artifact) or canonical_artifact
         )
-        with self._connect() as conn:
+        with self._write() as conn:
             row_id = self._find_row_id(
                 conn,
                 source_id=source_id,
@@ -1019,7 +1068,7 @@ class NotificationLedger:
         canonical_artifact = (
             normalize_github_url(canonical_artifact) or canonical_artifact
         )
-        with self._connect() as conn:
+        with self._write() as conn:
             row_id = self._find_row_id(
                 conn,
                 source_id=source_id,
@@ -1059,7 +1108,7 @@ class NotificationLedger:
         canonical_artifact = (
             normalize_github_url(canonical_artifact) or canonical_artifact
         )
-        with self._connect() as conn:
+        with self._write() as conn:
             row_id = self._find_row_id(
                 conn,
                 source_id=source_id,
@@ -1193,7 +1242,7 @@ class NotificationLedger:
 
     def record_health_snapshot(self, *, worker: str, snapshot: dict[str, Any]) -> None:
         now = utcnow_iso()
-        with self._connect() as conn:
+        with self._write() as conn:
             conn.execute(
                 """
                 INSERT INTO notification_health (worker, updated_at, snapshot_json)
