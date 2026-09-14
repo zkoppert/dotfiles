@@ -923,6 +923,8 @@ def web_url(notif: dict[str, Any]) -> str:
 def build_todo_entry(
     notif: dict[str, Any],
     classification: Classification,
+    *,
+    direct_ask: bool = False,
 ) -> dict[str, Any]:
     """Construct a todo.yml-shaped entry from a notification."""
     subject = notif.get("subject") or {}
@@ -948,6 +950,9 @@ def build_todo_entry(
             "captured_at": captured_at,
         },
     }
+
+    if direct_ask:
+        entry["notification"]["direct_ask"] = True
 
     if reason == "review_requested":
         escalates_at = review_request_escalates_at(captured_at)
@@ -1080,6 +1085,19 @@ def _is_untouched_q2_review_fallback(
     if not isinstance(notification, dict):
         return False
     return str(notification.get("reason") or "").lower() == "review_requested"
+
+
+def _notification_is_direct_ask(
+    notification: dict[str, Any],
+    *,
+    section: str | None = None,
+) -> bool:
+    if notification.get("direct_ask"):
+        return True
+    reason = str(notification.get("reason") or "").lower()
+    if reason in {"mention", "assign"}:
+        return True
+    return reason == "comment" and section == "prioritized.q1_do_first"
 
 
 def notification_has_new_activity(
@@ -2350,7 +2368,7 @@ def _stale_notification_prune_delta(
     if action != STALE_DROP:
         return None
     notification_reason = (notif.get("reason") or "").lower()
-    if section == "prioritized.q1_do_first" and notification_reason in {"mention", "assign"}:
+    if _notification_is_direct_ask(notif, section=section):
         return None
     archive_entry = None
     if parsed.get("kind") == "pr" and notification_reason == "author":
@@ -2831,6 +2849,8 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
             run_gh=run_gh,
             since=comment_since,
         )
+        if comment_snapshot is not None and not comment_snapshot.history_complete:
+            continue
 
         classification = classify(
             notif,
@@ -3000,26 +3020,15 @@ def run(args: argparse.Namespace) -> TriageStats:
         if comment_since is None and canonical_tracked is not None:
             comment_since = _bootstrap_comment_since(notif, canonical_tracked[1])
 
-        dependabot_bump = is_dependabot_bump(title)
         comment_snapshot = shared_comment_notification_snapshot(
             notif,
             my_login=my_login,
             run_gh=run_gh,
             since=comment_since,
         )
-        if (
-            comment_snapshot is not None
-            and not comment_snapshot.history_complete
-            and comment_snapshot.direct is not True
-            and not dependabot_bump
-        ):
+        if comment_snapshot is not None and not comment_snapshot.history_complete:
             if thread_id:
                 protected_actionable_thread_ids.add(thread_id)
-            if ledger is not None and thread_id and not ledger.readonly:
-                ledger.suspend_pending_clear(
-                    source_id=thread_id,
-                    canonical_artifact=canonical_url,
-                )
             continue
         if (
             thread_id
@@ -3095,13 +3104,12 @@ def run(args: argparse.Namespace) -> TriageStats:
                     "in_review",
                 }
             )
+            tracked_notification = tracked[1].get("notification") if tracked else None
             tracked_direct_ask = bool(
                 tracked_nonterminal
                 and tracked
-                and tracked[0] == "prioritized.q1_do_first"
-                and isinstance(tracked[1].get("notification"), dict)
-                and str(tracked[1]["notification"].get("reason") or "").lower()
-                in {"mention", "assign", "comment"}
+                and isinstance(tracked_notification, dict)
+                and _notification_is_direct_ask(tracked_notification, section=tracked[0])
             )
             subject_resolved = classification.bucket == BUCKET_DROP and (
                 "closed" in classification.reason or "merged" in classification.reason
@@ -3154,7 +3162,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 )
             ):
                 mutations.route_existing_q2.append(
-                    build_todo_entry(notif, classification)
+                    build_todo_entry(notif, classification, direct_ask=classification.direct_mention)
                 )
                 if tracked and tracker_terminal_disposition(tracked[1], tracked[0]):
                     reopened_thread_ids.add(thread_id)
@@ -3165,7 +3173,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                 and tracker_terminal_disposition(tracked[1], tracked[0])
             ):
                 mutations.route_existing_inbox.append(
-                    build_todo_entry(notif, classification)
+                    build_todo_entry(notif, classification, direct_ask=classification.direct_mention)
                 )
                 reopened_thread_ids.add(thread_id)
             elif classification.bucket == BUCKET_DROP and tracked:
@@ -3370,7 +3378,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     )
             continue
 
-        entry = build_todo_entry(notif, classification)
+        entry = build_todo_entry(notif, classification, direct_ask=classification.direct_mention)
         _ledger_capture(
             ledger,
             dry_run=args.dry_run,
@@ -3535,9 +3543,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                     if live_match is None:
                         continue
                     live_section, live_item = live_match
-                    live_disposition = tracker_terminal_disposition(live_item, live_section)
-                    if live_disposition != "completed":
-                        continue
                     live_notif = live_item.get("notification")
                     if not isinstance(live_notif, dict):
                         continue

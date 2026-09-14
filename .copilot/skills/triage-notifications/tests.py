@@ -2801,15 +2801,14 @@ def test_run_preserves_direct_mention_followed_by_newer_comment(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 1
+    assert stats.added_q1 == 0
     assert stats.added_inbox == 0
     assert stats.dropped == 0
     assert stats.unread == 0
-    notify_mock.assert_called_once_with(
-        "GitHub mention",
-        "Sample PR (zkoppert/example)",
-        "https://github.com/zkoppert/example/pull/42",
-    )
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["inbox"] == []
+    assert data["prioritized"]["q1_do_first"] == []
+    notify_mock.assert_not_called()
 
 
 def test_run_preserves_unread_direct_mention_before_title_drop(todo_file):
@@ -2931,11 +2930,12 @@ def test_run_comment_history_failure_routes_direct_mention_to_q1(todo_file):
         args = triage.parse_args(["--todo-file", str(todo_file)])
         stats = triage.run(args)
 
-    assert stats.added_q1 == 1
+    assert stats.added_q1 == 0
     assert stats.added_inbox == 0
     data = yaml.safe_load(todo_file.read_text())
-    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
-    notify_mock.assert_called_once()
+    assert data["inbox"] == []
+    assert data["prioritized"]["q1_do_first"] == []
+    notify_mock.assert_not_called()
 
 
 def test_run_comment_history_incomplete_defers_until_recovery(todo_file):
@@ -2956,6 +2956,8 @@ def test_run_comment_history_incomplete_defers_until_recovery(todo_file):
                 ]
             ]
         ),
+        "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
+        "/repos/zkoppert/example/pulls/42/reviews": json.dumps([]),
     }
     second_responses = {
         "/user": json.dumps({"login": "zkoppert"}),
@@ -2980,6 +2982,7 @@ def test_run_comment_history_incomplete_defers_until_recovery(todo_file):
             ]
         ),
         "/repos/zkoppert/example/pulls/42/comments": json.dumps([]),
+        "/repos/zkoppert/example/pulls/42/reviews": json.dumps([]),
     }
 
     def first_run(cmd, *args, **kwargs):
@@ -3011,6 +3014,7 @@ def test_run_comment_history_incomplete_defers_until_recovery(todo_file):
     assert stats.added_inbox == 0
     data = yaml.safe_load(todo_file.read_text())
     assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "1001"
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["direct_ask"] is True
     notify_mock.assert_called_once()
 
 
@@ -4909,6 +4913,34 @@ def test_stale_prune_collector_keeps_direct_mention_q1():
     ) as mark_done_mock:
         _collect_and_apply_stale_prunes(data, stats)
     assert len(data["prioritized"]["q1_do_first"]) == 1
+    assert stats.pruned_stale == 0
+    mark_done_mock.assert_not_called()
+
+
+def test_stale_prune_collector_keeps_direct_ask_q4():
+    stats = triage.TriageStats()
+    data = {
+        "inbox": [],
+        "prioritized": {
+            "q4_eliminate": [
+                {
+                    "id": "q4-direct",
+                    "source": "github-notification",
+                    "notification": {
+                        "url": "https://github.com/o/r/pull/102",
+                        "thread_id": "thr-102",
+                        "reason": "ci_activity",
+                        "direct_ask": True,
+                    },
+                }
+            ]
+        },
+    }
+    with patch("triage.run_gh", side_effect=_all_prs_merged), patch(
+        "triage.mark_thread_done"
+    ) as mark_done_mock:
+        _collect_and_apply_stale_prunes(data, stats)
+    assert len(data["prioritized"]["q4_eliminate"]) == 1
     assert stats.pruned_stale == 0
     mark_done_mock.assert_not_called()
 
@@ -7528,6 +7560,52 @@ def test_preview_backfill_ledger_reconciles_tracker_rows(tmp_path: Path, monkeyp
     assert snapshot["current_notification_count"] == 1
 
 
+def test_preview_backfill_skips_incomplete_comment_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first: []\n  q2_schedule: []\n  q3_delegate: []\n  q4_eliminate: []\ndone: []\n",
+        encoding="utf-8",
+    )
+    preview_ledger = tmp_path / "preview.sqlite"
+    notif = _notif(
+        "review_requested",
+        id="notif-1",
+        updated_at="2026-09-14T07:00:00Z",
+        repo="o/r",
+        url="https://api.github.com/repos/o/r/pulls/1",
+    )
+    notif["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/1"
+    notif["subject"]["latest_comment_url"] = "https://api.github.com/repos/o/r/issues/comments/1"
+    monkeypatch.setattr(triage, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(triage, "fetch_notifications", lambda: [notif])
+    monkeypatch.setattr(
+        triage,
+        "shared_comment_notification_snapshot",
+        lambda *args, **kwargs: triage.CommentNotificationSnapshot(None, None, None, False, None),
+    )
+    monkeypatch.setattr(
+        triage,
+        "classify",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("classify should not run")),
+    )
+
+    stats = triage.preview_backfill_ledger(
+        triage.parse_args([
+            "--todo-file",
+            str(todo_file),
+            "--dry-run",
+            "--backfill",
+            "--backfill-ledger",
+            str(preview_ledger),
+        ])
+    )
+
+    ledger = triage.NotificationLedger(preview_ledger)
+    rows = ledger._rows("SELECT source_id FROM notifications", ())
+    assert stats.fetched == 1
+    assert rows == []
+
+
 def test_ledger_record_terminal_keeps_first_boundary(todo_file: Path):
     ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
     artifact = "https://github.com/o/r/pull/1"
@@ -8307,5 +8385,4 @@ def test_reconcile_tracker_rows_to_ledger_reopens_canonical_only_rows(todo_file:
         }
     ]
     assert "terminal_disposition" not in data["inbox"][0]["notification"]
-    assert "terminal_recorded_at" not in data["inbox"][0]["notification"]
     assert "terminal_recorded_at" not in data["inbox"][0]["notification"]

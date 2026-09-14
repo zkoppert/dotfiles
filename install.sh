@@ -262,6 +262,7 @@ if [ -x "$TRIAGE_WRAPPER" ] && [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = 
   if [ -f "$TRIAGE_PLIST" ]; then
     mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
     PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.notification-triage.plist"
+    launchctl unload "$PLIST_TARGET" >/dev/null 2>&1 || true
     if [ -L "$PLIST_TARGET" ] || [ ! -e "$PLIST_TARGET" ]; then
       ln -sfn "$TRIAGE_PLIST" "$PLIST_TARGET"
       echo "✓ Linked com.zkoppert.notification-triage; keep it unloaded until the separate attended activation step"
@@ -286,6 +287,7 @@ if [ -x "$DEPENDABOT_WRAPPER" ] && [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR
   if [ -f "$DEPENDABOT_PLIST" ]; then
     mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
     DEPENDABOT_PLIST_TARGET="$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist"
+    launchctl unload "$DEPENDABOT_PLIST_TARGET" >/dev/null 2>&1 || true
     if [ -L "$DEPENDABOT_PLIST_TARGET" ] || [ ! -e "$DEPENDABOT_PLIST_TARGET" ]; then
       ln -sfn "$DEPENDABOT_PLIST" "$DEPENDABOT_PLIST_TARGET"
       echo "✓ Linked com.zkoppert.triage-dependabot; keep it unloaded until the separate attended activation step"
