@@ -1849,19 +1849,28 @@ def _current_notification_for_clearance(
     return None
 
 
-def _comment_notification_still_clearable(
-    notif: dict[str, Any],
+def _comment_notification_signature(notification: dict[str, Any]) -> tuple[str, str, str, str]:
+    subject = notification.get("subject") or {}
+    return (
+        str(notification.get("reason") or "").lower(),
+        str(notification.get("updated_at") or ""),
+        str(subject.get("url") or ""),
+        str(subject.get("latest_comment_url") or ""),
+    )
+
+
+def _comment_notification_still_clearable_from_current(
+    current: dict[str, Any] | None,
     *,
     ledger: NotificationLedger | None,
     my_login: str,
     thread_id: str,
     pr_url: str,
 ) -> bool:
-    current = _current_notification_for_clearance(thread_id=thread_id or None)
     if current is None:
         return False
     current_reason = str(current.get("reason") or "").lower()
-    original_reason = str(notif.get("reason") or "").lower()
+    original_reason = str(current.get("reason") or "").lower()
     if current_reason in {"mention", "assign"}:
         return False
     if current_reason != "comment":
@@ -1914,7 +1923,39 @@ def _comment_notification_still_clearable(
     return bool(snapshot.history_complete and snapshot.direct is False)
 
 
+def _comment_notification_still_clearable(
+    notif: dict[str, Any],
+    *,
+    ledger: NotificationLedger | None,
+    my_login: str,
+    thread_id: str,
+    pr_url: str,
+) -> bool:
+    current = _current_notification_for_clearance(thread_id=thread_id or None)
+    if not _comment_notification_still_clearable_from_current(
+        current,
+        ledger=ledger,
+        my_login=my_login,
+        thread_id=thread_id,
+        pr_url=pr_url,
+    ):
+        return False
+    fresh_current = _current_notification_for_clearance(thread_id=thread_id or None)
+    if fresh_current is None:
+        return False
+    if _comment_notification_signature(fresh_current) != _comment_notification_signature(current or {}):
+        return _comment_notification_still_clearable_from_current(
+            fresh_current,
+            ledger=ledger,
+            my_login=my_login,
+            thread_id=thread_id,
+            pr_url=pr_url,
+        )
+    return True
+
+
 def _clear_dependabot_notification(
+
     *,
     args: argparse.Namespace,
     ledger: NotificationLedger | None,
@@ -2564,6 +2605,9 @@ def run(args: argparse.Namespace) -> TriageStats:
                     stats.skipped += 1
                 continue
             if direct_comment is None:
+                stats.errors.append(
+                    f"incomplete comment history for notification {thread_id or pr_url}"
+                )
                 stats.skipped += 1
                 continue
         clearable_comment = reason == "comment" and direct_comment is False
@@ -2897,15 +2941,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                     return "preserving active todo ownership"
                 return None
 
-            if thread_id and not _comment_notification_still_clearable(
-                current_notif,
-                ledger=ledger,
-                my_login=my_login,
-                thread_id=thread_id,
-                pr_url=pr_url,
-            ):
-                stats.skipped += 1
-                continue
             fresh_pr = fetch_pr(repo, number)
             if fresh_pr is None:
                 stats.errors.append(f"failed to refresh {pr_url} before action")
@@ -2936,22 +2971,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 continue
             pr = fresh_pr
             if decision.outcome == OUTCOME_MERGE:
-                try:
-                    action_todo = load_todo(args.todo_file)
-                except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
-                    stats.errors.append(f"failed to reload todo before action for {pr_url}: {exc}")
-                    continue
-                if _todo_has_active_matching_entry_in_data(
-                    action_todo, thread_id=thread_id or None, pr_url=pr_url
-                ):
-                    logger.info(
-                        "%s#%d -> preserving active todo ownership for %s",
-                        repo,
-                        number,
-                        thread_id or pr_url or repo,
-                    )
-                    stats.skipped += 1
-                    continue
                 merged = do_merge(
                     repo,
                     number,

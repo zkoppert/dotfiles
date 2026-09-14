@@ -1055,19 +1055,25 @@ def _comment_snapshot_cache_key(thread_id: str, canonical_url: str) -> str:
     return thread_id or canonical_url
 
 
-def _current_notification_is_clearable(
+def _notification_clearability_signature(notification: dict[str, Any]) -> tuple[str, str, str, str]:
+    subject = notification.get("subject") or {}
+    return (
+        str(notification.get("reason") or "").lower(),
+        str(notification.get("updated_at") or ""),
+        str(subject.get("url") or ""),
+        str(subject.get("latest_comment_url") or ""),
+    )
+
+
+def _current_notification_is_clearable_from_current(
+    current: dict[str, Any] | None,
     *,
     url: str | None,
     thread_id: str | None,
     reason: str,
     ledger: NotificationLedger | None,
     my_login: str,
-    notifications: list[dict[str, Any]] | None = None,
 ) -> bool:
-    current = _current_notification_for_clearance(
-        thread_id=thread_id,
-        notifications=notifications,
-    )
     record = (
         ledger.notification_record(source_id=thread_id, canonical_artifact=url)
         if ledger is not None
@@ -1079,7 +1085,7 @@ def _current_notification_is_clearable(
     if current is None:
         return record is not None and boundary is not None
     current_reason = str(current.get("reason") or "").lower()
-    current_updated_at = parse_iso_datetime(current.get("updated_at"))
+    current_updated_at = parse_iso_datetime(str(current.get("updated_at") or ""))
     if current_reason in {"mention", "assign"} and boundary is None:
         return False
     if boundary is not None:
@@ -1130,7 +1136,52 @@ def _current_notification_is_clearable(
     return classification.bucket == BUCKET_DROP and not classification.skip_mark_done
 
 
+def _current_notification_is_clearable(
+    *,
+    url: str | None,
+    thread_id: str | None,
+    reason: str,
+    ledger: NotificationLedger | None,
+    my_login: str,
+    notifications: list[dict[str, Any]] | None = None,
+) -> bool:
+    current = _current_notification_for_clearance(
+        thread_id=thread_id,
+        notifications=notifications,
+    )
+    if not _current_notification_is_clearable_from_current(
+        current,
+        url=url,
+        thread_id=thread_id,
+        reason=reason,
+        ledger=ledger,
+        my_login=my_login,
+    ):
+        return False
+    fresh_current = _current_notification_for_clearance(thread_id=thread_id)
+    if fresh_current is None:
+        return _current_notification_is_clearable_from_current(
+            fresh_current,
+            url=url,
+            thread_id=thread_id,
+            reason=reason,
+            ledger=ledger,
+            my_login=my_login,
+        )
+    if _notification_clearability_signature(fresh_current) != _notification_clearability_signature(current or {}):
+        return _current_notification_is_clearable_from_current(
+            fresh_current,
+            url=url,
+            thread_id=thread_id,
+            reason=reason,
+            ledger=ledger,
+            my_login=my_login,
+        )
+    return True
+
+
 def _is_untouched_q2_review_fallback(
+
     tracked_item: dict[str, Any],
     section: str,
 ) -> bool:
@@ -2746,7 +2797,6 @@ def retry_pending_github_clears(
     dry_run: bool,
     stats: TriageStats,
     attempted_thread_ids: set[str],
-    protected_thread_ids: set[str],
     my_login: str,
 ) -> None:
     if ledger is None:
@@ -2754,11 +2804,7 @@ def retry_pending_github_clears(
     for row in ledger.pending_github_clears():
         thread_id = str(row.get("source_id") or "")
         canonical = row.get("canonical_artifact")
-        if (
-            not thread_id
-            or thread_id in attempted_thread_ids
-            or thread_id in protected_thread_ids
-        ):
+        if not thread_id or thread_id in attempted_thread_ids:
             continue
         try:
             current = _current_notification_for_clearance(thread_id=thread_id)
@@ -2879,6 +2925,9 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
         if canonical_url:
             comment_snapshot_cache[canonical_url] = snapshot
         if snapshot is not None and not snapshot.history_complete:
+            stats.errors.append(
+                f"incomplete comment history for notification {thread_id or canonical_url}"
+            )
             if thread_id:
                 deferred_thread_ids.add(thread_id)
             if canonical_url:
@@ -3121,7 +3170,6 @@ def run(args: argparse.Namespace) -> TriageStats:
 
     seen_ids = existing_thread_ids(data)
     mutations = TodoMutations()
-    protected_actionable_thread_ids: set[str] = set()
     direct_mention_thread_ids: set[str] = set()
     reopened_thread_ids: set[str] = set()
     attempted_thread_ids: set[str] = set()
@@ -3167,10 +3215,10 @@ def run(args: argparse.Namespace) -> TriageStats:
             else comment_snapshot_cache.get(canonical_url)
         )
         if comment_snapshot is not None and not comment_snapshot.history_complete:
+            stats.errors.append(
+                f"incomplete comment history for notification {thread_id or canonical_url}"
+            )
             if comment_snapshot.direct is None and reason not in Q1_REASONS:
-                stats.errors.append(
-                    f"incomplete comment history for notification {thread_id or canonical_url}"
-                )
                 continue
         if (
             thread_id
@@ -3545,7 +3593,6 @@ def run(args: argparse.Namespace) -> TriageStats:
         thread_id = str(notif_meta["thread_id"])
         if (
             thread_id in reopened_thread_ids
-            or thread_id in protected_actionable_thread_ids
             or thread_id in attempted_thread_ids
         ):
             continue
@@ -3675,7 +3722,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                 not delta.thread_id
                 or (
                     delta.thread_id not in reopened_thread_ids
-                    and delta.thread_id not in protected_actionable_thread_ids
                 )
             )
         ]
@@ -3872,7 +3918,6 @@ def run(args: argparse.Namespace) -> TriageStats:
         dry_run=args.dry_run,
         stats=stats,
         attempted_thread_ids=attempted_thread_ids,
-        protected_thread_ids=protected_actionable_thread_ids,
         my_login=my_login,
     )
 

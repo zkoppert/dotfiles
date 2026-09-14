@@ -6521,6 +6521,35 @@ def test_current_notification_is_clearable_allows_new_passive_after_terminal_bou
         )
 
 
+def test_current_notification_is_clearable_rechecks_fresh_assign_before_delete(
+    todo_file,
+):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/5"
+    current_comment = _notif("comment", id="thread-race", updated_at="2026-07-01T12:00:00Z")
+    current_comment["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/5"
+    current_comment["subject"]["latest_comment_url"] = "https://api.github.com/repos/o/r/issues/comments/1"
+    current_comment["repository"] = {"full_name": "o/r"}
+    current_assign = _notif("assign", id="thread-race", updated_at="2026-07-01T12:05:00Z")
+    current_assign["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/5"
+    current_assign["subject"]["latest_comment_url"] = "https://api.github.com/repos/o/r/issues/comments/1"
+    current_assign["repository"] = {"full_name": "o/r"}
+    with patch("triage.fetch_notifications", side_effect=[[current_comment], [current_assign]]), patch(
+        "triage.classify",
+        return_value=triage.Classification(triage.BUCKET_DROP, "comment without a direct @mention"),
+    ):
+        assert (
+            triage._current_notification_is_clearable(
+                url=artifact,
+                thread_id="thread-race",
+                reason="comment",
+                ledger=ledger,
+                my_login="zkoppert",
+            )
+            is False
+        )
+
+
 def test_current_notification_is_clearable_rejects_newer_review_requested_after_terminal_boundary(
     todo_file,
 ):
@@ -7940,8 +7969,12 @@ def test_preview_backfill_skips_incomplete_comment_history(tmp_path: Path, monke
 
     ledger = triage.NotificationLedger(preview_ledger)
     rows = ledger._rows("SELECT source_id FROM notifications", ())
+    snapshot = ledger.health_snapshot(worker="notification-triage")
     assert stats.fetched == 1
     assert rows == []
+    assert any("incomplete comment history" in err for err in stats.errors)
+    assert snapshot is not None
+    assert snapshot["last_error_at"] is not None
 
 
 def test_run_keeps_direct_comment_even_with_incomplete_comment_history(todo_file: Path, monkeypatch: pytest.MonkeyPatch):

@@ -2111,6 +2111,39 @@ def test_run_skips_merge_when_active_todo_exists_before_mutation(
     assert snapshot["current_notification_count"] == 1
 
 
+def test_run_records_error_on_incomplete_comment_history(tmp_path: Path) -> None:
+    notif = {
+        "id": "thread-incomplete-comment",
+        "reason": "comment",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r1/pulls/905",
+        },
+    }
+    pr = _base_pr(number=905, url="https://github.com/o/r1/pull/905")
+    args = _make_args(tmp_path)
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "shared_comment_notification_snapshot",
+        return_value=mock.Mock(history_complete=False, direct=None),
+    ):
+        stats = td.run(args)
+
+    assert stats.skipped == 1
+    assert any("incomplete comment history" in err for err in stats.errors)
+    snapshot = td.NotificationLedger(td.DEFAULT_LEDGER_PATH).health_snapshot(
+        worker="triage-dependabot"
+    )
+    assert snapshot is not None
+    assert snapshot["last_error_at"] is not None
+
+
 def test_run_cleans_stale_inbox_entries_on_merge(tmp_path: Path) -> None:
     """A pre-existing notif-* entry should be removed after the PR auto-merges."""
     notif = {
@@ -3156,6 +3189,45 @@ def test_comment_notification_still_clearable_allows_newer_review_requested_upda
             thread_id="thread-review",
             pr_url=artifact,
         )
+
+
+def test_comment_notification_still_clearable_rechecks_fresh_assign_before_mutation(
+    tmp_path: Path,
+) -> None:
+    artifact = "https://github.com/o/r/pull/44"
+    current_comment = {
+        "id": "thread-race",
+        "reason": "comment",
+        "updated_at": "2026-07-02T12:00:00Z",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/44",
+            "latest_comment_url": "https://api.github.com/repos/o/r/issues/comments/9",
+        },
+        "repository": {"full_name": "o/r"},
+    }
+    current_assign = {
+        "id": "thread-race",
+        "reason": "assign",
+        "updated_at": "2026-07-02T12:05:00Z",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/44",
+            "latest_comment_url": "https://api.github.com/repos/o/r/issues/comments/9",
+        },
+        "repository": {"full_name": "o/r"},
+    }
+    snapshot = mock.Mock(history_complete=True, direct=False)
+    with mock.patch.object(
+        td, "fetch_notifications", side_effect=[[current_comment], [current_assign]]
+    ), mock.patch.object(td, "shared_comment_notification_snapshot", return_value=snapshot):
+        assert td._comment_notification_still_clearable(
+            current_comment,
+            ledger=None,
+            my_login="zkoppert",
+            thread_id="thread-race",
+            pr_url=artifact,
+        ) is False
 
 
 def test_run_skips_super_linter_pr_with_stale_comment_keeps_notification(
