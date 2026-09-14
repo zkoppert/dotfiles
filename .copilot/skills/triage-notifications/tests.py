@@ -6634,6 +6634,40 @@ def test_current_notification_is_clearable_rechecks_fresh_assign_before_delete(
         )
 
 
+def test_current_notification_is_clearable_rejects_same_second_assign_after_terminal_boundary(
+    todo_file,
+):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/6"
+    ledger.capture(
+        source_id="thread-assign",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    ledger.record_terminal(
+        source_id="thread-assign",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-03T12:00:00Z",
+    )
+    current = _notif("assign", id="thread-assign", updated_at="2026-07-03T12:00:00Z")
+    current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/6"
+    current["repository"] = {"full_name": "o/r"}
+    with patch("triage.fetch_notifications", return_value=[current]):
+        assert (
+            triage._current_notification_is_clearable(
+                url=artifact,
+                thread_id="thread-assign",
+                reason="assign",
+                ledger=ledger,
+                my_login="zkoppert",
+            )
+            is False
+        )
+
+
 def test_current_notification_is_clearable_rejects_newer_review_requested_after_terminal_boundary(
     todo_file,
 ):

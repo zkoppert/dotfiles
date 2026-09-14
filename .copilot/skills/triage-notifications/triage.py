@@ -1089,7 +1089,7 @@ def _current_notification_is_clearable_from_current(
     if current_reason in {"mention", "assign"} and boundary is None:
         return False
     if boundary is not None:
-        if current_updated_at is not None and current_updated_at <= boundary:
+        if current_updated_at is not None and current_updated_at < boundary:
             return True
         if current_reason in {"mention", "assign"}:
             return False

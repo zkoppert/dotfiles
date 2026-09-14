@@ -121,8 +121,8 @@ remove_notification_launch_agent() {
 }
 
 if [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
-  remove_notification_launch_agent "notification-triage" "com.zkoppert.notification-triage.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"
-  remove_notification_launch_agent "triage-dependabot" "com.zkoppert.triage-dependabot.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.triage-dependabot.plist"
+  remove_notification_launch_agent "com.zkoppert.notification-triage" "com.zkoppert.notification-triage.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"
+  remove_notification_launch_agent "com.zkoppert.triage-dependabot" "com.zkoppert.triage-dependabot.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.triage-dependabot.plist"
 fi
 
 # Symlink copilot instructions for Copilot CLI

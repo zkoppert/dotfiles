@@ -428,6 +428,65 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(triage_target.resolve(), foreign_target.resolve())
         self.assertFalse(dependabot_target.exists())
 
+    def test_notification_jobs_stay_linked_when_unload_cannot_be_verified(self) -> None:
+        launch_agents = self.repo / "LaunchAgents"
+        launch_agents.mkdir()
+        triage_plist = launch_agents / "com.zkoppert.notification-triage.plist"
+        triage_plist.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
+        dependabot_plist = launch_agents / "com.zkoppert.triage-dependabot.plist"
+        dependabot_plist.write_text("<plist version=\"1.0\"></plist>\n", encoding="utf-8")
+        bin_dir = self.repo / "bin"
+        bin_dir.mkdir()
+        for command in ("notification-triage", "triage-dependabot"):
+            wrapper = bin_dir / command
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+        activity_log = self.home / "install.log"
+        launchctl = self.fake_bin / "launchctl"
+        launchctl.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"launchctl $*\" >> \"$HOME/install.log\"\n"
+            'if [ "$1" = "unload" ]; then\n'
+            "  exit 1\n"
+            "fi\n"
+            'if [ "$1" = "print" ]; then\n'
+            '  case "$2" in\n'
+            '    gui/*/com.zkoppert.notification-triage|gui/*/com.zkoppert.triage-dependabot) exit 0 ;;\n'
+            '  esac\n'
+            "  exit 1\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        launchctl.chmod(0o755)
+        triage_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.notification-triage.plist"
+        triage_target.parent.mkdir(parents=True)
+        triage_target.symlink_to(triage_plist)
+        dependabot_target = self.home / "Library" / "LaunchAgents" / "com.zkoppert.triage-dependabot.plist"
+        dependabot_target.symlink_to(dependabot_plist)
+
+        self.run_installer()
+
+        calls = activity_log.read_text(encoding="utf-8").splitlines()
+        self.assertIn(f"launchctl unload {triage_target}", calls)
+        self.assertIn(f"launchctl unload {dependabot_target}", calls)
+        self.assertTrue(
+            any(
+                entry.startswith("launchctl print gui/")
+                and entry.endswith("/com.zkoppert.notification-triage")
+                for entry in calls
+            )
+        )
+        self.assertTrue(
+            any(
+                entry.startswith("launchctl print gui/")
+                and entry.endswith("/com.zkoppert.triage-dependabot")
+                for entry in calls
+            )
+        )
+        self.assertTrue(triage_target.is_symlink())
+        self.assertTrue(dependabot_target.is_symlink())
+
     def test_accessibility_picker_is_linked_and_loaded_with_private_config(
         self,
     ) -> None:
