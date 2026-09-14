@@ -467,6 +467,10 @@ class InstallScriptTest(unittest.TestCase):
         self.assertFalse(dependabot_target.exists())
 
     def test_notification_jobs_stay_linked_when_unload_cannot_be_verified(self) -> None:
+        requirements = self.repo / "python" / "notification-worker-requirements.txt"
+        requirements.parent.mkdir(parents=True)
+        requirements.write_text("PyYAML==6.0.2\nruamel.yaml==0.18.6\n", encoding="utf-8")
+
         launch_agents = self.repo / "LaunchAgents"
         launch_agents.mkdir()
         triage_plist = launch_agents / "com.zkoppert.notification-triage.plist"
@@ -507,6 +511,8 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn(f"launchctl unload {dependabot_target}", calls)
         self.assertTrue(triage_target.is_symlink())
         self.assertTrue(dependabot_target.is_symlink())
+        self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/venv").exists())
+        self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/requirements.sha256").exists())
 
     def test_accessibility_picker_is_linked_and_loaded_with_private_config(
         self,

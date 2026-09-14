@@ -105,31 +105,43 @@ remove_notification_launch_agent() {
     fi
     if [ "$resolved_target" != "$expected_source" ]; then
       echo "⚠ $target points to $resolved_target - skipping"
-      return
+      return 1
     fi
     if launchctl unload "$target" >/dev/null 2>&1; then
       rm -f "$target"
       echo "✓ Removed $plist_name launch agent symlink; it stays unloaded until a later attended activation step"
-      return
+      return 0
     fi
     print_output="$(launchctl print "gui/$(id -u)/$launchctl_label" 2>&1)" || true
     if [[ "$print_output" == *"Could not find service"* ]]; then
       rm -f "$target"
       echo "✓ Removed $plist_name launch agent symlink; it stays unloaded until a later attended activation step"
-      return
+      return 0
     fi
     echo "⚠ failed to unload $target - skipping removal"
+    return 1
   elif [ -e "$target" ]; then
     echo "⚠ $target exists and is not a symlink - skipping"
+    return 1
   fi
+  return 0
 }
 
+notification_launch_agents_ready=true
 if [ "$(uname)" = "Darwin" ] && [ "$DOTFILES_DIR" = "$EXPECTED_DOTFILES_DIR" ]; then
-  remove_notification_launch_agent "com.zkoppert.notification-triage.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"
-  remove_notification_launch_agent "com.zkoppert.triage-dependabot.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.triage-dependabot.plist"
+  if ! remove_notification_launch_agent "com.zkoppert.notification-triage.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.notification-triage.plist"; then
+    notification_launch_agents_ready=false
+  fi
+  if ! remove_notification_launch_agent "com.zkoppert.triage-dependabot.plist" "$DOTFILES_DIR/LaunchAgents/com.zkoppert.triage-dependabot.plist"; then
+    notification_launch_agents_ready=false
+  fi
 fi
 
-ensure_notification_worker_runtime || true
+if [ "$notification_launch_agents_ready" = true ]; then
+  ensure_notification_worker_runtime || true
+else
+  echo "⚠ Notification worker runtime provisioning skipped until notification launch agents are confirmed unloaded"
+fi
 
 # Symlink copilot instructions for Copilot CLI
 if [ -f "$DOTFILES_DIR/.github/copilot-instructions.md" ]; then
