@@ -924,6 +924,52 @@ def test_remove_stale_entries_matches_by_pr_url_fallback() -> None:
     assert [item["id"] for item in data["inbox"]] == ["keep"]
 
 
+def test_todo_has_active_matching_entry_in_data_normalizes_github_urls() -> None:
+    data = {
+        "in_progress": [
+            {
+                "notification": {
+                    "thread_id": "OLD",
+                    "url": "https://www.github.com/o/r/pull/1?x=1",
+                }
+            }
+        ],
+        "prioritized": {"q1_do_first": []},
+    }
+    assert td._todo_has_active_matching_entry_in_data(
+        data,
+        thread_id="T-new",
+        pr_url="https://github.com/o/r/pull/1",
+    ) is True
+
+
+def test_todo_has_active_direct_ownership_in_data_normalizes_github_urls() -> None:
+    data = {
+        "inbox": [],
+        "in_progress": [],
+        "blocked": [],
+        "in_review": [],
+        "prioritized": {
+            "q1_do_first": [
+                {
+                    "notification": {
+                        "thread_id": "OLD",
+                        "url": "https://www.github.com/o/r/pull/1?x=1",
+                        "direct_ask": True,
+                    }
+                }
+            ],
+            "q2_schedule": [],
+            "q3_delegate": [],
+        },
+    }
+    assert td._todo_has_active_direct_ownership_in_data(
+        data,
+        thread_id="T-new",
+        pr_url="https://github.com/o/r/pull/1",
+    ) is True
+
+
 def test_remove_stale_entries_walks_all_buckets() -> None:
     data = {
         "inbox": [{"notification": {"thread_id": "T"}}],

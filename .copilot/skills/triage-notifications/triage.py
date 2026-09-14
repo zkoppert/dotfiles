@@ -1486,11 +1486,6 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
         return False
 
     quadrant = candidate_section.removeprefix("prioritized.")
-    if (
-        candidate_section in {"in_progress", "blocked", "in_review"}
-        and not delta.reopen_terminal
-    ):
-        return False
     if delta.escalated_at and (
         candidate_section not in {"inbox", "prioritized.q2_schedule"}
         or str(candidate.get("status") or "pending").lower()
@@ -1499,9 +1494,19 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
         return False
     notif = candidate.get("notification")
     changed = False
-    if isinstance(notif, dict) and delta.direct_ask and not notif.get("direct_ask"):
-        notif["direct_ask"] = True
-        changed = True
+    if isinstance(notif, dict):
+        if delta.direct_ask and not notif.get("direct_ask"):
+            notif["direct_ask"] = True
+            changed = True
+        if delta.escalated_at and notif.get("review_requested_escalated_at") != delta.escalated_at:
+            notif["review_requested_escalated_at"] = delta.escalated_at
+            changed = True
+        if delta.reason and notif.get("reason") != delta.reason:
+            notif["reason"] = delta.reason
+            changed = True
+        if delta.captured_at and notif.get("captured_at") != delta.captured_at:
+            notif["captured_at"] = delta.captured_at
+            changed = True
     if candidate_section in {"in_progress", "blocked", "in_review"} and not delta.reopen_terminal:
         return changed
     if quadrant == "q1_do_first" and not delta.reopen_terminal:
@@ -1530,15 +1535,8 @@ def _escalate_review_request(data: dict[str, Any], delta: EscalationDelta) -> bo
     )
     if delta.reopen_terminal:
         candidate.pop("completed", None)
-    if isinstance(notif, dict):
-        if delta.escalated_at:
-            notif["review_requested_escalated_at"] = delta.escalated_at
-        if delta.reason:
-            notif["reason"] = delta.reason
-        if delta.captured_at:
-            notif["captured_at"] = delta.captured_at
-        if delta.reopen_terminal:
-            _reset_terminal_notification(notif)
+    if isinstance(notif, dict) and delta.reopen_terminal:
+        _reset_terminal_notification(notif)
     q1.append(candidate)
     return True
 
@@ -2629,7 +2627,7 @@ def reconcile_tracker_rows_to_ledger(
                     queue_clear=not bool(notif.get("marked_done")),
                     event_at=terminal_recorded_at,
                 )
-        elif ledger is not None:
+        elif ledger is not None and not dry_run and not ledger.readonly:
             _reset_terminal_notification(notif)
             ledger.reopen_actionable(
                 source_id=thread_id,
@@ -2947,6 +2945,36 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
         elif canonical_tracked is not None:
             tracker_section, canonical_item = canonical_tracked
             tracker_item_id = str(canonical_item.get("id") or "") or None
+
+        tracked_terminal = bool(
+            tracked and tracker_terminal_disposition(tracked[1], tracker_section or "")
+        )
+        tracked_nonterminal = bool(tracked and not tracked_terminal)
+        tracked_notification = tracked[1].get("notification") if tracked else None
+        tracked_direct_ask = bool(
+            tracked_nonterminal
+            and tracked
+            and isinstance(tracked_notification, dict)
+            and _notification_is_direct_ask(tracked_notification)
+        )
+        subject_resolved = classification.bucket == BUCKET_DROP and (
+            "closed" in classification.reason or "merged" in classification.reason
+        )
+        if tracked_direct_ask:
+            subject_resolved = False
+        allow_dependabot_handoff = bool(
+            classification.skip_mark_done
+            and tracked is not None
+            and _is_untouched_q2_review_fallback(tracked[1], tracked[0])
+        )
+        if (
+            tracked_nonterminal
+            and classification.bucket == BUCKET_DROP
+            and not subject_resolved
+            and not allow_dependabot_handoff
+        ):
+            stats.already_tracked += 1
+            continue
 
         terminal_disposition = None
         queue_clear = False

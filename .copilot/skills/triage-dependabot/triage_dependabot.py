@@ -56,6 +56,7 @@ from notification_worker_common import comment_notification_snapshot as shared_c
 from notification_worker_common import ledger_capture as _ledger_capture
 from notification_worker_common import (
     ledger_record_clear_result as _ledger_record_clear_result,
+    normalize_github_url,
     parse_iso_datetime,
     utcnow_iso,
 )
@@ -1745,6 +1746,19 @@ def _entry_exists(data: dict[str, Any], entry: dict[str, Any]) -> bool:
     return _matching_entry(_iter_todo_items(data), entry) is not None
 
 
+def _normalized_github_artifact(url: Any) -> str | None:
+    if not isinstance(url, str) or not url:
+        return None
+    return normalize_github_url(url) or url
+
+
+def _notification_is_direct_ask(notification: dict[str, Any]) -> bool:
+    return bool(notification.get("direct_ask")) or str(notification.get("reason") or "").lower() in {
+        "mention",
+        "assign",
+    }
+
+
 def _todo_has_active_matching_entry_in_data(
     data: dict[str, Any],
     *,
@@ -1753,6 +1767,7 @@ def _todo_has_active_matching_entry_in_data(
 ) -> bool:
     if not thread_id and not pr_url:
         return False
+    target_url = _normalized_github_artifact(pr_url)
 
     def matches(item: Any) -> bool:
         if not isinstance(item, dict):
@@ -1762,7 +1777,8 @@ def _todo_has_active_matching_entry_in_data(
             return False
         if thread_id and str(notif.get("thread_id") or "") == thread_id:
             return True
-        if pr_url and notif.get("url") == pr_url:
+        candidate_url = _normalized_github_artifact(notif.get("url"))
+        if target_url and candidate_url == target_url:
             return True
         return False
 
@@ -1794,12 +1810,14 @@ def _todo_has_active_direct_ownership_in_data(
 ) -> bool:
     if not thread_id and not pr_url:
         return False
+    target_url = _normalized_github_artifact(pr_url)
     for item in _active_todo_items(data):
         notif = item.get("notification")
         if not isinstance(notif, dict):
             continue
         thread_match = thread_id and str(notif.get("thread_id") or "") == thread_id
-        canonical_match = pr_url and notif.get("url") == pr_url
+        candidate_url = _normalized_github_artifact(notif.get("url"))
+        canonical_match = target_url is not None and candidate_url == target_url
         if (thread_match or canonical_match) and _notification_is_direct_ask(notif):
             return True
     return False

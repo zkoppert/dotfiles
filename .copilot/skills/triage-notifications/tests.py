@@ -3425,6 +3425,23 @@ def test_run_dry_run_uses_existing_read_only_ledger_watermark(todo_file):
     notify_mock.assert_not_called()
 
 
+def test_run_dry_run_skips_read_only_ledger_reconciliation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first:\n    - id: tracked-one\n      title: tracked notification\n      status: pending\n      quadrant: q1_do_first\n      notification:\n        thread_id: notif-1\n        url: https://github.com/o/r/pull/1\n        reason: subscribed\n        repo: o/r\ndone: []\n",
+        encoding="utf-8",
+    )
+    ledger_path = tmp_path / "ledger.sqlite"
+    triage.NotificationLedger(ledger_path)
+    monkeypatch.setattr(triage, "DEFAULT_LEDGER_PATH", ledger_path)
+    monkeypatch.setattr(triage, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(triage, "fetch_notifications", lambda: [])
+
+    stats = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--dry-run"]))
+
+    assert stats.errors == []
+
+
 def test_run_adds_review_requests_to_q2_with_escalation_deadline(todo_file):
     responses = {
         "/user": json.dumps({"login": "zkoppert"}),
@@ -3569,6 +3586,81 @@ def test_stale_review_escalation_preserves_fresh_active_item(active_section):
     assert applied["changed"] is False
     assert data[active_section] == [item]
     assert data["prioritized"]["q1_do_first"] == []
+
+
+@pytest.mark.parametrize("active_section", ["in_progress", "blocked", "in_review"])
+def test_direct_ask_escalation_persists_on_active_section_without_moving(active_section):
+    item = {
+        "id": "review-direct-1",
+        "title": "Review request",
+        "status": active_section,
+        "notification": {
+            "thread_id": "thr-direct-1",
+            "reason": "comment",
+            "captured_at": "2026-07-03T12:00:00Z",
+        },
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {"q1_do_first": [], "q2_schedule": []},
+        "in_progress": [],
+        "blocked": [],
+        "in_review": [],
+        "done": [],
+    }
+    data[active_section].append(item)
+    delta = triage.EscalationDelta(
+        item_id="review-direct-1",
+        thread_id="thr-direct-1",
+        direct_ask=True,
+        reason="mention",
+        captured_at="2026-07-07T12:00:00Z",
+    )
+
+    applied = triage.apply_todo_mutations(data, triage.TodoMutations(escalate=[delta]))
+
+    assert applied["changed"] is True
+    assert data[active_section] == [item]
+    assert item["notification"]["direct_ask"] is True
+    assert item["notification"]["reason"] == "mention"
+    assert item["notification"]["captured_at"] == "2026-07-07T12:00:00Z"
+
+
+def test_direct_ask_escalation_updates_existing_q1_reason_without_requeue():
+    item = {
+        "id": "review-direct-2",
+        "title": "Q1 direct ask",
+        "status": "pending",
+        "quadrant": "q1_do_first",
+        "notification": {
+            "thread_id": "thr-direct-2",
+            "reason": "comment",
+            "captured_at": "2026-07-03T12:00:00Z",
+        },
+    }
+    data = {
+        "inbox": [],
+        "prioritized": {"q1_do_first": [item], "q2_schedule": []},
+        "in_progress": [],
+        "blocked": [],
+        "in_review": [],
+        "done": [],
+    }
+    delta = triage.EscalationDelta(
+        item_id="review-direct-2",
+        thread_id="thr-direct-2",
+        direct_ask=True,
+        reason="assign",
+        captured_at="2026-07-07T12:00:00Z",
+    )
+
+    applied = triage.apply_todo_mutations(data, triage.TodoMutations(escalate=[delta]))
+
+    assert applied["changed"] is True
+    assert data["prioritized"]["q1_do_first"] == [item]
+    assert item["notification"]["direct_ask"] is True
+    assert item["notification"]["reason"] == "assign"
+    assert item["notification"]["captured_at"] == "2026-07-07T12:00:00Z"
 
 
 @pytest.mark.parametrize("active_section", ["in_progress", "blocked", "in_review"])
@@ -7575,6 +7667,60 @@ def test_preview_backfill_ledger_reconciles_tracker_rows(tmp_path: Path, monkeyp
     snapshot = ledger.health_snapshot(worker="notification-triage")
     assert snapshot is not None
     assert snapshot["current_notification_count"] == 1
+
+
+def test_preview_backfill_preserves_active_tracker_ownership(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    todo_file = tmp_path / "todo.yml"
+    todo_file.write_text(
+        "inbox: []\nprioritized:\n  q1_do_first:\n    - id: active-one\n      title: Active direct ask\n      status: pending\n      quadrant: q1_do_first\n      notification:\n        thread_id: notif-active\n        url: https://github.com/o/r/pull/1\n        reason: mention\n        direct_ask: true\n        captured_at: 2026-09-13T07:00:00Z\n        repo: o/r\ndone: []\n",
+        encoding="utf-8",
+    )
+    preview_ledger = tmp_path / "preview.sqlite"
+    notif = _notif(
+        "subscribed",
+        id="notif-active",
+        updated_at="2026-09-14T07:00:00Z",
+        repo="o/r",
+        url="https://api.github.com/repos/o/r/pulls/1",
+    )
+    notif["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/1"
+    monkeypatch.setattr(triage, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(triage, "fetch_notifications", lambda: [notif])
+    monkeypatch.setattr(
+        triage,
+        "shared_comment_notification_snapshot",
+        lambda *args, **kwargs: triage.CommentNotificationSnapshot(None, None, False, True, None),
+    )
+    monkeypatch.setattr(
+        triage,
+        "classify",
+        lambda *args, **kwargs: triage.Classification(triage.BUCKET_DROP, "passive noise"),
+    )
+
+    stats = triage.preview_backfill_ledger(
+        triage.parse_args([
+            "--todo-file",
+            str(todo_file),
+            "--dry-run",
+            "--backfill",
+            "--backfill-ledger",
+            str(preview_ledger),
+        ])
+    )
+
+    ledger = triage.NotificationLedger(preview_ledger)
+    rows = ledger._rows(
+        "SELECT classification, terminal_disposition, clear_state FROM notifications WHERE source_id = ?",
+        ("notif-active",),
+    )
+    assert stats.already_tracked == 1
+    assert rows == [
+        {
+            "classification": "actionable",
+            "terminal_disposition": None,
+            "clear_state": "not_applicable",
+        }
+    ]
 
 
 def test_preview_backfill_skips_incomplete_comment_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
