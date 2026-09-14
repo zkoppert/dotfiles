@@ -138,7 +138,7 @@ TITLE_DROP_PATTERNS: list[re.Pattern[str]] = [
 # Reasons where a direct human action overrides title-pattern drops.
 # If someone explicitly @-mentions or assigns Zack on a flaky-test
 # issue, surface it instead of silently dropping.
-TITLE_DROP_PROTECTED_REASONS: set[str] = {"mention", "assign"}
+TITLE_DROP_PROTECTED_REASONS: set[str] = {"mention", "assign", "author"}
 
 # Reasons that get a subject-state check at classify time. If the PR / issue
 # is already closed/merged when the notification first arrives, drop it
@@ -807,7 +807,7 @@ def classify(
                     BUCKET_DROP,
                     f"{repo_full}: watch-only Dependabot bump - mark done",
                 )
-        elif reason not in TITLE_DROP_PROTECTED_REASONS:
+        else:
             if dependabot_bump_author is None:
                 return Classification(
                     BUCKET_DROP,
@@ -820,8 +820,6 @@ def classify(
                     "Dependabot version bump - left unread for triage-dependabot",
                     skip_mark_done=True,
                 )
-            if reason == "author":
-                return Classification(BUCKET_INBOX, "author - open PR/issue I opened")
 
     # Title-pattern drop: repetitive system-generated noise (flaky-test
     # reports) and routine `Enable Dependabot` config PRs. Mention/assign

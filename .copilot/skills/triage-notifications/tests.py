@@ -5709,6 +5709,26 @@ def test_classify_author_notification_keeps_human_authored_dependabot_like_pr():
     assert c.bucket == triage.BUCKET_INBOX
 
 
+def test_classify_author_notification_drops_merged_dependabot_like_pr():
+    notif = _notif(
+        "author",
+        subject={
+            "title": "build(deps): bump actions/checkout from 4 to 5",
+            "url": "https://api.github.com/repos/o/r/pulls/30",
+            "latest_comment_url": None,
+            "type": "PullRequest",
+        },
+    )
+    c = triage.classify(
+        notif,
+        my_login="zkoppert",
+        state_fetcher=lambda _: "merged",
+        comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
+        subject_author_fetcher=lambda _: "someone-else",
+    )
+    assert c.bucket == triage.BUCKET_DROP
+
+
 def test_classify_author_notification_hands_off_dependabot_authored_bump():
     notif = _notif(
         "author",
