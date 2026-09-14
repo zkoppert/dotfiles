@@ -1121,18 +1121,6 @@ def _current_notification_is_clearable_from_current(
                 ),
             )
             return classification.bucket == BUCKET_DROP and not classification.skip_mark_done
-    if current_reason != "comment":
-        classification = classify(
-            current,
-            my_login=my_login,
-            comment_snapshot_fetcher=shared_comment_notification_snapshot,
-            comment_since=(
-                ledger.comment_watermark(source_id=thread_id, canonical_artifact=url)
-                if ledger is not None and thread_id
-                else None
-            ),
-        )
-        return classification.bucket == BUCKET_DROP and not classification.skip_mark_done
     classification = classify(
         current,
         my_login=my_login,
