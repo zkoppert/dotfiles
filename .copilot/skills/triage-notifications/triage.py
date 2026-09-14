@@ -772,8 +772,8 @@ def classify(
 
     if reason in Q1_REASONS:
         return Classification(
-            BUCKET_Q2 if reason == "security_alert" else BUCKET_Q1,
-            f"{reason} → {'Q2' if reason == 'security_alert' else 'Q1'}",
+            BUCKET_Q1,
+            f"{reason} → Q1",
             direct_mention=reason == "mention",
         )
 
@@ -2924,7 +2924,8 @@ def preview_backfill_ledger(args: argparse.Namespace) -> TriageStats:
             else comment_snapshot_cache.get(canonical_url)
         )
         if comment_snapshot is not None and not comment_snapshot.history_complete:
-            continue
+            if comment_snapshot.direct is None and reason not in Q1_REASONS:
+                continue
 
         classification = classify(
             notif,
@@ -3154,7 +3155,8 @@ def run(args: argparse.Namespace) -> TriageStats:
             else comment_snapshot_cache.get(canonical_url)
         )
         if comment_snapshot is not None and not comment_snapshot.history_complete:
-            continue
+            if comment_snapshot.direct is None and reason not in Q1_REASONS:
+                continue
         if (
             thread_id
             and comment_snapshot is not None
@@ -3597,18 +3599,32 @@ def run(args: argparse.Namespace) -> TriageStats:
                     terminal_recorded_at=utcnow_iso(),
                     terminal_disposition=disposition,
                 )
+                current_after = None
+                if not args.dry_run:
+                    current_after = _current_notification_for_clearance(thread_id=thread_id)
+                    if current_after is not None and not _current_notification_is_clearable(
+                        url=terminal_canonical_url,
+                        thread_id=thread_id,
+                        reason=str(
+                            current_after.get("reason")
+                            or live_notif.get("reason")
+                            or notif_meta.get("reason")
+                            or ""
+                        ),
+                        ledger=ledger,
+                        my_login=my_login,
+                    ):
+                        continue
                 if not args.dry_run:
                     mark_thread_done(thread_id)
                     attempted_thread_ids.add(thread_id)
-                    mutations.mark_done.append(mark_done_delta)
                     _ledger_record_clear_result(
                         ledger,
                         dry_run=args.dry_run,
                         thread_id=thread_id,
                         canonical_artifact=terminal_canonical_url,
                     )
-                else:
-                    mutations.mark_done.append(mark_done_delta)
+                mutations.mark_done.append(mark_done_delta)
         except (
             FileNotFoundError,
             yaml.YAMLError,
@@ -3681,7 +3697,6 @@ def run(args: argparse.Namespace) -> TriageStats:
                         my_login=my_login,
                     ):
                         continue
-                    surviving_prunes.append(delta)
                     _ledger_capture(
                         ledger,
                         dry_run=args.dry_run,
@@ -3697,14 +3712,29 @@ def run(args: argparse.Namespace) -> TriageStats:
                         event_at=delta.captured_at or utcnow_iso(),
                     )
                     if not args.dry_run:
-                        mark_thread_done(delta.thread_id)
-                        attempted_thread_ids.add(delta.thread_id)
-                        _ledger_record_clear_result(
-                            ledger,
-                            dry_run=args.dry_run,
-                            thread_id=delta.thread_id,
-                            canonical_artifact=None,
+                        current_after = _current_notification_for_clearance(
+                            thread_id=delta.thread_id
                         )
+                        if current_after is not None and not _current_notification_is_clearable(
+                            url=None,
+                            thread_id=delta.thread_id,
+                            reason=delta.notification_reason or delta.stale_reason,
+                            ledger=ledger,
+                            my_login=my_login,
+                        ):
+                            continue
+                        surviving_prunes.append(delta)
+                        if current_after is not None:
+                            mark_thread_done(delta.thread_id)
+                            attempted_thread_ids.add(delta.thread_id)
+                            _ledger_record_clear_result(
+                                ledger,
+                                dry_run=args.dry_run,
+                                thread_id=delta.thread_id,
+                                canonical_artifact=None,
+                            )
+                    else:
+                        surviving_prunes.append(delta)
                 continue
             except (
                 FileNotFoundError,

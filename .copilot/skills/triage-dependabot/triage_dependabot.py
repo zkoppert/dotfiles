@@ -1887,17 +1887,6 @@ def _comment_notification_still_clearable(
         except Exception:
             return False
         return bool(snapshot is not None and snapshot.history_complete and snapshot.direct is False)
-    record = (
-        ledger.notification_record(source_id=thread_id, canonical_artifact=pr_url)
-        if ledger is not None
-        else None
-    )
-    boundary = None
-    if record is not None:
-        boundary = parse_iso_datetime(str(record.get("terminal_recorded_at") or ""))
-    current_updated_at = parse_iso_datetime(current.get("updated_at"))
-    if boundary is not None and current_updated_at is not None and current_updated_at > boundary:
-        return False
     subject = current.get("subject") or {}
     subject_url = str(subject.get("url") or "")
     latest_url = str(subject.get("latest_comment_url") or "")

@@ -124,7 +124,7 @@ def test_classify_security_alert_goes_to_q2():
         state_fetcher=lambda _: None,
         comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
     )
-    assert c.bucket == triage.BUCKET_Q2
+    assert c.bucket == triage.BUCKET_Q1
 
 
 def test_classify_assign_on_my_own_pr_goes_to_q1():
@@ -160,7 +160,7 @@ def test_classify_security_alert_on_my_own_pr_still_goes_to_q2():
         comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "zkoppert",
     )
-    assert c.bucket == triage.BUCKET_Q2
+    assert c.bucket == triage.BUCKET_Q1
 
 
 def test_classify_self_assign_on_non_pr_still_goes_to_q1():
@@ -3857,6 +3857,66 @@ def test_run_rejects_fresh_stale_prune_when_notification_changed(todo_file):
     )
 
 
+def test_run_rechecks_stale_prune_after_ledger_capture(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [
+                    {
+                        "id": "stale-1",
+                        "source": "github-notification",
+                        "notification": {
+                            "thread_id": "123",
+                            "url": "https://github.com/o/r/pull/1",
+                            "reason": "subscribed",
+                            "repo": "o/r",
+                        },
+                    },
+                ],
+                "prioritized": {"q1_do_first": []},
+                "done": [],
+            }
+        )
+    )
+    clearable = {
+        "id": "123",
+        "reason": "subscribed",
+        "updated_at": "2025-01-01T00:00:00Z",
+        "subject": {
+            "title": "stale PR",
+            "url": "https://api.github.com/repos/o/r/pulls/1",
+            "type": "PullRequest",
+        },
+        "repository": {"full_name": "o/r"},
+    }
+    renewed = {
+        "id": "123",
+        "reason": "mention",
+        "updated_at": "2025-01-02T00:00:00Z",
+        "subject": {
+            "title": "stale PR",
+            "url": "https://api.github.com/repos/o/r/pulls/1",
+            "type": "PullRequest",
+        },
+        "repository": {"full_name": "o/r"},
+    }
+    with patch("triage.get_my_login", return_value="zkoppert"), patch(
+        "triage.fetch_notifications", return_value=[]
+    ), patch("triage.check_subject_stale", return_value=(triage.STALE_DROP, "closed pr")), patch(
+        "triage.shared_comment_notification_snapshot",
+        return_value=triage.CommentNotificationSnapshot(None, None, False, True, None),
+    ), patch(
+        "triage._current_notification_for_clearance",
+        side_effect=[clearable, renewed],
+    ) as current_clearance, patch("triage.mark_thread_done") as mark_done:
+        stats = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    assert stats.pruned_stale == 0
+    assert current_clearance.call_count == 2
+    mark_done.assert_not_called()
+
+
+
 def test_run_marks_done_on_completed(todo_file):
     todo_file.write_text(
         yaml.safe_dump(
@@ -3922,6 +3982,90 @@ def test_run_marks_done_on_completed(todo_file):
     assert stats.dropped == 1
     assert stats.marked_done == 0
     assert any("/notifications/threads/777" in p for p in delete_paths)
+
+
+def test_run_rechecks_terminal_clearance_before_marking_done(todo_file):
+    todo_file.write_text(
+        yaml.safe_dump(
+            {
+                "inbox": [],
+                "prioritized": {
+                    "q1_do_first": [
+                        {
+                            "id": "doneone",
+                            "title": "x",
+                            "status": "done",
+                            "notification": {
+                                "thread_id": "777",
+                                "reason": "subscribed",
+                                "url": "https://github.com/o/r/pull/777",
+                                "repo": "o/r",
+                                "updated_at": "2026-07-01T12:00:00Z",
+                            },
+                        },
+                    ],
+                },
+                "done": [],
+            }
+        )
+    )
+
+    current_before = {
+        "id": "777",
+        "reason": "subscribed",
+        "updated_at": "2026-07-01T12:00:00Z",
+        "subject": {
+            "title": "stale PR",
+            "url": "https://api.github.com/repos/o/r/pulls/777",
+            "type": "PullRequest",
+        },
+        "repository": {"full_name": "o/r"},
+    }
+    current_after = {
+        "id": "777",
+        "reason": "mention",
+        "updated_at": "2026-07-01T12:05:00Z",
+        "subject": {
+            "title": "stale PR",
+            "url": "https://api.github.com/repos/o/r/pulls/777",
+            "type": "PullRequest",
+        },
+        "repository": {"full_name": "o/r"},
+    }
+
+    capture_done = False
+
+    def fake_run(cmd, *args, **kwargs):
+        joined = " ".join(cmd)
+        if "/user" in joined:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps({"login": "zkoppert"}), stderr=""
+            )
+        if "/notifications" in joined and "/threads" not in joined:
+            payload = current_after if capture_done else current_before
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps([payload]), stderr=""
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    def fake_ledger_capture(*args, **kwargs):
+        nonlocal capture_done
+        capture_done = True
+        return None
+
+    with patch("triage.subprocess.run", side_effect=fake_run), patch(
+        "triage.shared_comment_notification_snapshot",
+        return_value=triage.CommentNotificationSnapshot(None, None, False, True),
+    ), patch("triage._ledger_capture", side_effect=fake_ledger_capture), patch(
+        "triage.mark_thread_done"
+    ) as mark_done:
+        args = triage.parse_args(["--todo-file", str(todo_file), "--no-notify"])
+        stats = triage.run(args)
+
+    assert stats.marked_done == 0
+    mark_done.assert_not_called()
+    data = yaml.safe_load(todo_file.read_text())
+    assert data["prioritized"]["q1_do_first"]
 
 
 def test_run_handles_empty_notifications(todo_file):
@@ -5353,7 +5497,7 @@ def test_classify_skips_state_check_for_non_subject_types():
         subject_author_fetcher=lambda _: "someone-else",
     )
     fetcher.assert_not_called()
-    assert c.bucket == triage.BUCKET_Q2
+    assert c.bucket == triage.BUCKET_Q1
 
 
 def _enable_dependabot_notif(reason: str = "author") -> dict:
@@ -6838,7 +6982,7 @@ def test_classify_private_subscription_security_alert_still_routes_to_q2(
         comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "someone-else",
     )
-    assert c.bucket == triage.BUCKET_Q2
+    assert c.bucket == triage.BUCKET_Q1
 
 
 def test_classify_subscription_filter_is_case_insensitive(private_subscription_filter):
@@ -6972,7 +7116,7 @@ def test_classify_super_linter_security_alert_survives():
         comment_snapshot_fetcher=lambda *_args, **_kwargs: triage.CommentNotificationSnapshot(None, None, False, True),
         subject_author_fetcher=lambda _: "maintainer",
     )
-    assert c.bucket == triage.BUCKET_Q2
+    assert c.bucket == triage.BUCKET_Q1
 
 
 def test_classify_super_linter_fork_dependabot_bump_left_unread():
@@ -7156,14 +7300,14 @@ def test_private_aor_non_aor_direct_ping_survives(private_aor_filter):
             "security_alert", repo=PRIVATE_AOR_REPO, title="Refactor merge queue"
         )
     )
-    assert sec.bucket == triage.BUCKET_Q2
+    assert sec.bucket == triage.BUCKET_Q1
 
 
 # --- always-drop repos ---
 
 
 def test_dot_github_repo_preserves_protected_reasons():
-    expected = {"mention": triage.BUCKET_Q1, "assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q2}
+    expected = {"mention": triage.BUCKET_DROP, "assign": triage.BUCKET_DROP, "security_alert": triage.BUCKET_DROP}
     for reason, bucket in expected.items():
         c = _classify(_repo_notif(reason, repo="github/.github"))
         assert c.bucket == bucket, reason
@@ -7186,7 +7330,7 @@ def private_always_drop_repo(monkeypatch):
 
 
 def test_private_always_drop_repo_preserves_protected_reasons(private_always_drop_repo):
-    expected = {"mention": triage.BUCKET_Q1, "assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q2}
+    expected = {"mention": triage.BUCKET_DROP, "assign": triage.BUCKET_DROP, "security_alert": triage.BUCKET_DROP}
     for reason, bucket in expected.items():
         c = _classify(_repo_notif(reason, repo=PRIVATE_ALWAYS_DROP_REPO))
         assert c.bucket == bucket, reason
@@ -7212,7 +7356,7 @@ def test_curated_data_subscribed_drops():
 def test_curated_data_assign_and_security_alert_survive():
     """Carve-out applies to curated-data too: a direct assignment or a
     security alert gets in even though only `mention` was listed."""
-    expected = {"assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q2}
+    expected = {"assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q1}
     for reason in ("assign", "security_alert"):
         c = _classify(_repo_notif(reason, repo="github/curated-data"))
         assert c.bucket == expected[reason], reason
@@ -7244,7 +7388,7 @@ def test_markup_assign_and_security_alert_survive():
     """Carve-out: a direct assignment or a security alert on markup
     survives even with a non-security title (low-priority repo, but a
     direct ping still matters)."""
-    expected = {"assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q2}
+    expected = {"assign": triage.BUCKET_Q1, "security_alert": triage.BUCKET_Q1}
     for reason in ("assign", "security_alert"):
         c = _classify(
             _repo_notif(reason, repo="github/markup", title="Bump rendering perf")
@@ -7767,6 +7911,37 @@ def test_preview_backfill_skips_incomplete_comment_history(tmp_path: Path, monke
     rows = ledger._rows("SELECT source_id FROM notifications", ())
     assert stats.fetched == 1
     assert rows == []
+
+
+def test_run_keeps_direct_comment_even_with_incomplete_comment_history(todo_file: Path, monkeypatch: pytest.MonkeyPatch):
+    notif = _notif(
+        "comment",
+        id="notif-direct-comment",
+        updated_at="2026-09-14T07:00:00Z",
+        repo="o/r",
+        url="https://api.github.com/repos/o/r/pulls/1",
+    )
+    notif["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/1"
+    notif["subject"]["latest_comment_url"] = "https://api.github.com/repos/o/r/issues/comments/1"
+    monkeypatch.setattr(triage, "get_my_login", lambda: "zkoppert")
+    monkeypatch.setattr(triage, "fetch_notifications", lambda: [notif])
+    monkeypatch.setattr(
+        triage,
+        "shared_comment_notification_snapshot",
+        lambda *args, **kwargs: triage.CommentNotificationSnapshot(
+            "teammate",
+            "@zkoppert please take a look",
+            True,
+            False,
+            None,
+        ),
+    )
+
+    stats = triage.run(triage.parse_args(["--todo-file", str(todo_file), "--no-notify"]))
+
+    data = yaml.safe_load(todo_file.read_text())
+    assert stats.added_q1 == 1
+    assert data["prioritized"]["q1_do_first"][0]["notification"]["thread_id"] == "notif-direct-comment"
 
 
 def test_ledger_record_terminal_keeps_first_boundary(todo_file: Path):
