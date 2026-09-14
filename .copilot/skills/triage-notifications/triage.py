@@ -138,7 +138,7 @@ TITLE_DROP_PATTERNS: list[re.Pattern[str]] = [
 # Reasons where a direct human action overrides title-pattern drops.
 # If someone explicitly @-mentions or assigns Zack on a flaky-test
 # issue, surface it instead of silently dropping.
-TITLE_DROP_PROTECTED_REASONS: set[str] = {"mention", "assign", "author"}
+TITLE_DROP_PROTECTED_REASONS: set[str] = {"mention", "assign"}
 
 # Reasons that get a subject-state check at classify time. If the PR / issue
 # is already closed/merged when the notification first arrives, drop it
@@ -1093,6 +1093,21 @@ def _current_notification_is_clearable_from_current(
     if boundary is not None:
         if current_updated_at is not None and current_updated_at < boundary:
             return True
+        if current_updated_at is not None and current_updated_at == boundary:
+            if current_reason == reason == "review_requested":
+                snapshot = shared_comment_notification_snapshot(
+                    current,
+                    my_login=my_login,
+                    run_gh=run_gh,
+                    since=(
+                        ledger.comment_watermark(source_id=thread_id, canonical_artifact=url)
+                        if ledger is not None and thread_id
+                        else None
+                    ),
+                )
+                if snapshot is not None and snapshot.direct is True:
+                    return False
+                return True
         if current_reason in {"mention", "assign"}:
             return False
         if current_reason == "comment":

@@ -358,7 +358,19 @@ class InstallScriptTest(unittest.TestCase):
             'if [ "$1" = "unload" ]; then\n'
             "  : > \"$HOME/notification-teardown-ready\"\n"
             "fi\n"
-            "printf '%s\\n' \"launchctl $*\" >> \"$HOME/install.log\"\n",
+            "printf '%s\\n' \"launchctl $*\" >> \"$HOME/install.log\"\n"
+            'if [ "$1" = "print" ]; then\n'
+            '  if [ -e "$HOME/notification-teardown-ready" ]; then\n'
+            '    printf "%s\\n" "Could not find service \"$2\""\n'
+            "    exit 1\n"
+            "  fi\n"
+            "  printf '%s\\n' 'State = running'\n"
+            "  exit 0\n"
+            "fi\n"
+            'if [ "$1" = "bootout" ]; then\n'
+            "  : > \"$HOME/notification-teardown-ready\"\n"
+            "  exit 0\n"
+            "fi\n",
             encoding="utf-8",
         )
         launchctl.chmod(0o755)
@@ -579,6 +591,53 @@ class InstallScriptTest(unittest.TestCase):
         )
         self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/venv").exists())
         self.assertFalse((self.home / ".local/share/dotfiles/notification-workers/requirements.sha256").exists())
+
+    def test_notification_jobs_boot_out_targetless_loaded_services_before_provisioning(self) -> None:
+        requirements = self.repo / "python" / "notification-worker-requirements.txt"
+        requirements.parent.mkdir(parents=True)
+        requirements.write_text("PyYAML==6.0.2\nruamel.yaml==0.18.6\n", encoding="utf-8")
+
+        activity_log = self.home / "install.log"
+        launchctl = self.fake_bin / "launchctl"
+        launchctl.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"launchctl $*\" >> \"$HOME/install.log\"\n"
+            'label_key=$(printf "%s" "$2" | tr "/" "_")\n'
+            'marker="$HOME/bootedout-$label_key"\n'
+            'if [ "$1" = "print" ]; then\n'
+            '  if [ -e "$marker" ]; then\n'
+            "    printf '%s\\n' 'Could not find service \"$2\"'\n"
+            "    exit 1\n"
+            "  fi\n"
+            "  printf '%s\\n' 'State = running'\n"
+            "  exit 0\n"
+            "fi\n"
+            'if [ "$1" = "bootout" ]; then\n'
+            "  : > \"$marker\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        launchctl.chmod(0o755)
+
+        result = subprocess.run(
+            [str(self.installer)],
+            cwd=self.repo,
+            env=self.env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        calls = activity_log.read_text(encoding="utf-8").splitlines()
+        self.assertIn(f"launchctl print gui/{os.getuid()}/com.zkoppert.notification-triage", calls)
+        self.assertIn(f"launchctl bootout gui/{os.getuid()}/com.zkoppert.notification-triage", calls)
+        self.assertIn(f"launchctl print gui/{os.getuid()}/com.zkoppert.triage-dependabot", calls)
+        self.assertIn(f"launchctl bootout gui/{os.getuid()}/com.zkoppert.triage-dependabot", calls)
+        self.assertIn("Provisioned notification worker runtime", result.stdout)
+        self.assertTrue((self.home / ".local/share/dotfiles/notification-workers/venv/bin/python3").exists())
+        self.assertTrue((self.home / ".local/share/dotfiles/notification-workers/requirements.sha256").exists())
 
     def test_accessibility_picker_is_linked_and_loaded_with_private_config(
         self,

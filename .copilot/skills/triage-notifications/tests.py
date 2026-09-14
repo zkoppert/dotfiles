@@ -6785,6 +6785,115 @@ def test_current_notification_is_clearable_rejects_same_second_assign_after_term
         )
 
 
+def test_current_notification_is_clearable_allows_same_second_review_requested_after_terminal_boundary(
+    todo_file,
+):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/7"
+    ledger.capture(
+        source_id="thread-review",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    ledger.record_terminal(
+        source_id="thread-review",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-03T12:00:00Z",
+    )
+    current = _notif("review_requested", id="thread-review", updated_at="2026-07-03T12:00:00Z")
+    current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/7"
+    current["repository"] = {"full_name": "o/r"}
+    with patch("triage.fetch_notifications", return_value=[current]):
+        assert (
+            triage._current_notification_is_clearable(
+                url=artifact,
+                thread_id="thread-review",
+                reason="review_requested",
+                ledger=ledger,
+                my_login="zkoppert",
+            )
+            is True
+        )
+
+
+def test_current_notification_is_clearable_rejects_same_second_review_requested_with_direct_comment(
+    todo_file,
+):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/8"
+    ledger.capture(
+        source_id="thread-review-direct",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    ledger.record_terminal(
+        source_id="thread-review-direct",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-03T12:00:00Z",
+    )
+    current = _notif("review_requested", id="thread-review-direct", updated_at="2026-07-03T12:00:00Z")
+    current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/8"
+    current["subject"]["latest_comment_url"] = "https://api.github.com/repos/o/r/issues/comments/1"
+    current["repository"] = {"full_name": "o/r"}
+    with patch(
+        "triage.fetch_notifications",
+        return_value=[current],
+    ), patch(
+        "triage.shared_comment_notification_snapshot",
+        return_value=triage.CommentNotificationSnapshot("someone", "@zkoppert please review", True, True),
+    ):
+        assert (
+            triage._current_notification_is_clearable(
+                url=artifact,
+                thread_id="thread-review-direct",
+                reason="review_requested",
+                ledger=ledger,
+                my_login="zkoppert",
+            )
+            is False
+        )
+
+
+def test_current_notification_is_clearable_rejects_newer_review_requested_after_terminal_boundary(
+    todo_file,
+):
+    ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
+    artifact = "https://github.com/o/r/pull/7"
+    ledger.capture(
+        source_id="thread-review",
+        canonical_artifact=artifact,
+        classification="actionable",
+        worker="test",
+        event_at="2026-07-01T12:00:00Z",
+    )
+    ledger.record_terminal(
+        source_id="thread-review",
+        canonical_artifact=artifact,
+        terminal_disposition="irrelevant",
+        event_at="2026-07-03T12:00:00Z",
+    )
+    current = _notif("review_requested", id="thread-review", updated_at="2026-07-03T12:00:00Z")
+    current["subject"]["url"] = "https://api.github.com/repos/o/r/pulls/7"
+    current["repository"] = {"full_name": "o/r"}
+    with patch("triage.fetch_notifications", return_value=[current]):
+        assert (
+            triage._current_notification_is_clearable(
+                url=artifact,
+                thread_id="thread-review",
+                reason="review_requested",
+                ledger=ledger,
+                my_login="zkoppert",
+            )
+            is True
+        )
+
+
 def test_current_notification_is_clearable_rejects_newer_review_requested_after_terminal_boundary(
     todo_file,
 ):
@@ -7964,6 +8073,10 @@ def test_install_sh_does_not_link_notification_agents_yet(tmp_path: Path):
         "launchctl": (
             "#!/bin/sh\n"
             f"printf '%s\\n' \"$*\" >> '{launchctl_log}'\n"
+            'if [ "$1" = "print" ]; then\n'
+            '  printf "%s\\n" "Could not find service \"$2\""\n'
+            "  exit 1\n"
+            "fi\n"
             "exit 0\n"
         ),
         "terminal-notifier": "#!/bin/sh\nexit 0\n",

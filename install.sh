@@ -134,7 +134,17 @@ notification_launch_agent_is_unloaded() {
     return 1
   fi
   print_output="$(launchctl print "gui/$(id -u)/$launchctl_label" 2>&1)" || true
-  [[ "$print_output" == *"Could not find service"* ]]
+  if [[ "$print_output" == *"Could not find service"* ]]; then
+    return 0
+  fi
+  # Targetless loaded labels are still owned by these dotfiles, so boot them out
+  # before treating the launch agent as fully unloaded.
+  if launchctl bootout "gui/$(id -u)/$launchctl_label" >/dev/null 2>&1; then
+    print_output="$(launchctl print "gui/$(id -u)/$launchctl_label" 2>&1)" || true
+    [[ "$print_output" == *"Could not find service"* ]]
+  else
+    return 1
+  fi
 }
 
 notification_launch_agents_absent() {
