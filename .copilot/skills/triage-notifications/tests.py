@@ -9075,21 +9075,32 @@ def test_preview_backfill_keeps_terminal_tracker_rows_when_notification_is_not_n
     ]
 
 
-def test_notification_worker_tests_workflow_pins_container_and_lockfile():
+def test_notification_worker_tests_workflow_uses_matrix_and_lockfile():
     workflow = yaml.safe_load(
         Path(".github/workflows/notification-worker-tests.yml").read_text()
     )
-    for job_name in ("triage-notifications", "triage-dependabot"):
-        job = workflow["jobs"][job_name]
-        assert job["runs-on"] == "ubuntu-24.04"
-        assert job["container"]["image"] == (
-            "python:3.13.0-bookworm@sha256:91a40c9db8e53aa8c4cae96c24dc7135835e07c8140de233826ece4442ca8e29"
-        )
-        install_step = next(step for step in job["steps"] if step.get("name") == "Install test dependencies")
-        assert "--require-hashes" in install_step["run"]
-        assert "notification-worker-requirements.lock.txt" in install_step["run"]
-        assert all(
-            not step.get("uses", "").startswith("actions/setup-python@")
-            for step in job["steps"]
-            if isinstance(step, dict)
-        )
+    jobs = workflow["jobs"]
+    assert list(jobs) == ["notification-workers"]
+    job = jobs["notification-workers"]
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert job["container"]["image"] == (
+        "python:3.13.0-bookworm@sha256:91a40c9db8e53aa8c4cae96c24dc7135835e07c8140de233826ece4442ca8e29"
+    )
+    assert job["strategy"]["matrix"]["include"] == [
+        {
+            "suite": "triage-notifications",
+            "test_file": ".copilot/skills/triage-notifications/tests.py",
+        },
+        {
+            "suite": "triage-dependabot",
+            "test_file": ".copilot/skills/triage-dependabot/tests.py",
+        },
+    ]
+    install_step = next(step for step in job["steps"] if step.get("name") == "Install test dependencies")
+    assert "--require-hashes" in install_step["run"]
+    assert "notification-worker-requirements.lock.txt" in install_step["run"]
+    assert all(
+        not step.get("uses", "").startswith("actions/setup-python@")
+        for step in job["steps"]
+        if isinstance(step, dict)
+    )
