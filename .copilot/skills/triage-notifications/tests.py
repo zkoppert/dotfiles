@@ -1039,7 +1039,7 @@ def test_apply_todo_mutations_with_lock_preserves_concurrent_manual_edit(tmp_pat
         "inbox: []\nprioritized:\n  q1_do_first: []\n  q2_schedule: []\ndone: []\n",
         encoding="utf-8",
     )
-    _stale_snapshot = triage.load_todo(todo_path)
+    triage.load_todo(todo_path)
     todo_path.write_text(
         "inbox:\n"
         "  - id: manual-added\n"
@@ -1095,7 +1095,7 @@ def test_apply_todo_mutations_with_lock_dedupes_url_against_fresh_document(tmp_p
         "inbox: []\nprioritized:\n  q1_do_first: []\n  q2_schedule: []\ndone: []\n",
         encoding="utf-8",
     )
-    _stale_snapshot = triage.load_todo(todo_path)
+    triage.load_todo(todo_path)
     # Concurrent edit: another writer records the PR as a Q1 artifact after the
     # snapshot was taken but before this locked write runs.
     todo_path.write_text(

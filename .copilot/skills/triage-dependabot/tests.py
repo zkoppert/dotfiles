@@ -1104,7 +1104,7 @@ def test_apply_todo_mutations_with_lock_preserves_concurrent_manual_edit(
         "inbox: []\nprioritized:\n  q1_do_first: []\ndone: []\n",
         encoding="utf-8",
     )
-    _stale_snapshot = td.load_todo(path)
+    td.load_todo(path)
     path.write_text(
         "inbox:\n"
         "  - id: manual-added\n"
