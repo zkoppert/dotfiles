@@ -5,18 +5,16 @@ items into `~/repos/zkoppert-todo/todo.yml`, archive shipped work to
 the `done` section for biannual reflection, and mark notifications
 done on GitHub (removing them from the inbox) once handled.
 
-Designed to be safe to re-run: deduped by `notification.thread_id`, so a
-second run produces no duplicate todos and no spurious mark-dones.
+Re-runs reconcile existing work rather than starting a second queue. See
+[tracker integration](#how-it-integrates-with-zkoppert-todo) for identity matching
+and notification lifecycle handling.
 
 ## What problem this solves
 
-I get a lot of GitHub notifications and miss the important ones. The
-configured schedule is hourly, 24x7, but stays unloaded until attended activation.
-Each run does an aggressive "bulk triage": it drops
-the passive subscription noise (and clears those GitHub notifications),
-routes direct asks into Q1, keeps ordinary review requests in Q2 with a
-one-business-day escalation path, and leaves Dependabot bumps for a
-separate handler. The notification inbox stops being a wall of red.
+I get a lot of GitHub notifications and miss the important ones. Each run
+separates personal work from passive subscription noise, while
+[triage-dependabot](../triage-dependabot/README.md) handles dependency updates.
+The notification inbox stops being a wall of red without replacing my todo workflow.
 
 The fetch uses `?all=true` so the cron also sees notifications I've
 viewed on github.com (marked read) but never deleted. Without that,
@@ -25,119 +23,92 @@ they merged; the cron would never see them again to clean them up.
 
 Each newly added direct mention sends one macOS notification through
 `terminal-notifier`. Selecting the notification opens the PR, issue, or
-discussion in the default browser. A direct mention includes GitHub's
-`mention` reason and comment notifications whose body contains an exact,
-case-insensitive mention of my login. Assignments, review requests, security
-alerts, author updates, already tracked items, dropped noise, and no-op runs
-stay silent. A durable local ledger in
-`~/Library/Application Support/notification-workers/ledger.sqlite` records
-classification, tracker linkage, terminal disposition, and notification-clear
-state before any GitHub DELETE runs.
+discussion in the default browser. Alerts follow the classifier's direct-mention
+result, including a mention found in comment history when GitHub reports a
+different reason. Assignments, reviews, security alerts, and author updates
+without such a mention stay silent, as do already tracked items, dropped
+noise, and no-op runs.
 
 ## How it classifies
 
-The core policy is **KEEP_REASONS default-drop**: only directed,
-personal-action reasons survive. Everything else is passive subscription
-noise that drops and is marked done on GitHub.
+The classifier protects personal requests before applying noise filters:
 
-`KEEP_REASONS = {review_requested, assign, author, mention}`; the earlier
-Q1 route also protects `security_alert`.
+1. **Direct asks**: `mention`, `assign`, and exact, case-insensitive mentions
+   of the authenticated login in relevant comment history route to Q1. A
+   closed PR or issue does not by itself resolve a direct ask.
+2. **Security alerts**: `security_alert` routes to Q1.
+3. **Review requests**: ordinary `review_requested` notifications route to
+   Q2, regardless of the author's team. Closed or merged subjects drop instead.
+   Recognized Dependabot-authored bump reviews are handed to the companion
+   worker; an unverified author falls back to scheduled review work.
 
-A series of protected reason routes runs before the noise-only drops:
+Comment inspection includes issue comments, PR review comments, and reviews
+when the notification carries comment evidence. The ledger keeps a separate
+cursor for each stream so a later bot reply does not hide an earlier direct
+mention. Incomplete history is retained for retry and reported as an error;
+a direct ask already established by the reason or available history still
+reaches Q1. A comment with no usable history can remain in INBOX for triage.
 
-1. **Comments** - an exact, case-insensitive `@zkoppert` mention routes to
-   Q1. Dependabot comments are left for `triage-dependabot` after their author
-   is verified. Incomplete comment history is retained rather than cleared.
-2. **Direct reasons** - `mention` and `assign` route to Q1; `security_alert` routes to Q1.
-3. **Review requests** - open, non-Dependabot review requests route to Q2 with
-   one-business-day escalation. Verified Dependabot review requests are left
-   for `triage-dependabot`.
+The remaining notifications follow the noise policy in `classify()` and
+`repo_override()` in [triage.py](triage.py):
 
-The remaining notifications then pass through these drops in order:
+- **Dependabot handoff**: bump-title patterns identify candidates, and an
+  author lookup confirms bot ownership. Handoffs remain in GitHub's inbox
+  without changing read state; an unavailable lookup also retains the thread.
+  Private `watch_only_dependabot_mark_done_repos` entries instead clear
+  passive bump notifications. Protected direct asks and security alerts still
+  reach Q1, and watch-only review requests remain scheduled work.
+- **Title-pattern drops**: repetitive flaky-test reports and routine
+  `Enable Dependabot` config PRs are noise. `TITLE_DROP_PATTERNS` owns the
+  matching patterns; these do not override the protected routes above.
+- **Closed author updates**: closed or merged self-authored PRs can be
+  archived to `done` with source `github-notification-auto-archive`, retaining
+  shipped work for biannual reflection. Closed issues are not archived as PR work.
+- **Repository filters**: the public defaults and private
+  `~/.copilot/private/triage-repos.yml` settings govern the remaining reasons.
+  Tuned-out and subscription-filtered repos drop noise; area-of-responsibility
+  filters require matching titles; security-title exceptions can retain an
+  INBOX item. The owner-agnostic super-linter filter also covers forks.
+  None of these filters overrides a protected request.
+- Surviving `author` status items enter INBOX. Other unprotected reasons,
+  including non-direct comments, default to DROP unless a repository exception
+  keeps them.
 
-1. **Dependabot version-bump drop** - verified Dependabot-authored bump PRs
-   drop from the tracker but are **never marked done on GitHub**
-   (`skip_mark_done`). A separate `triage-dependabot` tool consumes those
-   threads, so they must stay available to that worker.
-2. **Title-pattern drop** - repetitive system-generated noise and routine
-   config PRs (regex match on `subject.title`). Catches flaky-test report
-   titles (`Intermittent test failure: ...`, `Flaky test: ...`, `test
-   flake: ...`) and `Enable Dependabot` config PRs. Edit
-   `TITLE_DROP_PATTERNS` in `triage.py` to add patterns.
-3. **Closed-subject drop** - if an ordinary review request or author status
-   item is already closed/merged when the notification arrives, drop instead
-   of routing it. Direct asks have already routed to Q1. If the subject is a
-   PR I authored, also append an entry to todo.yml's `done` section (source
-   `github-notification-auto-archive`) so the shipped work is captured for
-   biannual reflection.
-4. **Repo-level overrides** (`repo_override`) - per-repo policies, often
-   stricter than the global KEEP_REASONS. Direct asks, security alerts, and
-   ordinary review requests have already been routed before these noise-only
-   gates.
-   - `github/.github` plus private config entries (`ALWAYS_DROP_REPOS`):
-      drop unprotected notification reasons.
-   - `github/curated-data`: drop everything except the carve-out (direct
-     pings and security alerts).
-   - `github/markup`: keep security-related titles (security / vuln /
-     CVE, routed to INBOX) and the carve-out reasons; drop the rest as
-     low priority.
-   - Private config entries in `title_aor_required_repos`: keep only
-     titles about NUX's area of responsibility plus the carve-out reasons;
-     drop anything else.
-   - `*/super-linter` (any owner, matched by `^[^/]+/super-linter$`):
-     keep only the carve-out reasons. This covers both
-     `super-linter/super-linter` and the `github/super-linter` fork (an
-     exact-match list missed the fork, so its Dependabot PRs slipped
-     through).
-   - Private config entries in `subscription_filtered_repos`: keep the
-     listed reasons plus the carve-out reasons; drop everything else.
-
-After the drops, surviving `author` notifications route to INBOX and unknown
-reasons drop. Both read and unread notifications classify through the same table; the
-`already_tracked` short-circuit in `run()` prevents re-adding a tracked
-notification.
-
-The reason table (after the early-exit drops above):
-
-| Reason             | Bucket                                          |
-| ------------------ | ----------------------------------------------- |
-| `mention`          | Q1 (urgent direct ask)                          |
-| `assign`           | Q1                                              |
-| `security_alert`   | Q1 urgent security alert                        |
-| `review_requested` | Q2 scheduled work; auto-escalate after 1 business day if untouched |
-| `author`           | INBOX (my own open PR/issue, status item)       |
-| `comment`          | Q1 if the body @-mentions me; else DROP         |
-| anything else      | DROP (passive subscription noise)               |
+An ordinary review escalates to Q1 after one business day while it remains
+in INBOX or Q2 with an empty, `pending`, or `not_started` status. The deadline
+uses the original `notification.captured_at` (initially GitHub's `updated_at`,
+or intake time if unavailable); legacy entries can fall back to `added`.
+Business days skip weekends, not holidays, and preserve the UTC time of day.
+Editing notes alone does not count as starting work. Items moved to
+`in_progress`, `blocked`, or `in_review`, or given a started status, are not
+moved by age escalation.
 
 ## How it integrates with zkoppert-todo
 
-Each new entry carries a `notification` block:
+`todo.yml` remains the human work queue. The shared local ledger records
+source identity, canonical artifact, classification, tracker linkage,
+terminal decisions, comment cursors, and clear/retry state before a GitHub
+DELETE. `NotificationLedger` in [notification_worker_common.py](../notification_worker_common.py)
+owns the persisted schema and its writable upgrades; see
+[health inspection](#health-and-backfill-preview) for the database location.
 
-```yaml
-- id: notif-github-pull-1234-fix-the-thing
-  title: "Fix the thing (org/repo)"
-  description: "GitHub notification - reason: mention. @mention → Q1."
-  category: process
-  source: github-notification
-  added: 2026-01-15
-  urgency: high
-  importance: high
-  quadrant: q1_do_first
-  status: pending
-  notes: ""
-  notification:
-    thread_id: "1234567"
-    url: "https://github.com/org/repo/pull/1234"
-    reason: mention
-    repo: org/repo
-```
+The general worker matches `notification.thread_id` first, then canonical
+PR/issue URLs in tracker `link` or `artifacts` references. Matching spans
+INBOX, all quadrants, `in_progress`, `blocked`, `in_review`, and `done`.
+Q1/Q2 requests can attach notification metadata to a matching item without
+a thread ID, preserving its title, notes, and started-work section instead
+of adding another todo. URL-deduped INBOX candidates do not add another item;
+clearing their GitHub threads still requires a current clearability check.
 
-Writes to `todo.yml` are race-safe. The tool computes GitHub outcomes
-first, then takes an exclusive `todo.yml.lock`, re-reads the file from
-disk, applies only the planned deltas by `id` or
-`notification.thread_id`, and writes with an atomic `os.replace`. That
-keeps manual edits made during a run instead of replaying a stale
-in-memory snapshot.
+`build_todo_entry()` and the archive builders in [triage.py](triage.py) own
+the generated tracker fields. Use the worker rather than copying an older
+notification block by hand.
+
+Writes take an exclusive `todo.yml.lock`, re-read the file, apply planned
+deltas, and use an atomic `os.replace`. Round-trip YAML preserves comments,
+key order, and quoting. Terminal-clear checks and git operations also use
+the shared lock so cooperating writers cannot invalidate tracker ownership
+between its check and a clear.
 
 After a successful write, the tool stages `todo.yml` in the todo repo,
 skips the commit when there is no staged diff, and otherwise creates a
@@ -169,37 +140,63 @@ endpoint rather than repeatedly paginating the whole inbox.
 
 ## Schedule
 
-The launchd plist defines an hourly schedule on the hour, 24x7. Logs land in
-`~/Library/Logs/notification-triage.log`. The schedule passes `--log-output`
-so summaries, prune breakdowns, and errors include timestamps. Ad-hoc runs
-keep the plain stdout summary; runtime preflight errors are always timestamped.
+Both the [general triage plist](../../../LaunchAgents/com.zkoppert.notification-triage.plist)
+and the [Dependabot plist](../../../LaunchAgents/com.zkoppert.triage-dependabot.plist)
+define hourly runs on the hour, 24x7, with no immediate run at load.
+Their `--log-output` argument timestamps summaries, prune breakdowns, and
+errors in `~/Library/Logs/<worker>.log`. Ad-hoc runs keep the plain stdout
+summary; runtime preflight errors are always timestamped.
 
-`./install.sh` verifies that owned notification services are unloaded before
-provisioning the runtime or changing worker links. It uses `bootout` if an
-owned service remains registered after `unload`, and stops installation if
-absence cannot be verified. Foreign links and services are preserved.
-The installer removes owned plist symlinks from `~/Library/LaunchAgents` and
-never starts the hourly jobs.
-When you're ready to activate it in a separate attended step, recreate the
-symlink and run:
+On macOS, `./install.sh` requires both notification services and their
+LaunchAgents filesystem entries (including dangling symlinks) to be absent
+before provisioning the runtime or changing worker links. From
+`~/repos/dotfiles`, it unloads owned plist symlinks, verifies service absence,
+then removes those links. It tries `bootout` when `unload` leaves an owned
+service registered. A loaded label without a plist is stopped only when its
+program points to the expected checkout's worker. Foreign entries and services
+are preserved; nonstandard checkouts do not stop services or remove agent entries.
+If either path remains or service absence cannot be verified, installation
+stops with a nonzero exit. The installer never runs these workers or loads
+their schedules.
+
+Activation is a separate attended step, not part of fixture validation.
+First provision the [runtime](#requirements) and inspect the
+[backfill preview](#health-and-backfill-preview). The checked-in plists use
+absolute paths for Zack's macOS account; inspect them before loading on another
+machine. For the configured account, choose one worker and recreate its missing
+symlink before loading it:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist
+worker=notification-triage # Choose triage-dependabot to activate that worker instead.
+agent="$HOME/Library/LaunchAgents/com.zkoppert.$worker.plist"
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs" &&
+  ln -s "$HOME/repos/dotfiles/LaunchAgents/com.zkoppert.$worker.plist" "$agent" &&
+  launchctl load -w "$agent"
 ```
 
-To pause:
+Do not force-replace an existing agent path; inspect its ownership first.
+To disable the selected worker, including at future logins:
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.zkoppert.notification-triage.plist
+worker=notification-triage # Choose the worker to disable.
+launchctl unload -w "$HOME/Library/LaunchAgents/com.zkoppert.$worker.plist"
 ```
 
 ## Health and backfill preview
 
-The workers write a machine-readable health snapshot into the shared local
-ledger (`~/Library/Application Support/notification-workers/ledger.sqlite`).
-It records last success/error timestamps, actionable items without tracker
-links, clear failures, and dropped items not yet cleared. Notification totals
-are the last observed intake counts, not a new post-clear GitHub inventory.
+The workers write separate machine-readable health snapshots into the shared
+local ledger at `~/Library/Application Support/notification-workers/ledger.sqlite`.
+Each snapshot records the worker's last success/error timestamps and retains
+the previous error when a later run succeeds. Its `current_notification_count`
+and `current_unread_count` describe that run's intake, not a post-clear GitHub
+inventory. `notification_counts` and the actionable-without-tracker,
+clear-failure, and stale-dropped lists summarize the shared ledger across
+both workers, including retained historical rows. Stale-dropped items are
+irrelevant rows not yet cleared, not an age threshold.
+
+`record_worker_health_snapshot()` in [notification_worker_common.py](../notification_worker_common.py)
+owns the JSON fields. Runtime preflight failures happen before that function
+can run, so check the timestamped log as well as the stored health timestamp.
 Read the stored JSON without modifying the database:
 
 ```bash
@@ -219,14 +216,17 @@ The preview reconciles by thread ID first, then canonical GitHub URL, and
 records the projected tracker links and terminal decisions in that new file.
 It does not modify the current tracker or existing ledger, clear notifications,
 or activate schedules. Normal `--dry-run` does not write health or ledger state.
-A live migration is not part of this delivery.
+A backfill preview is not applied to production automatically. Ordinary mutating
+worker runs create or upgrade their ledger schema when needed; the installer
+does not perform that migration.
 
 ## Pruning stale notifications
 
-After classifying new notifications, the script walks the inbox **and
-all four quadrants** (`q1_do_first`, `q2_schedule`, `q3_delegate`,
-`q4_eliminate`) and drops anything whose underlying GitHub subject is
-now stale:
+After classifying new notifications, the script walks INBOX and all four
+quadrants for stale subjects. Direct asks are not auto-pruned just because
+the subject closes; they follow the explicit terminal-disposition lifecycle
+above. Other `source: github-notification` entries are candidates when their
+subjects are:
 
 - closed or merged PRs
 - closed issues
@@ -234,19 +234,15 @@ now stale:
 - answered Q&A discussions
 - subjects that 404 (deleted)
 
-The classifier also performs the same closed/merged check at intake
-time, so a notification that arrives on an already-closed subject (e.g.
-a `review_requested` review that landed before the cron ran) is dropped
-immediately instead of being routed to a quadrant.
+Ordinary review and author-status notifications also receive a closed/merged
+check at intake; this does not override the protected direct-ask route.
 
 A closed-but-unlocked regular discussion is kept because it can still
-receive activity. Only entries with `source: github-notification` are
-touched, so manually added items are left alone. Errors other than 404
-(timeout, 5xx, parse failure) keep the entry to avoid dropping things
-during transient issues. When the pruner drops an entry, it also marks
-the underlying GitHub notification thread done (DELETE) so the next
-cron cycle doesn't re-fetch the unread thread and re-add it. If the
-dropped entry was a self-authored PR (`notification.reason == "author"`
+receive activity. Manually added entries are left alone. Errors other than
+404 (timeout, 5xx, parse failure) keep the entry to avoid dropping work during
+transient issues. Before pruning, the worker rechecks the tracker and current
+notification and durably records the terminal decision. A clear failure stays
+in the ledger for retry. If the dropped entry was a self-authored PR (`notification.reason == "author"`
 on a PR URL), it is also copied into `done` with
 `source: github-notification-auto-archive` before being removed, so
 PRs first tracked while open and merged later still land in the
@@ -275,13 +271,21 @@ in-memory load and reports that preview without writing.
 
 ## Requirements
 
-Runtime dependencies are pinned in
-`~/repos/dotfiles/python/notification-worker-requirements.txt` and are
-installed by `./install.sh` into a dotfiles-owned runtime at
-`~/.local/share/dotfiles/notification-workers/venv`.
+Both workers use a dotfiles-owned virtualenv at
+`~/.local/share/dotfiles/notification-workers/venv`. `./install.sh` needs an
+available Python 3.11+ interpreter to create it, installs the dependency
+versions in [notification-worker-requirements.txt](../../../python/notification-worker-requirements.txt),
+and verifies that `PyYAML` and `ruamel.yaml` import successfully. The Python
+interpreter comes from the local bootstrap selection, not an exact version pin.
+A healthy runtime is reused when the requirements stamp matches.
 
-The wrapper fails fast with a preflight error when that runtime cannot import
-`PyYAML` and `ruamel.yaml`.
+The wrappers resolve their checkout through symlinks and use only this
+virtualenv, not whichever Python happens to be on `PATH`. They fail before
+starting a worker if its Python executable is missing or the YAML import
+preflight fails. Runtime provisioning failures warn without stopping the rest
+of dotfiles setup, but do not activate a notification schedule. Notification
+wrapper symlinks in `~/.local/bin` are installed only on macOS from
+`~/repos/dotfiles`; elsewhere, invoke the checkout's `bin/` wrappers directly.
 
 GitHub access:
 
@@ -299,10 +303,12 @@ private metadata. Do not publish the ledger or raw health output. If you make
 
 ## Tests
 
-```bash
-cd ~/repos/dotfiles/.copilot/skills/triage-notifications
-pytest tests.py -v
-```
+Use fixtures, not live workers or the real installer. The
+[notification worker CI workflow](../../../.github/workflows/notification-worker-tests.yml)
+owns the locked test dependencies and explicit full-suite commands. Each
+worker's `tests.py` must run in its own pytest process; bare discovery does
+not collect these suites. The installer boundary is exercised by
+[test_install.py](../../../test_install.py) with a fake HOME and launchctl.
 
 ## Failure modes
 
@@ -313,17 +319,15 @@ pytest tests.py -v
   `~/Library/Logs/notification-triage.log`.
 - **`todo.yml` missing**: script exits with code 1. Re-create the file
   (or check that `~/repos/zkoppert-todo` is still cloned).
-- **A new GitHub notification reason appears**: under the aggressive
-  policy the classifier **drops** any reason that isn't in
-  `KEEP_REASONS`. If a new directed-ping reason shows up that I care
-  about, add it to `KEEP_REASONS` (and route it in `classify`)
-  in `triage.py`. Run with `--dry-run --verbose` to see how unfamiliar
-  reasons are being classified before they're cleared.
+- **A new GitHub notification reason appears**: use `--dry-run --verbose`
+  to inspect its result under the [classification policy](#how-it-classifies)
+  before allowing clears. Add an explicit route in `classify()` with fixture
+  coverage if the new reason should receive personal attention.
 - **Pruner dropped something I wanted to keep**: the pruner only drops
   on a hard "stale" signal (closed PR, closed issue, locked discussion,
-  answered Q&A discussion, or 404). If a subject reopens after being
-  pruned and you still care about it, run triage again and the
-  notification will come back through the inbox. To audit what was
+  answered Q&A discussion, or 404), subject to the direct-ask protection
+  above. If GitHub sends renewed activity after a subject reopens, the next
+  triage run can route that notification again. To audit what was
   dropped, check the cron log
   (`~/Library/Logs/notification-triage.log`) or run with `--verbose`;
   each drop logs `planned prune of <section> item <id> (<reason>)`. To disable the

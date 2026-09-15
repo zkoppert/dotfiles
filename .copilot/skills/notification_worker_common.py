@@ -50,6 +50,7 @@ def parse_iso_datetime(value: str | None) -> _dt.datetime | None:
 
 
 def normalize_github_url(url: str | None) -> str | None:
+    """Owner/repository casing does not distinguish GitHub artifact identity."""
     if not isinstance(url, str) or not url.strip():
         return None
     try:

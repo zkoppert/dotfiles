@@ -4,9 +4,9 @@ My personal configuration for macOS and GitHub Codespaces.
 
 ## What does the installer configure?
 
-`install.sh` links the repository's Copilot instructions, local skills, and CLI wrappers into their user-level locations. Before changing worker links or the runtime, it unloads existing dotfiles-owned GitHub notification LaunchAgents and verifies they are absent. If `unload` leaves an owned service registered, it tries `bootout` and verifies again. An unverified teardown stops installation with a nonzero exit; foreign links and services are not stopped or replaced. Nonstandard checkouts do not stop existing services.
+`install.sh` links the repository's Copilot instructions, local skills, and CLI wrappers into their user-level locations. It also provisions the [shared GitHub notification runtime](.copilot/skills/triage-notifications/README.md#requirements), without running the workers or activating their schedules.
 
-Once those checks pass, the installer provisions `~/.local/share/dotfiles/notification-workers/venv` and verifies the pinned `PyYAML` and `ruamel.yaml` dependencies. It removes owned notification-agent symlinks and never loads their hourly schedules. Activation remains a separate attended step. See the [GitHub notification worker documentation](.copilot/skills/triage-notifications/README.md) for health inspection and a fresh-file backfill preview. Slack intake is not included.
+See the [notification worker guide](.copilot/skills/triage-notifications/README.md) for installer safety checks, attended activation, health inspection, and the fresh-file backfill preview. [Dependabot triage](.copilot/skills/triage-dependabot/README.md) keeps its separate dependency-update policy. Slack intake is not included.
 
 The installer can also install these tools from a private skill catalog:
 
@@ -29,7 +29,7 @@ export COPILOT_SKILL_CATALOG_REPO="OWNER/REPOSITORY"
 ./install.sh
 ```
 
-The installer skips tools that are already present. Missing CLIs, authentication failures, or unavailable catalog tools produce warnings without stopping the rest of dotfiles setup. If the notification-worker runtime cannot be provisioned or fails import preflight, the wrappers still install but the notification launch agents stay unloaded until you explicitly activate them in a separate attended step.
+The installer skips catalog tools that are already present. Missing CLIs, authentication failures, or unavailable catalog tools produce warnings without stopping the rest of dotfiles setup. Notification setup has separate [runtime prerequisites](.copilot/skills/triage-notifications/README.md#requirements) and [LaunchAgent safety checks](.copilot/skills/triage-notifications/README.md#schedule); consult those if installation stops or a worker reports a preflight error.
 
 ## How do I update catalog tools?
 

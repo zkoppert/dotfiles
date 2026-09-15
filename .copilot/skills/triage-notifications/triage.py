@@ -1,31 +1,5 @@
 #!/usr/bin/env python3
-"""Notification triage: classify GitHub notifications and route them to todo.yml.
-
-For each notification from `gh api /notifications?all=true` (read or
-unread), this tool:
-
-1. Classifies it as one of:
-   - DROP            (safe to mark-done without confirmation)
-   - QUADRANT_Q1     (urgent direct asks and security alerts)
-   - QUADRANT_Q2     (ordinary review requests with age escalation)
-   - INBOX           (other actionable work needing human triage)
-2. For DROP items: records a durable disposition before clearing GitHub.
-3. For Q1/Q2/INBOX items: adds an entry to ~/repos/zkoppert-todo/todo.yml
-   (deduped by notification thread_id and tracked PR/issue URLs).
-4. Reconciles completed, Q4, and dropped tracker items with the ledger,
-   then clears unchanged threads or settles confirmed-absent ones locally.
-5. Triggers a clickable macOS notification for each newly added direct mention.
-
-Designed to be safe to re-run (consistent: a second run produces no
-duplicate todos and no spurious mark-dones).
-
-Usage:
-    triage.py [--dry-run] [--todo-file PATH] [--no-notify] [--verbose]
-
-Exit codes:
-    0  Triage completed (with or without items found)
-    1  Error reading config, todo file, or hitting the API
-"""
+"""GitHub notification worker; see README.md for policy and CLI usage."""
 
 from __future__ import annotations
 
@@ -93,14 +67,8 @@ Q1_REASONS: set[str] = {
     "security_alert",
 }
 
-# Aggressive "bulk triage" policy: only directed, personal-action reasons
-# survive. Everything else (subscribed, team_mention, comment,
-# state_change, ci_activity, manual, ...) is passive subscription noise
-# that drops and is marked done on GitHub. `author` stays so I keep
-# tracking my own open PRs/issues; closed/merged ones still drop (and
-# archive) via the closed-state check. Repo-level overrides below can be
-# MORE restrictive than this set (e.g. dropping `author` on a repo I'm
-# only passively subscribed to).
+# `author` keeps my own open work visible after the protected request routes.
+# Remaining reasons default to noise, subject to the repository policy.
 KEEP_REASONS: set[str] = {
     "review_requested",
     "assign",
@@ -111,10 +79,8 @@ KEEP_REASONS: set[str] = {
 # Subject states that are candidates for the drop bucket.
 CLOSED_STATES: set[str] = {"closed", "merged"}
 
-# Title patterns that auto-drop regardless of subject state. Useful for
-# repetitive system-generated noise (intermittent test failures, flaky
-# test reports) that lands as `team_mention` on open issues and would
-# otherwise fall through to the inbox-by-default bucket.
+# These title shapes identify generated reports rather than human-written
+# discussions about flaky tests. Protected requests route before this filter.
 #
 # Patterns are deliberately anchored to the START of the title and
 # require the phrase to be followed by a colon. This matches the
@@ -155,11 +121,9 @@ STATEFUL_REASONS: set[str] = {
     "author",
 }
 
-# Dependabot version-bump PRs. These drop from the inbox but are NEVER
-# marked done on GitHub: a separate dependency-handler tool
-# (triage-dependabot) consumes those notifications, so this tool must
-# leave them unread. Titles identify candidates; an author lookup confirms
-# Dependabot ownership, and an unavailable lookup retains the thread.
+# Titles identify handoff candidates, not proof of bot ownership. Clearing a
+# real bump here would hide it from triage-dependabot, so unavailable author
+# lookups retain the thread. See README.md for protected and watch-only routes.
 # Dependabot uses stable title shapes: conventional-commit
 # `build(deps): ...` / `chore(deps-dev): ...` / super-linter's
 # `deps(<ecosystem>): bump ...` and `ci(<scope>): bump ...`, the classic
@@ -295,39 +259,26 @@ def _private_keyword_map(
 
 _PRIVATE_REPO_CONFIG = load_private_triage_repos()
 
-# Normally Dependabot bumps stay unread for triage-dependabot. Private
-# watch-only repos from local config mark passive bump notifications done.
+# Watch-only policy can suppress passive bump handoffs without losing direct asks.
 WATCH_ONLY_DEPENDABOT_MARK_DONE_REPOS: set[str] = _private_repo_set(
     _PRIVATE_REPO_CONFIG, "watch_only_dependabot_mark_done_repos"
 )
 
-# Repos where I'm only interested in directed pings - everything else
-# (subscribed, team_mention, comment, ci_activity, author, etc.) is auto-
-# subscription noise that should drop and be marked done on GitHub.
-# Maps full_name (lowercase) -> set of allowed NON-protected reasons.
-# Direct pings (mention, assign) and security_alert are handled earlier by
-# REPO_OVERRIDE_PROTECTED_REASONS and always survive, so they do NOT need
-# to be listed here; these sets only decide the remaining reasons.
+# These allowlists only govern reasons left after classify's protected routes.
 SUBSCRIPTION_FILTERED_REPOS: dict[str, set[str]] = {
-    # curated-data: nothing beyond the carve-out - only direct pings and
-    # security alerts get in.
     "github/curated-data": set(),
 }
 SUBSCRIPTION_FILTERED_REPOS.update(
     _private_reason_map(_PRIVATE_REPO_CONFIG, "subscription_filtered_repos")
 )
 
-# Repos I've fully tuned out of: drop every notification regardless of
-# reason, including direct pings and security alerts. These are repos I
-# unsubscribe from entirely (profile READMEs, bot pings, ELT threads).
+# Tuned-out repos have no useful subscription noise, but a personal request
+# still needs attention. Protected routes remain independent of this list.
 ALWAYS_DROP_REPOS: set[str] = {"github/.github"} | _private_repo_set(
     _PRIVATE_REPO_CONFIG, "always_drop_repos"
 )
 
-# Reasons that always survive the relevance/priority repo gates below (but
-# NOT ALWAYS_DROP_REPOS). A direct @-mention, a direct assignment, or a
-# vulnerability alert is too important to silently drop just because a
-# repo's title or subscription filter did not match.
+# A direct ping or alert survives even an otherwise ignored repository.
 REPO_OVERRIDE_PROTECTED_REASONS: set[str] = {"mention", "assign", "security_alert"}
 DIRECTED_REPO_REASONS: set[str] = REPO_OVERRIDE_PROTECTED_REASONS | {"review_requested"}
 
@@ -338,24 +289,17 @@ DIRECTED_REPO_REASONS: set[str] = REPO_OVERRIDE_PROTECTED_REASONS | {"review_req
 # allowlist). Each entry is (compiled_pattern, allowed_non_protected_reasons).
 SUBSCRIPTION_FILTERED_REPO_PATTERNS: list[tuple[re.Pattern[str], set[str]]] = [
     # super-linter (any owner): I'm a passive subscriber, not a maintainer.
-    # Nothing beyond the carve-out gets in (direct pings / security alerts
-    # still survive); dependabot bumps, comments, and CI noise drop.
+    # Protected requests and Dependabot handoffs are decided before this filter.
     (re.compile(r"^[^/]+/super-linter$"), set()),
 ]
 
-# Repos where the kept set is gated by the subject TITLE rather than the
-# reason. Maps full_name (lowercase) -> tuple of case-insensitive keyword
-# substrings. A notification is kept (routed normally) only if its title
-# contains one of the keywords; otherwise it drops regardless of reason.
-# Private AoR repo filters live in the untracked local config.
+# Area-of-responsibility title filters apply after protected request routes.
+# Private repo names and keywords stay in untracked local config.
 TITLE_AOR_REQUIRED_REPOS: dict[str, tuple[str, ...]] = _private_keyword_map(
     _PRIVATE_REPO_CONFIG, "title_aor_required_repos"
 )
 
-# Repos I maintain but treat as low priority unless a notification is
-# security-related or a direct @-mention. Non-security, non-mention
-# notifications drop; security-titled ones are kept (INBOX) even on
-# otherwise-passive reasons so vulnerabilities are never silently dropped.
+# Keep security-titled noise visible even in low-priority maintained repos.
 SECURITY_TITLE_KEEP_REPOS: set[str] = {"github/markup"}
 
 # Matches security-related subject titles (security / vulnerability / CVE).
@@ -384,9 +328,7 @@ class Classification:
     # an entry to todo.yml's `done` section so the work shows up in
     # biannual reflections.
     archive_to_done: bool = False
-    # When BUCKET_DROP fires on a Dependabot version-bump PR, drop it from
-    # the inbox but do NOT mark the GitHub notification done - the separate
-    # triage-dependabot tool consumes those threads and needs them unread.
+    # A DROP bucket may retain the remote thread for handoff or revalidation.
     skip_mark_done: bool = False
 
 
@@ -406,8 +348,6 @@ class TriageStats:
     pruned_stale: int = 0
     pruned_by_reason: dict[str, int] = field(default_factory=dict)
     archived_to_done: int = 0
-    # Dependabot bumps dropped from the inbox but left unread on GitHub for
-    # triage-dependabot to consume.
     left_for_dependabot: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -425,7 +365,7 @@ class MarkDoneDelta:
 
 @dataclass
 class EscalationDelta:
-    """Move an aged review request from inbox/Q2 into Q1."""
+    """Urgency or renewal update that preserves work already in progress."""
 
     item_id: str
     thread_id: str | None = None
@@ -502,12 +442,10 @@ def is_security_title(title: str) -> bool:
 
 
 def repo_override(repo_full: str, reason: str, title: str) -> Classification | None:
-    """Apply repo-level overrides before reason routing.
+    """Apply repository noise policy after classify's protected routes.
 
-    Returns a Classification when a repo's policy decides the outcome
-    (usually ``BUCKET_DROP``, or ``BUCKET_INBOX`` for the markup
-    security-keep case), or ``None`` to fall through to normal reason
-    routing. Repo lookups are case-insensitive.
+    Return None when the remaining reason should use normal routing.
+    Repo lookups are case-insensitive.
     """
     repo_lc = (repo_full or "").lower()
 
@@ -625,14 +563,7 @@ def fetch_thread_state(notif: dict[str, Any]) -> str | None:
 
 
 def fetch_subject_author(notif: dict[str, Any]) -> str | None:
-    """Return the GitHub login that opened the subject (PR or issue).
-
-    Used for `review_requested` notifications: GitHub doesn't include the
-    requester in the notification payload, so we use the PR author as a
-    pragmatic proxy. This handles the dominant NUX-team case where a
-    teammate opens a PR and adds Zack as reviewer in the same step.
-    Returns None on any API or parse failure.
-    """
+    """Return the subject author's login, or None when the lookup fails."""
     subject = notif.get("subject") or {}
     url = subject.get("url")
     if not url:
@@ -681,9 +612,8 @@ def classify(
     `state_fetcher` and `subject_author_fetcher` are injectable so tests
     can avoid network calls. They default to the live API helpers.
 
-    Read notifications classify identically to unread ones; the
-    `already_tracked` short-circuit prevents the same notification from
-    being added to the inbox on successive cron ticks.
+    Read state never changes classification; run() reconciles tracker
+    ownership and renewed activity separately.
     """
     reason = (notif.get("reason") or "").lower()
     subject = notif.get("subject") or {}
@@ -787,11 +717,7 @@ def classify(
         return Classification(BUCKET_Q2, "review_requested - scheduled review")
 
     if dependabot_bump:
-        # Dependabot version-bump PRs: drop from the inbox but normally NEVER
-        # mark the GitHub notification done - triage-dependabot consumes those
-        # threads and needs them unread. Watch-only repos from private config
-        # are the exception: passive bump notifications should be marked done
-        # instead of handed off.
+        # Watch-only policy is an explicit opt-out from passive bump handoffs.
         repo_lc = repo_full.lower()
         if repo_lc in WATCH_ONLY_DEPENDABOT_MARK_DONE_REPOS:
             if reason not in DIRECTED_REPO_REASONS:
@@ -824,12 +750,8 @@ def classify(
                     f"title matches drop pattern /{pattern.pattern}/",
                 )
 
-    # Cheap early drop: if the subject is already closed/merged when the
-    # notification first lands, there is nothing left to do. Only check
-    # reasons that route to inbox/Q1, and only when the subject is the
-    # kind of resource whose state actually means "done". Conservative on
-    # error: state_fetcher returns None for network/parse failures, which
-    # falls through to the normal classification path.
+    # Only unprotected status work reaches this state check. On lookup failure,
+    # keep normal routing rather than treating missing data as completion.
     if reason in STATEFUL_REASONS and subject_type in {"pullrequest", "issue"}:
         state = state_fetcher(notif)
         if state in CLOSED_STATES:
@@ -848,11 +770,6 @@ def classify(
                 archive_to_done=archive,
             )
 
-    # Repo-level overrides: repo policies that can be more restrictive than
-    # the global KEEP_REASONS. Placed after the title / closed-state /
-    # Dependabot drops so those still fire on override repos, but before
-    # reason routing so we don't pay for state/author fetches on reasons
-    # we're about to discard.
     override = repo_override(repo_full, reason, title)
     if override is not None:
         return override
@@ -2751,8 +2668,8 @@ def clear_url_deduped_threads(
     this runs. Reacquire the same exclusive lock and serialize the reload,
     the URL revalidation, and the notification clear so no todo writer can
     remove the tracking item between the check and the DELETE: if the URL is
-    no longer tracked, leave the thread unread so the next run re-surfaces
-    it. The clear (a network call) is held under the lock deliberately, so a
+    no longer tracked, retain the thread so the next run re-surfaces it.
+    The clear (a network call) is held under the lock deliberately, so a
     concurrent removal cannot orphan the notification.
     """
     if not deduped:

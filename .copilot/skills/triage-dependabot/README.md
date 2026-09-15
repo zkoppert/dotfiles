@@ -18,53 +18,55 @@ piles automatically.
 
 ## Decision tree
 
-For each notification from `gh api /notifications?all=true` whose subject is a
-`PullRequest` authored by `dependabot[bot]` or `dependabot-preview[bot]`:
+The worker uses the same [read-state-resilient intake](../triage-notifications/README.md#what-problem-this-solves)
+as general triage and filters to Dependabot-authored PRs. Its decision policy
+stays separate. Direct mentions, assignments, and directly addressed comments
+are left for [general triage's direct-ask routing](../triage-notifications/README.md#how-it-classifies),
+not handled by a PR mutation or terminal cleanup here. Verified non-direct
+comments can continue through the policy; incomplete history stays accountable
+for retry.
+
+After cooldown and ownership checks, the worker follows these routes:
 
 | Condition | Outcome |
 | --- | --- |
-| Notification reason is `mention` or `assign`, or a comment contains a direct mention | hand off to general notification triage before any terminal action |
-| PR closed or merged | skip and mark notification done |
-| Repo owner is not `github`, `github-community-projects`, or `zkoppert` AND notification reason is `review_requested`, `subscribed`, or `ci_activity` | skip and mark notification done |
-| Notification reason is `comment` with complete history and no direct mention | continue through the Dependabot decision tree |
-| Repo owner is not `github`, `github-community-projects`, or `zkoppert` AND notification reason is not passive | skip, leave notification in inbox for direct response |
-| Title or body references an excluded dependency (e.g. `super-linter/super-linter`) AND notification reason is `review_requested`, `subscribed`, or `ci_activity` | skip and mark notification done |
-| Title or body references an excluded dependency AND notification reason is not passive | skip, leave notification in inbox for direct response |
+| Repo archived | skip with terminal notification cleanup |
+| Repo owner outside the allowlist | apply the [owned-repo policy](#owned-repo-allowlist) without acting on the PR |
+| Repo or dependency excluded | apply the [exclusion policy](#excluded-dependencies) without acting on the PR |
+| PR closed or merged | skip with terminal notification cleanup |
 | Draft PR | flag-for-review |
 | Any non-bot human (other than me) reviewed or commented | flag-for-review |
-| Target version is a prerelease (alpha / beta / rc / dev / preview) | close-prerelease (force-close via `gh pr close --delete-branch`) |
-| `mergeStateStatus` is `behind` or `dirty` | rebase (suppressed if my last rebase comment is newer than the latest dependabot push) |
-| Bump is major / minor / unknown AND repo coverage threshold below 90 | flag-for-review |
-| CI status pending | skip this run; next hour retries |
+| Target version is a prerelease (alpha / beta / rc / dev / preview) | close-prerelease |
+| `mergeStateStatus` is `behind` or `dirty` | rebase unless a prior request is still waiting on Dependabot |
+| Bump kind unknown | flag-for-review regardless of coverage |
+| Bump is major / minor AND coverage is unknown or below 90 | flag-for-review |
+| CI status pending | skip this run; a later run retries |
 | CI status failing | flag-for-review |
-| Security release (Copilot sub-agent or regex on title/body) AND repo defines a `release` label | label-and-merge |
+| Security release (Copilot sub-agent or regex on title/body) | label-and-merge, adding `release` only if the repo defines it |
 | Otherwise | merge |
 
-The existing decision tree stays separate from general notification triage.
 Before each approval, merge, label, rebase, or close, the guard checks ledger
 and tracker ownership, inspects relevant comment history, then makes a final
 single-thread read of the notification reason, update timestamp, subject, and
-latest-comment URL. New direct asks veto the mutation. Notifications without
-comment evidence do not trigger unrelated comment-collection requests;
-incomplete relevant history is retained rather than assumed non-direct.
+latest-comment URL. New direct asks veto the mutation. A tracker reload failure
+also blocks the action. Notifications without comment evidence do not trigger
+unrelated comment-collection requests; incomplete relevant history is retained
+rather than assumed non-direct.
 
-The script never auto-merges when uncertainty exists; sub-agent
-timeouts, unknown bump kinds, and missing coverage signals all route to
-`flag-for-review`.
+A security-classification sub-agent failure falls back to the regex, not
+a blanket flag-for-review. Unknown bump kinds and insufficient coverage for
+non-patch updates follow the conservative branches above.
 
 ### Owned repo allowlist
 
-The script only processes repos whose owner is `github`,
-`github-community-projects`, or `zkoppert`. The owner comparison is
-case-insensitive. Dependabot PRs from every other owner are skipped and no Q1
-todo entry is created. Passive notification reasons (`review_requested`,
-`subscribed`, `ci_activity`) are marked done so third-party subscription noise
-stays out of the inbox. `mention`, `assign`, and directly addressed comment
-notifications are handed to general triage before this policy runs. Verified
-non-direct comments continue through the Dependabot decision tree; incomplete
-comment history is retained. Other non-passive reasons leave the notification
-in place so the user can respond. Repo-specific
-skips from the private config still apply inside the owned owners.
+The script only acts on PRs whose repo owner is `github`,
+`github-community-projects`, or `zkoppert`, compared case-insensitively.
+PRs from other owners do not create a Dependabot Q1 flag. After the direct-ask
+handoff above, passive reasons (`review_requested`, `subscribed`, `ci_activity`)
+and verified non-direct comments may clear as irrelevant, subject to tracker
+ownership and current-notification checks. Other reasons leave the notification
+in place. Repo-specific skips from the private config still apply inside the
+owned owners.
 
 ### Prerelease detection
 
@@ -95,31 +97,29 @@ a permanent skip, add an `ignore` rule in the repo's
 
 ### Excluded dependencies
 
-`SKIPPED_DEPENDENCY_PATTERNS` in `triage_dependabot.py` lists package
-coordinates the script must never auto-act on (currently
-`super-linter/super-linter`). These PRs always skip the action branches,
-but the notification handling depends on the reason: passive reasons
-(`review_requested`, `subscribed`, `ci_activity`) auto-clear so the
-inbox stops accumulating. `mention`, `assign`, and directly addressed comment
-notifications are handed to general triage before the exclusion policy.
-Verified non-direct comments may clear as irrelevant, while incomplete comment
-history and other reasons leave the notification in place.
+`SKIPPED_DEPENDENCY_PATTERNS` in [triage_dependabot.py](triage_dependabot.py)
+owns the excluded package coordinates. Those matches and private
+`dependabot_skipped_repos` entries never reach PR action branches. Open PRs
+use the same passive-reason and verified-comment clearance policy as
+[unowned repos](#owned-repo-allowlist); closed or merged PRs can receive terminal
+cleanup. Direct asks and incomplete history retain the protections above.
 
 ### Coverage detection
 
-The script reads `pyproject.toml`, `setup.cfg`, `Makefile`, `tox.ini`,
-and `.coveragerc` on the repo's default branch via `gh api` and looks
-for `--cov-fail-under=N` or `fail_under = N`. When no signal exists, the
-threshold is treated as below 90, which means non-patch bumps in repos
-without a configured threshold are flagged for review. This is the
-conservative default.
+`detect_repo_coverage()` in [triage_dependabot.py](triage_dependabot.py)
+owns the supported Python and Ruby SimpleCov configuration sources and
+threshold parsing. It reads the repo's default branch via `gh api`.
+A missing or unreadable coverage signal is unknown, not evidence of safety;
+non-patch updates then follow the flag-for-review branch.
 
 ## Outputs
 
 - **Auto-merge**: submit an approving review, then
-  `gh pr merge --auto --squash --delete-branch`, and the notification is
-  marked done only after the shared local notification ledger records the
-  terminal decision. The approval comes first because most target repos require
+  `gh pr merge --auto --squash --delete-branch`. Enabling auto-merge is not
+  treated as completion: the notification stays open until a later run sees
+  the PR closed or merged. A successful synchronous merge can clear immediately
+  after the ledger records completion and clearance is revalidated.
+  The approval comes first because most target repos require
   an approving code-owner review; enabling auto-merge alone would leave
   the PR stuck until a human approved. When the repo doesn't allow
   auto-merge at the repo level, the merge falls back to a synchronous
@@ -132,43 +132,42 @@ conservative default.
   flow.
 - **Close-prerelease**: `gh pr close --delete-branch` (force-close via
   the API, so we do not depend on Dependabot acting on a comment) for
-  PRs whose target version is an alpha / beta / rc / dev / preview;
-  notification is marked done and the cooldown is applied.
+  PRs whose target version is an alpha / beta / rc / dev / preview.
+  After a successful close, the worker records irrelevance, applies the
+  cooldown, and attempts notification clearance with durable retry state.
 - **Flag-for-review**: a Q1 entry in
   `~/repos/zkoppert-todo/todo.yml` under
-  `prioritized.q1_do_first`, with `source: dependabot-triage`,
-  `notification.thread_id` for dedup, the PR url, and the reason in
-  `description`. Each newly added flag also sends one macOS notification
+  `prioritized.q1_do_first`. Ordinary flags keep their GitHub notification
+  open for human disposition. A branch-protection handoff can clear after
+  the Q1 item is durably linked in the ledger as `tracked_elsewhere`, without
+  removing the flag. Each newly added flag also sends one macOS notification
   through `terminal-notifier`. Selecting the notification opens the PR in
   the default browser. Routine merges, rebases, labels, prerelease closes,
   already tracked flags, and no-op runs stay silent.
 
 ## Health snapshot
 
-The shared notification ledger also carries a machine-readable health
-snapshot for Dependabot runs. It includes last success/error timestamps,
-notification totals, actionables without tracker links, clear failures,
-and dropped items that remain uncleared. These are the last observed intake
-counts. See the [read-only health query](../triage-notifications/README.md#health-and-backfill-preview).
-Normal dry runs do not modify an existing ledger or its health snapshot.
+See the shared [health and backfill guide](../triage-notifications/README.md#health-and-backfill-preview)
+for the read-only query and the distinction between worker intake counts and
+ledger-wide metrics. Dependabot records its snapshot under `triage-dependabot`.
+Normal dry runs do not modify the existing ledger, health snapshot, tracker,
+or cooldown state.
 
 ## Per-PR cooldown
 
 `~/Library/Logs/triage-dependabot-state.json` records the last action
-timestamp per PR url. Re-runs within `ACTION_COOLDOWN_SECONDS` (3600)
-skip the same PR so an unrefreshed notification stream cannot trigger a
-duplicate merge. The shared source ledger lives at
-`~/Library/Application Support/notification-workers/ledger.sqlite` and
-tracks tracker linkage plus notification-clear retries independently of
-that cooldown.
+timestamp per PR URL. The action cooldown is one hour; branch-protection
+handoffs back off for a day. This limits repeated PR actions while GitHub's
+notification stream catches up. Durable clear and tracker-cleanup retries
+are separate from that cooldown; see [tracker integration](#integration-with-zkoppert-todo).
 
 ## Integration with zkoppert-todo
 
-Flagged PRs are written using the same notification schema as
-`triage-notifications` (`thread_id`, `url`, `reason`, `repo`) plus
-`pr_number` and `bump`. Dedup keys off `notification.thread_id` and is
-checked against `inbox`, every `prioritized` quadrant, `in_progress`,
-`blocked`, `in_review`, and `done`.
+`build_flag_entry()` in [triage_dependabot.py](triage_dependabot.py) owns
+the generated flag fields. Dedup checks the item ID and notification thread
+across INBOX, every quadrant, `in_progress`, `blocked`, `in_review`, and `done`.
+Ownership and cleanup also compare normalized GitHub artifact URLs so an older
+thread can still protect or identify the same PR.
 
 Writes to `todo.yml` use an exclusive `todo.yml.lock`, a fresh read, and
 an atomic `os.replace`. Before clearing a terminal notification, the tool
@@ -189,38 +188,15 @@ signed-off local commit with the Copilot co-author trailer. It then tries
 are logged as warnings so launchd keeps running, while the local commit
 still records the change.
 
-When the user moves a flagged todo to `done`, `status: dropped`, or Q4,
-the existing `triage-notifications` reconciliation loop will catch it on its
-next run, record the terminal disposition in the shared ledger, and then
-DELETE the underlying notification thread.
+Human completion or elimination of a flag uses general triage's
+[terminal-disposition reconciliation](../triage-notifications/README.md#how-it-integrates-with-zkoppert-todo),
+including already-absent threads and renewed asks.
 
 ## Schedule
 
-`com.zkoppert.triage-dependabot.plist` defines an hourly schedule on the hour, 24x7.
-The `RunAtLoad` key is false so loading the plist does not trigger an
-immediate run.
-
-`./install.sh` verifies owned notification jobs are absent before changing
-worker links or provisioning the runtime, using `bootout` when `unload` is
-insufficient. If it cannot verify absence, installation fails. It preserves
-foreign jobs and links, removes owned notification-agent symlinks, and never
-starts these hourly schedules.
-When you're ready to activate it in a separate attended step, recreate the
-symlink and run:
-
-```bash
-launchctl load -w "$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist"
-```
-
-To unload:
-
-```bash
-launchctl unload -w "$HOME/Library/LaunchAgents/com.zkoppert.triage-dependabot.plist"
-```
-
-Logs go to `~/Library/Logs/triage-dependabot.log`. The schedule passes
-`--log-output` so summaries and errors include timestamps. Ad-hoc runs keep
-the plain stdout summary; runtime preflight errors are always timestamped.
+Use the shared [schedule and attended-activation instructions](../triage-notifications/README.md#schedule)
+for installer safeguards, plist paths, timestamped logs, and enable/disable
+commands. Select `triage-dependabot` as the worker in those examples.
 
 ## Ad-hoc usage
 
@@ -231,12 +207,15 @@ the plain stdout summary; runtime preflight errors are always timestamped.
 # Preview only.
 ~/repos/dotfiles/bin/triage-dependabot --dry-run --verbose
 
-# Process a single repo while testing rule changes.
+# Restrict new intake to one owned repo; repeat --allowed-repo for more.
 ~/repos/dotfiles/bin/triage-dependabot --allowed-repo zkoppert/dotfiles
 
 # Skip the Copilot sub-agent (regex-only security classification).
 ~/repos/dotfiles/bin/triage-dependabot --no-copilot-subagent
 ```
+
+`--allowed-repo` filters incoming notifications, not recovery of existing
+ledger cleanup intents. Use `--dry-run` when you need a non-mutating preview.
 
 ## Requirements
 
@@ -246,34 +225,21 @@ the plain stdout summary; runtime preflight errors are always timestamped.
   (default). The skill falls back to a regex classifier on any sub-agent
   failure, so the `--no-copilot-subagent` flag is for explicit opt-out
   rather than failure recovery.
-- The pinned notification-worker runtime provisioned by `./install.sh` at
-  `~/.local/share/dotfiles/notification-workers/venv`, using
-  `python/notification-worker-requirements.txt` (`PyYAML` and
-  `ruamel.yaml`). The wrapper fails fast when that runtime is missing
-  dependencies.
-- `terminal-notifier` on `PATH` for clickable macOS alerts. Install it
-  with `brew install terminal-notifier`.
+- The shared [notification runtime and alert prerequisites](../triage-notifications/README.md#requirements).
 
 ## Privacy
 
 The script reads only repos accessible to the authenticated `gh` user.
-Sub-agent invocations send the PR title and the first 4000 characters of
-the body to Copilot CLI; nothing else leaves the local machine. The
-state file in `~/Library/Logs` is a flat JSON map of PR url to
-timestamp. The shared ledger and health snapshots also contain notification
-titles and URLs; keep them private. The default ledger directory uses mode
-`0700`, and its database and SQLite sidecars use mode `0600`.
+Security-classification prompts send the PR title and the first 4000
+characters of the body to Copilot CLI. Normal GitHub operations and tracker
+syncing also use the network. The cooldown state contains PR URLs and
+timestamps. Follow the shared [ledger and tracker privacy guidance](../triage-notifications/README.md#privacy)
+when inspecting or sharing local state.
 
 ## Tests
 
-`tests.py` covers the decision tree branches, semver detection (single
-and grouped bumps), coverage parsing, human-activity detection, rebase
-suppression, and the cooldown state file. Run with:
-
-```bash
-cd ~/repos/dotfiles/.copilot/skills/triage-dependabot
-python3 -m pytest tests.py -v
-```
+Use the shared [fixture-validation instructions](../triage-notifications/README.md#tests)
+and run this worker's complete `tests.py` suite in its own pytest process.
 
 ## Failure modes and recovery
 
@@ -284,22 +250,17 @@ python3 -m pytest tests.py -v
 - Coverage detection request fails: treated as unknown coverage, which
   routes non-patch bumps to `flag-for-review` until the request
   recovers.
-- State file corruption: load returns `{}` so every PR is re-evaluated
-  on the next run. The worst case is one duplicate merge attempt which
-  `gh` will reject as a no-op once the PR is auto-merging.
+- Malformed cooldown JSON: load falls back to an empty map, resetting
+  action throttling. This does not reset ledger lifecycle decisions or
+  tracker ownership; the normal guards and cleanup recovery still apply.
 
 ## Known limitations
 
-This is tracked for a follow-up PR rather than blocking this one. The
-remaining item has a narrow blast radius given the hourly cron with a
-10-30 second run window, but it is worth surfacing.
-
-- **Per-PR cooldown state has a read-then-write race across overlapping
-  runs.** The launchd schedule runs hourly and a single invocation
-  finishes well under a minute, so two runs should not overlap in
-  practice. If they ever do, the second run can clobber the first run's
-  state updates. Mitigation under consideration: lock the state file for
-  the duration of each run.
+**Per-PR cooldown state has a read-then-write race across overlapping runs.**
+The state file has no run-wide lock, so a second invocation can overwrite
+the first run's timestamp updates. Avoid overlapping manual and scheduled
+runs; the schedule is not a guarantee about worker duration or manual invocation.
+A run-wide cooldown lock remains a possible follow-up.
 
 ## Adding new outcomes
 

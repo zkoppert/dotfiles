@@ -1,33 +1,5 @@
 #!/usr/bin/env python3
-"""Triage Dependabot PRs surfaced via GitHub notifications.
-
-For each read or unread notification whose subject is a PullRequest authored
-by ``dependabot[bot]``, this tool fetches the PR and decides one of five
-action outcomes, or skips it:
-
-- ``merge`` - enable auto-merge via squash + delete branch.
-- ``rebase`` - comment ``@dependabot rebase`` (suppressed if the prior
-  rebase request is newer than the most recent dependabot push, to avoid
-  spamming the PR).
-- ``label-and-merge`` - add the ``release`` label (when the repo defines
-  one and the change is security-related) and enable auto-merge.
-- ``close-prerelease`` - close an unstable prerelease bump.
-- ``flag-for-review`` - write a Q1 entry to
-  ``~/repos/zkoppert-todo/todo.yml`` so a human reviews the PR.
-
-Design goals:
-
-- Safe to re-run: every action is checked against PR state and a local
-  state file so the same PR is not double-acted on within an hour.
-- Conservative: any uncertainty (missing data, parse errors, sub-agent
-  timeouts) routes to ``flag-for-review`` rather than auto-merging.
-- Dry-run friendly: ``--dry-run`` skips every API mutation.
-
-Usage:
-    triage_dependabot.py [--dry-run] [--todo-file PATH]
-                         [--allowed-repo OWNER/REPO]
-                         [--no-copilot-subagent] [--no-notify] [--verbose]
-"""
+"""Dependabot notification worker; see README.md for policy and CLI usage."""
 
 from __future__ import annotations
 
@@ -180,9 +152,8 @@ _BUMP_RANK = {BUMP_PATCH: 0, BUMP_MINOR: 1, BUMP_MAJOR: 2, BUMP_UNKNOWN: 3}
 # Coverage threshold below which non-patch bumps flag for review.
 SAFE_COVERAGE_THRESHOLD = 90
 
-# Re-run cooldown: once an action runs for a PR, ignore the same PR for
-# this many seconds even if a fresh notification arrives. This avoids
-# duplicate merges while gh updates the notification stream.
+# Limit repeated PR actions while GitHub updates the notification stream.
+# Durable cleanup recovery is separate and can surface a renewed direct ask.
 ACTION_COOLDOWN_SECONDS = 3600
 
 # When a PR is blocked by branch protection (e.g. CODEOWNERS review
@@ -1098,6 +1069,10 @@ def do_merge(
 
     Any other merge failure is re-raised unchanged so the run loop can
     surface it in stats.errors.
+
+    True means a synchronous merge completed (or a dry-run preview).
+    False can mean auto-merge was enabled or the guard vetoed an action;
+    the caller must distinguish those before recording a terminal decision.
     """
     if dry_run:
         logger.info("dry-run: would approve and auto-merge %s#%d", repo, number)
@@ -1474,23 +1449,15 @@ def _safe_mark_thread_done(
     my_login: str | None = None,
     todo_file: Path | None = None,
 ) -> bool:
-    """Best-effort wrapper around ``mark_thread_done`` for post-action cleanup.
+    """Keep PR action outcomes separate from notification-cleanup failures.
 
-    Used after a successful action (merge / label-and-merge /
-    close-prerelease / terminal-skip) where the action has already
-    landed and the per-PR cooldown has already been written. A flaky
-    notifications API call (``CalledProcessError`` /
-    ``TimeoutExpired``) must NOT unwind any of that. Otherwise the
-    outer ``except`` would skip the cooldown set, and the next cron
-    tick would re-attempt the already-completed action (re-merge,
-    re-close, re-comment) producing the exact spam pathology this
-    module is built to avoid.
+    Writable callers record a durable disposition before invoking this
+    helper. Clear failures must remain retryable without replaying PR
+    mutations. When todo_file is supplied, capture matching tracker
+    snapshots before DELETE so recovery can preserve later edits or moves.
 
-    Failures are recorded in ``stats.errors`` and logged. ``thread_id``
-    of empty / falsy is a no-op (matches the existing convention at
-    the call sites that guard with ``if thread_id``).
-
-    Returns True on success or no-op, False if the call raised.
+    Returns True on success, preview, or an empty-thread no-op; False on
+    an ownership veto or handled failure. Failures are added to stats.errors.
     """
     if not thread_id:
         return True
@@ -1662,12 +1629,12 @@ def remove_stale_entries(
 ) -> int:
     """Drop todo entries that point at a notification we just resolved.
 
-    Once we auto-merge a Dependabot PR (or close-skip it), any pre-existing
-    inbox or quadrant entry tracking that same PR is now stale: the PR is
-    gone but the entry still says "review this". Match by
-    ``notification.thread_id`` first (1:1 with the GitHub thread we marked
-    done), and fall back to ``notification.url`` so we catch the case where
-    an earlier notification thread tracked the same PR under a different id.
+    A terminal decision can make a notification-backed entry obsolete
+    even when the PR remains open under an exclusion policy. Match by
+    ``notification.thread_id`` first, then normalized ``notification.url``
+    so an earlier thread can identify the same PR. When expected_snapshots
+    is supplied, only identical section/item snapshots may be removed;
+    replaying cleanup must not erase a later manual edit or move.
 
     Defense-in-depth guarantees enforced here, since hand-curated Q1
     entries without a ``notification`` field have been reported lost in

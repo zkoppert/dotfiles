@@ -1,6 +1,6 @@
 ---
 name: triage-dependabot
-description: Triggers when the user says "triage dependabot", "review my dependabot PRs", "what dependency updates are waiting", "merge safe dependabot bumps", or any similar request to process Dependabot PRs surfaced via GitHub notifications. Runs the dotfiles tool which filters notifications to Dependabot-authored PRs, evaluates each PR against a five-outcome decision tree (auto-merge, request rebase, label-and-merge for security releases, close-prerelease for alpha/beta/rc/dev target versions, or flag for human review in ~/repos/zkoppert-todo/todo.yml), and records notification-clear state in the shared local ledger before any GitHub DELETE. Safe to re-run; per-PR cooldown prevents double-acting within an hour.
+description: Triggers when the user says "triage dependabot", "review my dependabot PRs", "what dependency updates are waiting", "merge safe dependabot bumps", or any similar request to process Dependabot PRs surfaced via GitHub notifications. Use the dotfiles Dependabot worker and its README for the current decision policy and human-ownership safeguards.
 ---
 
 # Triage Dependabot PRs
@@ -18,105 +18,36 @@ Use whenever the user asks any of:
 Also offer this when the user mentions being behind on dependency
 upgrades or seeing a backlog of dependabot notifications.
 
-## What it does
-
-1. Fetches all notifications via `gh api /notifications?all=true --paginate`.
-2. Filters to notifications whose subject is a PullRequest authored by
-   `dependabot[bot]` (or `dependabot-preview[bot]`).
-3. Hands `mention`, `assign`, and directly addressed comment notifications to
-   general triage before taking any terminal action. Verified non-direct
-   comments continue through the Dependabot decision tree; incomplete comment
-   history is retained.
-4. Skips repos whose owner is not `github`, `github-community-projects`,
-   or `zkoppert`; passive notifications are marked done, direct pings stay in
-   the inbox, and no todo is created.
-5. For each remaining PR, fetches metadata (`gh pr view --json`) and decides one
-   of five outcomes:
-   - `merge` - approve, then enable `gh pr merge --auto --squash --delete-branch`
-     (synchronous merge fallback when the repo disallows auto-merge).
-   - `rebase` - comment `@dependabot rebase` (suppressed when a prior
-     rebase request is newer than the most recent dependabot push).
-   - `label-and-merge` - add the `release` label (if the repo defines
-     one), then approve and merge, for changes the Copilot sub-agent or
-     fallback regex classifies as security-related.
-   - `close-prerelease` - force-close via
-     `gh pr close --delete-branch` when the target version is a
-     prerelease (alpha / beta / rc / dev / preview). Catches PRs like
-     `bump python from 3.14.5-slim to 3.15.0b2-slim` that should
-     never auto-merge. The direct API close exists because Dependabot
-     has historically ignored `@dependabot close` comments for hours.
-   - `flag-for-review` - write a Q1 entry to
-     `~/repos/zkoppert-todo/todo.yml` for human attention.
-6. Records terminal source decisions in the shared local ledger and then marks
-   the notification done on GitHub. Rebase notifications remain open for the
-   next Dependabot push.
-7. Persists a per-PR cooldown timestamp in
-   `~/Library/Logs/triage-dependabot-state.json` so re-runs within an
-   hour do not double-act.
-8. Writes `todo.yml` through an exclusive `todo.yml.lock`, fresh re-read,
-   delta apply, and atomic replace. Any resulting change is committed in
-   the todo repo, followed by a best-effort pull and push.
-9. Sends one clickable macOS notification for each newly added
-   `flag-for-review` entry. Selecting it opens the PR URL. Routine actions,
-   already tracked flags, no-op runs, and dry runs stay silent.
-
-The launchd definition (`com.zkoppert.triage-dependabot.plist`) schedules
-hourly runs, 24x7, but the installer leaves it unloaded. Live activation and
-migration require a separate attended step; use fixtures for validation.
-
 ## How to run
 
-Default run writes to `~/repos/zkoppert-todo/todo.yml`, calls mutating
-GitHub endpoints, and sends clickable alerts only for PRs that need human
-attention:
+Read [README.md](README.md) before running the worker. It owns the
+[decision policy and guards](README.md#decision-tree),
+[tracker cleanup lifecycle](README.md#integration-with-zkoppert-todo), and
+[ad-hoc commands](README.md#ad-hoc-usage), including previews, repository
+filtering, and the security-classification opt-out. Use those wrapper commands
+rather than a system-Python invocation or manual PR and tracker mutations.
 
-```bash
-~/repos/dotfiles/bin/triage-dependabot
-```
-
-Preview without mutations (no merges, no comments, no labels, no todo
-writes, no DELETE on the notification):
-
-```bash
-~/repos/dotfiles/bin/triage-dependabot --dry-run --verbose
-```
-
-Restrict to specific repos inside the owned-owner allowlist:
-
-```bash
-~/repos/dotfiles/bin/triage-dependabot \
-  --allowed-repo zkoppert/dotfiles \
-  --allowed-repo github-community-projects/contributors
-```
-
-Disable the Copilot CLI sub-agent (use regex-only security
-classification):
-
-```bash
-~/repos/dotfiles/bin/triage-dependabot --no-copilot-subagent
-```
+For development validation, use the [fixture instructions](README.md#tests),
+not a live worker or the real installer. Follow the separate
+[attended-activation guide](README.md#schedule) only when scheduling is
+explicitly authorized.
 
 ## After running
 
-1. Read the printed summary
-   (`fetched=N unread=N dependabot=N merged=N labeled=N rebased=N
-   flagged=N skipped=N cooldown=N already_tracked=N`).
+1. Read the worker's printed summary and distinguish completed actions from
+   retained notifications or pending auto-merges.
 2. If any PRs were flagged, tell the user which repos and why so they
    know what awaits review.
-3. If `ERROR:` lines appear on stderr, surface them (most commonly an
-   expired `gh auth` token or `copilot` not on `PATH`).
+3. Surface errors from stderr so the user can investigate, such as an
+   expired `gh auth` token or a failed tracker update.
 
 ## What this skill must NOT do
 
-- Do not modify `todo.yml` directly. The script handles atomic writes.
-- Do not edit `todo.yml` outside the script's lock plus fresh re-read path.
+- Do not modify `todo.yml` or the ledger directly; use the worker's locked
+  reconciliation path.
 - Do not fail the triage run just because the best-effort git pull or push
   could not complete.
-- Do not relax the five-outcome decision tree without explicit approval.
-  Routing to `flag-for-review` is the safe default whenever any
-  uncertainty exists (sub-agent failure, unknown bump kind, missing
-  coverage signal).
-- Do not auto-merge PRs that show any human review or comment activity.
-- Do not spam `@dependabot rebase` comments. The script suppresses the
-  comment when a prior rebase request is newer than the latest
-  dependabot push.
+- Do not widen the worker's decision policy or bypass its ownership guard
+  without explicit approval. Do not manually mutate PRs it leaves for human
+  attention or hands to general notification triage.
+- Do not bypass the worker's rebase-comment suppression or retry cooldown.
