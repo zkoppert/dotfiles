@@ -402,6 +402,16 @@ def comment_notification_snapshot(
     )
 
 
+def tracker_terminal_disposition(item: dict[str, Any], section: str) -> str | None:
+    """Return the terminal disposition implied by a tracker item, if any."""
+    status = str(item.get("status") or "").lower()
+    if section == "done" or status == "done":
+        return "completed"
+    if section == "prioritized.q4_eliminate" or status == "dropped":
+        return "irrelevant"
+    return None
+
+
 def tracker_item_snapshot(section: str, item: dict[str, Any]) -> str:
     return json.dumps([section, item], sort_keys=True, default=str)
 

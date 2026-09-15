@@ -2487,11 +2487,19 @@ def test_run_recovers_terminal_cleanup_after_notification_disappears(
 
 
 @pytest.mark.parametrize("edit", ["move", "status", "renewed_ask"])
+@pytest.mark.parametrize("failure", ["delete", "todo_write"])
 def test_run_terminal_cleanup_preserves_deliberately_reopened_tracker(
-    tmp_path, monkeypatch, edit
+    tmp_path, monkeypatch, edit, failure
 ):
     args, _notifications, deleted = _terminal_cleanup_case(tmp_path, monkeypatch)
-    with mock.patch.object(td, "write_todo_atomic", side_effect=OSError("disk full")):
+    failure_patch = (
+        mock.patch.object(td, "write_todo_atomic", side_effect=OSError("disk full"))
+        if failure == "todo_write" else mock.patch.object(
+            td, "mark_thread_done",
+            side_effect=subprocess.CalledProcessError(1, "gh", stderr="HTTP 503"),
+        )
+    )
+    with failure_patch:
         failed = td.run(args)
     assert failed.errors
     data = td.load_todo(args.todo_file)
@@ -2506,14 +2514,33 @@ def test_run_terminal_cleanup_preserves_deliberately_reopened_tracker(
         item["notification"]["captured_at"] = "2026-07-11T12:00:00Z"
     td.write_todo_atomic(args.todo_file, data)
     reopened = args.todo_file.read_bytes()
-
-    stats = td.run(args)
-
-    assert stats.errors == []
-    assert stats.stale_removed == 0
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    before_ledger = td.DEFAULT_LEDGER_PATH.read_bytes()
+    before_state = args.state_file.read_bytes()
+    preview = td.run(argparse.Namespace(**{**vars(args), "dry_run": True}))
+    assert preview.errors == []
+    assert preview.stale_removed == 0
     assert args.todo_file.read_bytes() == reopened
-    assert deleted == ["cleanup-thread"]
-    assert td.NotificationLedger(td.DEFAULT_LEDGER_PATH).pending_tracker_cleanups() == []
+    assert td.DEFAULT_LEDGER_PATH.read_bytes() == before_ledger
+    assert args.state_file.read_bytes() == before_state
+
+    for _ in range(2):
+        td.save_state(args.state_file, {})
+        stats = td.run(args)
+        assert stats.errors == []
+        assert stats.stale_removed == 0
+        assert args.todo_file.read_bytes() == reopened
+        assert deleted == (["cleanup-thread"] if failure == "todo_write" else [])
+        assert ledger.pending_tracker_cleanups() == []
+        assert ledger.has_active_actionable_notification(source_id="cleanup-thread", canonical_artifact=None)
+        assert ledger._rows(
+            "SELECT tracker_item_id, tracker_section, terminal_disposition FROM notifications WHERE source_id = ?",
+            ("cleanup-thread",),
+        ) == [{
+            "tracker_item_id": "old-flag",
+            "tracker_section": "in_progress" if edit == "move" else "prioritized.q1_do_first",
+            "terminal_disposition": None,
+        }]
 
 
 @pytest.mark.parametrize("renewed_assignment", [False, True])
@@ -2532,7 +2559,7 @@ def test_run_terminal_cleanup_retries_clear_without_repeating_pr_actions(
     if renewed_assignment:
         notifications[0]["reason"] = "assign"
         notifications[0]["updated_at"] = "2026-07-11T12:00:00Z"
-    with mock.patch.object(td, "fetch_pr", side_effect=AssertionError("PR action replayed")):
+    with mock.patch.object(td, "decide", side_effect=AssertionError("PR action replayed")):
         recovered = td.run(args)
     assert recovered.errors == []
     assert recovered.stale_removed == (0 if renewed_assignment else 1)
@@ -2540,6 +2567,163 @@ def test_run_terminal_cleanup_retries_clear_without_repeating_pr_actions(
     if renewed_assignment:
         assert args.todo_file.read_bytes() == original_todo
     assert td.NotificationLedger(td.DEFAULT_LEDGER_PATH).pending_tracker_cleanups() == []
+
+
+@pytest.mark.parametrize("section,status", [
+    ("prioritized.q1_do_first", "done"),
+    ("prioritized.q1_do_first", "dropped"),
+    ("done", "pending"),
+    ("prioritized.q4_eliminate", "pending"),
+])
+def test_run_terminal_cleanup_does_not_reopen_terminal_tracker(
+    tmp_path, monkeypatch, section, status
+):
+    args, _notifications, deleted = _terminal_cleanup_case(tmp_path, monkeypatch)
+    with mock.patch.object(
+        td, "mark_thread_done",
+        side_effect=subprocess.CalledProcessError(1, "gh", stderr="HTTP 503"),
+    ):
+        assert td.run(args).errors
+    data = td.load_todo(args.todo_file)
+    item = data["prioritized"]["q1_do_first"].pop()
+    item["status"] = status
+    if section.startswith("prioritized."):
+        data["prioritized"][section.split(".", 1)[1]] = [item]
+    else:
+        data[section] = [item]
+    td.write_todo_atomic(args.todo_file, data)
+    before = args.todo_file.read_bytes()
+
+    stats = td.run(args)
+
+    assert stats.errors == []
+    assert stats.stale_removed == 0
+    assert args.todo_file.read_bytes() == before
+    assert deleted == []
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    assert ledger.pending_tracker_cleanups() == []
+    assert not ledger.has_active_actionable_notification(source_id="cleanup-thread", canonical_artifact=None)
+
+
+@pytest.mark.parametrize("route", ["archived", "excluded", "unowned"])
+@pytest.mark.parametrize("url_variant", ["query", "files", "plural"])
+def test_run_terminal_cleanup_recovers_canonical_alias_from_older_thread(
+    tmp_path, monkeypatch, route, url_variant
+):
+    args, notifications, deleted = _terminal_cleanup_case(tmp_path, monkeypatch, route)
+    data = td.load_todo(args.todo_file)
+    bucket = data["prioritized"]["q1_do_first"] if route == "archived" else data["inbox"]
+    item = next(item for item in bucket if item.get("id") == "old-flag")
+    canonical = item["notification"]["url"]
+    url = canonical.replace("https://github.com/", "https://www.github.com/")
+    if url_variant == "query":
+        url += "?x=1#review"
+    elif url_variant == "files":
+        url += "/files"
+    else:
+        url = url.replace("/pull/", "/pulls/")
+    item["notification"]["url"] = url
+    item["notification"]["thread_id"] = "previous-thread"
+    td.write_todo_atomic(args.todo_file, data)
+    before = args.todo_file.read_bytes()
+    with mock.patch.object(td, "write_todo_atomic", side_effect=OSError("disk full")):
+        failed = td.run(args)
+    assert failed.errors == ["failed to write todo file: disk full"]
+    assert notifications == []
+    assert args.todo_file.read_bytes() == before
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    assert len(ledger.pending_tracker_cleanups()) == 1
+
+    recovered = td.run(args)
+
+    assert recovered.errors == []
+    assert recovered.stale_removed == 1
+    assert td.load_todo(args.todo_file)["inbox"] == [{"id": "manual", "link": canonical}]
+    assert td.load_todo(args.todo_file)["prioritized"]["q1_do_first"] == []
+    assert deleted == ["cleanup-thread"]
+    assert ledger.pending_tracker_cleanups() == []
+
+
+@pytest.mark.parametrize("reason", ["mention", "assign", "comment"])
+@pytest.mark.parametrize("present_at_intake", [False, True])
+def test_run_terminal_cleanup_routes_renewed_direct_ask_before_cooldown(
+    tmp_path, monkeypatch, reason, present_at_intake
+):
+    args, notifications, deleted = _terminal_cleanup_case(tmp_path, monkeypatch)
+    renewed = dict(notifications[0])
+    before = args.todo_file.read_bytes()
+    with mock.patch.object(td, "write_todo_atomic", side_effect=OSError("disk full")):
+        assert td.run(args).errors == ["failed to write todo file: disk full"]
+    renewed["reason"] = reason
+    renewed["updated_at"] = "2026-07-11T12:00:00Z"
+    if reason == "comment":
+        renewed["subject"] = {
+            **renewed["subject"],
+            "latest_comment_url": "https://api.github.com/repos/o/r/issues/comments/99",
+        }
+        run_gh = td.run_gh
+
+        def comment_history(command, **kwargs):
+            if command[:2] == ["api", "/repos/o/r/issues/1/comments"]:
+                return json.dumps([[{
+                    "id": 99, "user": {"login": "teammate"},
+                    "body": "@zkoppert please take a look",
+                    "updated_at": renewed["updated_at"],
+                }]])
+            if command[:2] in (
+                ["api", "/repos/o/r/pulls/1/comments"],
+                ["api", "/repos/o/r/pulls/1/reviews"],
+            ):
+                return "[[]]"
+            return run_gh(command, **kwargs)
+
+        monkeypatch.setattr(td, "run_gh", comment_history)
+    notifications.append(renewed)
+    if not present_at_intake:
+        monkeypatch.setattr(td, "fetch_notifications", lambda: [])
+    with mock.patch.object(td, "decide", side_effect=AssertionError("PR action replayed")):
+        stats = td.run(args)
+
+    assert stats.errors == []
+    assert stats.stale_removed == 0
+    assert stats.cooldown == 0
+    assert stats.skipped == 1
+    assert notifications == [renewed]
+    assert args.todo_file.read_bytes() == before
+    assert deleted == ["cleanup-thread"]
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    assert ledger.pending_tracker_cleanups() == []
+    assert ledger.has_active_actionable_notification(source_id="cleanup-thread", canonical_artifact=None)
+    assert ledger._rows(
+        "SELECT reason, tracker_item_id, tracker_section FROM notifications WHERE source_id = ?",
+        ("cleanup-thread",),
+    ) == [{"reason": reason, "tracker_item_id": "old-flag", "tracker_section": "prioritized.q1_do_first"}]
+
+
+@pytest.mark.parametrize("error", [
+    subprocess.CalledProcessError(1, "gh", stderr="HTTP 503"),
+    subprocess.TimeoutExpired("gh", 20),
+    json.JSONDecodeError("invalid thread", "[]", 0),
+])
+def test_run_terminal_cleanup_keeps_tracker_when_success_revalidation_fails(
+    tmp_path, monkeypatch, error
+):
+    args, _notifications, deleted = _terminal_cleanup_case(tmp_path, monkeypatch)
+    before = args.todo_file.read_bytes()
+    with mock.patch.object(td, "write_todo_atomic", side_effect=OSError("disk full")):
+        assert td.run(args).errors
+    with mock.patch.object(td, "fetch_notification_thread", side_effect=error):
+        stats = td.run(args)
+    assert any("stale cleanup revalidation failed" in message for message in stats.errors)
+    assert stats.stale_removed == 0
+    assert args.todo_file.read_bytes() == before
+    ledger = td.NotificationLedger(td.DEFAULT_LEDGER_PATH)
+    assert len(ledger.pending_tracker_cleanups()) == 1
+    recovered = td.run(args)
+    assert recovered.errors == []
+    assert recovered.stale_removed == 1
+    assert deleted == ["cleanup-thread"]
+    assert ledger.pending_tracker_cleanups() == []
 
 
 def test_run_terminal_cleanup_recovers_after_todo_write_before_acknowledgment(

@@ -69,6 +69,7 @@ from notification_worker_common import (
     parse_iso_datetime,
     review_request_escalates_at,
     tracker_item_snapshot,
+    tracker_terminal_disposition,
     utcnow_iso,
 )
 from ruamel.yaml import YAML
@@ -2223,16 +2224,6 @@ def _iter_notification_items_with_sections(
                 if isinstance(item, dict):
                     items.append((f"prioritized.{quadrant}", item))
     return items
-
-
-def tracker_terminal_disposition(item: dict[str, Any], section: str) -> str | None:
-    """Return the terminal disposition implied by a tracker item, if any."""
-    status = str(item.get("status") or "").lower()
-    if section == "done" or status == "done":
-        return "completed"
-    if section == "prioritized.q4_eliminate" or status == "dropped":
-        return "irrelevant"
-    return None
 
 
 def items_ready_for_clear(

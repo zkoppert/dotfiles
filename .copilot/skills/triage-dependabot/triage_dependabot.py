@@ -62,6 +62,7 @@ from notification_worker_common import (
     normalize_github_url,
     parse_iso_datetime,
     tracker_item_snapshot,
+    tracker_terminal_disposition,
     utcnow_iso,
 )
 from ruamel.yaml import YAML
@@ -1646,7 +1647,8 @@ def _stale_entry_match(item: Any, thread_id: str | None, pr_url: str | None) -> 
         return None
     if thread_id and str(notif.get("thread_id") or "") == thread_id:
         return f"thread_id={thread_id}"
-    if pr_url and notif.get("url") == pr_url:
+    target_url = _normalized_github_artifact(pr_url)
+    if target_url and _normalized_github_artifact(notif.get("url")) == target_url:
         return f"url={pr_url}"
     return None
 
@@ -2448,6 +2450,29 @@ def _tracker_cleanup_snapshots(
     ]
 
 
+def _reopen_cleanup_ownership(
+    ledger: NotificationLedger,
+    row: dict[str, Any],
+    *,
+    match: tuple[str, dict[str, Any]] | None,
+    reason: str,
+) -> None:
+    section, item = match if match is not None else ("", {})
+    ledger.reopen_actionable(
+        source_id=row["source_id"],
+        canonical_artifact=row["canonical_artifact"],
+        reason=reason,
+        tracker_section=section,
+    )
+    if item.get("id"):
+        ledger.link_tracker(
+            source_id=row["source_id"],
+            canonical_artifact=row["canonical_artifact"],
+            tracker_item_id=str(item["id"]),
+            tracker_section=section,
+        )
+
+
 def _recover_stale_cleanup(
     args: argparse.Namespace,
     *,
@@ -2456,17 +2481,18 @@ def _recover_stale_cleanup(
     my_login: str,
     retry_clears: bool = True,
     skip_thread_ids: set[str] | None = None,
-) -> set[str]:
+) -> tuple[set[str], dict[str, dict[str, Any]]]:
     if ledger is None:
-        return set()
+        return set(), {}
     rows = [
         row for row in ledger.pending_tracker_cleanups()
         if (retry_clears or row["clear_state"] == "succeeded")
         and row["source_id"] not in (skip_thread_ids or set())
     ]
     if not rows:
-        return set()
+        return set(), {}
     attempted: set[str] = set()
+    renewed: dict[str, dict[str, Any]] = {}
     try:
         with contextlib.nullcontext() if args.dry_run else _todo_write_lock(args.todo_file):
             data = load_todo(args.todo_file)
@@ -2477,21 +2503,51 @@ def _recover_stale_cleanup(
                 pr_url = row["canonical_artifact"]
                 attempted.add(thread_id)
                 expected = frozenset(json.loads(row["tracker_cleanup_json"]))
-                current = set(_tracker_cleanup_snapshots(
-                    data, thread_id=thread_id, pr_url=pr_url
-                ))
+                matches = [
+                    (section, item)
+                    for section, items in _todo_buckets(data)
+                    for item in items
+                    if _stale_entry_match(item, thread_id, pr_url)
+                ]
+                current = {tracker_item_snapshot(section, item) for section, item in matches}
+                active_matches = [
+                    (section, item) for section, item in matches
+                    if tracker_terminal_disposition(item, section) is None
+                ]
                 if not current.issubset(expected):
                     if not args.dry_run:
-                        if row["clear_state"] == "succeeded":
+                        reopened = next(
+                            (match for match in active_matches if tracker_item_snapshot(*match) not in expected),
+                            None,
+                        )
+                        if reopened is not None:
+                            _reopen_cleanup_ownership(
+                                ledger, row, match=reopened,
+                                reason=str(reopened[1]["notification"].get("reason") or ""),
+                            )
+                        elif row["clear_state"] == "succeeded":
                             ledger.finish_tracker_cleanup(row["id"], row["tracker_cleanup_json"])
                         else:
                             ledger.suspend_pending_clear(
                                 source_id=thread_id, canonical_artifact=pr_url
                             )
                     continue
-                if row["clear_state"] != "succeeded":
-                    try:
-                        notif = _current_notification_for_clearance(thread_id=thread_id)
+                try:
+                    notif = _current_notification_for_clearance(thread_id=thread_id)
+                    if notif is not None and not _comment_notification_still_clearable_from_current(
+                        notif, ledger=ledger, my_login=my_login,
+                        thread_id=thread_id, pr_url=pr_url,
+                    ):
+                        if not args.dry_run:
+                            _reopen_cleanup_ownership(
+                                ledger, row,
+                                match=next(iter(active_matches), None),
+                                reason=str(notif.get("reason") or ""),
+                            )
+                        renewed[thread_id] = notif
+                        attempted.discard(thread_id)
+                        continue
+                    if row["clear_state"] != "succeeded":
                         if notif is not None:
                             if not _safe_mark_thread_done(
                                 thread_id,
@@ -2509,13 +2565,13 @@ def _recover_stale_cleanup(
                                 ledger, dry_run=args.dry_run,
                                 thread_id=thread_id, canonical_artifact=pr_url,
                             )
-                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-                        stats.errors.append(f"stale cleanup revalidation failed for {pr_url}: {exc}")
-                        _ledger_record_clear_result(
-                            ledger, dry_run=args.dry_run, thread_id=thread_id,
-                            canonical_artifact=pr_url, error=exc,
-                        )
-                        continue
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+                    stats.errors.append(f"stale cleanup revalidation failed for {pr_url}: {exc}")
+                    _ledger_record_clear_result(
+                        ledger, dry_run=args.dry_run, thread_id=thread_id,
+                        canonical_artifact=pr_url, error=exc,
+                    )
+                    continue
                 mutations.prunes.append(PruneTodoDelta(
                     thread_id=thread_id,
                     pr_url=pr_url,
@@ -2534,7 +2590,7 @@ def _recover_stale_cleanup(
             commit_todo_changes(args.todo_file, "Record Dependabot triage todo updates")
     except (OSError, yaml.YAMLError, _RuamelYAMLError) as exc:
         stats.errors.append(f"failed to write todo file: {exc}")
-    return attempted
+    return attempted, renewed
 
 
 
@@ -2575,9 +2631,13 @@ def run(args: argparse.Namespace) -> TriageStats:
     stats.fetched = len(notifications)
     stats.unread = sum(1 for notif in notifications if notif.get("unread"))
     logger.info("fetched %d notification(s)", stats.fetched)
-    recovered_thread_ids = _recover_stale_cleanup(
+    recovered_thread_ids, renewed_notifications = _recover_stale_cleanup(
         args, ledger=ledger, stats=stats, my_login=my_login
     )
+    notifications = list(renewed_notifications.values()) + [
+        notif for notif in notifications
+        if str(notif.get("id") or "") not in renewed_notifications
+    ]
 
     state = load_state(args.state_file)
     now = datetime.datetime.now(datetime.timezone.utc).timestamp()
@@ -2594,7 +2654,8 @@ def run(args: argparse.Namespace) -> TriageStats:
         return coverage_cache[repo]
 
     for notif in notifications:
-        if str(notif.get("id") or "") in recovered_thread_ids:
+        thread_id = str(notif.get("id") or "")
+        if thread_id in recovered_thread_ids:
             continue
         parsed = parse_pr_subject(notif)
         if parsed is None:
@@ -2603,7 +2664,7 @@ def run(args: argparse.Namespace) -> TriageStats:
         if allowed and repo not in allowed:
             continue
         candidate_url = f"https://github.com/{repo}/pull/{number}"
-        if in_cooldown(state, candidate_url, now=now):
+        if thread_id not in renewed_notifications and in_cooldown(state, candidate_url, now=now):
             stats.cooldown += 1
             logger.info("cooldown active for %s, skipping (pre-fetch)", candidate_url)
             continue
@@ -2613,7 +2674,6 @@ def run(args: argparse.Namespace) -> TriageStats:
             continue
         if not is_dependabot_pr(pr):
             continue
-        thread_id = str(notif.get("id") or "")
         pr_url = pr.get("url") or ""
         reason = (notif.get("reason") or "").lower()
         title = str(pr.get("title") or "")

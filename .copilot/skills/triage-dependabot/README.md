@@ -172,11 +172,15 @@ checked against `inbox`, every `prioritized` quadrant, `in_progress`,
 
 Writes to `todo.yml` use an exclusive `todo.yml.lock`, a fresh read, and
 an atomic `os.replace`. Before clearing a terminal notification, the tool
-records any matching stale entries and their sections in the shared ledger.
-It retries that cleanup even when the notification no longer appears in the
-inbox. Only unchanged tracker snapshots are removed; edits or moves cancel
-the old cleanup intent. General triage does not mistake an unchanged pending
-cleanup for a deliberate reopen.
+records any matching stale entries and their sections in the shared ledger,
+matching thread identity first and normalized GitHub URLs second. It retries
+that cleanup even when the notification no longer appears in the inbox.
+Only unchanged tracker snapshots are removed. Edits or moves that keep work
+active reopen ledger ownership, so another Dependabot run cannot resume the
+old cleanup. Renewed direct asks retain the tracker entry and return to intake
+without waiting for the old action cooldown, even if the earlier clear
+succeeded. General triage does not mistake an unchanged pending cleanup for
+a deliberate reopen.
 
 After a successful write, the tool stages `todo.yml` in the todo repo,
 skips the commit when there is no staged diff, and otherwise creates a
