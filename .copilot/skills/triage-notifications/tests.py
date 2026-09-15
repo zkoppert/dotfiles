@@ -8361,14 +8361,20 @@ def test_ledger_tracks_distinct_threads_for_same_artifact(todo_file: Path):
     assert rows == [{"source_id": "thread-a"}, {"source_id": "thread-b"}]
 
 
-def test_ledger_first_thread_claims_canonical_tracker_row(todo_file: Path):
+@pytest.mark.parametrize("tracker_artifact", [
+    "https://github.com/o/r/pull/1", "https://github.com/O/R/pull/1",
+])
+def test_ledger_first_thread_claims_canonical_tracker_row(todo_file: Path, tracker_artifact: str):
     ledger = triage.NotificationLedger(todo_file.parent / "ledger.sqlite")
     artifact = "https://github.com/o/r/pull/1"
     ledger.link_tracker(
         source_id=None,
-        canonical_artifact=artifact,
+        canonical_artifact=tracker_artifact,
         tracker_item_id="existing-item",
         tracker_section="prioritized.q1_now",
+    )
+    assert ledger.has_active_actionable_notification(
+        source_id=None, canonical_artifact=artifact,
     )
 
     first_id = ledger.capture(

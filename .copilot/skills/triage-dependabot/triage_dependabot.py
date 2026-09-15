@@ -3032,7 +3032,7 @@ def run(args: argparse.Namespace) -> TriageStats:
                     return "preserving active actionable notification"
                 try:
                     action_todo = load_todo(args.todo_file)
-                except (FileNotFoundError, yaml.YAMLError, _RuamelYAMLError) as exc:
+                except (OSError, yaml.YAMLError, _RuamelYAMLError) as exc:
                     return f"failed to reload todo before action for {pr_url}: {exc}"
                 if _todo_has_active_matching_entry_in_data(
                     action_todo, thread_id=thread_id or None, pr_url=pr_url

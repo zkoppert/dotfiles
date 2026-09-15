@@ -64,8 +64,8 @@ def normalize_github_url(url: str | None) -> str | None:
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) < 3:
         return None
-    owner = parts[0]
-    repo = parts[1]
+    owner = parts[0].lower()
+    repo = parts[1].lower()
     kind = parts[2]
     remainder = parts[3:]
     if kind == "pulls":

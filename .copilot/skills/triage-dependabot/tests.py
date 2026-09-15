@@ -79,28 +79,14 @@ def test_load_private_triage_repos_missing_file_warns(
 
 
 @pytest.fixture(autouse=True)
-def _stub_archive_lookup(request: Any) -> Any:
-    """Default ``is_archived_repo`` to False for every test.
-
-    Bug 2 added a per-loop archive check that talks to ``gh api``. Without
-    this fixture every end-to-end test would hit the network (slowing the
-    suite and flaking offline) and the archived-repo regression test
-    would have to fight a cached True value from a prior run. Tests that
-    exercise ``is_archived_repo`` directly opt out by marking themselves
-    with ``@pytest.mark.no_archive_stub`` so the real function runs.
-    """
+def _stub_archive_lookup(request: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Keep archive API calls offline unless a test opts out."""
     td._ARCHIVED_REPO_CACHE.clear()
-    if request.node.get_closest_marker("no_archive_stub"):
-        yield None
-        td._ARCHIVED_REPO_CACHE.clear()
-        return
-    patcher = mock.patch.object(td, "is_archived_repo", return_value=False)
-    patcher.start()
-    try:
-        yield patcher
-    finally:
-        patcher.stop()
-        td._ARCHIVED_REPO_CACHE.clear()
+    if not request.node.get_closest_marker("no_archive_stub"):
+        # Share the undo stack with test-specific archive overrides.
+        monkeypatch.setattr(td, "is_archived_repo", lambda _repo: False)
+    yield
+    td._ARCHIVED_REPO_CACHE.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -2197,8 +2183,9 @@ def test_run_rechecks_current_notification_before_merging(tmp_path: Path) -> Non
     mark_mock.assert_not_called()
 
 
+@pytest.mark.parametrize("thread_id", ["thread-active-merge", "older-thread", ""])
 def test_run_skips_merge_when_active_todo_exists_before_mutation(
-    tmp_path: Path,
+    tmp_path: Path, thread_id: str,
 ) -> None:
     args = _make_args(tmp_path)
     todo = args.todo_file
@@ -2210,8 +2197,8 @@ def test_run_skips_merge_when_active_todo_exists_before_mutation(
         "      title: Tracked merge\n"
         "      source: github-notification\n"
         "      notification:\n"
-        "        thread_id: thread-active-merge\n"
-        "        url: https://github.com/o/r1/pull/904\n"
+        f"        thread_id: {thread_id}\n"
+        "        url: https://github.com/O/R1/pull/904\n"
         "        reason: subscribed\n"
         "done: []\n",
         encoding="utf-8",
@@ -2225,6 +2212,7 @@ def test_run_skips_merge_when_active_todo_exists_before_mutation(
         },
     }
     pr = _base_pr(number=904, url="https://github.com/o/r1/pull/904")
+    before_todo = todo.read_bytes()
 
     with mock.patch.object(
         td, "get_my_login", return_value="zkoppert"
@@ -2247,11 +2235,63 @@ def test_run_skips_merge_when_active_todo_exists_before_mutation(
     fetch_pr_mock.assert_has_calls([mock.call("o/r1", 904), mock.call("o/r1", 904)])
     gh_mock.assert_not_called()
     mark_mock.assert_not_called()
+    assert stats.merged == 0
+    assert td.load_state(args.state_file) == {}
+    assert todo.read_bytes() == before_todo
     snapshot = td.NotificationLedger(td.DEFAULT_LEDGER_PATH).health_snapshot(
         worker="triage-dependabot"
     )
     assert snapshot is not None
     assert snapshot["current_notification_count"] == 1
+
+
+@pytest.mark.parametrize("error", [
+    FileNotFoundError("todo missing"),
+    PermissionError("todo unreadable"),
+    OSError("todo I/O failure"),
+])
+def test_run_records_error_when_todo_reload_fails_before_mutation(
+    tmp_path: Path, error: OSError,
+) -> None:
+    args = _make_args(tmp_path)
+    before_todo = args.todo_file.read_bytes()
+    notif = {
+        "id": "thread-unreadable-todo",
+        "reason": "subscribed",
+        "subject": {
+            "type": "PullRequest",
+            "url": "https://api.github.com/repos/o/r/pulls/1",
+        },
+    }
+    pr = _base_pr()
+
+    with mock.patch.object(
+        td, "get_my_login", return_value="zkoppert"
+    ), mock.patch.object(
+        td, "fetch_notifications", return_value=[notif]
+    ), mock.patch.object(
+        td, "fetch_pr", return_value=pr
+    ), mock.patch.object(
+        td, "detect_repo_coverage", return_value=95
+    ), mock.patch.object(
+        td, "load_todo", side_effect=error
+    ), mock.patch.object(td, "run_gh") as gh_mock:
+        stats = td.run(args)
+
+    assert stats.dependabot == 1
+    assert stats.merged == 0
+    assert stats.errors == [
+        f"failed to reload todo before action for {pr['url']}: {error}"
+    ]
+    gh_mock.assert_not_called()
+    assert td.load_state(args.state_file) == {}
+    assert args.todo_file.read_bytes() == before_todo
+    health = td.NotificationLedger(td.DEFAULT_LEDGER_PATH).health_snapshot(
+        worker="triage-dependabot"
+    )
+    assert health["last_error"] == stats.errors[0]
+    assert health["last_error_at"] is not None
+    assert health.get("last_success_at") is None
 
 
 def test_run_records_error_on_incomplete_comment_history(tmp_path: Path) -> None:
@@ -4242,14 +4282,20 @@ def test_run_excluded_dep_mention_writes_cooldown_without_mark_done(
         td, "fetch_pr", return_value=pr
     ), mock.patch.object(
         td, "mark_thread_done"
-    ) as mark_mock, mock.patch.object(
-        td, "_cleanup_stale_entries"
-    ) as cleanup_mock:
+    ) as mark_mock:
+        todo = td.load_todo(args.todo_file)
+        todo["inbox"] = [{
+            "id": "tracked-mention",
+            "source": "dependabot-triage",
+            "notification": {"thread_id": notif["id"], "url": pr["url"]},
+        }]
+        td.write_todo_atomic(args.todo_file, todo)
         stats = td.run(args)
 
     assert stats.skipped_dependency == 1
     mark_mock.assert_not_called()
-    cleanup_mock.assert_not_called()
+    assert stats.stale_removed == 0
+    assert td.load_todo(args.todo_file) == todo
     saved = td.load_state(args.state_file)
     assert "https://github.com/o/r/pull/42" in saved
 
@@ -4576,9 +4622,14 @@ def test_run_skips_third_party_repo_mention_keeps_notification(
         td, "do_merge"
     ) as merge_mock, mock.patch.object(
         td, "mark_thread_done"
-    ) as mark_mock, mock.patch.object(
-        td, "_cleanup_stale_entries"
-    ) as cleanup_mock:
+    ) as mark_mock:
+        todo = td.load_todo(args.todo_file)
+        todo["inbox"] = [{
+            "id": "tracked-mention",
+            "source": "dependabot-triage",
+            "notification": {"thread_id": notif["id"], "url": pr["url"]},
+        }]
+        td.write_todo_atomic(args.todo_file, todo)
         stats = td.run(args)
 
     assert stats.skipped == 1
@@ -4590,10 +4641,8 @@ def test_run_skips_third_party_repo_mention_keeps_notification(
     fetch_labels_mock.assert_not_called()
     merge_mock.assert_not_called()
     mark_mock.assert_not_called()
-    cleanup_mock.assert_not_called()
-    reloaded = td.load_todo(args.todo_file)
-    assert reloaded["inbox"] == []
-    assert reloaded["prioritized"]["q1_do_first"] == []
+    assert stats.stale_removed == 0
+    assert td.load_todo(args.todo_file) == todo
 
 
 def test_run_owned_org_repo_still_flags_without_clearing_notification(
