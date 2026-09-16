@@ -15,8 +15,7 @@ Marker kinds (filename inside `<git-dir>/copilot-pr-review/<encoded-branch>/`,
 minimum size in bytes, whether HEAD-pinned, and whether a multi-model review):
 
   code-review  code-review.md   200   multi-model review of the code diff
-                                      (pinned, requires >=3 models and a final
-                                      clean convergence round from 1 through 5)
+                                      (pinned; see review requirements below)
   plan         plan.md          120   multi-model review of the plan
                                       (requires >=3 models)
   demo         demo.md          120   demo video + before/after images
