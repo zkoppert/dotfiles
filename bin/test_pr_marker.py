@@ -15,6 +15,8 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -133,6 +135,123 @@ def _gh_guard_ready(
             capture_output=True,
             text=True,
         )
+
+
+def _gh_guard_launcher(
+    args: list[str],
+    *,
+    layout: str = "symlink",
+    native_present: bool = True,
+    native_exit: int = 0,
+    confirmed_create: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], bytes]:
+    """Exercise installed-style links without exposing a real gh or user config."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        owner = root / "owner"
+        local_bin = root / "local-bin"
+        other_bin = root / "other-bin"
+        native_bin = root / "native-bin"
+        tools = root / "tools"
+        home = root / "home"
+        repo = root / "repo"
+        for directory in (owner, local_bin, other_bin, native_bin, tools, home, repo):
+            directory.mkdir()
+        guard = owner / "gh-guard"
+        shutil.copy2(Path(__file__).resolve().with_name("gh-guard"), guard)
+        launcher = local_bin / "gh"
+        launcher.symlink_to(guard)
+        entries = [local_bin]
+        if layout == "symlink":
+            (other_bin / "gh").symlink_to(guard)
+            entries.append(other_bin)
+        elif layout == "hardlink":
+            os.link(guard, other_bin / "gh")
+            entries.append(other_bin)
+        elif layout == "directory-alias":
+            alias = root / "bin-alias"
+            alias.symlink_to(local_bin, target_is_directory=True)
+            entries.append(alias)
+        elif layout == "duplicate":
+            entries.append(local_bin)
+        else:
+            assert layout == "single", layout
+        entries.extend((native_bin, tools))
+        for utility in ("dirname", "readlink", "cat", "sed", "git"):
+            executable = shutil.which(utility, path=os.defpath)
+            assert executable is not None, utility
+            (tools / utility).symlink_to(executable)
+        calls = root / "native-calls"
+        if native_present:
+            native = native_bin / "gh"
+            native.write_text(
+                "#!/bin/sh\nset -eu\n"
+                "printf 'call\\0' >> \"$GH_GUARD_TEST_CALLS\"\n"
+                "for arg in \"$@\"; do\n"
+                "  printf '%s\\0' \"$arg\" >> \"$GH_GUARD_TEST_CALLS\"\n"
+                "done\n"
+                "printf 'native fixture stdout\\n'\n"
+                "printf 'native fixture stderr\\n' >&2\n"
+                "exit \"$GH_GUARD_TEST_EXIT\"\n",
+                encoding="utf-8",
+            )
+            native.chmod(0o755)
+        # Stop an unfixed exec cycle without changing the copied guard's bytes.
+        startup = root / "bash-startup"
+        startup.write_text(
+            'if [ "$0" -ef "$GH_GUARD_TEST_SOURCE" ]; then\n'
+            '  if [ "${GH_GUARD_TEST_ENTERED:-}" = 1 ]; then\n'
+            "    printf 'fixture: gh-guard re-entered itself\\n' >&2\n"
+            "    exit 98\n"
+            "  fi\n"
+            "  export GH_GUARD_TEST_ENTERED=1\n"
+            "fi\n",
+            encoding="utf-8",
+        )
+        env = {
+            "PATH": os.pathsep.join(map(str, entries)),
+            "HOME": str(home),
+            "LC_ALL": "C",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CEILING_DIRECTORIES": str(root),
+            "BASH_ENV": str(startup),
+            "GH_GUARD_TEST_SOURCE": str(guard),
+            "GH_GUARD_TEST_CALLS": str(calls),
+            "GH_GUARD_TEST_EXIT": str(native_exit),
+        }
+        if confirmed_create:
+            env["ZACK_CONFIRMED_PR_CREATE"] = "1"
+        subprocess.run(
+            [str(tools / "git"), "init", "-q"],
+            cwd=repo, env=env, capture_output=True, check=True, timeout=5,
+        )
+        command = [str(launcher), *args]
+        with subprocess.Popen(
+            command, cwd=repo, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
+        ) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired as exc:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate(timeout=1)
+                raise AssertionError("gh-guard launcher exceeded five seconds") from exc
+            result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        return result, calls.read_bytes() if calls.exists() else b""
+
+
+def _assert_native_result(
+    result: subprocess.CompletedProcess[str], calls: bytes, args: list[str], code: int = 0
+) -> None:
+    assert result.returncode == code, result
+    assert result.stdout == "native fixture stdout\n", result
+    assert result.stderr == "native fixture stderr\n", result
+    assert calls == b"call\0" + b"".join(arg.encode() + b"\0" for arg in args), calls
 
 
 SAMPLE_BRANCHES = [
@@ -300,6 +419,78 @@ def test_gh_guard_allows_explicit_draft_confirmation() -> None:
 
     assert result.returncode == 0
     assert result.stdout.strip() == "pr ready 32128 --undo"
+
+
+def test_gh_guard_help_skips_same_file_aliases() -> None:
+    """Distinct PATH locations for this guard must not replace native gh."""
+    for layout in ("symlink", "hardlink", "directory-alias"):
+        for args in (["help"], ["--help"], ["auth", "login", "--help"]):
+            result, calls = _gh_guard_launcher(args, layout=layout)
+            _assert_native_result(result, calls, args)
+
+
+def test_gh_guard_routes_single_link_and_duplicate_entries() -> None:
+    """Repeating the same PATH entry differs from another alias of the guard."""
+    for layout in ("single", "duplicate"):
+        for args in (["help"], ["--help"]):
+            result, calls = _gh_guard_launcher(args, layout=layout)
+            _assert_native_result(result, calls, args)
+
+
+def test_gh_guard_missing_native_fails_closed() -> None:
+    """Only guard aliases on PATH must produce the existing missing-gh error."""
+    for layout in ("single", "duplicate", "symlink", "hardlink", "directory-alias"):
+        result, calls = _gh_guard_launcher(["--help"], layout=layout, native_present=False)
+        assert result.returncode == 127, result
+        assert result.stdout == "", result
+        assert "gh-guard: real gh binary not found in PATH" in result.stderr, result
+        assert calls == b"", calls
+
+
+def test_gh_guard_preserves_argv_output_and_exit_code() -> None:
+    """Pass-through retains empty arguments, shell metacharacters and errors."""
+    for args in ([], ["--version"], ["help", "space here", "", "*", "a;b", "line\nbreak"]):
+        for code in (0, 37):
+            result, calls = _gh_guard_launcher(args, native_exit=code)
+            _assert_native_result(result, calls, args, code)
+
+
+def test_gh_guard_denies_protected_operations_with_aliases() -> None:
+    """Resolving native gh must not bypass readiness, draft or creation gates."""
+    cases = (
+        (["pr", "ready"], "ZACK_CONFIRMED_PR_READY=1"),
+        (["pr", "ready", "--undo"], "ZACK_CONFIRMED_PR_DRAFT=1"),
+        (["pr", "ready", "--undo=true"], "ZACK_CONFIRMED_PR_DRAFT=1"),
+        (["pr", "create", "--title", "fixture"], "gh pr create` blocked"),
+    )
+    for args, reason in cases:
+        result, calls = _gh_guard_launcher(args)
+        assert result.returncode == 1, result
+        assert result.stdout == "", result
+        assert reason in result.stderr, result
+        assert calls == b"", calls
+
+
+def test_gh_guard_create_confirmation_still_requires_markers() -> None:
+    """A confirmation cannot replace the five artifacts in a resolvable repo."""
+    result, calls = _gh_guard_launcher(
+        ["pr", "create", "--title", "fixture"], confirmed_create=True
+    )
+    assert result.returncode == 1, result
+    assert result.stdout == "", result
+    assert result.stderr.count("[ MISSING ]") == 5, result
+    assert calls == b"", calls
+
+
+def test_gh_guard_protected_help_reaches_native() -> None:
+    """Help for protected operations still passes through without performing them."""
+    for args in (
+        ["pr", "create", "--help"],
+        ["pr", "ready", "-h"],
+        ["pr", "ready", "--undo", "--help"],
+    ):
+        result, calls = _gh_guard_launcher(args)
+        _assert_native_result(result, calls, args)
 
 
 def test_pin_roundtrip() -> None:
@@ -1148,6 +1339,15 @@ def main() -> int:
         test_branch_dir_and_paths,
         test_artifacts_dir_derivation,
         test_gh_guard_matches_kinds,
+        test_gh_guard_blocks_noninteractive_draft_conversion,
+        test_gh_guard_allows_explicit_draft_confirmation,
+        test_gh_guard_help_skips_same_file_aliases,
+        test_gh_guard_routes_single_link_and_duplicate_entries,
+        test_gh_guard_missing_native_fails_closed,
+        test_gh_guard_preserves_argv_output_and_exit_code,
+        test_gh_guard_denies_protected_operations_with_aliases,
+        test_gh_guard_create_confirmation_still_requires_markers,
+        test_gh_guard_protected_help_reaches_native,
         test_pin_roundtrip,
         test_run_tests,
         test_test_quality_preflight,

@@ -66,9 +66,6 @@
 #     bypass the matcher because aliases are resolved inside real `gh` after
 #     the wrapper has already dispatched. Avoid aliasing the guarded
 #     subcommands.
-#   - Direct invocation by real path (e.g. `~/repos/dotfiles/bin/gh-guard`)
-#     instead of via the `~/.local/bin/gh` symlink can pick the symlink back
-#     as REAL_GH and fork-recurse. Use the symlink, not the real path.
 #
 # Install:
 #   ln -sf "$PWD/bin/gh-guard" ~/.local/bin/gh
@@ -90,6 +87,7 @@ for entry in "${PATH_ENTRIES[@]}"; do
   [ -z "$entry" ] && continue
   candidate="$entry/gh"
   [ ! -x "$candidate" ] && continue
+  [ "$candidate" -ef "${BASH_SOURCE[0]}" ] && continue
   resolved_dir="$(cd "$entry" 2>/dev/null && pwd || echo "$entry")"
   if [ "$resolved_dir" = "$SCRIPT_PATH" ] || [ "$resolved_dir" = "$SELF_REAL_PATH" ]; then
     continue
