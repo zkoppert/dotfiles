@@ -160,6 +160,16 @@ elif [ "$subcmd" = "pr" ] && [ "$op" = "edit" ]; then
   is_pr_edit=1
 fi
 
+# A partial native locator is still a required handoff, never a legacy fallback.
+# Run before help scanning so a title/body value cannot bypass native validation.
+if { [ "${NO_MISTAKES_PUBLICATION_RUN+x}" = "x" ] || [ "${NO_MISTAKES_PUBLICATION_ATTEMPT+x}" = "x" ]; } &&
+   { [ "$is_pr_create" = "1" ] || [ "$is_pr_edit" = "1" ]; }; then
+  if ! "$SCRIPT_PATH/pr-marker" check --publication "$@"; then
+    echo 'gh-guard: native publication blocked; legacy markers cannot replace native proof.' >&2
+    exit 1
+  fi
+fi
+
 # Help flags after the op (e.g. `gh pr create --help`, `gh pr ready -h`) are
 # not seen by the parser above because it breaks at `op`. Scan the full
 # argument list and let help requests pass through unguarded so agents can

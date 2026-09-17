@@ -38,6 +38,12 @@ copilot plugin update gho11y
 
 To retry a failed or interrupted setup, confirm that `gh auth status` and `copilot --version` succeed, set `COPILOT_SKILL_CATALOG_REPO`, and run `./install.sh` again.
 
+## How are native publication handoffs checked?
+
+`gh-guard` treats either `NO_MISTAKES_PUBLICATION_RUN` or `NO_MISTAKES_PUBLICATION_ATTEMPT` as a required native handoff on a create or body-edit command. Both are opaque locators, not proof or consent. Its adjacent `pr-marker` checks the actual command, Git context, body bytes, and producer-owned evidence through `no-mistakes axi publication verify`. It resolves that CLI from the existing operator-controlled PATH and refuses an older CLI before attempting the verifier. No locator-supplied executable or caller proof file is accepted.
+
+The native path currently fails closed: pre-implementation plan provenance and an authorized review-budget scope are still required before compatibility can be advertised. `pr-marker capabilities --json` therefore exits nonzero, and even a structurally valid native response cannot authorize publication. The read-only check does not import artifacts, overwrite existing markers, or reset review counts. Non-native handling remains unchanged, including all five markers, body checks, and explicit creation confirmation.
+
 ## How does the accessibility issue picker work?
 
 The macOS installer can schedule one accessibility remediation attempt each hour. The picker claims one eligible unassigned issue, starts a credential-restricted Copilot session in the local command sandbox, saves the handoff, and sends a notification that can prepare the saved session in iTerm without executing it.
