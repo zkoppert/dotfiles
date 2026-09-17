@@ -1353,13 +1353,16 @@ def _native_planning_exception(proof: dict, binding: dict, policy: dict) -> dict
     ):
         raise NativeProofError("native planning exception run/context mismatch")
     _native_text(exception["id"], "native authorization identity")
-    if not _native_text(exception["reason"], "native authorization reason").strip():
+    reason = _native_text(exception["reason"], "native authorization reason")
+    if not reason.strip():
         raise NativeProofError("native authorization reason is empty")
+    if len(reason.encode("utf-8")) > 4096:
+        raise NativeProofError("native authorization reason exceeds 4096 UTF-8 bytes")
     for key in ("intent_sha256", "policy_sha256"):
         _native_sha(exception[key], f"native authorization {key}", (64,))
     _native_integer(exception["authorized_at"], "native authorization time", 1)
     # Historical producer attribution, not evidence from a currently live PID.
-    _native_integer(exception["authorizer_pid"], "native authorizer PID", 1)
+    _native_integer(exception["authorizer_pid"], "native authorizer PID", 2)
     if (
         proof["plan"] is not None
         or type(proof["preparation_admitted_at"]) is not int

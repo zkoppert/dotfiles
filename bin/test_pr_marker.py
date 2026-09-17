@@ -637,13 +637,27 @@ class NativePublicationFixture(PublicationFixture):
         return proof
 
     def planning_exception_fixture(self) -> dict:
-        """Explicit fixture of the proposed contract, not native authorization."""
+        """Source-derived protocol fixture, not executed native authorization."""
         proof = self.protocol_fixture()
         proof["required_commands"] = [
             "fixture full unit suite",
             "fixture full lint/build checks",
         ]
         proof["policy"]["planning_exception_support"] = True
+        # Native PolicyDigest hashes struct field order and sorted map keys.
+        # Keep those bytes as fixture data, not a second production encoder.
+        policy_json = (
+            '{"protocol":"no-mistakes.publication/v1","artifacts":{'
+            '"code-review":{"min_bytes":200},"demo":{"min_bytes":120},'
+            '"plan":{"min_bytes":120},"pr-review":{"min_bytes":120},'
+            '"tests":{"min_bytes":120}},"min_review_models":3,'
+            '"excluded_model_prefixes":["gemini"],'
+            '"create_confirmation_env":"ZACK_CONFIRMED_PR_CREATE",'
+            '"review_budget_scope":"code-only","plan_order":"before-implementation",'
+            '"planning_exception_support":true,"max_review_rounds":10,'
+            '"requires_full_tests":true}'
+        )
+        assert json.loads(policy_json) == proof["policy"], "native policy fixture drift"
         proof["plan"] = None
         proof["preparation_admitted_at"] = 0
         proof["total_plan_rounds"] = 0
@@ -657,7 +671,7 @@ class NativePublicationFixture(PublicationFixture):
             "branch": proof["binding"]["branch"],
             "work_head_sha": proof["submitted_head_sha"],
             "intent_sha256": fixture_digest("Explicit synthetic intent"),
-            "policy_sha256": fixture_digest("Explicit synthetic native policy pin"),
+            "policy_sha256": fixture_digest(policy_json),
             "id": "fixture-native-authorization",
             "authorized_at": 500,
             "authority": "native-operator-control",
@@ -1047,6 +1061,35 @@ def test_native_proposed_exception_preserves_remaining_proof_and_history() -> No
             fixture.proof["plan"]["policy"]["planning_exception_support"] = support
             fixture.save()
             fixture.assert_fixture_accepted()
+
+
+def test_native_authorizer_pid_matches_the_native_boundary() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        fixture.proof = fixture.planning_exception_fixture()
+        assert fixture.proof["planning_exception"]["policy_sha256"] == (
+            "5e525653ba5a59548b8becf203d71d3722487290d9bef9c568ac3c114e8342ed"
+        )
+        fixture.proof["planning_exception"]["authorizer_pid"] = 1
+        fixture.save()
+        fixture.assert_denied("native authorizer PID")
+        fixture.proof["planning_exception"]["authorizer_pid"] = 2
+        fixture.save()
+        fixture.assert_fixture_accepted()
+
+
+def test_native_authorization_reason_limit_counts_utf8_bytes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        fixture.proof = fixture.planning_exception_fixture()
+        reason = "é" * 2048
+        assert len(reason.encode("utf-8")) == 4096
+        fixture.proof["planning_exception"]["reason"] = reason
+        fixture.save()
+        fixture.assert_fixture_accepted()
+        fixture.proof["planning_exception"]["reason"] += "x"
+        fixture.save()
+        fixture.assert_denied("native authorization reason exceeds 4096 UTF-8 bytes")
 
 
 def test_native_exception_requires_exact_native_command_manifest() -> None:
@@ -2553,6 +2596,8 @@ def main() -> int:
         test_native_baseline_checks_and_plan_reviews_precede_implementation,
         test_native_proposed_exception_requires_bound_native_authorization,
         test_native_proposed_exception_preserves_remaining_proof_and_history,
+        test_native_authorizer_pid_matches_the_native_boundary,
+        test_native_authorization_reason_limit_counts_utf8_bytes,
         test_native_exception_requires_exact_native_command_manifest,
         test_native_locators_require_proof_without_legacy_fallback,
         test_native_rejected_verifier_stdout_cannot_supply_proof,
