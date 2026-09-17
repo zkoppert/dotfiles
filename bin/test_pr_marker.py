@@ -467,6 +467,10 @@ class NativePublicationFixture(PublicationFixture):
             "    parser.add_argument('--' + name, required=True)\n"
             "parser.add_argument('--json', action='store_true', required=True)\n"
             "request = parser.parse_args(args[3:])\n"
+            "verify_count = sum(json.loads(line)['argv'][:3] == ['axi', 'publication', 'verify'] for line in calls.read_text().splitlines())\n"
+            "if str(verify_count) == os.environ.get('FIXTURE_NATIVE_REJECT_ON_VERIFY'):\n"
+            "    print(json.dumps({'protocol': 'no-mistakes.publication/v1', 'error': 'explicit fixture refusal'}))\n"
+            "    sys.exit(1)\n"
             "effect = os.environ.get('FIXTURE_NATIVE_EFFECT')\n"
             "if effect == 'head':\n"
             "    subprocess.run(['git', 'commit', '-q', '--allow-empty', '-m', 'fixture advance'], check=True)\n"
@@ -478,7 +482,8 @@ class NativePublicationFixture(PublicationFixture):
             "        body.write('fixture body advance\\n')\n"
             "if os.environ.get('FIXTURE_NATIVE_EXIT'):\n"
             "    sys.exit(int(os.environ['FIXTURE_NATIVE_EXIT']))\n"
-            "sys.stdout.buffer.write(Path(os.environ['FIXTURE_NATIVE_RESPONSE']).read_bytes())\n",
+            "sys.stdout.buffer.write(Path(os.environ['FIXTURE_NATIVE_RESPONSE']).read_bytes())\n"
+            "sys.exit(int(os.environ.get('FIXTURE_NATIVE_EXIT_AFTER_OUTPUT', '0')))\n",
             encoding="utf-8",
         )
         producer.chmod(0o755)
@@ -927,6 +932,36 @@ def test_native_locators_require_proof_without_legacy_fallback() -> None:
         del fixture.env["FIXTURE_OLD_CLI"]
         fixture.env["FIXTURE_NATIVE_EXIT"] = "1"
         fixture.assert_denied("native verifier refused")
+
+
+def test_native_rejected_verifier_stdout_cannot_supply_proof() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        fixture.env["FIXTURE_NATIVE_EXIT_AFTER_OUTPUT"] = "1"
+        fixture.assert_denied("native verifier refused or is unavailable (exit 1)")
+
+
+def test_native_recheck_refusal_prevents_publication() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        fixture.env["FIXTURE_NATIVE_REJECT_ON_VERIFY"] = "2"
+        before, payload = fixture.snapshot(), fixture.payload.read_bytes()
+        result = fixture.native(guard=True)
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert "native verifier refused or is unavailable (exit 1)" in result.stderr
+        assert result.stdout == ""
+        assert (
+            not fixture.publications.exists()
+        ), "earlier proof overrode native refusal"
+        assert fixture.snapshot() == before
+        assert fixture.payload.read_bytes() == payload
+        verified = [
+            call
+            for line in fixture.verifier_calls.read_text().splitlines()
+            if (call := json.loads(line))["argv"][:3]
+            == ["axi", "publication", "verify"]
+        ]
+        assert len(verified) == 2 and verified[0] == verified[1], verified
 
 
 def test_native_proof_parser_rejects_malformed_and_inspection_responses() -> None:
@@ -2325,6 +2360,8 @@ def main() -> int:
         test_native_preparation_binding_and_admission_are_required,
         test_native_baseline_checks_and_plan_reviews_precede_implementation,
         test_native_locators_require_proof_without_legacy_fallback,
+        test_native_rejected_verifier_stdout_cannot_supply_proof,
+        test_native_recheck_refusal_prevents_publication,
         test_native_proof_parser_rejects_malformed_and_inspection_responses,
         test_native_proof_binds_actual_store_branch_head_body_and_call,
         test_native_context_and_body_changes_cannot_relabel_old_proof,
