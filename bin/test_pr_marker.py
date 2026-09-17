@@ -18,6 +18,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -467,10 +468,12 @@ class NativePublicationFixture(PublicationFixture):
             "    parser.add_argument('--' + name, required=True)\n"
             "parser.add_argument('--json', action='store_true', required=True)\n"
             "request = parser.parse_args(args[3:])\n"
-            "verify_count = sum(json.loads(line)['argv'][:3] == ['axi', 'publication', 'verify'] for line in calls.read_text().splitlines())\n"
-            "if str(verify_count) == os.environ.get('FIXTURE_NATIVE_REJECT_ON_VERIFY'):\n"
-            "    print(json.dumps({'protocol': 'no-mistakes.publication/v1', 'error': 'explicit fixture refusal'}))\n"
-            "    sys.exit(1)\n"
+            "reject_call = os.environ.get('FIXTURE_NATIVE_REJECT_ON_VERIFY')\n"
+            "if reject_call:\n"
+            "    verify_count = sum(json.loads(line)['argv'][:3] == ['axi', 'publication', 'verify'] for line in calls.read_text().splitlines())\n"
+            "    if str(verify_count) == reject_call:\n"
+            "        print(json.dumps({'protocol': 'no-mistakes.publication/v1', 'error': 'explicit fixture refusal'}))\n"
+            "        sys.exit(1)\n"
             "effect = os.environ.get('FIXTURE_NATIVE_EFFECT')\n"
             "if effect == 'head':\n"
             "    subprocess.run(['git', 'commit', '-q', '--allow-empty', '-m', 'fixture advance'], check=True)\n"
@@ -633,6 +636,36 @@ class NativePublicationFixture(PublicationFixture):
         }
         return proof
 
+    def planning_exception_fixture(self) -> dict:
+        """Explicit fixture of the proposed contract, not native authorization."""
+        proof = self.protocol_fixture()
+        proof["required_commands"] = [
+            "fixture full unit suite",
+            "fixture full lint/build checks",
+        ]
+        proof["policy"]["planning_exception_support"] = True
+        proof["plan"] = None
+        proof["preparation_admitted_at"] = 0
+        proof["total_plan_rounds"] = 0
+        del proof["artifacts"]["plan"]
+        proof["planning_exception"] = {
+            "scope": "missing-pre-implementation-planning",
+            "run_id": proof["run_id"],
+            "repo_id": proof["repo_id"],
+            "requested_store": proof["binding"]["requested_store"],
+            "worktree": proof["binding"]["worktree"],
+            "branch": proof["binding"]["branch"],
+            "work_head_sha": proof["submitted_head_sha"],
+            "intent_sha256": fixture_digest("Explicit synthetic intent"),
+            "policy_sha256": fixture_digest("Explicit synthetic native policy pin"),
+            "id": "fixture-native-authorization",
+            "authorized_at": 500,
+            "authority": "native-operator-control",
+            "authorizer_pid": 42,
+            "reason": "Explicit authorization fixture, not a real native operator action.",
+        }
+        return proof
+
     def save(self) -> None:
         self.payload.write_text(json.dumps(self.proof), encoding="utf-8")
 
@@ -690,8 +723,20 @@ class NativePublicationFixture(PublicationFixture):
 
     def assert_denied(self, diagnostic: str, *, confirmed=True) -> None:
         markers, payload = self.snapshot(), self.payload.read_bytes()
-        for guard in (False, True):
-            result = self.native(guard=guard, confirmed=confirmed)
+        # Only immutable refusal cases can share the fixture concurrently;
+        # verification-time Git/body mutations must keep their original order.
+        if self.env.get("FIXTURE_NATIVE_EFFECT"):
+            results = [
+                self.native(guard=guard, confirmed=confirmed) for guard in (False, True)
+            ]
+        else:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                pending = [
+                    pool.submit(self.native, guard=guard, confirmed=confirmed)
+                    for guard in (False, True)
+                ]
+                results = [result.result() for result in pending]
+        for result in results:
             assert result.returncode == 1, (result.stdout, result.stderr)
             assert diagnostic in result.stderr, result.stderr
             assert result.stdout == "", result.stdout
@@ -727,6 +772,7 @@ def test_native_capabilities_preserve_the_consumer_policy() -> None:
             "create_confirmation_env": "ZACK_CONFIRMED_PR_CREATE",
             "review_budget_scope": "code-only",
             "plan_order": "before-implementation",
+            "planning_exception_support": True,
             "max_review_rounds": 10,
             "requires_full_tests": True,
         }
@@ -903,6 +949,152 @@ def test_native_baseline_checks_and_plan_reviews_precede_implementation() -> Non
             fixture.proof["artifacts"]["code-review"][field][0]["started_at"] = 2000
         fixture.save()
         fixture.assert_fixture_accepted()
+
+
+def test_native_proposed_exception_requires_bound_native_authorization() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        original = fixture.planning_exception_fixture()
+        for field, value, diagnostic in (
+            ("authority", "caller-note", "authority/scope mismatch"),
+            ("scope", "all-planning", "authority/scope mismatch"),
+            ("run_id", "different-run", "run/context mismatch"),
+            ("repo_id", "different-repository", "run/context mismatch"),
+            ("branch", "fixture/other", "run/context mismatch"),
+            ("requested_store", str(Path(tmp) / "other.git"), "run/context mismatch"),
+            ("worktree", str(Path(tmp) / "other"), "run/context mismatch"),
+            ("work_head_sha", fixture.head, "run/context mismatch"),
+            ("id", "", "native authorization identity"),
+            ("intent_sha256", "not-a-digest", "native authorization intent_sha256"),
+            ("policy_sha256", "x" * 64, "native authorization policy_sha256"),
+            ("authorized_at", True, "native authorization time"),
+            ("authorizer_pid", 0, "native authorizer PID"),
+            ("reason", " ", "native authorization reason is empty"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["planning_exception"][field] = value
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["planning_exception"] = {"reason": "A caller's approval note"}
+        fixture.save()
+        fixture.assert_denied("native planning exception: missing required fields")
+
+
+def test_native_proposed_exception_preserves_remaining_proof_and_history() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        original = fixture.planning_exception_fixture()
+        for field, value, diagnostic in (
+            (
+                "plan",
+                fixture.protocol_fixture()["plan"],
+                "cannot invent a plan or prior admission",
+            ),
+            (
+                "preparation_admitted_at",
+                False,
+                "cannot invent a plan or prior admission",
+            ),
+            ("preparation_admitted_at", 500, "cannot invent a plan or prior admission"),
+            ("total_plan_rounds", -1, "expected an integer"),
+            ("history_known", False, "history is unknown"),
+            ("total_code_rounds", 11, "cumulative review budget is exhausted"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof[field] = value
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        for support, diagnostic in (
+            (False, "requires explicit policy support"),
+            (1, "planning-exception support must be boolean"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["policy"]["planning_exception_support"] = support
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["artifacts"]["plan"] = fixture.protocol_fixture()["artifacts"][
+            "plan"
+        ]
+        fixture.save()
+        fixture.assert_denied("native artifacts: unsupported fields")
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["planning_exception"]["authorized_at"] = 1001
+        fixture.save()
+        fixture.assert_denied(
+            "machine checks did not pass on the final head after native authorization"
+        )
+        for kind in ("code-review", "pr-review"):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["artifacts"][kind]["reviews"].pop()
+            fixture.save()
+            fixture.assert_denied(f"{kind} has insufficient distinct reviewers")
+        for kind in original["artifacts"]:
+            fixture.proof = copy.deepcopy(original)
+            del fixture.proof["artifacts"][kind]
+            fixture.save()
+            fixture.assert_denied("native artifacts: missing required fields")
+        for plan_rounds in (0, 3):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["total_plan_rounds"] = plan_rounds
+            fixture.save()
+            fixture.assert_fixture_accepted()
+        fixture.assert_denied("same-call ZACK_CONFIRMED_PR_CREATE", confirmed=False)
+        for support in (False, True):
+            fixture.proof = fixture.protocol_fixture()
+            fixture.proof["policy"]["planning_exception_support"] = support
+            fixture.proof["plan"]["policy"]["planning_exception_support"] = support
+            fixture.save()
+            fixture.assert_fixture_accepted()
+
+
+def test_native_exception_requires_exact_native_command_manifest() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        original = fixture.planning_exception_fixture()
+        for commands, diagnostic in (
+            (None, "native required command manifest is missing or malformed"),
+            ([], "native required command manifest is missing or malformed"),
+            (
+                {"command": "not-a-list"},
+                "native required command manifest is missing or malformed",
+            ),
+            ([False], "native required command: expected a string"),
+            ([" "], "native required command is empty"),
+            (
+                list(reversed(original["required_commands"])),
+                "final checks differ from the pinned command manifest",
+            ),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            if commands is None:
+                del fixture.proof["required_commands"]
+            else:
+                fixture.proof["required_commands"] = commands
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        for change in ("missing-last", "extra", "reordered", "different"):
+            fixture.proof = copy.deepcopy(original)
+            checks = fixture.proof["artifacts"]["tests"]["checks"]
+            if change == "missing-last":
+                checks.pop()
+            elif change == "extra":
+                checks.append(copy.deepcopy(checks[-1]))
+            elif change == "reordered":
+                checks.reverse()
+            else:
+                checks[-1]["command"] = "fixture narrowed command"
+            fixture.save()
+            fixture.assert_denied(
+                "final checks differ from the pinned command manifest"
+            )
+        fixture.proof = fixture.protocol_fixture()
+        fixture.proof["required_commands"] = original["required_commands"]
+        fixture.save()
+        fixture.assert_denied(
+            "required_commands is only supported with a planning exception"
+        )
 
 
 def test_native_locators_require_proof_without_legacy_fallback() -> None:
@@ -2359,6 +2551,9 @@ def main() -> int:
         test_native_complete_fixture_does_not_require_or_write_legacy_markers,
         test_native_preparation_binding_and_admission_are_required,
         test_native_baseline_checks_and_plan_reviews_precede_implementation,
+        test_native_proposed_exception_requires_bound_native_authorization,
+        test_native_proposed_exception_preserves_remaining_proof_and_history,
+        test_native_exception_requires_exact_native_command_manifest,
         test_native_locators_require_proof_without_legacy_fallback,
         test_native_rejected_verifier_stdout_cannot_supply_proof,
         test_native_recheck_refusal_prevents_publication,
