@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""Pin pr-marker's branch encoding to gh-guard's sed pipeline.
+"""Exercise pr-marker and gh-guard's marker and publication boundaries.
 
-gh-guard computes the marker filename in bash with:
-    printf '%s' "$branch" | sed -e 's/%/%25/g' -e 's|/|%2F|g'
-pr-marker must produce the identical result or a marker written by pr-marker
-would land at a path the gate does not check. These tests fail loudly if the
-two implementations ever drift.
+Publication fixtures intercept the native gh command. Their marker content and
+model names are test inputs, never evidence of real reviews or publication.
 
 Run: python3 bin/test_pr_marker.py
 """
@@ -13,8 +10,9 @@ Run: python3 bin/test_pr_marker.py
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
-import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -77,10 +75,10 @@ def bash_convergence_rounds(path: str) -> int:
     """Read convergence metadata with gh-guard's exact shell rules."""
     script = (
         "set -euo pipefail\n"
-        "count=\"$(grep -c '^<!-- review-convergence:' \"$1\" 2>/dev/null || true)\"\n"
-        "rounds=\"$(sed -n "
+        'count="$(grep -c \'^<!-- review-convergence:\' "$1" 2>/dev/null || true)"\n'
+        'rounds="$(sed -n '
         "'s/^<!-- review-convergence: clean; rounds: \\([1-9][0-9]*\\) -->$/\\1/p' "
-        "\"$1\" 2>/dev/null)\"\n"
+        '"$1" 2>/dev/null)"\n'
         'if [ "${count:-0}" = "1" ] && [[ "$rounds" =~ ^[1-9][0-9]?$ ]]; then\n'
         '  printf "%s" "$rounds"\n'
         "else\n"
@@ -227,60 +225,249 @@ def test_artifacts_dir_derivation() -> None:
     assert art.parent == path.parent
 
 
-def test_gh_guard_matches_kinds() -> None:
-    """gh-guard's floors, filenames, pin flags, model + result rules must equal KINDS.
+class PublicationFixture:
+    """Isolated legacy fixtures, never review evidence or a real publication."""
 
-    gh-guard duplicates the byte floors, marker filenames, pin flags, the
-    requires-models flag, and the requires-result flag for resilience (so the gate
-    works without pr-marker). This asserts the two never drift, which is the real
-    risk the "single source of truth" claim rests on.
-    """
-    gh = Path(__file__).resolve().with_name("gh-guard").read_text(encoding="utf-8")
-    for kind in pr_marker.KINDS.values():
-        # Filename: gh-guard references it as "$marker_base/<filename>".
-        assert f'"$marker_base/{kind.filename}"' in gh, kind.filename
-
-        # Byte floor: the constant CODE_REVIEW_MIN_BYTES etc. equals min_bytes.
-        const = kind.name.upper().replace("-", "_") + "_MIN_BYTES"
-        match = re.search(rf"^{const}=(\d+)$", gh, re.MULTILINE)
-        assert match, f"gh-guard missing constant {const}"
-        assert int(match.group(1)) == kind.min_bytes, const
-
-        # The eval_marker line for this kind must reference that constant and end
-        # with the pin, model, result, and convergence flags (each 1 or 0).
-        line = next(
-            ln
-            for ln in gh.splitlines()
-            if "eval_marker" in ln and f'"$marker_base/{kind.filename}"' in ln
+    def __init__(self, root: Path):
+        self.repo = root / "repo"
+        self.repo.mkdir()
+        home = root / "home"
+        home.mkdir()
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        self.publications = root / "publications.jsonl"
+        self.env = {
+            "HOME": str(home),
+            "PATH": os.pathsep.join(
+                [str(fake_bin), str(Path(sys.executable).parent), "/usr/bin", "/bin"]
+            ),
+            "FIXTURE_PUBLICATIONS": str(self.publications),
+            "TMPDIR": str(root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_LAZY_FETCH": "1",
+        }
+        fake_gh = fake_bin / "gh"
+        fake_gh.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "args = sys.argv[1:]\n"
+            "if args[:2] == ['pr', 'create']:\n"
+            "    with open(os.environ['FIXTURE_PUBLICATIONS'], 'a') as log:\n"
+            "        log.write(json.dumps({'argv': args, 'cwd': os.getcwd()}) + '\\n')\n"
+            "    print('fixture publication intercepted')\n"
+            "elif args == ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner']:\n"
+            "    print('fixture/public')\n"
+            "elif args == ['api', 'repos/fixture/public', '--jq', '.visibility']:\n"
+            "    print('public')\n"
+            "elif args == ['api', 'repos/fixture/private', '--jq', '.visibility']:\n"
+            "    print('private')\n"
+            "else:\n"
+            "    sys.exit('unexpected fixture gh request: ' + repr(args))\n",
+            encoding="utf-8",
         )
-        assert f'"${const}"' in line, f"{kind.name} eval_marker uses wrong floor"
-        fields = line.split()
-        assert fields[-4] == str(int(kind.pinned)), f"{kind.name} pin flag drift"
-        assert fields[-3] == str(
-            int(kind.requires_models)
-        ), f"{kind.name} requires-models flag drift"
-        assert fields[-2] == str(
-            int(kind.requires_result)
-        ), f"{kind.name} requires-result flag drift"
-        assert fields[-1] == str(
-            int(kind.requires_convergence)
-        ), f"{kind.name} requires-convergence flag drift"
+        fake_gh.chmod(0o755)
+        lint = home / ".copilot/skills/validate-style/lint.py"
+        lint.parent.mkdir(parents=True)
+        lint.symlink_to(
+            Path(__file__).resolve().parents[1]
+            / ".copilot/skills/validate-style/lint.py"
+        )
+        for args in (
+            ("init", "-q"),
+            ("config", "user.email", "fixture@example.com"),
+            ("config", "user.name", "publication fixture"),
+            ("checkout", "-q", "-b", "fixture/proof"),
+            ("commit", "-q", "--allow-empty", "-m", "fixture base"),
+        ):
+            result = self.run(["git", *args])
+            assert result.returncode == 0, result.stderr
+        self.head = self.run(["git", "rev-parse", "HEAD"]).stdout.strip()
+        self.paths = {
+            name: Path(self.marker("path", name).stdout.strip())
+            for name in pr_marker.KINDS
+        }
 
-    # The minimum-model threshold must agree between the two implementations.
-    match = re.search(r"^MIN_REVIEW_MODELS=(\d+)$", gh, re.MULTILINE)
-    assert match, "gh-guard missing constant MIN_REVIEW_MODELS"
-    assert int(match.group(1)) == pr_marker.MIN_MODELS, "MIN_MODELS drift"
-    assert pr_marker.MIN_REVIEW_ROUNDS == 1
-    assert pr_marker.MAX_REVIEW_ROUNDS == 99
-    assert (
-        r"rounds: \([1-9][0-9]*\)" in gh and r'=~ ^[1-9][0-9]?$' in gh
-    ), "gh-guard convergence range drift"
+    def run(self, argv: list[str], **kwargs) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            argv,
+            cwd=self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            **kwargs,
+        )
 
-    # The tests-result header gh-guard greps for must match pr-marker's literal,
-    # and use whole-line (-x) matching so it agrees with has_result_header.
-    assert (
-        f"grep -qxF -- '{pr_marker.TESTS_RESULT_HEADER}'" in gh
-    ), "gh-guard tests-result header literal drift from pr_marker.TESTS_RESULT_HEADER"
+    def marker(self, *args: str, **kwargs) -> subprocess.CompletedProcess:
+        return self.run([sys.executable, str(_MODULE_PATH), *args], **kwargs)
+
+    def create(self, *args: str, confirmed: bool = True) -> subprocess.CompletedProcess:
+        env = {**self.env}
+        if confirmed:
+            env["ZACK_CONFIRMED_PR_CREATE"] = "1"
+        return subprocess.run(
+            [
+                str(_MODULE_PATH.with_name("gh-guard")),
+                "pr",
+                "create",
+                "--title",
+                "fixture",
+                *args,
+            ],
+            cwd=self.repo,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def populate_legacy_markers(self) -> None:
+        for name in ("plan", "code-review", "demo", "pr-review"):
+            args = ["write", name, "-"]
+            if name != "demo":
+                args += ["--models", "a,b,c"]
+            if name == "code-review":
+                args += ["--convergence-rounds", "2"]
+            result = self.marker(
+                *args,
+                input="Test fixture only. No real reviewers were run for this content.\n"
+                * 8,
+            )
+            assert result.returncode == 0, result.stderr
+        result = self.marker(
+            "run-tests",
+            "--cmd",
+            f"{shlex.quote(sys.executable)} -c 'print(\"fixture machine test\")'",
+        )
+        assert result.returncode == 0, result.stderr
+
+    def snapshot(self) -> dict[str, bytes]:
+        return {
+            name: path.read_bytes()
+            for name, path in self.paths.items()
+            if path.exists()
+        }
+
+    def assert_markers_block_publication(self, name: str) -> None:
+        before = self.snapshot()
+        checked = self.marker("check")
+        assert checked.returncode != 0, checked.stdout
+        assert str(self.paths[name]) in checked.stderr, checked.stderr
+        guarded = self.create()
+        assert guarded.returncode != 0, guarded.stdout
+        assert str(self.paths[name]) in guarded.stderr, guarded.stderr
+        assert (
+            not self.publications.exists()
+        ), "rejected markers reached native publication"
+        assert self.snapshot() == before, "validation rewrote the rejected evidence"
+
+    def assert_legacy_publication_intercepted(self) -> None:
+        checked = self.marker("check")
+        assert checked.returncode == 0, checked.stderr
+        guarded = self.create()
+        assert guarded.returncode == 0, guarded.stderr
+        calls = [
+            json.loads(line)
+            for line in self.publications.read_text(encoding="utf-8").splitlines()
+        ]
+        assert calls == [
+            {"argv": ["pr", "create", "--title", "fixture"], "cwd": str(self.repo)}
+        ]
+        self.publications.unlink()
+
+
+def test_legacy_marker_floors_through_entry_points() -> None:
+    """Every artifact and exact byte floor is enforced before native mutation."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = PublicationFixture(Path(tmp))
+        fixture.populate_legacy_markers()
+        fixture.assert_legacy_publication_intercepted()
+        originals = fixture.snapshot()
+        for name, floor in (
+            ("code-review", 200),
+            ("plan", 120),
+            ("demo", 120),
+            ("pr-review", 120),
+            ("tests", 120),
+        ):
+            path = fixture.paths[name]
+            path.unlink()
+            fixture.assert_markers_block_publication(name)
+            headers = b"".join(
+                line
+                for line in originals[name].splitlines(keepends=True)
+                if line.startswith(b"<!--")
+            )
+            assert len(headers) < floor
+            for size in (0, floor - 1, floor, floor + 1):
+                content = (headers + b"x" * floor)[:size]
+                path.write_bytes(content)
+                if size < floor:
+                    fixture.assert_markers_block_publication(name)
+                else:
+                    fixture.assert_legacy_publication_intercepted()
+            path.write_bytes(originals[name])
+
+
+def test_legacy_marker_rejections_stop_publication() -> None:
+    """Invalid pins, review metadata, and test results cannot reach the sink."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = PublicationFixture(Path(tmp))
+        fixture.populate_legacy_markers()
+        originals = fixture.snapshot()
+        for name in ("code-review", "tests"):
+            fixture.paths[name].write_bytes(
+                originals[name].replace(fixture.head.encode(), b"0" * 40)
+            )
+            fixture.assert_markers_block_publication(name)
+            fixture.paths[name].write_bytes(originals[name])
+        for name in ("plan", "code-review", "pr-review"):
+            for models in (b"", b"a, A, b", b"a, Gemini-3, b"):
+                fixture.paths[name].write_bytes(
+                    originals[name].replace(b"a, b, c", models)
+                )
+                fixture.assert_markers_block_publication(name)
+            fixture.paths[name].write_bytes(originals[name])
+        convergence = b"<!-- review-convergence: clean; rounds: 2 -->\n"
+        for replacement in (b"", convergence * 2, convergence.replace(b"2", b"100")):
+            fixture.paths["code-review"].write_bytes(
+                originals["code-review"].replace(convergence, replacement)
+            )
+            fixture.assert_markers_block_publication("code-review")
+        fixture.paths["code-review"].write_bytes(originals["code-review"])
+        fixture.paths["tests"].write_bytes(
+            originals["tests"].replace(
+                b"<!-- tests-result: passed -->", b"no passing result"
+            )
+        )
+        fixture.assert_markers_block_publication("tests")
+
+
+def test_legacy_confirmation_and_body_rules_stop_publication() -> None:
+    """Valid markers alone cannot authorize a create or bypass body linting."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = PublicationFixture(Path(tmp))
+        fixture.populate_legacy_markers()
+        before = fixture.snapshot()
+        for args, confirmed, diagnostic in (
+            ([], False, "ZACK_CONFIRMED_PR_CREATE"),
+            (["--body", "This PR adds a guard."], True, "no-this-pr-subject"),
+            (
+                ["--body", "I fixed https://github.com/fixture/private/pull/1."],
+                True,
+                "no-private-repo-ref",
+            ),
+        ):
+            result = fixture.create(*args, confirmed=confirmed)
+            assert result.returncode == 1, result.stderr
+            assert diagnostic in result.stderr, result.stderr
+            assert (
+                not fixture.publications.exists()
+            ), "rejected create reached native publication"
+            assert fixture.snapshot() == before
 
 
 def test_gh_guard_blocks_noninteractive_draft_conversion() -> None:
@@ -294,9 +481,7 @@ def test_gh_guard_blocks_noninteractive_draft_conversion() -> None:
 
 def test_gh_guard_allows_explicit_draft_confirmation() -> None:
     """An explicit current-task confirmation can pass the draft guard."""
-    result = _gh_guard_ready(
-        ["pr", "ready", "32128", "--undo"], confirmed_draft=True
-    )
+    result = _gh_guard_ready(["pr", "ready", "32128", "--undo"], confirmed_draft=True)
 
     assert result.returncode == 0
     assert result.stdout.strip() == "pr ready 32128 --undo"
@@ -429,9 +614,7 @@ def test_test_quality_preflight() -> None:
             marker = pr_marker.marker_path(tests, branch="feat/quality")
 
             assert (
-                pr_marker.main(
-                    ["run-tests", "--base-ref", "main", "--cmd", "true"]
-                )
+                pr_marker.main(["run-tests", "--base-ref", "main", "--cmd", "true"])
                 == 1
             )
             assert not marker.exists()
@@ -445,9 +628,7 @@ def test_test_quality_preflight() -> None:
             _run("git", "add", "test_tool.py")
             _run("git", "commit", "-q", "-m", "test")
             assert (
-                pr_marker.main(
-                    ["run-tests", "--base-ref", "main", "--cmd", "true"]
-                )
+                pr_marker.main(["run-tests", "--base-ref", "main", "--cmd", "true"])
                 == 0
             )
             body = marker.read_text(encoding="utf-8")
@@ -513,9 +694,7 @@ def test_test_quality_preflight() -> None:
             _run("git", "commit", "-q", "--allow-empty", "-m", "base")
 
             assert (
-                pr_marker.main(
-                    ["run-tests", "--base-ref", "missing", "--cmd", "true"]
-                )
+                pr_marker.main(["run-tests", "--base-ref", "missing", "--cmd", "true"])
                 == 1
             )
             marker = pr_marker.marker_path(
@@ -586,7 +765,11 @@ def test_run_tests_requires_clean_repo() -> None:
 
             assert (
                 pr_marker.main(
-                    ["run-tests", "--cmd", f"{sys.executable} -c \"open('generated.txt', 'w').write('x')\""]
+                    [
+                        "run-tests",
+                        "--cmd",
+                        f"{sys.executable} -c \"open('generated.txt', 'w').write('x')\"",
+                    ]
                 )
                 == 1
             )
@@ -884,20 +1067,16 @@ def test_code_review_marker_rewrite() -> None:
             assert pr_marker.main(rewrite_args) == 0
             lines = marker.read_text(encoding="utf-8").splitlines()
             assert (
-                sum(
-                    line.startswith(pr_marker.REVIEWED_COMMIT_PREFIX)
-                    for line in lines
-                )
+                sum(line.startswith(pr_marker.REVIEWED_COMMIT_PREFIX) for line in lines)
                 == 1
             )
             assert (
-                sum(
-                    line.startswith(pr_marker.REVIEWED_MODELS_PREFIX)
-                    for line in lines
-                )
+                sum(line.startswith(pr_marker.REVIEWED_MODELS_PREFIX) for line in lines)
                 == 1
             )
-            assert sum(line.startswith("<!-- review-convergence:") for line in lines) == 1
+            assert (
+                sum(line.startswith("<!-- review-convergence:") for line in lines) == 1
+            )
             assert pr_marker.read_reviewed_models(marker) == ["d", "e", "f"]
             assert pr_marker.read_convergence_rounds(marker) == 3
             ok, detail, _size, _path = pr_marker.marker_status(
@@ -1014,7 +1193,9 @@ def test_gh_guard_gate() -> None:
             ]
             for headers in invalid_headers:
                 crpath.write_text(
-                    "\n".join([*without_convergence[:2], *headers, *without_convergence[2:]])
+                    "\n".join(
+                        [*without_convergence[:2], *headers, *without_convergence[2:]]
+                    )
                     + "\n",
                     encoding="utf-8",
                 )
@@ -1147,7 +1328,9 @@ def main() -> int:
         test_kinds_and_thresholds,
         test_branch_dir_and_paths,
         test_artifacts_dir_derivation,
-        test_gh_guard_matches_kinds,
+        test_legacy_marker_floors_through_entry_points,
+        test_legacy_marker_rejections_stop_publication,
+        test_legacy_confirmation_and_body_rules_stop_publication,
         test_pin_roundtrip,
         test_run_tests,
         test_test_quality_preflight,
