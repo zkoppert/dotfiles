@@ -161,20 +161,22 @@ elif [ "$subcmd" = "pr" ] && [ "$op" = "edit" ]; then
 fi
 
 # A partial native locator is still a required handoff, never a legacy fallback.
-# Run before help scanning so a title/body value cannot bypass native validation.
+native_publication=0
 if { [ "${NO_MISTAKES_PUBLICATION_RUN+x}" = "x" ] || [ "${NO_MISTAKES_PUBLICATION_ATTEMPT+x}" = "x" ]; } &&
    { [ "$is_pr_create" = "1" ] || [ "$is_pr_edit" = "1" ]; }; then
   if ! "$SCRIPT_PATH/pr-marker" check --publication "$@"; then
     echo 'gh-guard: native publication blocked; legacy markers cannot replace native proof.' >&2
     exit 1
   fi
+  native_publication=1
 fi
 
 # Help flags after the op (e.g. `gh pr create --help`, `gh pr ready -h`) are
 # not seen by the parser above because it breaks at `op`. Scan the full
 # argument list and let help requests pass through unguarded so agents can
 # introspect flags without tripping the gate.
-if [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ] || [ "$is_pr_draft" = "1" ] || [ "$is_pr_edit" = "1" ]; then
+if [ "$native_publication" = "0" ] &&
+   { [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ] || [ "$is_pr_draft" = "1" ] || [ "$is_pr_edit" = "1" ]; }; then
   for a in "$@"; do
     case "$a" in
       --help|-h|help)
@@ -294,6 +296,18 @@ EOF
     echo "gh-guard: skipping validate-style lint ($body_skip_reason)." >&2
   fi
 }
+
+# Native evidence satisfies the same five artifact requirements without writing
+# caller-authored marker files. Recheck after lint's visibility reads, which can
+# outlive the verified head, body or native history, immediately before publication.
+if [ "$native_publication" = "1" ]; then
+  lint_pr_body_or_die "gh pr $op" "$@"
+  if ! "$SCRIPT_PATH/pr-marker" check --publication "$@"; then
+    echo 'gh-guard: native publication blocked; legacy markers cannot replace native proof.' >&2
+    exit 1
+  fi
+  exec "$REAL_GH" "$@"
+fi
 
 # Minimum accepted size (bytes) for each PR-readiness marker. These MUST match
 # the per-kind thresholds in bin/pr-marker so the writer and the gate agree.

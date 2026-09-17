@@ -67,8 +67,10 @@ branch `x.plan`'s code-review marker.
 
 Native handoffs use `check --publication <actual gh argv>` and the producer's
 opaque run/attempt locators. The helper reads the native verifier, not caller
-proof JSON or old marker logs. Discovery and acceptance remain unsupported until
-native pre-implementation plan evidence and an authorized budget scope exist.
+proof JSON or old marker logs. Native evidence retains an earlier reviewed plan,
+its implementation admission, final-head checks, and exact-body review. Native
+policy caps cumulative code panels at ten; plan/description history stays
+separate. Legacy marker metadata and its accepted round range are unchanged.
 
 Usage:
   pr-marker path <kind>            print the marker file path for the current branch
@@ -86,6 +88,10 @@ Usage:
   pr-marker status                 show all five markers and whether each passes
   pr-marker check                  exit 0 only if every marker passes (fresh + over
                                    floor)
+  pr-marker capabilities --json    describe native proof requirements, not readiness
+  pr-marker check --publication <actual gh argv>
+                                   verify native-located evidence without importing
+                                   or rewriting markers or native history
 """
 
 from __future__ import annotations
@@ -206,10 +212,23 @@ NATIVE_REVIEW_FIELDS = (
     "invocation_id agent requested_model served_model model_id model_provider "
     "head_sha subject_sha256 started_at completed_at outcome content"
 )
-NATIVE_UNSUPPORTED = (
-    "native publication is not yet compatible: pre-implementation plan provenance "
-    "is unavailable and the review-budget scope is unresolved"
-)
+NATIVE_MAX_REVIEW_ROUNDS = 10
+
+
+def _native_policy() -> dict:
+    return {
+        "protocol": NATIVE_PROTOCOL,
+        "artifacts": {
+            kind.name: {"min_bytes": kind.min_bytes} for kind in KINDS.values()
+        },
+        "min_review_models": MIN_MODELS,
+        "excluded_model_prefixes": list(PROHIBITED_MODEL_PREFIXES),
+        "create_confirmation_env": "ZACK_CONFIRMED_PR_CREATE",
+        "review_budget_scope": "code-only",
+        "plan_order": "before-implementation",
+        "max_review_rounds": NATIVE_MAX_REVIEW_ROUNDS,
+        "requires_full_tests": True,
+    }
 
 
 def _git(*args: str, read_only: bool = False) -> str:
@@ -918,8 +937,8 @@ def _native_decode(raw: bytes) -> dict:
     return _native_object(
         value,
         "protocol run_id attempt_id repo_id binding title body body_sha256 "
-        "preparation_id policy history_known total_code_rounds total_plan_rounds "
-        "total_description_rounds artifacts",
+        "preparation_id plan preparation_admitted_at submitted_head_sha policy "
+        "history_known total_code_rounds total_plan_rounds total_description_rounds artifacts",
         label="native proof",
     )
 
@@ -1197,11 +1216,75 @@ def _native_binding(
     return binding
 
 
+def _native_artifact(value, kind: Kind, subject: str, *, label: str) -> dict:
+    artifact = _native_object(
+        value,
+        "content sha256 bytes round_id subject_sha256",
+        "reviews attempts checks observations",
+        label=f"{label} artifact",
+    )
+    content = _native_text(artifact["content"], f"{label} content")
+    size = _native_integer(artifact["bytes"], f"{label} bytes")
+    if (
+        size != len(content.encode("utf-8"))
+        or size < kind.min_bytes
+        or artifact["sha256"] != _native_digest(content)
+    ):
+        raise NativeProofError(f"native {label} artifact floor/digest mismatch")
+    _native_text(artifact["round_id"], f"{label} round identity")
+    actual = _native_sha(artifact["subject_sha256"], f"{label} subject", (64,))
+    if actual != subject:
+        raise NativeProofError(f"native {label} subject is stale")
+    return artifact
+
+
+def _native_checks(
+    artifact: dict,
+    head: str,
+    *,
+    admitted_at: int = 1,
+    plan_completed_at: int | None = None,
+) -> tuple[list[str], int]:
+    label = "baseline " if plan_completed_at is not None else ""
+    checks = artifact.get("checks")
+    if not isinstance(checks, list) or not checks:
+        raise NativeProofError(f"native {label}machine checks are missing")
+    commands = []
+    completed = 0
+    for check in checks:
+        check = _native_object(
+            check,
+            "command exit_code started_at completed_at head_sha output",
+            label=f"{label}machine check",
+        )
+        commands.append(_native_text(check["command"], f"{label}machine check command"))
+        _native_text(check["output"], f"{label}machine check output", empty=True)
+        start = _native_integer(check["started_at"], f"{label}machine check start", 1)
+        end = _native_integer(
+            check["completed_at"], f"{label}machine check completion", start
+        )
+        if (
+            type(check["exit_code"]) is not int
+            or check["exit_code"] != 0
+            or check["head_sha"] != head
+            or start < admitted_at
+            or (plan_completed_at is not None and end > plan_completed_at)
+        ):
+            boundary = (
+                "before plan completion"
+                if plan_completed_at is not None
+                else "on the final head after implementation admission"
+            )
+            raise NativeProofError(
+                f"native {label}machine checks did not pass {boundary}"
+            )
+        completed = max(completed, end)
+    return commands, completed
+
+
 def _native_evidence(proof: dict, binding: dict) -> None:
     policy = _native_object(
-        proof["policy"],
-        "protocol artifacts min_review_models excluded_model_prefixes create_confirmation_env review_budget_scope max_review_rounds requires_full_tests",
-        label="native policy",
+        proof["policy"], " ".join(_native_policy()), label="native policy"
     )
     requirements = _native_object(
         policy["artifacts"], " ".join(KINDS), label="artifact requirements"
@@ -1221,10 +1304,14 @@ def _native_evidence(proof: dict, binding: dict) -> None:
         or policy["requires_full_tests"] is not True
     ):
         raise NativeProofError("native review/test/confirmation policy mismatch")
+    if policy["plan_order"] != "before-implementation":
+        raise NativeProofError("native plan ordering policy mismatch")
     ceiling = _native_integer(policy["max_review_rounds"], "native review ceiling", 1)
-    scope = policy["review_budget_scope"]
-    if ceiling > 10 or scope not in ("code-only", "combined"):
-        raise NativeProofError("native review policy has an unsupported budget")
+    if (
+        ceiling != NATIVE_MAX_REVIEW_ROUNDS
+        or policy["review_budget_scope"] != "code-only"
+    ):
+        raise NativeProofError("native code-only review budget policy mismatch")
     if proof["history_known"] is not True:
         raise NativeProofError("native review history is unknown")
     counts = [
@@ -1235,60 +1322,73 @@ def _native_evidence(proof: dict, binding: dict) -> None:
             "total_description_rounds",
         )
     ]
-    if (counts[0] if scope == "code-only" else sum(counts)) > ceiling:
+    if counts[0] > ceiling:
         raise NativeProofError("native cumulative review budget is exhausted")
+    plan = _native_object(
+        proof["plan"],
+        "run_id repo_id branch requested_store worktree baseline_sha intent_sha256 "
+        "plan_text plan_sha256 checks artifact policy execution_config_sha256 completed_at",
+        label="pre-implementation plan",
+    )
+    earlier_run = _native_text(plan["run_id"], "earlier preparation run")
+    if (
+        earlier_run == proof["run_id"]
+        or plan["repo_id"] != proof["repo_id"]
+        or any(
+            plan[key] != binding[key]
+            for key in ("branch", "requested_store", "worktree")
+        )
+    ):
+        raise NativeProofError("native pre-implementation plan context mismatch")
+    baseline = _native_sha(plan["baseline_sha"], "prepared baseline")
+    _native_sha(proof["submitted_head_sha"], "submitted head")
+    for key in ("intent_sha256", "execution_config_sha256"):
+        _native_sha(plan[key], f"plan {key}", (64,))
+    plan_text = _native_text(plan["plan_text"], "prospective plan")
+    if plan["plan_sha256"] != _native_digest(plan_text):
+        raise NativeProofError("native pre-implementation plan subject mismatch")
+    plan_completed = _native_integer(plan["completed_at"], "plan completion", 1)
+    admitted = _native_integer(
+        proof["preparation_admitted_at"], "preparation admission", plan_completed
+    )
+    # Compare typed JSON rather than Python equality (True == 1 == 1.0).
+    if json.dumps(plan["policy"], sort_keys=True) != json.dumps(policy, sort_keys=True):
+        raise NativeProofError("native policy differs from pre-implementation plan")
     artifacts = _native_object(
         proof["artifacts"], " ".join(KINDS), label="native artifacts"
     )
     for kind in KINDS.values():
-        artifact = _native_object(
-            artifacts[kind.name],
-            "content sha256 bytes round_id subject_sha256",
-            "reviews attempts checks observations",
-            label=f"{kind.name} artifact",
-        )
-        content = _native_text(artifact["content"], f"{kind.name} content")
-        size = _native_integer(artifact["bytes"], f"{kind.name} bytes")
-        if (
-            size != len(content.encode("utf-8"))
-            or size < kind.min_bytes
-            or artifact["sha256"] != _native_digest(content)
-        ):
-            raise NativeProofError(f"native {kind.name} artifact floor/digest mismatch")
-        _native_text(artifact["round_id"], f"{kind.name} round identity")
-        subject = _native_sha(artifact["subject_sha256"], f"{kind.name} subject", (64,))
-        expected = (
-            proof["body_sha256"]
-            if kind.name == "pr-review"
-            else _native_digest(binding["head_sha"])
-        )
-        if kind.name != "plan" and subject != expected:
-            raise NativeProofError(f"native {kind.name} subject is stale")
-    # The pinned native manifest owns completeness; an arbitrary nonempty list
-    # cannot establish which checks this repository requires.
-    checks = artifacts["tests"].get("checks")
-    if not isinstance(checks, list) or not checks:
-        raise NativeProofError("native machine checks are missing")
-    tests_completed = 0
-    for check in checks:
-        check = _native_object(
-            check,
-            "command exit_code started_at completed_at head_sha output",
-            label="machine check",
-        )
-        _native_text(check["command"], "machine check command")
-        _native_text(check["output"], "machine check output", empty=True)
-        start = _native_integer(check["started_at"], "machine check start", 1)
-        end = _native_integer(check["completed_at"], "machine check completion", start)
-        if (
-            type(check["exit_code"]) is not int
-            or check["exit_code"] != 0
-            or check["head_sha"] != binding["head_sha"]
-        ):
-            raise NativeProofError(
-                "native machine checks did not pass on the final head"
+        subject = (
+            plan["plan_sha256"]
+            if kind.name == "plan"
+            else (
+                proof["body_sha256"]
+                if kind.name == "pr-review"
+                else _native_digest(binding["head_sha"])
             )
-        tests_completed = max(tests_completed, end)
+        )
+        _native_artifact(artifacts[kind.name], kind, subject, label=kind.name)
+    if json.dumps(plan["artifact"], sort_keys=True) != json.dumps(
+        artifacts["plan"], sort_keys=True
+    ):
+        raise NativeProofError(
+            "native pre-implementation plan was replaced or relabeled"
+        )
+    baseline_tests = _native_artifact(
+        plan["checks"], KINDS["tests"], _native_digest(baseline), label="baseline tests"
+    )
+    baseline_commands, baseline_completed = _native_checks(
+        baseline_tests, baseline, plan_completed_at=plan_completed
+    )
+    commands, tests_completed = _native_checks(
+        artifacts["tests"], binding["head_sha"], admitted_at=admitted
+    )
+    # The native verifier owns the pinned manifest and its actual execution;
+    # matching two arbitrary lists is not proof of required-suite completeness.
+    if commands != baseline_commands:
+        raise NativeProofError(
+            "native final checks differ from the prepared command manifest"
+        )
     if (
         not isinstance(artifacts["demo"].get("observations"), dict)
         or not artifacts["demo"]["observations"]
@@ -1356,13 +1456,18 @@ def _native_evidence(proof: dict, binding: dict) -> None:
                     f"native {kind} has prohibited or duplicate reviewers"
                 )
             start = _native_integer(review["started_at"], "review start", 1)
-            _native_integer(review["completed_at"], "review completion", start)
+            end = _native_integer(review["completed_at"], "review completion", start)
             _native_sha(review["head_sha"], "reviewed head")
-            if kind != "plan" and (
-                review["head_sha"] != binding["head_sha"] or start < tests_completed
-            ):
+            head = baseline if kind == "plan" else binding["head_sha"]
+            checks_completed = baseline_completed if kind == "plan" else tests_completed
+            if review["head_sha"] != head or start < checks_completed:
+                boundary = "baseline" if kind == "plan" else "final-head"
                 raise NativeProofError(
-                    f"native {kind} review preceded passing final-head checks or is stale"
+                    f"native {kind} review preceded passing {boundary} checks or is stale"
+                )
+            if kind == "plan" and end > plan_completed:
+                raise NativeProofError(
+                    "native plan review completed after the preparation receipt"
                 )
             if (
                 review["subject_sha256"] != artifact["subject_sha256"]
@@ -1415,20 +1520,15 @@ def cmd_native_check(argv: list[str]) -> int:
             )
         binding = _native_binding(proof, request, context, body, ids)
         _native_evidence(proof, binding)
-        # Structural validity cannot authorize the still-missing earlier plan
-        # phase or select the consumer's held review budget on its behalf.
-        raise NativeProofError(NATIVE_UNSUPPORTED)
+        return 0
     except (NativeProofError, OSError, UnicodeError, subprocess.SubprocessError) as exc:
         print(f"pr-marker: native publication: {exc}", file=sys.stderr)
         return 1
 
 
 def cmd_capabilities(_args: argparse.Namespace) -> int:
-    print(
-        f"pr-marker: {NATIVE_UNSUPPORTED}; no passing policy advertised",
-        file=sys.stderr,
-    )
-    return 1
+    print(json.dumps(_native_policy(), sort_keys=True))
+    return 0
 
 
 def marker_status(kind: Kind, branch: str) -> tuple[bool, str, int, Path]:
@@ -1581,7 +1681,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_capabilities = sub.add_parser(
         "capabilities",
-        help="discover native publication requirements (currently unsupported)",
+        help="describe native publication requirements, not producer readiness",
     )
     p_capabilities.add_argument("--json", action="store_true")
     p_capabilities.set_defaults(func=cmd_capabilities)
