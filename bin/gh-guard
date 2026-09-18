@@ -203,6 +203,9 @@ fi
 #   $@ - the original argv to scan (caller forwards "$@").
 lint_pr_body_or_die() {
   local subcmd_label="$1"; shift
+  # Native callers must distinguish completed checks from legacy skips.
+  body_lint_passed=0
+  body_visibility_verified=0
   local body_content=""
   local body_source=""
   local body_skip_reason=""
@@ -269,7 +272,11 @@ lint_pr_body_or_die() {
     fi
     if [ -n "$target_repo" ]; then
       local repo_vis=""
-      repo_vis="$("$REAL_GH" api "repos/$target_repo" --jq .visibility 2>/dev/null || true)"
+      if repo_vis="$("$REAL_GH" api "repos/$target_repo" --jq .visibility 2>/dev/null)"; then
+        case "$repo_vis" in
+          public|private|internal) body_visibility_verified=1 ;;
+        esac
+      fi
       if [ "$repo_vis" = "public" ]; then
         visibility_flag="--check-visibility"
       fi
@@ -292,6 +299,7 @@ $lint_output
 EOF
       exit 1
     fi
+    body_lint_passed=1
   elif [ -n "$body_skip_reason" ]; then
     echo "gh-guard: skipping validate-style lint ($body_skip_reason)." >&2
   fi
@@ -302,6 +310,14 @@ EOF
 # outlive the verified head, body or native history, immediately before publication.
 if [ "$native_publication" = "1" ]; then
   lint_pr_body_or_die "gh pr $op" "$@"
+  if [ "$body_lint_passed" != "1" ]; then
+    echo 'gh-guard: native publication requires completed body lint; tooling is unavailable or body input was skipped.' >&2
+    exit 1
+  fi
+  if [ "$body_visibility_verified" != "1" ]; then
+    echo 'gh-guard: native publication requires verified target visibility; the lookup failed or returned an unknown value.' >&2
+    exit 1
+  fi
   if ! "$SCRIPT_PATH/pr-marker" check --publication "$@"; then
     echo 'gh-guard: native publication blocked; legacy markers cannot replace native proof.' >&2
     exit 1

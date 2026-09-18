@@ -278,7 +278,8 @@ class PublicationFixture:
             "    elif effect == 'body':\n"
             "        with open(os.environ['FIXTURE_BODY_FILE'], 'a') as body:\n"
             "            body.write('Fixture body changed during visibility read.\\n')\n"
-            "    print('public')\n"
+            "    print(os.environ.get('FIXTURE_REPO_VISIBILITY', 'public'))\n"
+            "    sys.exit(int(os.environ.get('FIXTURE_REPO_VISIBILITY_EXIT', '0')))\n"
             "elif args == ['api', 'repos/fixture/private', '--jq', '.visibility']:\n"
             "    print('private')\n"
             "else:\n"
@@ -707,6 +708,39 @@ class NativePublicationFixture(PublicationFixture):
             text=True,
             timeout=15,
         )
+
+    def use_update(self) -> None:
+        self.argv = [
+            "pr",
+            "edit",
+            "1",
+            "--repo",
+            "fixture/public",
+            "--title",
+            "fixture title",
+            "--body-file",
+            str(self.body),
+        ]
+        self.proof["binding"].update(
+            operation="update",
+            pr_url="https://github.com/fixture/public/pull/1",
+            previous_body_sha256=fixture_digest("Earlier fixture body."),
+        )
+        self.save()
+
+    def assert_lint_denied(self, diagnostic: str) -> None:
+        markers, payload = self.snapshot(), self.payload.read_bytes()
+        checked = self.native()
+        assert checked.returncode == 0, (checked.stdout, checked.stderr)
+        assert checked.stdout == checked.stderr == ""
+        assert not self.publications.exists(), "helper performed publication"
+        guarded = self.native(guard=True)
+        assert guarded.returncode == 1, (guarded.stdout, guarded.stderr)
+        assert diagnostic in guarded.stderr, guarded.stderr
+        assert guarded.stdout == ""
+        assert not self.publications.exists(), "unproved lint reached publication"
+        assert self.snapshot() == markers, "lint refusal rewrote legacy markers"
+        assert self.payload.read_bytes() == payload, "lint refusal rewrote native proof"
 
     def assert_fixture_accepted(self, *, confirmed=True) -> None:
         markers, payload = self.snapshot(), self.payload.read_bytes()
@@ -1569,6 +1603,97 @@ def test_native_body_transport_and_update_target_cannot_bypass_guard() -> None:
         fixture.assert_denied(
             "unsupported native publication argument", confirmed=False
         )
+
+
+def test_native_requires_available_body_lint_tooling() -> None:
+    for operation in ("create", "update"):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = NativePublicationFixture(Path(tmp))
+            if operation == "update":
+                fixture.use_update()
+            lint = Path(fixture.env["HOME"]) / ".copilot/skills/validate-style/lint.py"
+            fixture.env.update(body_lint_passed="1", body_visibility_verified="1")
+            for unavailable in ("missing", "broken-link", "directory"):
+                if lint.is_symlink():
+                    lint.unlink()
+                if unavailable == "broken-link":
+                    lint.symlink_to(Path(tmp) / "missing-linter.py")
+                elif unavailable == "directory":
+                    lint.mkdir()
+                fixture.assert_lint_denied(
+                    "native publication requires completed body lint"
+                )
+
+
+def test_native_requires_verified_target_visibility() -> None:
+    for operation in ("create", "update"):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = NativePublicationFixture(Path(tmp))
+            if operation == "update":
+                fixture.use_update()
+            fixture.env.update(body_lint_passed="1", body_visibility_verified="1")
+            for visibility, code in (
+                ("", "1"),
+                ("public", "1"),
+                ("", "0"),
+                ("null", "0"),
+                ("unknown", "0"),
+            ):
+                fixture.env.update(
+                    FIXTURE_REPO_VISIBILITY=visibility,
+                    FIXTURE_REPO_VISIBILITY_EXIT=code,
+                )
+                fixture.assert_lint_denied(
+                    "native publication requires verified target visibility"
+                )
+            for visibility in ("public", "private", "internal"):
+                fixture.env.update(
+                    FIXTURE_REPO_VISIBILITY=visibility, FIXTURE_REPO_VISIBILITY_EXIT="0"
+                )
+                fixture.assert_fixture_accepted()
+
+
+def test_legacy_lint_dependencies_keep_existing_behavior() -> None:
+    for unavailable in ("linter", "visibility-error", "visibility-unknown"):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = PublicationFixture(Path(tmp))
+            fixture.populate_legacy_markers()
+            markers = fixture.snapshot()
+            if unavailable == "linter":
+                (
+                    Path(fixture.env["HOME"]) / ".copilot/skills/validate-style/lint.py"
+                ).unlink()
+            elif unavailable == "visibility-error":
+                fixture.env.update(
+                    FIXTURE_REPO_VISIBILITY="public", FIXTURE_REPO_VISIBILITY_EXIT="1"
+                )
+            else:
+                fixture.env["FIXTURE_REPO_VISIBILITY"] = "unknown"
+            body = "I exercise the unchanged ordinary lint dependency behavior."
+            result = fixture.create("--body", body)
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert result.stdout == "fixture publication intercepted\n"
+            assert result.stderr == ""
+            calls = [
+                json.loads(line)
+                for line in fixture.publications.read_text().splitlines()
+            ]
+            assert calls == [
+                {
+                    "argv": ["pr", "create", "--title", "fixture", "--body", body],
+                    "cwd": str(fixture.repo),
+                }
+            ]
+            assert fixture.snapshot() == markers
+            fixture.publications.unlink()
+            if unavailable == "visibility-error":
+                result = fixture.create(
+                    "--body", "I fixed https://github.com/fixture/private/pull/1."
+                )
+                assert result.returncode == 1, (result.stdout, result.stderr)
+                assert "no-private-repo-ref" in result.stderr, result.stderr
+                assert not fixture.publications.exists()
+                assert fixture.snapshot() == markers
 
 
 def test_native_lint_reads_cannot_outlive_the_certified_head_or_body() -> None:
@@ -2609,6 +2734,9 @@ def main() -> int:
         test_native_artifact_review_and_machine_check_requirements,
         test_native_code_budget_retains_separate_plan_and_description_history,
         test_native_body_transport_and_update_target_cannot_bypass_guard,
+        test_native_requires_available_body_lint_tooling,
+        test_native_requires_verified_target_visibility,
+        test_legacy_lint_dependencies_keep_existing_behavior,
         test_native_lint_reads_cannot_outlive_the_certified_head_or_body,
         test_native_fork_selector_preserves_exact_utf8_body_bytes,
         test_native_proof_does_not_bypass_body_visibility_or_help_value_rules,
