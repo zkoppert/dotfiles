@@ -162,9 +162,10 @@ fi
 
 # A partial native locator is still a required handoff, never a legacy fallback.
 native_publication=0
+native_repository=""
 if { [ "${NO_MISTAKES_PUBLICATION_RUN+x}" = "x" ] || [ "${NO_MISTAKES_PUBLICATION_ATTEMPT+x}" = "x" ]; } &&
    { [ "$is_pr_create" = "1" ] || [ "$is_pr_edit" = "1" ]; }; then
-  if ! "$SCRIPT_PATH/pr-marker" check --publication "$@"; then
+  if ! native_repository="$("$SCRIPT_PATH/pr-marker" check --print-publication-repository --publication "$@")"; then
     echo 'gh-guard: native publication blocked; legacy markers cannot replace native proof.' >&2
     exit 1
   fi
@@ -266,13 +267,19 @@ lint_pr_body_or_die() {
       esac
       prev="$arg"
     done
-    # Fall back to current repo from git remote
-    if [ -z "$target_repo" ] && git rev-parse --show-toplevel >/dev/null 2>&1; then
+    # Native targets come from the verified binding, not option-looking values.
+    if [ "$native_publication" = "1" ]; then
+      target_repo="$native_repository"
+    elif [ -z "$target_repo" ] && git rev-parse --show-toplevel >/dev/null 2>&1; then
       target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
     fi
     if [ -n "$target_repo" ]; then
       local repo_vis=""
-      if repo_vis="$("$REAL_GH" api "repos/$target_repo" --jq .visibility 2>/dev/null)"; then
+      local visibility_args=(api "repos/$target_repo" --jq .visibility)
+      if [ "$native_publication" = "1" ]; then
+        visibility_args=(repo view --json visibility --jq '.visibility | ascii_downcase' -- "$target_repo")
+      fi
+      if repo_vis="$("$REAL_GH" "${visibility_args[@]}" 2>/dev/null)"; then
         case "$repo_vis" in
           public|private|internal) body_visibility_verified=1 ;;
         esac

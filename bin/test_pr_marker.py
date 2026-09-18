@@ -271,7 +271,12 @@ class PublicationFixture:
             "    print('fixture publication intercepted')\n"
             "elif args == ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner']:\n"
             "    print('fixture/public')\n"
-            "elif args == ['api', 'repos/fixture/public', '--jq', '.visibility']:\n"
+            "elif args in (['api', 'repos/fixture/public', '--jq', '.visibility'],\n"
+            "              ['repo', 'view', '--json', 'visibility', '--jq', '.visibility | ascii_downcase', '--', 'fixture/public'],\n"
+            "              ['repo', 'view', '--json', 'visibility', '--jq', '.visibility | ascii_downcase', '--', 'ghe.example.test/fixture/public']):\n"
+            "    if os.environ.get('FIXTURE_VISIBILITY_CALLS'):\n"
+            "        with open(os.environ['FIXTURE_VISIBILITY_CALLS'], 'a') as log:\n"
+            "            log.write(json.dumps(args) + '\\n')\n"
             "    effect = os.environ.get('FIXTURE_VISIBILITY_EFFECT')\n"
             "    if effect == 'head':\n"
             "        subprocess.run(['git', 'commit', '-q', '--allow-empty', '-m', 'fixture during lint'], check=True)\n"
@@ -684,7 +689,9 @@ class NativePublicationFixture(PublicationFixture):
     def save(self) -> None:
         self.payload.write_text(json.dumps(self.proof), encoding="utf-8")
 
-    def native(self, *, guard=False, confirmed=True) -> subprocess.CompletedProcess:
+    def native(
+        self, *, guard=False, confirmed=True, print_repository=False
+    ) -> subprocess.CompletedProcess:
         env = dict(self.env)
         if confirmed and self.argv[1] == "create":
             env["ZACK_CONFIRMED_PR_CREATE"] = "1"
@@ -695,6 +702,7 @@ class NativePublicationFixture(PublicationFixture):
                 sys.executable,
                 str(_MODULE_PATH),
                 "check",
+                *(["--print-publication-repository"] if print_repository else []),
                 "--publication",
                 *self.argv,
             ]
@@ -827,6 +835,26 @@ def test_native_capabilities_preserve_the_consumer_policy() -> None:
         assert not fixture.verifier_calls.exists(), "discovery invoked a producer"
         assert not fixture.publications.exists(), "discovery performed publication"
         assert fixture.snapshot() == before
+
+
+def test_native_repository_projection_requires_complete_proof() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        markers, payload = fixture.snapshot(), fixture.payload.read_bytes()
+        result = fixture.native(print_repository=True)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "fixture/public\n" and result.stderr == ""
+        assert not fixture.publications.exists()
+        assert fixture.snapshot() == markers and fixture.payload.read_bytes() == payload
+        fixture.proof["history_known"] = False
+        fixture.save()
+        result = fixture.native(print_repository=True)
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert result.stdout == "" and "history is unknown" in result.stderr
+        assert not fixture.publications.exists()
+        legacy = fixture.marker("check", "--print-publication-repository")
+        assert legacy.returncode == 1, (legacy.stdout, legacy.stderr)
+        assert legacy.stdout == "" and "requires --publication" in legacy.stderr
 
 
 def test_native_complete_fixture_does_not_require_or_write_legacy_markers() -> None:
@@ -1342,6 +1370,18 @@ def test_native_context_and_body_changes_cannot_relabel_old_proof() -> None:
         assert not fixture.verifier_calls.exists()
 
 
+def test_native_dirty_worktree_refuses_before_verification() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        (fixture.repo / "unreviewed.txt").write_text("Uncommitted fixture input.\n")
+        fixture.assert_denied("native verification refuses a dirty worktree")
+        assert not fixture.verifier_calls.exists(), "dirty input invoked the producer"
+        staged = fixture.run(["git", "add", "unreviewed.txt"])
+        assert staged.returncode == 0, staged.stderr
+        fixture.assert_denied("native verification refuses a dirty worktree")
+        assert not fixture.verifier_calls.exists(), "staged input invoked the producer"
+
+
 def test_native_uses_requested_common_store_in_a_linked_worktree() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         fixture = NativePublicationFixture(Path(tmp))
@@ -1606,7 +1646,7 @@ def test_native_body_transport_and_update_target_cannot_bypass_guard() -> None:
 
 
 def test_native_requires_available_body_lint_tooling() -> None:
-    for operation in ("create", "update"):
+    def exercise(operation: str) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fixture = NativePublicationFixture(Path(tmp))
             if operation == "update":
@@ -1624,9 +1664,12 @@ def test_native_requires_available_body_lint_tooling() -> None:
                     "native publication requires completed body lint"
                 )
 
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(exercise, ("create", "update")))
+
 
 def test_native_requires_verified_target_visibility() -> None:
-    for operation in ("create", "update"):
+    def exercise(operation: str) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fixture = NativePublicationFixture(Path(tmp))
             if operation == "update":
@@ -1652,6 +1695,68 @@ def test_native_requires_verified_target_visibility() -> None:
                 )
                 fixture.assert_fixture_accepted()
 
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(exercise, ("create", "update")))
+
+
+def test_native_visibility_uses_the_bound_target_not_option_looking_titles() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        for title in (
+            "--repo=fixture/private",
+            "-R=fixture/private",
+            "--repo",
+            "-R",
+            "--repo=",
+        ):
+            fixture.body.write_text(
+                "I fixed https://github.com/fixture/private/pull/1.\n"
+            )
+            fixture.proof = fixture.protocol_fixture()
+            fixture.proof["title"] = title
+            fixture.argv[fixture.argv.index("--title") + 1] = title
+            fixture.save()
+            fixture.assert_lint_denied("no-private-repo-ref")
+        fixture.body.write_text("I preserve an option-looking title in this fixture.\n")
+        fixture.proof = fixture.protocol_fixture()
+        fixture.proof["title"] = "--repo="
+        fixture.argv[fixture.argv.index("--title") + 1] = "--repo="
+        fixture.save()
+        fixture.assert_fixture_accepted()
+
+
+def test_native_visibility_resolves_the_explicit_enterprise_repository() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        repository = "ghe.example.test/fixture/public"
+        lookups = Path(tmp) / "visibility-calls.jsonl"
+        fixture.env["FIXTURE_VISIBILITY_CALLS"] = str(lookups)
+        expected_lookup = [
+            "repo",
+            "view",
+            "--json",
+            "visibility",
+            "--jq",
+            ".visibility | ascii_downcase",
+            "--",
+            repository,
+        ]
+        for index, operation in enumerate(("create", "update"), 1):
+            if operation == "update":
+                fixture.use_update()
+                fixture.proof["binding"][
+                    "pr_url"
+                ] = "https://ghe.example.test/fixture/public/pull/1"
+            fixture.proof["binding"].update(
+                repository=repository, head_repository=repository
+            )
+            fixture.argv[fixture.argv.index("--repo") + 1] = repository
+            fixture.save()
+            fixture.assert_fixture_accepted()
+            assert [json.loads(line) for line in lookups.read_text().splitlines()] == [
+                expected_lookup
+            ] * index
+
 
 def test_legacy_lint_dependencies_keep_existing_behavior() -> None:
     for unavailable in ("linter", "visibility-error", "visibility-unknown"):
@@ -1659,6 +1764,8 @@ def test_legacy_lint_dependencies_keep_existing_behavior() -> None:
             fixture = PublicationFixture(Path(tmp))
             fixture.populate_legacy_markers()
             markers = fixture.snapshot()
+            lookups = Path(tmp) / "visibility-calls.jsonl"
+            fixture.env["FIXTURE_VISIBILITY_CALLS"] = str(lookups)
             if unavailable == "linter":
                 (
                     Path(fixture.env["HOME"]) / ".copilot/skills/validate-style/lint.py"
@@ -1686,6 +1793,12 @@ def test_legacy_lint_dependencies_keep_existing_behavior() -> None:
             ]
             assert fixture.snapshot() == markers
             fixture.publications.unlink()
+            if unavailable == "linter":
+                assert not lookups.exists()
+            else:
+                assert [
+                    json.loads(line) for line in lookups.read_text().splitlines()
+                ] == [["api", "repos/fixture/public", "--jq", ".visibility"]]
             if unavailable == "visibility-error":
                 result = fixture.create(
                     "--body", "I fixed https://github.com/fixture/private/pull/1."
@@ -2716,6 +2829,7 @@ def main() -> int:
         test_branch_dir_and_paths,
         test_artifacts_dir_derivation,
         test_native_capabilities_preserve_the_consumer_policy,
+        test_native_repository_projection_requires_complete_proof,
         test_native_complete_fixture_does_not_require_or_write_legacy_markers,
         test_native_preparation_binding_and_admission_are_required,
         test_native_baseline_checks_and_plan_reviews_precede_implementation,
@@ -2730,12 +2844,15 @@ def main() -> int:
         test_native_proof_parser_rejects_malformed_and_inspection_responses,
         test_native_proof_binds_actual_store_branch_head_body_and_call,
         test_native_context_and_body_changes_cannot_relabel_old_proof,
+        test_native_dirty_worktree_refuses_before_verification,
         test_native_uses_requested_common_store_in_a_linked_worktree,
         test_native_artifact_review_and_machine_check_requirements,
         test_native_code_budget_retains_separate_plan_and_description_history,
         test_native_body_transport_and_update_target_cannot_bypass_guard,
         test_native_requires_available_body_lint_tooling,
         test_native_requires_verified_target_visibility,
+        test_native_visibility_uses_the_bound_target_not_option_looking_titles,
+        test_native_visibility_resolves_the_explicit_enterprise_repository,
         test_legacy_lint_dependencies_keep_existing_behavior,
         test_native_lint_reads_cannot_outlive_the_certified_head_or_body,
         test_native_fork_selector_preserves_exact_utf8_body_bytes,
