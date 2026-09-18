@@ -1607,7 +1607,9 @@ def _native_evidence(proof: dict, binding: dict) -> None:
             raise NativeProofError(f"native {kind} has insufficient distinct reviewers")
 
 
-def cmd_native_check(argv: list[str], *, print_repository: bool = False) -> int:
+def cmd_native_check(
+    argv: list[str], *, print_repository: bool = False, print_lint_context: bool = False
+) -> int:
     try:
         ids = tuple(os.environ.get(key, "") for key in NATIVE_LOCATORS)
         if not all(ids):
@@ -1631,7 +1633,16 @@ def cmd_native_check(argv: list[str], *, print_repository: bool = False) -> int:
             )
         binding = _native_binding(proof, request, context, body, ids)
         _native_evidence(proof, binding)
-        if print_repository:
+        if print_lint_context:
+            print(
+                json.dumps(
+                    {
+                        "repository": binding["repository"],
+                        "body_file": request["body-file"],
+                    }
+                )
+            )
+        elif print_repository:
             print(binding["repository"])
         return 0
     except (NativeProofError, OSError, UnicodeError, subprocess.SubprocessError) as exc:
@@ -1714,11 +1725,13 @@ def cmd_check(args: argparse.Namespace) -> int:
     """Require legacy markers, or validate the explicitly requested native handoff."""
     if args.publication is not None:
         return cmd_native_check(
-            args.publication, print_repository=args.print_publication_repository
+            args.publication,
+            print_repository=args.print_publication_repository,
+            print_lint_context=args.print_publication_lint_context,
         )
-    if args.print_publication_repository:
+    if args.print_publication_repository or args.print_publication_lint_context:
         print(
-            "pr-marker: --print-publication-repository requires --publication",
+            "pr-marker: native publication projection requires --publication",
             file=sys.stderr,
         )
         return 1
@@ -1792,10 +1805,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.set_defaults(func=cmd_status)
 
     p_check = sub.add_parser("check", help="exit 0 only if every marker passes")
-    p_check.add_argument(
+    projection = p_check.add_mutually_exclusive_group()
+    projection.add_argument(
         "--print-publication-repository",
         action="store_true",
         help="print the bound repository only after successful native proof validation",
+    )
+    projection.add_argument(
+        "--print-publication-lint-context",
+        action="store_true",
+        help="print verified repository/body_file JSON for native lint after complete proof validation",
     )
     p_check.add_argument(
         "--publication",

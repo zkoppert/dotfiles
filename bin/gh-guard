@@ -30,8 +30,8 @@
 #   3. `gh pr edit`   - if `--body` or `--body-file` is provided, the new
 #      body content is piped through the same `validate-style` lint skill
 #      and the edit is blocked if any hard-rule violations are reported.
-#      Edits that touch only title, labels, reviewers, base, milestone,
-#      etc. are not gated. This closes the loop where post-create body
+#      Without native locators, edits that touch only title, labels,
+#      reviewers, base, milestone, etc. are not gated. Post-create body
 #      edits would otherwise bypass the `pr create` lint.
 #
 # Behavior:
@@ -170,10 +170,22 @@ fi
 # A partial native locator is still a required handoff, never a legacy fallback.
 native_publication=0
 native_repository=""
+native_body_file=""
 if { [ "${NO_MISTAKES_PUBLICATION_RUN+x}" = "x" ] || [ "${NO_MISTAKES_PUBLICATION_ATTEMPT+x}" = "x" ]; } &&
    { [ "$is_pr_create" = "1" ] || [ "$is_pr_edit" = "1" ]; }; then
-  if ! native_repository="$("$SCRIPT_PATH/pr-marker" check --print-publication-repository --publication "$@")"; then
+  if ! native_lint_context="$("$SCRIPT_PATH/pr-marker" check --print-publication-lint-context --publication "$@")"; then
     echo 'gh-guard: native publication blocked; legacy markers cannot replace native proof.' >&2
+    exit 1
+  fi
+  if ! {
+    IFS= read -r -d '' native_repository &&
+    IFS= read -r -d '' native_body_file
+  } < <(printf '%s' "$native_lint_context" | python3 -c '
+import json, sys
+context = json.load(sys.stdin)
+sys.stdout.buffer.write(b"\0".join(context[key].encode("utf-8") for key in ("repository", "body_file")) + b"\0")
+'); then
+    echo 'gh-guard: native publication requires verified lint inputs.' >&2
     exit 1
   fi
   native_publication=1
@@ -198,12 +210,10 @@ if [ "$native_publication" = "0" ] &&
   done
 fi
 
-# Extract a PR body from `--body` / `--body-file` flags (in any of the four
-# forms: `--body x`, `--body=x`, `--body-file p`, `--body-file=p`) and pipe
-# it through the validate-style lint skill. Blocks the calling subcommand
-# with a clear violation list if the lint reports any hard-rule failures.
-# Silently passes if no body flag is present (e.g., a `gh pr edit` that
-# only changes labels, or a `gh pr create` that opens the editor).
+# Native calls lint the verified file; legacy calls extract the body from
+# --body / --body-file flags. A failed lint blocks either calling subcommand.
+# Only legacy calls may skip lint when no body flag is present (e.g., an edit
+# that only changes labels, or a create that opens the editor).
 #
 # Args:
 #   $1 - human-readable subcommand label for the error message, e.g.
@@ -217,47 +227,55 @@ lint_pr_body_or_die() {
   local body_content=""
   local body_source=""
   local body_skip_reason=""
+  local lint_input="-"
   local prev_arg=""
   local arg path
-  for arg in "$@"; do
-    case "$prev_arg" in
-      --body)
-        body_content="$arg"
-        body_source="--body"
-        ;;
-      --body-file)
-        if [ "$arg" = "-" ]; then
-          body_skip_reason="--body-file - (stdin; cannot safely re-read)"
-        elif [ -f "$arg" ]; then
-          body_content="$(cat "$arg")"
-          body_source="--body-file $arg"
-        else
-          body_skip_reason="--body-file $arg (file not found)"
-        fi
-        ;;
-    esac
-    case "$arg" in
-      --body=*)
-        body_content="${arg#--body=}"
-        body_source="--body="
-        ;;
-      --body-file=*)
-        path="${arg#--body-file=}"
-        if [ "$path" = "-" ]; then
-          body_skip_reason="--body-file=- (stdin; cannot safely re-read)"
-        elif [ -f "$path" ]; then
-          body_content="$(cat "$path")"
-          body_source="--body-file=$path"
-        else
-          body_skip_reason="--body-file=$path (file not found)"
-        fi
-        ;;
-    esac
-    prev_arg="$arg"
-  done
+  if [ "$native_publication" = "1" ]; then
+    # Reusing the verified file avoids interpreting option-looking values as flags.
+    lint_input="$native_body_file"
+    body_source="verified --body-file $native_body_file"
+  else
+    for arg in "$@"; do
+      case "$prev_arg" in
+        --body)
+          body_content="$arg"
+          body_source="--body"
+          ;;
+        --body-file)
+          if [ "$arg" = "-" ]; then
+            body_skip_reason="--body-file - (stdin; cannot safely re-read)"
+          elif [ -f "$arg" ]; then
+            body_content="$(cat "$arg")"
+            body_source="--body-file $arg"
+          else
+            body_skip_reason="--body-file $arg (file not found)"
+          fi
+          ;;
+      esac
+      case "$arg" in
+        --body=*)
+          body_content="${arg#--body=}"
+          body_source="--body="
+          ;;
+        --body-file=*)
+          path="${arg#--body-file=}"
+          if [ "$path" = "-" ]; then
+            body_skip_reason="--body-file=- (stdin; cannot safely re-read)"
+          elif [ -f "$path" ]; then
+            body_content="$(cat "$path")"
+            body_source="--body-file=$path"
+          else
+            body_skip_reason="--body-file=$path (file not found)"
+          fi
+          ;;
+      esac
+      prev_arg="$arg"
+    done
+  fi
 
   local lint_path="$HOME/.copilot/skills/validate-style/lint.py"
-  if [ -n "$body_content" ] && [ -x "$(command -v python3)" ] && [ -f "$lint_path" ]; then
+  if { [ "$native_publication" = "1" ] || [ -n "$body_content" ]; } &&
+     [ -x "$(command -v python3)" ] && [ -f "$lint_path" ]; then
     # Determine if the target repo is public. If so, enable --check-visibility
     # to block references to private/internal repos in the PR body.
     local visibility_flag=""
@@ -297,7 +315,7 @@ lint_pr_body_or_die() {
     fi
 
     local lint_output=""
-    if ! lint_output="$(printf '%s' "$body_content" | python3 "$lint_path" $visibility_flag - 2>&1)"; then
+    if ! lint_output="$(printf '%s' "$body_content" | python3 "$lint_path" $visibility_flag "$lint_input" 2>&1)"; then
       cat >&2 <<EOF
 gh-guard: \`$subcmd_label\` blocked by validate-style.
 
