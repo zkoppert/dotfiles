@@ -261,7 +261,11 @@ class PublicationFixture:
             "import json, os, subprocess, sys\n"
             "from pathlib import Path\n"
             "args = sys.argv[1:]\n"
-            "if args[:2] in (['pr', 'create'], ['pr', 'edit']):\n"
+            "if len(args) == 3 and args[:2] in (['pr', 'create'], ['pr', 'edit']) and args[2] in ('--help', '-h'):\n"
+            "    with open(os.environ['FIXTURE_HELP_CALLS'], 'a') as log:\n"
+            "        log.write(json.dumps({'argv': args, 'cwd': os.getcwd()}) + '\\n')\n"
+            "    print('Usage: gh pr ' + args[1] + ' [flags]')\n"
+            "elif args[:2] in (['pr', 'create'], ['pr', 'edit']):\n"
             "    record = {'argv': args, 'cwd': os.getcwd()}\n"
             "    for index, arg in enumerate(args):\n"
             "        if arg == '--body-file':\n"
@@ -1851,6 +1855,70 @@ def test_native_fork_selector_preserves_exact_utf8_body_bytes() -> None:
         fixture.assert_denied("exact body mismatch")
 
 
+def test_read_only_help_needs_no_native_proof_or_confirmation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        help_calls = Path(tmp) / "help-calls.jsonl"
+        fixture.env["FIXTURE_HELP_CALLS"] = str(help_calls)
+        for path in fixture.paths.values():
+            path.unlink()
+        fixture.payload.write_text("Unavailable native proof, not a certificate.")
+        payload = fixture.payload.read_bytes()
+        expected = []
+        locator_cases = (
+            {},
+            {"NO_MISTAKES_PUBLICATION_RUN": "fixture-run"},
+            {"NO_MISTAKES_PUBLICATION_ATTEMPT": "fixture-attempt"},
+            {
+                "NO_MISTAKES_PUBLICATION_RUN": "",
+                "NO_MISTAKES_PUBLICATION_ATTEMPT": "",
+            },
+            {
+                "NO_MISTAKES_PUBLICATION_RUN": "fixture-run",
+                "NO_MISTAKES_PUBLICATION_ATTEMPT": "fixture-attempt",
+            },
+        )
+        for locators in locator_cases:
+            for name in pr_marker.NATIVE_LOCATORS:
+                fixture.env.pop(name, None)
+            fixture.env.update(locators)
+            for operation in ("create", "edit"):
+                for flag in ("--help", "-h"):
+                    fixture.argv = ["pr", operation, flag]
+                    result = fixture.native(guard=True, confirmed=False)
+                    assert result.returncode == 0, (result.stdout, result.stderr)
+                    assert result.stdout == f"Usage: gh pr {operation} [flags]\n"
+                    assert result.stderr == ""
+                    expected.append({"argv": fixture.argv, "cwd": str(fixture.repo)})
+                    assert [
+                        json.loads(line) for line in help_calls.read_text().splitlines()
+                    ] == expected
+                    assert not fixture.publications.exists(), "help published a body"
+                    assert not fixture.verifier_calls.exists(), "help required proof"
+                    assert fixture.snapshot() == {}
+                    assert fixture.payload.read_bytes() == payload
+
+
+def test_native_help_with_other_arguments_does_not_bypass_proof() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        help_calls = Path(tmp) / "help-calls.jsonl"
+        fixture.env["FIXTURE_HELP_CALLS"] = str(help_calls)
+        for argv in (
+            [*fixture.argv, "--help"],
+            [*fixture.argv, "-h"],
+            ["pr", "create", "--help", "--title", "unreviewed"],
+            ["pr", "create", "-h", "--title", "unreviewed"],
+            ["pr", "edit", "--help", "--repo", "fixture/public"],
+            ["pr", "edit", "-h", "--repo", "fixture/public"],
+            ["pr", "create", "help"],
+        ):
+            fixture.argv = argv
+            fixture.assert_denied("unsupported native publication argument")
+        assert not help_calls.exists(), "publication arguments reached help routing"
+        assert not fixture.verifier_calls.exists()
+
+
 def test_native_proof_does_not_bypass_body_visibility_or_help_value_rules() -> None:
     for title in ("fixture title", "--help", "-h", "help"):
         for body, diagnostic in (
@@ -2856,6 +2924,8 @@ def main() -> int:
         test_legacy_lint_dependencies_keep_existing_behavior,
         test_native_lint_reads_cannot_outlive_the_certified_head_or_body,
         test_native_fork_selector_preserves_exact_utf8_body_bytes,
+        test_read_only_help_needs_no_native_proof_or_confirmation,
+        test_native_help_with_other_arguments_does_not_bypass_proof,
         test_native_proof_does_not_bypass_body_visibility_or_help_value_rules,
         test_legacy_marker_floors_through_entry_points,
         test_legacy_marker_rejections_stop_publication,

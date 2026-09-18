@@ -160,6 +160,13 @@ elif [ "$subcmd" = "pr" ] && [ "$op" = "edit" ]; then
   is_pr_edit=1
 fi
 
+# Only complete read-only help calls can skip proof; a title may itself be --help.
+if [ "$#" -eq 3 ] && [ "$1" = "pr" ] &&
+   { [ "$2" = "create" ] || [ "$2" = "edit" ]; } &&
+   { [ "$3" = "--help" ] || [ "$3" = "-h" ]; }; then
+  exec "$REAL_GH" "$@"
+fi
+
 # A partial native locator is still a required handoff, never a legacy fallback.
 native_publication=0
 native_repository=""
