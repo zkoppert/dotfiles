@@ -65,6 +65,15 @@ each branch its own directory (rather than suffixing the encoded branch onto
 every filename) avoids collisions between, e.g., branch `x`'s plan marker and
 branch `x.plan`'s code-review marker.
 
+Native handoffs use `check --publication <actual gh argv>` and the producer's
+opaque run/attempt locators. The helper reads the native verifier, not caller
+proof JSON or old marker logs. Normal native evidence retains an earlier reviewed
+plan, its implementation admission, final-head checks, and exact-body review.
+Only native-operator authorization bound to that exact run/context can explain a
+missing prior plan; capability discovery or caller text cannot grant an exception.
+Native policy caps cumulative code panels at ten; plan/description history stays
+separate. Legacy marker metadata and its accepted round range are unchanged.
+
 Usage:
   pr-marker path <kind>            print the marker file path for the current branch
   pr-marker artifacts-dir <kind>   print the sibling artifacts directory path
@@ -81,19 +90,29 @@ Usage:
   pr-marker status                 show all five markers and whether each passes
   pr-marker check                  exit 0 only if every marker passes (fresh + over
                                    floor)
+  pr-marker capabilities --json    describe native proof requirements, not readiness
+  pr-marker check --publication <actual gh argv>
+                                   verify native-located evidence without importing
+                                   or rewriting markers or native history
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True)
@@ -188,14 +207,45 @@ MAX_REVIEW_ROUNDS = 99
 # Keep this literal in sync with gh-guard's grep.
 TESTS_RESULT_HEADER = "<!-- tests-result: passed -->"
 
+NATIVE_PROTOCOL = "no-mistakes.publication/v1"
+NATIVE_MAX_PAYLOAD = 4 << 20
+NATIVE_LOCATORS = ("NO_MISTAKES_PUBLICATION_RUN", "NO_MISTAKES_PUBLICATION_ATTEMPT")
+NATIVE_REVIEW_FIELDS = (
+    "invocation_id agent requested_model served_model model_id model_provider "
+    "head_sha subject_sha256 started_at completed_at outcome content"
+)
+NATIVE_MAX_REVIEW_ROUNDS = 10
 
-def _git(*args: str) -> str:
+
+def _native_policy() -> dict:
+    return {
+        "protocol": NATIVE_PROTOCOL,
+        "artifacts": {
+            kind.name: {"min_bytes": kind.min_bytes} for kind in KINDS.values()
+        },
+        "min_review_models": MIN_MODELS,
+        "excluded_model_prefixes": list(PROHIBITED_MODEL_PREFIXES),
+        "create_confirmation_env": "ZACK_CONFIRMED_PR_CREATE",
+        "review_budget_scope": "code-only",
+        "plan_order": "before-implementation",
+        "planning_exception_support": True,
+        "max_review_rounds": NATIVE_MAX_REVIEW_ROUNDS,
+        "requires_full_tests": True,
+    }
+
+
+def _git(*args: str, read_only: bool = False) -> str:
     """Run a git command and return stripped stdout, or raise on failure."""
     result = subprocess.run(
         ["git", *args],
         capture_output=True,
         text=True,
         check=True,
+        env=(
+            {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1"}
+            if read_only
+            else None
+        ),
     )
     return result.stdout.strip()
 
@@ -319,9 +369,7 @@ def parse_models(raw: str | None) -> list[str]:
 def prohibited_models(models: list[str]) -> list[str]:
     """Return model names that are prohibited from multi-model reviews."""
     return [
-        model
-        for model in models
-        if model.lower().startswith(PROHIBITED_MODEL_PREFIXES)
+        model for model in models if model.lower().startswith(PROHIBITED_MODEL_PREFIXES)
     ]
 
 
@@ -562,7 +610,9 @@ def _invalidate_tests_marker(kind: Kind, branch: str) -> str:
     return " (removed the previous tests marker)"
 
 
-def _run_test_quality_preflight(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
+def _run_test_quality_preflight(
+    args: argparse.Namespace,
+) -> tuple[int, dict[str, object]]:
     """Run the test-evidence checker and return its exit code and JSON result."""
     checker = test_quality_checker_path()
     if not checker.is_file():
@@ -632,9 +682,7 @@ def _run_test_quality_preflight(args: argparse.Namespace) -> tuple[int, dict[str
         )
     if result.stderr:
         print(result.stderr, file=sys.stderr)
-    if result.returncode == 0 and (
-        status != "passed" or evidence == "unavailable"
-    ):
+    if result.returncode == 0 and (status != "passed" or evidence == "unavailable"):
         print(
             "pr-marker run-tests: the test-quality preflight did not analyze a "
             "branch diff; pass --base-ref <ref>.",
@@ -801,6 +849,801 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
     return 0
 
 
+class NativeProofError(RuntimeError):
+    """A native handoff is unavailable, contradictory, or unsupported."""
+
+
+def _native_object(value, required: str, optional: str = "", *, label: str) -> dict:
+    required_keys = set(required.split())
+    if not isinstance(value, dict) or not required_keys <= value.keys():
+        raise NativeProofError(f"malformed {label}: missing required fields")
+    if value.keys() - required_keys - set(optional.split()):
+        raise NativeProofError(f"malformed {label}: unsupported fields")
+    return value
+
+
+def _native_text(value, label: str, *, empty: bool = False) -> str:
+    if not isinstance(value, str) or (not empty and not value):
+        raise NativeProofError(f"malformed {label}: expected a string")
+    try:
+        value.encode("utf-8")
+    except UnicodeError as exc:
+        raise NativeProofError(f"malformed {label}: invalid UTF-8") from exc
+    return value
+
+
+def _native_integer(value, label: str, minimum: int = 0) -> int:
+    if type(value) is not int or not minimum <= value <= (1 << 63) - 1:
+        raise NativeProofError(
+            f"malformed {label}: expected an integer >= {minimum} within the native range"
+        )
+    return value
+
+
+def _native_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _native_sha(value, label: str, lengths=(40, 64)) -> str:
+    value = _native_text(value, label)
+    if len(value) not in lengths or any(c not in "0123456789abcdef" for c in value):
+        raise NativeProofError(f"malformed {label}: expected a full hexadecimal digest")
+    return value
+
+
+def _native_model_id(raw) -> str:
+    raw = _native_text(raw, "served model")
+    if raw.count("/") > 1 or any(
+        c.isspace() or unicodedata.category(c) == "Cc" for c in raw
+    ):
+        raise NativeProofError("unsupported native model spelling")
+    parts = raw.split("/")
+    if any(not part for part in parts):
+        raise NativeProofError("unsupported native model spelling")
+    # Go's strings.ToLower uses simple rune mapping, not Python's contextual
+    # sigma or multi-codepoint dotted-I lowercasing.
+    return "".join(character.lower()[0] for character in parts[-1])
+
+
+def _native_decode(raw: bytes) -> dict:
+    if not raw or len(raw) > NATIVE_MAX_PAYLOAD:
+        raise NativeProofError("native proof is empty or exceeds the payload limit")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise NativeProofError("malformed native proof: duplicate JSON key")
+            result[key] = value
+        return result
+
+    def invalid_constant(_value):
+        raise NativeProofError("malformed native proof: non-JSON numeric constant")
+
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=unique_object,
+            parse_constant=invalid_constant,
+        )
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise NativeProofError("malformed native proof JSON") from exc
+    pending = [(value, 0)]
+    while pending:
+        item, depth = pending.pop()
+        if depth > 128:
+            raise NativeProofError("malformed native proof: nesting limit exceeded")
+        if isinstance(item, dict):
+            pending.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, list):
+            pending.extend((child, depth + 1) for child in item)
+    return _native_object(
+        value,
+        "protocol run_id attempt_id repo_id binding title body body_sha256 "
+        "preparation_id plan preparation_admitted_at submitted_head_sha policy "
+        "history_known total_code_rounds total_plan_rounds total_description_rounds artifacts",
+        "planning_exception required_commands",
+        label="native proof",
+    )
+
+
+def _native_request(argv: list[str]) -> dict:
+    if len(argv) < 2 or argv[0] != "pr" or argv[1] not in ("create", "edit"):
+        raise NativeProofError(
+            "unsupported native publication argv: expected pr create or pr edit"
+        )
+    request = {
+        "operation": "create" if argv[1] == "create" else "update",
+        "draft": False,
+    }
+    flags = {"--repo", "--body-file", "--title"}
+    if request["operation"] == "create":
+        flags |= {"--head", "--base"}
+    index = 2
+    while index < len(argv):
+        arg = argv[index]
+        flag, separator, value = arg.partition("=")
+        if flag == "-R":
+            flag = "--repo"
+        key = flag.removeprefix("--")
+        if flag in flags:
+            if key in request:
+                raise NativeProofError(f"duplicate native publication argument {flag}")
+            if not separator:
+                index += 1
+                if index >= len(argv):
+                    raise NativeProofError(
+                        f"missing native publication argument {flag}"
+                    )
+                value = argv[index]
+            if not value:
+                raise NativeProofError(f"empty native publication argument {flag}")
+            request[key] = value
+        elif (
+            arg == "--draft"
+            and request["operation"] == "create"
+            and not request["draft"]
+        ):
+            request["draft"] = True
+        elif (
+            request["operation"] == "update"
+            and "selector" not in request
+            and not arg.startswith("-")
+        ):
+            request["selector"] = arg
+        else:
+            raise NativeProofError(f"unsupported native publication argument {flag}")
+        index += 1
+    required = {flag.removeprefix("--") for flag in flags}
+    if request["operation"] == "update":
+        required = (required - {"title"}) | {"selector"}
+    if not required <= request.keys():
+        raise NativeProofError("missing required native publication arguments")
+    return request
+
+
+def _native_body(path: str) -> bytes:
+    file = Path(path)
+    if not file.is_absolute():
+        raise NativeProofError(
+            "native body file must be an absolute regular file, not stdin"
+        )
+    info = file.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size > NATIVE_MAX_PAYLOAD:
+        raise NativeProofError(
+            "native body file must be a bounded regular file, not a symlink or stream"
+        )
+    body = file.read_bytes()
+    if not body or len(body) > NATIVE_MAX_PAYLOAD:
+        raise NativeProofError("native body file is empty or exceeds the payload limit")
+    body.decode("utf-8")
+    return body
+
+
+def _native_context() -> dict:
+    def git(*args):
+        return _git(*args, read_only=True)
+
+    worktree = Path.cwd().resolve()
+    root = Path(git("rev-parse", "--show-toplevel")).resolve(strict=True)
+    if worktree != root:
+        raise NativeProofError(
+            "native verification requires the actual source worktree root"
+        )
+    try:
+        branch = git("symbolic-ref", "--quiet", "HEAD")
+    except subprocess.CalledProcessError as exc:
+        raise NativeProofError(
+            "native verification requires a named branch, not detached HEAD"
+        ) from exc
+    if not branch.startswith("refs/heads/"):
+        raise NativeProofError("native verification requires a named branch")
+    head = git("rev-parse", "--verify", "HEAD^{commit}")
+    _native_sha(head, "actual HEAD")
+    store = Path(
+        git("rev-parse", "--path-format=absolute", "--git-common-dir")
+    ).resolve(strict=True)
+    if git("status", "--porcelain=v1", "--untracked-files=all"):
+        raise NativeProofError("native verification refuses a dirty worktree")
+    return {
+        "worktree": str(root),
+        "requested_store": str(store),
+        "branch": branch.removeprefix("refs/heads/"),
+        "head_sha": head,
+    }
+
+
+def _native_output(argv: list[str]) -> bytes:
+    # Spool bounded reads rather than retaining arbitrary producer output in RAM.
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+        result = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=errors,
+            timeout=30,
+            env={
+                **os.environ,
+                "NO_MISTAKES_NO_UPDATE_CHECK": "1",
+                "NO_MISTAKES_TELEMETRY": "0",
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_NO_LAZY_FETCH": "1",
+            },
+        )
+        if result.returncode:
+            raise NativeProofError(
+                f"native verifier refused or is unavailable (exit {result.returncode})"
+            )
+        output.seek(0)
+        raw = output.read(NATIVE_MAX_PAYLOAD + 1)
+        if len(raw) > NATIVE_MAX_PAYLOAD:
+            raise NativeProofError("native verifier output exceeds the payload limit")
+        return raw
+
+
+def _native_read_proof(
+    context: dict, body_file: str, run_id: str, attempt_id: str
+) -> dict:
+    executable = shutil.which("no-mistakes")
+    if not executable:
+        raise NativeProofError(
+            "trusted no-mistakes CLI is unavailable on the operator PATH"
+        )
+    executable = str(Path(executable).resolve(strict=True))
+    help_text = _native_output([executable, "axi", "--help"]).decode("utf-8")
+    commands = help_text.partition("Available Commands:")[2].partition("Flags:")[0]
+    if not any(line.split()[:1] == ["publication"] for line in commands.splitlines()):
+        raise NativeProofError(
+            "selected no-mistakes CLI has no native publication verifier"
+        )
+    raw = _native_output(
+        [
+            executable,
+            "axi",
+            "publication",
+            "verify",
+            "--run",
+            run_id,
+            "--attempt",
+            attempt_id,
+            "--expected-store",
+            context["requested_store"],
+            "--branch",
+            context["branch"],
+            "--head",
+            context["head_sha"],
+            "--body-file",
+            body_file,
+            "--json",
+        ]
+    )
+    return _native_decode(raw)
+
+
+def _native_repo(raw, *, default_host="github.com") -> tuple[str, str, str]:
+    parts = _native_text(raw, "repository").split("/")
+    if len(parts) == 2:
+        parts.insert(0, default_host)
+    if len(parts) != 3 or any(not p or any(c.isspace() for c in p) for p in parts):
+        raise NativeProofError("malformed native repository identity")
+    return tuple(part.lower() for part in parts)
+
+
+def _native_binding(
+    proof: dict, request: dict, context: dict, body: bytes, ids: tuple
+) -> dict:
+    if (
+        proof["protocol"] != NATIVE_PROTOCOL
+        or (proof["run_id"], proof["attempt_id"]) != ids
+    ):
+        raise NativeProofError("native producer/run/attempt identity mismatch")
+    for key in ("repo_id", "preparation_id"):
+        _native_text(proof[key], key)
+    binding = _native_object(
+        proof["binding"],
+        "requested_store worktree branch head_sha repository head_repository base_branch draft operation push_target before_push",
+        "pr_url previous_body_sha256",
+        label="native binding",
+    )
+    for key, expected in context.items():
+        if binding[key] != expected:
+            raise NativeProofError(f"native {key} mismatch")
+    for key in ("draft", "before_push"):
+        if type(binding[key]) is not bool:
+            raise NativeProofError(f"malformed native {key}")
+    _native_text(binding["push_target"], "native push target")
+    _native_text(binding["base_branch"], "native base branch")
+    if binding["operation"] != request["operation"]:
+        raise NativeProofError("native publication operation mismatch")
+    repo = _native_repo(binding["repository"])
+    head_repo = _native_repo(binding["head_repository"], default_host=repo[0])
+    if head_repo[0] != repo[0]:
+        raise NativeProofError("native head repository belongs to a different forge")
+    if repo != _native_repo(request["repo"]):
+        raise NativeProofError("native target repository mismatch")
+    title = _native_text(proof["title"], "native title", empty=True)
+    if request.get("title", "") != title:
+        raise NativeProofError("native title mismatch")
+    certified_body = _native_text(proof["body"], "native body")
+    if certified_body.encode("utf-8") != body or proof["body_sha256"] != _native_digest(
+        certified_body
+    ):
+        raise NativeProofError("native exact body mismatch")
+    if request["operation"] == "create":
+        if (
+            binding["base_branch"] != request["base"]
+            or binding["draft"] != request["draft"]
+        ):
+            raise NativeProofError("native base/draft mismatch")
+        head = request["head"]
+        owner, colon, branch = head.partition(":")
+        if colon:
+            matches = (
+                owner.lower() == head_repo[1]
+                and branch == context["branch"]
+                and head_repo[0] == repo[0]
+            )
+        else:
+            matches = head == context["branch"] and head_repo == repo
+        if not matches:
+            raise NativeProofError("native head repository/branch selector mismatch")
+        if (
+            binding.get("pr_url")
+            or binding.get("previous_body_sha256")
+            or binding["before_push"]
+        ):
+            raise NativeProofError("unsupported native create binding")
+    else:
+        try:
+            url = urlsplit(_native_text(binding.get("pr_url"), "native update URL"))
+        except ValueError as exc:
+            raise NativeProofError("malformed native update URL") from exc
+        parts = url.path.split("/")
+        if (
+            url.scheme not in ("https", "http")
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+            or len(parts) != 5
+            or parts[3] != "pull"
+            or not parts[4].isascii()
+            or not parts[4].isdigit()
+            or int(parts[4]) < 1
+        ):
+            raise NativeProofError("malformed native update URL")
+        if (url.netloc.lower(), parts[1].lower(), parts[2].lower()) != repo:
+            raise NativeProofError("native update repository mismatch")
+        if request["selector"] not in (binding["pr_url"], parts[4]):
+            raise NativeProofError("native update selector mismatch")
+        _native_sha(binding.get("previous_body_sha256"), "native previous body", (64,))
+    return binding
+
+
+def _native_artifact(value, kind: Kind, subject: str, *, label: str) -> dict:
+    artifact = _native_object(
+        value,
+        "content sha256 bytes round_id subject_sha256",
+        "reviews attempts checks observations",
+        label=f"{label} artifact",
+    )
+    content = _native_text(artifact["content"], f"{label} content")
+    size = _native_integer(artifact["bytes"], f"{label} bytes")
+    if (
+        size != len(content.encode("utf-8"))
+        or size < kind.min_bytes
+        or artifact["sha256"] != _native_digest(content)
+    ):
+        raise NativeProofError(f"native {label} artifact floor/digest mismatch")
+    _native_text(artifact["round_id"], f"{label} round identity")
+    actual = _native_sha(artifact["subject_sha256"], f"{label} subject", (64,))
+    if actual != subject:
+        raise NativeProofError(f"native {label} subject is stale")
+    return artifact
+
+
+def _native_checks(
+    artifact: dict,
+    head: str,
+    *,
+    not_before: int = 1,
+    plan_completed_at: int | None = None,
+    after_authorization: bool = False,
+) -> tuple[list[str], int]:
+    label = "baseline " if plan_completed_at is not None else ""
+    checks = artifact.get("checks")
+    if not isinstance(checks, list) or not checks:
+        raise NativeProofError(f"native {label}machine checks are missing")
+    commands = []
+    completed = 0
+    for check in checks:
+        check = _native_object(
+            check,
+            "command exit_code started_at completed_at head_sha output",
+            label=f"{label}machine check",
+        )
+        commands.append(_native_text(check["command"], f"{label}machine check command"))
+        _native_text(check["output"], f"{label}machine check output", empty=True)
+        start = _native_integer(check["started_at"], f"{label}machine check start", 1)
+        end = _native_integer(
+            check["completed_at"], f"{label}machine check completion", start
+        )
+        if (
+            type(check["exit_code"]) is not int
+            or check["exit_code"] != 0
+            or check["head_sha"] != head
+            or start < not_before
+            or (plan_completed_at is not None and end > plan_completed_at)
+        ):
+            boundary = (
+                "before plan completion"
+                if plan_completed_at is not None
+                else (
+                    "on the final head after native authorization"
+                    if after_authorization
+                    else "on the final head after implementation admission"
+                )
+            )
+            raise NativeProofError(
+                f"native {label}machine checks did not pass {boundary}"
+            )
+        completed = max(completed, end)
+    return commands, completed
+
+
+def _native_plan(proof: dict, binding: dict) -> dict:
+    plan = _native_object(
+        proof["plan"],
+        "run_id repo_id branch requested_store worktree baseline_sha intent_sha256 "
+        "plan_text plan_sha256 checks artifact policy execution_config_sha256 completed_at",
+        label="pre-implementation plan",
+    )
+    earlier_run = _native_text(plan["run_id"], "earlier preparation run")
+    if (
+        earlier_run == proof["run_id"]
+        or plan["repo_id"] != proof["repo_id"]
+        or any(
+            plan[key] != binding[key]
+            for key in ("branch", "requested_store", "worktree")
+        )
+    ):
+        raise NativeProofError("native pre-implementation plan context mismatch")
+    _native_sha(plan["baseline_sha"], "prepared baseline")
+    for key in ("intent_sha256", "execution_config_sha256"):
+        _native_sha(plan[key], f"plan {key}", (64,))
+    plan_text = _native_text(plan["plan_text"], "prospective plan")
+    if plan["plan_sha256"] != _native_digest(plan_text):
+        raise NativeProofError("native pre-implementation plan subject mismatch")
+    plan_completed = _native_integer(plan["completed_at"], "plan completion", 1)
+    _native_integer(
+        proof["preparation_admitted_at"], "preparation admission", plan_completed
+    )
+    # Compare typed JSON rather than Python equality (True == 1 == 1.0).
+    if json.dumps(plan["policy"], sort_keys=True) != json.dumps(
+        proof["policy"], sort_keys=True
+    ):
+        raise NativeProofError("native policy differs from pre-implementation plan")
+    return plan
+
+
+def _native_planning_exception(proof: dict, binding: dict, policy: dict) -> dict:
+    if policy.get("planning_exception_support") is not True:
+        raise NativeProofError(
+            "native planning exception requires explicit policy support"
+        )
+    exception = _native_object(
+        proof["planning_exception"],
+        "scope run_id repo_id requested_store worktree branch work_head_sha "
+        "intent_sha256 policy_sha256 id authorized_at authority authorizer_pid reason",
+        label="native planning exception",
+    )
+    if (
+        exception["scope"] != "missing-pre-implementation-planning"
+        or exception["authority"] != "native-operator-control"
+    ):
+        raise NativeProofError("native planning exception authority/scope mismatch")
+    if (
+        exception["run_id"] != proof["run_id"]
+        or exception["repo_id"] != proof["repo_id"]
+        or exception["work_head_sha"] != proof["submitted_head_sha"]
+        or any(
+            exception[key] != binding[key]
+            for key in ("branch", "requested_store", "worktree")
+        )
+    ):
+        raise NativeProofError("native planning exception run/context mismatch")
+    _native_text(exception["id"], "native authorization identity")
+    reason = _native_text(exception["reason"], "native authorization reason")
+    if not reason.strip():
+        raise NativeProofError("native authorization reason is empty")
+    if len(reason.encode("utf-8")) > 4096:
+        raise NativeProofError("native authorization reason exceeds 4096 UTF-8 bytes")
+    for key in ("intent_sha256", "policy_sha256"):
+        _native_sha(exception[key], f"native authorization {key}", (64,))
+    _native_integer(exception["authorized_at"], "native authorization time", 1)
+    # Historical producer attribution, not evidence from a currently live PID.
+    _native_integer(exception["authorizer_pid"], "native authorizer PID", 2)
+    if (
+        proof["plan"] is not None
+        or type(proof["preparation_admitted_at"]) is not int
+        or proof["preparation_admitted_at"] != 0
+    ):
+        raise NativeProofError(
+            "native planning exception cannot invent a plan or prior admission"
+        )
+    return exception
+
+
+def _native_evidence(proof: dict, binding: dict) -> None:
+    policy = _native_object(
+        proof["policy"],
+        " ".join(
+            key for key in _native_policy() if key != "planning_exception_support"
+        ),
+        "planning_exception_support",
+        label="native policy",
+    )
+    if (
+        "planning_exception_support" in policy
+        and type(policy["planning_exception_support"]) is not bool
+    ):
+        raise NativeProofError("native planning-exception support must be boolean")
+    requirements = _native_object(
+        policy["artifacts"], " ".join(KINDS), label="artifact requirements"
+    )
+    for kind in KINDS.values():
+        rule = _native_object(
+            requirements[kind.name], "min_bytes", label=f"{kind.name} requirement"
+        )
+        if type(rule["min_bytes"]) is not int or rule["min_bytes"] != kind.min_bytes:
+            raise NativeProofError(f"native {kind.name} byte-floor policy mismatch")
+    if (
+        policy["protocol"] != NATIVE_PROTOCOL
+        or type(policy["min_review_models"]) is not int
+        or policy["min_review_models"] != MIN_MODELS
+        or policy["excluded_model_prefixes"] != list(PROHIBITED_MODEL_PREFIXES)
+        or policy["create_confirmation_env"] != "ZACK_CONFIRMED_PR_CREATE"
+        or policy["requires_full_tests"] is not True
+    ):
+        raise NativeProofError("native review/test/confirmation policy mismatch")
+    if policy["plan_order"] != "before-implementation":
+        raise NativeProofError("native plan ordering policy mismatch")
+    ceiling = _native_integer(policy["max_review_rounds"], "native review ceiling", 1)
+    if (
+        ceiling != NATIVE_MAX_REVIEW_ROUNDS
+        or policy["review_budget_scope"] != "code-only"
+    ):
+        raise NativeProofError("native code-only review budget policy mismatch")
+    if proof["history_known"] is not True:
+        raise NativeProofError("native review history is unknown")
+    excepted = "planning_exception" in proof
+    if not excepted and "required_commands" in proof:
+        raise NativeProofError(
+            "native required_commands is only supported with a planning exception"
+        )
+    counts = [
+        _native_integer(
+            proof[key], key, 0 if excepted and key == "total_plan_rounds" else 1
+        )
+        for key in (
+            "total_code_rounds",
+            "total_plan_rounds",
+            "total_description_rounds",
+        )
+    ]
+    if counts[0] > ceiling:
+        raise NativeProofError("native cumulative review budget is exhausted")
+    _native_sha(proof["submitted_head_sha"], "submitted head")
+    if excepted:
+        exception = _native_planning_exception(proof, binding, policy)
+        checks_after = exception["authorized_at"]
+        plan = None
+        kinds = {name: kind for name, kind in KINDS.items() if name != "plan"}
+    else:
+        plan = _native_plan(proof, binding)
+        checks_after = proof["preparation_admitted_at"]
+        kinds = KINDS
+    artifacts = _native_object(
+        proof["artifacts"], " ".join(kinds), label="native artifacts"
+    )
+    for kind in kinds.values():
+        subject = (
+            plan["plan_sha256"]
+            if kind.name == "plan"
+            else (
+                proof["body_sha256"]
+                if kind.name == "pr-review"
+                else _native_digest(binding["head_sha"])
+            )
+        )
+        _native_artifact(artifacts[kind.name], kind, subject, label=kind.name)
+    if plan is not None:
+        if json.dumps(plan["artifact"], sort_keys=True) != json.dumps(
+            artifacts["plan"], sort_keys=True
+        ):
+            raise NativeProofError(
+                "native pre-implementation plan was replaced or relabeled"
+            )
+        baseline_tests = _native_artifact(
+            plan["checks"],
+            KINDS["tests"],
+            _native_digest(plan["baseline_sha"]),
+            label="baseline tests",
+        )
+        baseline_commands, baseline_completed = _native_checks(
+            baseline_tests, plan["baseline_sha"], plan_completed_at=plan["completed_at"]
+        )
+    commands, tests_completed = _native_checks(
+        artifacts["tests"],
+        binding["head_sha"],
+        not_before=checks_after,
+        after_authorization=excepted,
+    )
+    # The native verifier owns the pin and its actual execution; a caller's
+    # command list or two matching arbitrary lists cannot prove completeness.
+    if plan is None:
+        required_commands = proof.get("required_commands")
+        if not isinstance(required_commands, list) or not required_commands:
+            raise NativeProofError(
+                "native required command manifest is missing or malformed"
+            )
+        for command in required_commands:
+            if not _native_text(command, "native required command").strip():
+                raise NativeProofError("native required command is empty")
+        if commands != required_commands:
+            raise NativeProofError(
+                "native final checks differ from the pinned command manifest"
+            )
+    elif commands != baseline_commands:
+        raise NativeProofError(
+            "native final checks differ from the prepared command manifest"
+        )
+    if (
+        not isinstance(artifacts["demo"].get("observations"), dict)
+        or not artifacts["demo"]["observations"]
+    ):
+        raise NativeProofError("native demo observations are missing")
+    invocations = set()
+    for kind in (
+        name for name in ("plan", "code-review", "pr-review") if name in kinds
+    ):
+        artifact = artifacts[kind]
+        reviews, attempts = artifact.get("reviews"), artifact.get("attempts")
+        if (
+            not isinstance(reviews, list)
+            or not isinstance(attempts, list)
+            or not attempts
+        ):
+            raise NativeProofError(
+                f"native {kind} review/attempt provenance is missing"
+            )
+        recorded_attempts = {}
+        for attempt in attempts:
+            attempt = _native_object(
+                attempt, NATIVE_REVIEW_FIELDS, label=f"{kind} attempt"
+            )
+            identity = _native_text(attempt["invocation_id"], "attempt invocation")
+            if identity in recorded_attempts or attempt["outcome"] not in (
+                "returned",
+                "failed",
+            ):
+                raise NativeProofError(f"native {kind} has malformed attempt history")
+            for field in (
+                "agent",
+                "requested_model",
+                "served_model",
+                "model_id",
+                "model_provider",
+                "content",
+            ):
+                _native_text(attempt[field], f"attempt {field}", empty=True)
+            start = _native_integer(attempt["started_at"], "attempt start", 1)
+            _native_integer(attempt["completed_at"], "attempt completion", start)
+            _native_sha(attempt["head_sha"], "attempt head")
+            if attempt["subject_sha256"] != artifact["subject_sha256"]:
+                raise NativeProofError(f"native {kind} attempt subject mismatch")
+            recorded_attempts[identity] = attempt
+        models = set()
+        for review in reviews:
+            review = _native_object(
+                review, NATIVE_REVIEW_FIELDS, label=f"{kind} review"
+            )
+            identity = _native_text(review["invocation_id"], "review invocation")
+            _native_text(review["agent"], "review agent")
+            _native_text(review["model_provider"], "review provider", empty=True)
+            requested = _native_text(review["requested_model"], "requested model")
+            _native_model_id(requested)
+            model = _native_model_id(review["served_model"])
+            if (
+                review["model_id"] != model
+                or requested.strip().rsplit("/", 1)[-1].strip()
+                != review["served_model"].rsplit("/", 1)[-1]
+            ):
+                raise NativeProofError(
+                    f"native {kind} requested/served model identity mismatch"
+                )
+            if prohibited_models([model]) or model in models or identity in invocations:
+                raise NativeProofError(
+                    f"native {kind} has prohibited or duplicate reviewers"
+                )
+            start = _native_integer(review["started_at"], "review start", 1)
+            end = _native_integer(review["completed_at"], "review completion", start)
+            _native_sha(review["head_sha"], "reviewed head")
+            head = plan["baseline_sha"] if kind == "plan" else binding["head_sha"]
+            checks_completed = baseline_completed if kind == "plan" else tests_completed
+            if review["head_sha"] != head or start < checks_completed:
+                boundary = "baseline" if kind == "plan" else "final-head"
+                raise NativeProofError(
+                    f"native {kind} review preceded passing {boundary} checks or is stale"
+                )
+            if kind == "plan" and end > plan["completed_at"]:
+                raise NativeProofError(
+                    "native plan review completed after the preparation receipt"
+                )
+            if (
+                review["subject_sha256"] != artifact["subject_sha256"]
+                or review["outcome"] != "clean"
+                or not _native_text(review["content"], "review content").strip()
+            ):
+                raise NativeProofError(
+                    f"native {kind} has no clean review of the exact subject"
+                )
+            attempt = recorded_attempts.get(identity)
+            if (
+                not attempt
+                or attempt["outcome"] != "returned"
+                or any(
+                    attempt[field] != value
+                    for field, value in review.items()
+                    if field not in ("outcome", "content")
+                )
+            ):
+                raise NativeProofError(
+                    f"native {kind} clean review does not match its recorded attempt"
+                )
+            models.add(model)
+            invocations.add(identity)
+        if len(models) < MIN_MODELS:
+            raise NativeProofError(f"native {kind} has insufficient distinct reviewers")
+
+
+def cmd_native_check(argv: list[str], *, print_repository: bool = False) -> int:
+    try:
+        ids = tuple(os.environ.get(key, "") for key in NATIVE_LOCATORS)
+        if not all(ids):
+            raise NativeProofError(
+                "both native run/attempt locators are required and must be nonempty"
+            )
+        request = _native_request(argv)
+        if (
+            request["operation"] == "create"
+            and os.environ.get("ZACK_CONFIRMED_PR_CREATE") != "1"
+        ):
+            raise NativeProofError(
+                "native creation requires same-call ZACK_CONFIRMED_PR_CREATE=1"
+            )
+        context = _native_context()
+        body = _native_body(request["body-file"])
+        proof = _native_read_proof(context, request["body-file"], *ids)
+        if _native_context() != context or _native_body(request["body-file"]) != body:
+            raise NativeProofError(
+                "Git context or exact body changed during native verification"
+            )
+        binding = _native_binding(proof, request, context, body, ids)
+        _native_evidence(proof, binding)
+        if print_repository:
+            print(binding["repository"])
+        return 0
+    except (NativeProofError, OSError, UnicodeError, subprocess.SubprocessError) as exc:
+        print(f"pr-marker: native publication: {exc}", file=sys.stderr)
+        return 1
+
+
+def cmd_capabilities(_args: argparse.Namespace) -> int:
+    print(json.dumps(_native_policy(), sort_keys=True))
+    return 0
+
+
 def marker_status(kind: Kind, branch: str) -> tuple[bool, str, int, Path]:
     """Return (ok, detail, size_bytes, path).
 
@@ -851,6 +1694,11 @@ def cmd_status(_args: argparse.Namespace) -> int:
             f"{path.name}{pin}"
         )
     print()
+    if any(key in os.environ for key in NATIVE_LOCATORS):
+        print(
+            "gate would BLOCK: native handoff needs check --publication with actual gh argv; legacy markers are not certification"
+        )
+        return 1
     if all_ok:
         print("all markers satisfied")
     else:
@@ -862,8 +1710,24 @@ def cmd_status(_args: argparse.Namespace) -> int:
     return 0 if all_ok else 1
 
 
-def cmd_check(_args: argparse.Namespace) -> int:
-    """Exit non-zero (printing each gap) unless every marker passes its floor."""
+def cmd_check(args: argparse.Namespace) -> int:
+    """Require legacy markers, or validate the explicitly requested native handoff."""
+    if args.publication is not None:
+        return cmd_native_check(
+            args.publication, print_repository=args.print_publication_repository
+        )
+    if args.print_publication_repository:
+        print(
+            "pr-marker: --print-publication-repository requires --publication",
+            file=sys.stderr,
+        )
+        return 1
+    if any(key in os.environ for key in NATIVE_LOCATORS):
+        print(
+            "pr-marker: native handoff requires --publication with actual gh argv; legacy markers are not proof",
+            file=sys.stderr,
+        )
+        return 1
     branch = current_branch()
     failures = []
     for kind in KINDS.values():
@@ -928,7 +1792,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.set_defaults(func=cmd_status)
 
     p_check = sub.add_parser("check", help="exit 0 only if every marker passes")
+    p_check.add_argument(
+        "--print-publication-repository",
+        action="store_true",
+        help="print the bound repository only after successful native proof validation",
+    )
+    p_check.add_argument(
+        "--publication",
+        nargs=argparse.REMAINDER,
+        metavar="GH_ARGV",
+        help="check the native-located handoff against actual gh argv; imports no caller proof",
+    )
     p_check.set_defaults(func=cmd_check)
+
+    p_capabilities = sub.add_parser(
+        "capabilities",
+        help="describe native publication requirements, not producer readiness",
+    )
+    p_capabilities.add_argument("--json", action="store_true")
+    p_capabilities.set_defaults(func=cmd_capabilities)
 
     p_run = sub.add_parser(
         "run-tests",

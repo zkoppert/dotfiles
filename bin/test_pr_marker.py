@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""Pin pr-marker's branch encoding to gh-guard's sed pipeline.
+"""Exercise pr-marker and gh-guard's marker and publication boundaries.
 
-gh-guard computes the marker filename in bash with:
-    printf '%s' "$branch" | sed -e 's/%/%25/g' -e 's|/|%2F|g'
-pr-marker must produce the identical result or a marker written by pr-marker
-would land at a path the gate does not check. These tests fail loudly if the
-two implementations ever drift.
+Publication fixtures intercept the native gh command. Their marker content and
+model names are test inputs, never evidence of real reviews or publication.
 
 Run: python3 bin/test_pr_marker.py
 """
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import importlib.util
+import json
 import os
-import re
+import shlex
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
@@ -77,10 +78,10 @@ def bash_convergence_rounds(path: str) -> int:
     """Read convergence metadata with gh-guard's exact shell rules."""
     script = (
         "set -euo pipefail\n"
-        "count=\"$(grep -c '^<!-- review-convergence:' \"$1\" 2>/dev/null || true)\"\n"
-        "rounds=\"$(sed -n "
+        'count="$(grep -c \'^<!-- review-convergence:\' "$1" 2>/dev/null || true)"\n'
+        'rounds="$(sed -n '
         "'s/^<!-- review-convergence: clean; rounds: \\([1-9][0-9]*\\) -->$/\\1/p' "
-        "\"$1\" 2>/dev/null)\"\n"
+        '"$1" 2>/dev/null)"\n'
         'if [ "${count:-0}" = "1" ] && [[ "$rounds" =~ ^[1-9][0-9]?$ ]]; then\n'
         '  printf "%s" "$rounds"\n'
         "else\n"
@@ -227,60 +228,1814 @@ def test_artifacts_dir_derivation() -> None:
     assert art.parent == path.parent
 
 
-def test_gh_guard_matches_kinds() -> None:
-    """gh-guard's floors, filenames, pin flags, model + result rules must equal KINDS.
+def fixture_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    gh-guard duplicates the byte floors, marker filenames, pin flags, the
-    requires-models flag, and the requires-result flag for resilience (so the gate
-    works without pr-marker). This asserts the two never drift, which is the real
-    risk the "single source of truth" claim rests on.
-    """
-    gh = Path(__file__).resolve().with_name("gh-guard").read_text(encoding="utf-8")
-    for kind in pr_marker.KINDS.values():
-        # Filename: gh-guard references it as "$marker_base/<filename>".
-        assert f'"$marker_base/{kind.filename}"' in gh, kind.filename
 
-        # Byte floor: the constant CODE_REVIEW_MIN_BYTES etc. equals min_bytes.
-        const = kind.name.upper().replace("-", "_") + "_MIN_BYTES"
-        match = re.search(rf"^{const}=(\d+)$", gh, re.MULTILINE)
-        assert match, f"gh-guard missing constant {const}"
-        assert int(match.group(1)) == kind.min_bytes, const
+class PublicationFixture:
+    """Isolated legacy fixtures, never review evidence or a real publication."""
 
-        # The eval_marker line for this kind must reference that constant and end
-        # with the pin, model, result, and convergence flags (each 1 or 0).
-        line = next(
-            ln
-            for ln in gh.splitlines()
-            if "eval_marker" in ln and f'"$marker_base/{kind.filename}"' in ln
+    def __init__(self, root: Path):
+        self.repo = root / "repo"
+        self.repo.mkdir()
+        home = root / "home"
+        home.mkdir()
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        self.publications = root / "publications.jsonl"
+        self.env = {
+            "HOME": str(home),
+            "PATH": os.pathsep.join(
+                [str(fake_bin), str(Path(sys.executable).parent), "/usr/bin", "/bin"]
+            ),
+            "FIXTURE_PUBLICATIONS": str(self.publications),
+            "TMPDIR": str(root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_LAZY_FETCH": "1",
+        }
+        fake_gh = fake_bin / "gh"
+        fake_gh.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, subprocess, sys\n"
+            "from pathlib import Path\n"
+            "args = sys.argv[1:]\n"
+            "if len(args) == 3 and args[:2] in (['pr', 'create'], ['pr', 'edit']) and args[2] in ('--help', '-h'):\n"
+            "    with open(os.environ['FIXTURE_HELP_CALLS'], 'a') as log:\n"
+            "        log.write(json.dumps({'argv': args, 'cwd': os.getcwd()}) + '\\n')\n"
+            "    print('Usage: gh pr ' + args[1] + ' [flags]')\n"
+            "elif args[:2] in (['pr', 'create'], ['pr', 'edit']):\n"
+            "    record = {'argv': args, 'cwd': os.getcwd()}\n"
+            "    for index, arg in enumerate(args):\n"
+            "        if arg == '--body-file':\n"
+            "            record['body'] = Path(args[index + 1]).read_bytes().decode('utf-8')\n"
+            "    with open(os.environ['FIXTURE_PUBLICATIONS'], 'a') as log:\n"
+            "        log.write(json.dumps(record) + '\\n')\n"
+            "    print('fixture publication intercepted')\n"
+            "elif args == ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner']:\n"
+            "    print('fixture/public')\n"
+            "elif args in (['api', 'repos/fixture/public', '--jq', '.visibility'],\n"
+            "              ['repo', 'view', '--json', 'visibility', '--jq', '.visibility | ascii_downcase', '--', 'fixture/public'],\n"
+            "              ['repo', 'view', '--json', 'visibility', '--jq', '.visibility | ascii_downcase', '--', 'ghe.example.test/fixture/public']):\n"
+            "    if os.environ.get('FIXTURE_VISIBILITY_CALLS'):\n"
+            "        with open(os.environ['FIXTURE_VISIBILITY_CALLS'], 'a') as log:\n"
+            "            log.write(json.dumps(args) + '\\n')\n"
+            "    effect = os.environ.get('FIXTURE_VISIBILITY_EFFECT')\n"
+            "    if effect == 'head':\n"
+            "        subprocess.run(['git', 'commit', '-q', '--allow-empty', '-m', 'fixture during lint'], check=True)\n"
+            "    elif effect == 'body':\n"
+            "        with open(os.environ['FIXTURE_BODY_FILE'], 'a') as body:\n"
+            "            body.write('Fixture body changed during visibility read.\\n')\n"
+            "    print(os.environ.get('FIXTURE_REPO_VISIBILITY', 'public'))\n"
+            "    sys.exit(int(os.environ.get('FIXTURE_REPO_VISIBILITY_EXIT', '0')))\n"
+            "elif args == ['api', 'repos/fixture/private', '--jq', '.visibility']:\n"
+            "    print('private')\n"
+            "else:\n"
+            "    sys.exit('unexpected fixture gh request: ' + repr(args))\n",
+            encoding="utf-8",
         )
-        assert f'"${const}"' in line, f"{kind.name} eval_marker uses wrong floor"
-        fields = line.split()
-        assert fields[-4] == str(int(kind.pinned)), f"{kind.name} pin flag drift"
-        assert fields[-3] == str(
-            int(kind.requires_models)
-        ), f"{kind.name} requires-models flag drift"
-        assert fields[-2] == str(
-            int(kind.requires_result)
-        ), f"{kind.name} requires-result flag drift"
-        assert fields[-1] == str(
-            int(kind.requires_convergence)
-        ), f"{kind.name} requires-convergence flag drift"
+        fake_gh.chmod(0o755)
+        lint = home / ".copilot/skills/validate-style/lint.py"
+        lint.parent.mkdir(parents=True)
+        lint.symlink_to(
+            Path(__file__).resolve().parents[1]
+            / ".copilot/skills/validate-style/lint.py"
+        )
+        for args in (
+            ("init", "-q"),
+            ("config", "user.email", "fixture@example.com"),
+            ("config", "user.name", "publication fixture"),
+            ("checkout", "-q", "-b", "fixture/proof"),
+            ("commit", "-q", "--allow-empty", "-m", "fixture base"),
+        ):
+            result = self.run(["git", *args])
+            assert result.returncode == 0, result.stderr
+        self.head = self.run(["git", "rev-parse", "HEAD"]).stdout.strip()
+        self.paths = {
+            name: Path(self.marker("path", name).stdout.strip())
+            for name in pr_marker.KINDS
+        }
 
-    # The minimum-model threshold must agree between the two implementations.
-    match = re.search(r"^MIN_REVIEW_MODELS=(\d+)$", gh, re.MULTILINE)
-    assert match, "gh-guard missing constant MIN_REVIEW_MODELS"
-    assert int(match.group(1)) == pr_marker.MIN_MODELS, "MIN_MODELS drift"
-    assert pr_marker.MIN_REVIEW_ROUNDS == 1
-    assert pr_marker.MAX_REVIEW_ROUNDS == 99
-    assert (
-        r"rounds: \([1-9][0-9]*\)" in gh and r'=~ ^[1-9][0-9]?$' in gh
-    ), "gh-guard convergence range drift"
+    def run(self, argv: list[str], **kwargs) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            argv,
+            cwd=self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            **kwargs,
+        )
 
-    # The tests-result header gh-guard greps for must match pr-marker's literal,
-    # and use whole-line (-x) matching so it agrees with has_result_header.
-    assert (
-        f"grep -qxF -- '{pr_marker.TESTS_RESULT_HEADER}'" in gh
-    ), "gh-guard tests-result header literal drift from pr_marker.TESTS_RESULT_HEADER"
+    def marker(self, *args: str, **kwargs) -> subprocess.CompletedProcess:
+        return self.run([sys.executable, str(_MODULE_PATH), *args], **kwargs)
+
+    def create(self, *args: str, confirmed: bool = True) -> subprocess.CompletedProcess:
+        env = {**self.env}
+        if confirmed:
+            env["ZACK_CONFIRMED_PR_CREATE"] = "1"
+        return subprocess.run(
+            [
+                str(_MODULE_PATH.with_name("gh-guard")),
+                "pr",
+                "create",
+                "--title",
+                "fixture",
+                *args,
+            ],
+            cwd=self.repo,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def populate_legacy_markers(self) -> None:
+        for name in ("plan", "code-review", "demo", "pr-review"):
+            args = ["write", name, "-"]
+            if name != "demo":
+                args += ["--models", "a,b,c"]
+            if name == "code-review":
+                args += ["--convergence-rounds", "2"]
+            result = self.marker(
+                *args,
+                input="Test fixture only. No real reviewers were run for this content.\n"
+                * 8,
+            )
+            assert result.returncode == 0, result.stderr
+        result = self.marker(
+            "run-tests",
+            "--cmd",
+            f"{shlex.quote(sys.executable)} -c 'print(\"fixture machine test\")'",
+        )
+        assert result.returncode == 0, result.stderr
+
+    def snapshot(self) -> dict[str, bytes]:
+        return {
+            name: path.read_bytes()
+            for name, path in self.paths.items()
+            if path.exists()
+        }
+
+    def assert_markers_block_publication(self, name: str) -> None:
+        before = self.snapshot()
+        checked = self.marker("check")
+        assert checked.returncode != 0, checked.stdout
+        assert str(self.paths[name]) in checked.stderr, checked.stderr
+        guarded = self.create()
+        assert guarded.returncode != 0, guarded.stdout
+        assert str(self.paths[name]) in guarded.stderr, guarded.stderr
+        assert (
+            not self.publications.exists()
+        ), "rejected markers reached native publication"
+        assert self.snapshot() == before, "validation rewrote the rejected evidence"
+
+    def assert_legacy_publication_intercepted(self) -> None:
+        checked = self.marker("check")
+        assert checked.returncode == 0, checked.stderr
+        guarded = self.create()
+        assert guarded.returncode == 0, guarded.stderr
+        calls = [
+            json.loads(line)
+            for line in self.publications.read_text(encoding="utf-8").splitlines()
+        ]
+        assert calls == [
+            {"argv": ["pr", "create", "--title", "fixture"], "cwd": str(self.repo)}
+        ]
+        self.publications.unlink()
+
+
+class NativePublicationFixture(PublicationFixture):
+    """Explicit synthetic native records, never genuine producer certification."""
+
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.baseline = self.head
+        baseline_branch = self.run(["git", "branch", "main", self.baseline])
+        assert baseline_branch.returncode == 0, baseline_branch.stderr
+        submitted = self.run(
+            ["git", "commit", "-q", "--allow-empty", "-m", "fixture implementation"]
+        )
+        assert submitted.returncode == 0, submitted.stderr
+        self.submitted_head = self.run(["git", "rev-parse", "HEAD"]).stdout.strip()
+        finalized = self.run(
+            ["git", "commit", "-q", "--allow-empty", "-m", "fixture finalization"]
+        )
+        assert finalized.returncode == 0, finalized.stderr
+        self.head = self.run(["git", "rev-parse", "HEAD"]).stdout.strip()
+        self.populate_legacy_markers()
+        self.body = root / "native-body.md"
+        self.body.write_text(
+            "I exercise an explicit publication protocol fixture.\n", encoding="utf-8"
+        )
+        self.body.chmod(0o600)
+        self.payload = root / "native-response.json"
+        self.verifier_calls = root / "verifier-calls.jsonl"
+        self.env.update(
+            {
+                "NO_MISTAKES_PUBLICATION_RUN": "fixture-run",
+                "NO_MISTAKES_PUBLICATION_ATTEMPT": "fixture-attempt",
+                "FIXTURE_NATIVE_RESPONSE": str(self.payload),
+                "FIXTURE_NATIVE_CALLS": str(self.verifier_calls),
+            }
+        )
+        self.argv = [
+            "pr",
+            "create",
+            "--head",
+            "fixture/proof",
+            "--base",
+            "main",
+            "--repo",
+            "fixture/public",
+            "--draft",
+            "--title",
+            "fixture title",
+            "--body-file",
+            str(self.body),
+        ]
+        self.proof = self.protocol_fixture()
+        self.save()
+        producer = root / "bin" / "no-mistakes"
+        producer.write_text(
+            "#!/usr/bin/env python3\n"
+            "import argparse, json, os, subprocess, sys\n"
+            "from pathlib import Path\n"
+            "args = sys.argv[1:]\n"
+            "calls = Path(os.environ['FIXTURE_NATIVE_CALLS'])\n"
+            "with calls.open('a') as log:\n"
+            "    log.write(json.dumps({'argv': args, 'cwd': os.getcwd()}) + '\\n')\n"
+            "if args == ['axi', '--help']:\n"
+            "    command = 'status' if os.environ.get('FIXTURE_OLD_CLI') else 'publication'\n"
+            "    print('Available Commands:\\n  ' + command + '  fixture command\\n\\nFlags:\\n  -h help')\n"
+            "    sys.exit(0)\n"
+            "if args[:3] != ['axi', 'publication', 'verify']:\n"
+            "    sys.exit('unexpected fixture producer operation')\n"
+            "parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)\n"
+            "for name in ('run', 'attempt', 'expected-store', 'branch', 'head', 'body-file'):\n"
+            "    parser.add_argument('--' + name, required=True)\n"
+            "parser.add_argument('--json', action='store_true', required=True)\n"
+            "request = parser.parse_args(args[3:])\n"
+            "reject_call = os.environ.get('FIXTURE_NATIVE_REJECT_ON_VERIFY')\n"
+            "if reject_call:\n"
+            "    verify_count = sum(json.loads(line)['argv'][:3] == ['axi', 'publication', 'verify'] for line in calls.read_text().splitlines())\n"
+            "    if str(verify_count) == reject_call:\n"
+            "        print(json.dumps({'protocol': 'no-mistakes.publication/v1', 'error': 'explicit fixture refusal'}))\n"
+            "        sys.exit(1)\n"
+            "effect = os.environ.get('FIXTURE_NATIVE_EFFECT')\n"
+            "if effect == 'head':\n"
+            "    subprocess.run(['git', 'commit', '-q', '--allow-empty', '-m', 'fixture advance'], check=True)\n"
+            "elif effect == 'branch':\n"
+            "    branch = 'fixture/switched-' + str(len(calls.read_text().splitlines()))\n"
+            "    subprocess.run(['git', 'checkout', '-q', '-b', branch], check=True)\n"
+            "elif effect == 'body':\n"
+            "    with open(request.body_file, 'a') as body:\n"
+            "        body.write('fixture body advance\\n')\n"
+            "if os.environ.get('FIXTURE_NATIVE_EXIT'):\n"
+            "    sys.exit(int(os.environ['FIXTURE_NATIVE_EXIT']))\n"
+            "sys.stdout.buffer.write(Path(os.environ['FIXTURE_NATIVE_RESPONSE']).read_bytes())\n"
+            "sys.exit(int(os.environ.get('FIXTURE_NATIVE_EXIT_AFTER_OUTPUT', '0')))\n",
+            encoding="utf-8",
+        )
+        producer.chmod(0o755)
+
+    def protocol_fixture(self) -> dict:
+        body = self.body.read_bytes().decode("utf-8")
+        plan_text = "Explicit prospective plan fixture. No real preparation was run."
+        artifacts = {}
+        for name, kind in pr_marker.KINDS.items():
+            subject = (
+                body
+                if name == "pr-review"
+                else plan_text if name == "plan" else self.head
+            )
+            content = (
+                f"Explicit {name} protocol fixture. No real native execution is claimed.\n"
+                * 4
+            )
+            artifact = {
+                "content": content,
+                "sha256": fixture_digest(content),
+                "bytes": len(content.encode()),
+                "round_id": f"fixture-{name}-round",
+                "subject_sha256": fixture_digest(subject),
+            }
+            if kind.requires_models:
+                reviews = []
+                start = 300 if name == "plan" else 3000
+                for index in range(3):
+                    reviews.append(
+                        {
+                            "invocation_id": f"fixture-{name}-{index}",
+                            "agent": "fixture-agent",
+                            "requested_model": f"fixture/model-{index}",
+                            "served_model": f"fixture/model-{index}",
+                            "model_id": f"model-{index}",
+                            "model_provider": "fixture",
+                            "head_sha": self.baseline if name == "plan" else self.head,
+                            "subject_sha256": artifact["subject_sha256"],
+                            "started_at": start + index,
+                            "completed_at": start + 10 + index,
+                            "outcome": "clean",
+                            "content": "Explicit test fixture analysis, not a real review.",
+                        }
+                    )
+                artifact["reviews"] = reviews
+                artifact["attempts"] = [
+                    {
+                        **review,
+                        "outcome": "returned",
+                        "content": '{"publication_analysis":"explicit fixture"}',
+                    }
+                    for review in reviews
+                ]
+            if name == "tests":
+                artifact["checks"] = [
+                    {
+                        "command": command,
+                        "exit_code": 0,
+                        "started_at": 1000 + index * 500,
+                        "completed_at": 1500 + index * 500,
+                        "head_sha": self.head,
+                        "output": "Synthetic protocol result, not actual task testing evidence.",
+                    }
+                    for index, command in enumerate(
+                        ("fixture full unit suite", "fixture full lint/build checks")
+                    )
+                ]
+            if name == "demo":
+                artifact["observations"] = {
+                    "verdict": "go",
+                    "summary": "Explicit scenario fixture",
+                }
+            artifacts[name] = artifact
+        proof = {
+            "protocol": "no-mistakes.publication/v1",
+            "run_id": "fixture-run",
+            "attempt_id": "fixture-attempt",
+            "repo_id": "fixture-repository",
+            "preparation_id": "fixture-finalization-round",
+            "preparation_admitted_at": 500,
+            "submitted_head_sha": self.submitted_head,
+            "title": "fixture title",
+            "body": body,
+            "body_sha256": fixture_digest(body),
+            "history_known": True,
+            "total_code_rounds": 2,
+            "total_plan_rounds": 1,
+            "total_description_rounds": 1,
+            "binding": {
+                "requested_store": str(self.repo / ".git"),
+                "worktree": str(self.repo),
+                "branch": "fixture/proof",
+                "head_sha": self.head,
+                "repository": "fixture/public",
+                "head_repository": "fixture/public",
+                "base_branch": "main",
+                "draft": True,
+                "operation": "create",
+                "push_target": "opaque-fixture-target",
+                "before_push": False,
+            },
+            "policy": {
+                "protocol": "no-mistakes.publication/v1",
+                "artifacts": {
+                    name: {"min_bytes": kind.min_bytes}
+                    for name, kind in pr_marker.KINDS.items()
+                },
+                "min_review_models": 3,
+                "excluded_model_prefixes": ["gemini"],
+                "create_confirmation_env": "ZACK_CONFIRMED_PR_CREATE",
+                "review_budget_scope": "code-only",
+                "plan_order": "before-implementation",
+                "max_review_rounds": 10,
+                "requires_full_tests": True,
+            },
+            "artifacts": artifacts,
+        }
+        checks = copy.deepcopy(artifacts["tests"])
+        checks.update(
+            round_id="fixture-baseline-checks-round",
+            subject_sha256=fixture_digest(self.baseline),
+        )
+        for index, check in enumerate(checks["checks"]):
+            check.update(
+                head_sha=self.baseline,
+                started_at=100 + index * 50,
+                completed_at=150 + index * 50,
+            )
+        proof["plan"] = {
+            "run_id": "fixture-earlier-plan-run",
+            "repo_id": proof["repo_id"],
+            "branch": proof["binding"]["branch"],
+            "requested_store": proof["binding"]["requested_store"],
+            "worktree": proof["binding"]["worktree"],
+            "baseline_sha": self.baseline,
+            "intent_sha256": fixture_digest("Explicit synthetic intent"),
+            "plan_text": plan_text,
+            "plan_sha256": fixture_digest(plan_text),
+            "checks": checks,
+            "artifact": artifacts["plan"],
+            "policy": copy.deepcopy(proof["policy"]),
+            "execution_config_sha256": fixture_digest(
+                "Explicit synthetic execution pin"
+            ),
+            "completed_at": 400,
+        }
+        return proof
+
+    def planning_exception_fixture(self) -> dict:
+        """Source-derived protocol fixture, not executed native authorization."""
+        proof = self.protocol_fixture()
+        proof["required_commands"] = [
+            "fixture full unit suite",
+            "fixture full lint/build checks",
+        ]
+        proof["policy"]["planning_exception_support"] = True
+        # Native PolicyDigest hashes struct field order and sorted map keys.
+        # Keep those bytes as fixture data, not a second production encoder.
+        policy_json = (
+            '{"protocol":"no-mistakes.publication/v1","artifacts":{'
+            '"code-review":{"min_bytes":200},"demo":{"min_bytes":120},'
+            '"plan":{"min_bytes":120},"pr-review":{"min_bytes":120},'
+            '"tests":{"min_bytes":120}},"min_review_models":3,'
+            '"excluded_model_prefixes":["gemini"],'
+            '"create_confirmation_env":"ZACK_CONFIRMED_PR_CREATE",'
+            '"review_budget_scope":"code-only","plan_order":"before-implementation",'
+            '"planning_exception_support":true,"max_review_rounds":10,'
+            '"requires_full_tests":true}'
+        )
+        assert json.loads(policy_json) == proof["policy"], "native policy fixture drift"
+        proof["plan"] = None
+        proof["preparation_admitted_at"] = 0
+        proof["total_plan_rounds"] = 0
+        del proof["artifacts"]["plan"]
+        proof["planning_exception"] = {
+            "scope": "missing-pre-implementation-planning",
+            "run_id": proof["run_id"],
+            "repo_id": proof["repo_id"],
+            "requested_store": proof["binding"]["requested_store"],
+            "worktree": proof["binding"]["worktree"],
+            "branch": proof["binding"]["branch"],
+            "work_head_sha": proof["submitted_head_sha"],
+            "intent_sha256": fixture_digest("Explicit synthetic intent"),
+            "policy_sha256": fixture_digest(policy_json),
+            "id": "fixture-native-authorization",
+            "authorized_at": 500,
+            "authority": "native-operator-control",
+            "authorizer_pid": 42,
+            "reason": "Explicit authorization fixture, not a real native operator action.",
+        }
+        return proof
+
+    def save(self) -> None:
+        self.payload.write_text(json.dumps(self.proof), encoding="utf-8")
+
+    def native(
+        self, *, guard=False, confirmed=True, print_repository=False
+    ) -> subprocess.CompletedProcess:
+        env = dict(self.env)
+        if confirmed and self.argv[1] == "create":
+            env["ZACK_CONFIRMED_PR_CREATE"] = "1"
+        command = (
+            [str(_MODULE_PATH.with_name("gh-guard")), *self.argv]
+            if guard
+            else [
+                sys.executable,
+                str(_MODULE_PATH),
+                "check",
+                *(["--print-publication-repository"] if print_repository else []),
+                "--publication",
+                *self.argv,
+            ]
+        )
+        return subprocess.run(
+            command,
+            cwd=self.repo,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    def use_update(self) -> None:
+        self.argv = [
+            "pr",
+            "edit",
+            "1",
+            "--repo",
+            "fixture/public",
+            "--title",
+            "fixture title",
+            "--body-file",
+            str(self.body),
+        ]
+        self.proof["binding"].update(
+            operation="update",
+            pr_url="https://github.com/fixture/public/pull/1",
+            previous_body_sha256=fixture_digest("Earlier fixture body."),
+        )
+        self.save()
+
+    def assert_lint_denied(self, diagnostic: str) -> None:
+        markers, payload = self.snapshot(), self.payload.read_bytes()
+        checked = self.native()
+        assert checked.returncode == 0, (checked.stdout, checked.stderr)
+        assert checked.stdout == checked.stderr == ""
+        assert not self.publications.exists(), "helper performed publication"
+        guarded = self.native(guard=True)
+        assert guarded.returncode == 1, (guarded.stdout, guarded.stderr)
+        assert diagnostic in guarded.stderr, guarded.stderr
+        assert guarded.stdout == ""
+        assert not self.publications.exists(), "unproved lint reached publication"
+        assert self.snapshot() == markers, "lint refusal rewrote legacy markers"
+        assert self.payload.read_bytes() == payload, "lint refusal rewrote native proof"
+
+    def assert_fixture_accepted(self, *, confirmed=True) -> None:
+        markers, payload = self.snapshot(), self.payload.read_bytes()
+        for guard in (False, True):
+            result = self.native(guard=guard, confirmed=confirmed)
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert result.stdout == (
+                "fixture publication intercepted\n" if guard else ""
+            )
+            assert result.stderr == "", result.stderr
+            assert self.snapshot() == markers, "acceptance rewrote legacy markers"
+            assert (
+                self.payload.read_bytes() == payload
+            ), "acceptance rewrote native history"
+            if not guard:
+                assert not self.publications.exists(), "helper performed publication"
+        calls = [
+            json.loads(line) for line in self.publications.read_text().splitlines()
+        ]
+        assert calls == [
+            {
+                "argv": self.argv,
+                "cwd": str(self.repo),
+                "body": self.body.read_bytes().decode("utf-8"),
+            }
+        ], calls
+        self.publications.unlink()
+
+    def assert_denied(self, diagnostic: str, *, confirmed=True) -> None:
+        markers, payload = self.snapshot(), self.payload.read_bytes()
+        # Only immutable refusal cases can share the fixture concurrently;
+        # verification-time Git/body mutations must keep their original order.
+        if self.env.get("FIXTURE_NATIVE_EFFECT"):
+            results = [
+                self.native(guard=guard, confirmed=confirmed) for guard in (False, True)
+            ]
+        else:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                pending = [
+                    pool.submit(self.native, guard=guard, confirmed=confirmed)
+                    for guard in (False, True)
+                ]
+                results = [result.result() for result in pending]
+        for result in results:
+            assert result.returncode == 1, (result.stdout, result.stderr)
+            assert diagnostic in result.stderr, result.stderr
+            assert result.stdout == "", result.stdout
+            assert (
+                not self.publications.exists()
+            ), "rejected native proof reached publication"
+            assert (
+                self.snapshot() == markers
+            ), "native rejection rewrote legacy evidence"
+            assert (
+                self.payload.read_bytes() == payload
+            ), "native rejection rewrote producer evidence/counts"
+
+
+def test_native_capabilities_preserve_the_consumer_policy() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        before = fixture.snapshot()
+        result = fixture.marker("capabilities", "--json")
+        assert result.returncode == 0, result.stderr
+        assert result.stderr == "", result.stderr
+        assert json.loads(result.stdout) == {
+            "protocol": "no-mistakes.publication/v1",
+            "artifacts": {
+                "plan": {"min_bytes": 120},
+                "code-review": {"min_bytes": 200},
+                "pr-review": {"min_bytes": 120},
+                "demo": {"min_bytes": 120},
+                "tests": {"min_bytes": 120},
+            },
+            "min_review_models": 3,
+            "excluded_model_prefixes": ["gemini"],
+            "create_confirmation_env": "ZACK_CONFIRMED_PR_CREATE",
+            "review_budget_scope": "code-only",
+            "plan_order": "before-implementation",
+            "planning_exception_support": True,
+            "max_review_rounds": 10,
+            "requires_full_tests": True,
+        }
+        assert not fixture.verifier_calls.exists(), "discovery invoked a producer"
+        assert not fixture.publications.exists(), "discovery performed publication"
+        assert fixture.snapshot() == before
+
+
+def test_native_repository_projection_requires_complete_proof() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        markers, payload = fixture.snapshot(), fixture.payload.read_bytes()
+        result = fixture.native(print_repository=True)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "fixture/public\n" and result.stderr == ""
+        assert not fixture.publications.exists()
+        assert fixture.snapshot() == markers and fixture.payload.read_bytes() == payload
+        fixture.proof["history_known"] = False
+        fixture.save()
+        result = fixture.native(print_repository=True)
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert result.stdout == "" and "history is unknown" in result.stderr
+        assert not fixture.publications.exists()
+        legacy = fixture.marker("check", "--print-publication-repository")
+        assert legacy.returncode == 1, (legacy.stdout, legacy.stderr)
+        assert legacy.stdout == "" and "requires --publication" in legacy.stderr
+
+
+def test_native_complete_fixture_does_not_require_or_write_legacy_markers() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        assert len({fixture.baseline, fixture.submitted_head, fixture.head}) == 3
+        assert fixture.proof["plan"]["run_id"] != fixture.proof["preparation_id"]
+        for path in fixture.paths.values():
+            path.unlink()
+        fixture.assert_fixture_accepted()
+        assert fixture.snapshot() == {}, "native acceptance synthesized markers"
+        fixture.assert_denied("same-call ZACK_CONFIRMED_PR_CREATE", confirmed=False)
+        fixture.env["FIXTURE_NATIVE_EXIT"] = "1"
+        fixture.assert_denied("native verifier refused")
+
+
+def test_native_preparation_binding_and_admission_are_required() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        original = copy.deepcopy(fixture.proof)
+        for field in ("plan", "preparation_admitted_at", "submitted_head_sha"):
+            fixture.proof = copy.deepcopy(original)
+            del fixture.proof[field]
+            fixture.save()
+            fixture.assert_denied("native proof: missing required fields")
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["plan"] = None
+        fixture.save()
+        fixture.assert_denied("pre-implementation plan: missing required fields")
+        for field in original["plan"]:
+            fixture.proof = copy.deepcopy(original)
+            del fixture.proof["plan"][field]
+            fixture.save()
+            fixture.assert_denied("pre-implementation plan: missing required fields")
+        for field, value, diagnostic in (
+            ("run_id", original["run_id"], "plan context mismatch"),
+            ("repo_id", "wrong-repository", "plan context mismatch"),
+            ("branch", "fixture/wrong", "plan context mismatch"),
+            ("requested_store", str(Path(tmp) / "wrong.git"), "plan context mismatch"),
+            ("worktree", str(Path(tmp) / "elsewhere"), "plan context mismatch"),
+            ("baseline_sha", "short", "prepared baseline"),
+            ("intent_sha256", "g" * 64, "plan intent_sha256"),
+            ("execution_config_sha256", "x" * 64, "plan execution_config_sha256"),
+            ("plan_text", "Different synthetic subject", "plan subject mismatch"),
+            ("plan_sha256", "0" * 64, "plan subject mismatch"),
+            ("completed_at", True, "plan completion"),
+            ("completed_at", 501, "preparation admission"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["plan"][field] = value
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        for field, value, diagnostic in (
+            ("preparation_admitted_at", 399, "preparation admission"),
+            ("preparation_admitted_at", None, "preparation admission"),
+            ("preparation_admitted_at", 500.0, "preparation admission"),
+            ("submitted_head_sha", "short", "submitted head"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof[field] = value
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["plan"]["policy"]["max_review_rounds"] = 9
+        fixture.save()
+        fixture.assert_denied("policy differs from pre-implementation plan")
+        for field, value in (("max_review_rounds", 10.0), ("requires_full_tests", 1)):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["plan"]["policy"][field] = value
+            fixture.save()
+            fixture.assert_denied("policy differs from pre-implementation plan")
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["plan"]["artifact"] = copy.deepcopy(
+            fixture.proof["artifacts"]["plan"]
+        )
+        fixture.proof["plan"]["artifact"]["bytes"] = float(
+            fixture.proof["plan"]["artifact"]["bytes"]
+        )
+        fixture.save()
+        fixture.assert_denied("pre-implementation plan was replaced or relabeled")
+        fixture.proof = copy.deepcopy(original)
+        replacement = copy.deepcopy(fixture.proof["artifacts"]["plan"])
+        replacement["content"] += "Replaced plan synthesis."
+        replacement["sha256"] = fixture_digest(replacement["content"])
+        replacement["bytes"] = len(replacement["content"].encode())
+        fixture.proof["artifacts"]["plan"] = replacement
+        fixture.save()
+        fixture.assert_denied("pre-implementation plan was replaced or relabeled")
+
+
+def test_native_baseline_checks_and_plan_reviews_precede_implementation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        original = copy.deepcopy(fixture.proof)
+        for field, value, diagnostic in (
+            ("checks", [], "baseline machine checks are missing"),
+            (
+                "subject_sha256",
+                fixture_digest(fixture.head),
+                "baseline tests subject is stale",
+            ),
+            ("bytes", 0, "baseline tests artifact floor/digest mismatch"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["plan"]["checks"][field] = value
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        for field, value, diagnostic in (
+            ("exit_code", 1, "baseline machine checks did not pass"),
+            ("exit_code", False, "baseline machine checks did not pass"),
+            ("head_sha", fixture.head, "baseline machine checks did not pass"),
+            ("started_at", 0, "baseline machine check start"),
+            ("completed_at", 99, "baseline machine check completion"),
+            ("completed_at", 401, "baseline machine checks did not pass"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["plan"]["checks"]["checks"][0][field] = value
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        for field, value, diagnostic in (
+            (
+                "head_sha",
+                fixture.head,
+                "plan review preceded passing baseline checks or is stale",
+            ),
+            (
+                "started_at",
+                199,
+                "plan review preceded passing baseline checks or is stale",
+            ),
+            (
+                "completed_at",
+                401,
+                "plan review completed after the preparation receipt",
+            ),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["artifacts"]["plan"]["reviews"][0][field] = value
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["artifacts"]["tests"]["checks"][0]["started_at"] = 499
+        fixture.save()
+        fixture.assert_denied(
+            "machine checks did not pass on the final head after implementation admission"
+        )
+        for change in ("missing-last", "extra", "reordered", "different"):
+            fixture.proof = copy.deepcopy(original)
+            checks = fixture.proof["artifacts"]["tests"]["checks"]
+            if change == "missing-last":
+                checks.pop()
+            elif change == "extra":
+                checks.append(copy.deepcopy(checks[-1]))
+            elif change == "reordered":
+                checks.reverse()
+            else:
+                checks[-1]["command"] = "fixture narrowed command"
+            fixture.save()
+            fixture.assert_denied(
+                "final checks differ from the prepared command manifest"
+            )
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["preparation_admitted_at"] = 400
+        fixture.proof["artifacts"]["tests"]["checks"][0]["started_at"] = 400
+        for field in ("reviews", "attempts"):
+            fixture.proof["artifacts"]["plan"][field][0]["started_at"] = 200
+            fixture.proof["artifacts"]["plan"][field][-1]["completed_at"] = 400
+            fixture.proof["artifacts"]["code-review"][field][0]["started_at"] = 2000
+        fixture.save()
+        fixture.assert_fixture_accepted()
+
+
+def test_native_proposed_exception_requires_bound_native_authorization() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        original = fixture.planning_exception_fixture()
+        for field, value, diagnostic in (
+            ("authority", "caller-note", "authority/scope mismatch"),
+            ("scope", "all-planning", "authority/scope mismatch"),
+            ("run_id", "different-run", "run/context mismatch"),
+            ("repo_id", "different-repository", "run/context mismatch"),
+            ("branch", "fixture/other", "run/context mismatch"),
+            ("requested_store", str(Path(tmp) / "other.git"), "run/context mismatch"),
+            ("worktree", str(Path(tmp) / "other"), "run/context mismatch"),
+            ("work_head_sha", fixture.head, "run/context mismatch"),
+            ("id", "", "native authorization identity"),
+            ("intent_sha256", "not-a-digest", "native authorization intent_sha256"),
+            ("policy_sha256", "x" * 64, "native authorization policy_sha256"),
+            ("authorized_at", True, "native authorization time"),
+            ("authorizer_pid", 0, "native authorizer PID"),
+            ("reason", " ", "native authorization reason is empty"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["planning_exception"][field] = value
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["planning_exception"] = {"reason": "A caller's approval note"}
+        fixture.save()
+        fixture.assert_denied("native planning exception: missing required fields")
+
+
+def test_native_proposed_exception_preserves_remaining_proof_and_history() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        original = fixture.planning_exception_fixture()
+        for field, value, diagnostic in (
+            (
+                "plan",
+                fixture.protocol_fixture()["plan"],
+                "cannot invent a plan or prior admission",
+            ),
+            (
+                "preparation_admitted_at",
+                False,
+                "cannot invent a plan or prior admission",
+            ),
+            ("preparation_admitted_at", 500, "cannot invent a plan or prior admission"),
+            ("total_plan_rounds", -1, "expected an integer"),
+            ("history_known", False, "history is unknown"),
+            ("total_code_rounds", 11, "cumulative review budget is exhausted"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof[field] = value
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        for support, diagnostic in (
+            (False, "requires explicit policy support"),
+            (1, "planning-exception support must be boolean"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["policy"]["planning_exception_support"] = support
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["artifacts"]["plan"] = fixture.protocol_fixture()["artifacts"][
+            "plan"
+        ]
+        fixture.save()
+        fixture.assert_denied("native artifacts: unsupported fields")
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["planning_exception"]["authorized_at"] = 1001
+        fixture.save()
+        fixture.assert_denied(
+            "machine checks did not pass on the final head after native authorization"
+        )
+        for kind in ("code-review", "pr-review"):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["artifacts"][kind]["reviews"].pop()
+            fixture.save()
+            fixture.assert_denied(f"{kind} has insufficient distinct reviewers")
+        for kind in original["artifacts"]:
+            fixture.proof = copy.deepcopy(original)
+            del fixture.proof["artifacts"][kind]
+            fixture.save()
+            fixture.assert_denied("native artifacts: missing required fields")
+        for plan_rounds in (0, 3):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["total_plan_rounds"] = plan_rounds
+            fixture.save()
+            fixture.assert_fixture_accepted()
+        fixture.assert_denied("same-call ZACK_CONFIRMED_PR_CREATE", confirmed=False)
+        for support in (False, True):
+            fixture.proof = fixture.protocol_fixture()
+            fixture.proof["policy"]["planning_exception_support"] = support
+            fixture.proof["plan"]["policy"]["planning_exception_support"] = support
+            fixture.save()
+            fixture.assert_fixture_accepted()
+
+
+def test_native_authorizer_pid_matches_the_native_boundary() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        fixture.proof = fixture.planning_exception_fixture()
+        assert fixture.proof["planning_exception"]["policy_sha256"] == (
+            "5e525653ba5a59548b8becf203d71d3722487290d9bef9c568ac3c114e8342ed"
+        )
+        fixture.proof["planning_exception"]["authorizer_pid"] = 1
+        fixture.save()
+        fixture.assert_denied("native authorizer PID")
+        fixture.proof["planning_exception"]["authorizer_pid"] = 2
+        fixture.save()
+        fixture.assert_fixture_accepted()
+
+
+def test_native_authorization_reason_limit_counts_utf8_bytes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        fixture.proof = fixture.planning_exception_fixture()
+        reason = "é" * 2048
+        assert len(reason.encode("utf-8")) == 4096
+        fixture.proof["planning_exception"]["reason"] = reason
+        fixture.save()
+        fixture.assert_fixture_accepted()
+        fixture.proof["planning_exception"]["reason"] += "x"
+        fixture.save()
+        fixture.assert_denied("native authorization reason exceeds 4096 UTF-8 bytes")
+
+
+def test_native_exception_requires_exact_native_command_manifest() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        original = fixture.planning_exception_fixture()
+        for commands, diagnostic in (
+            (None, "native required command manifest is missing or malformed"),
+            ([], "native required command manifest is missing or malformed"),
+            (
+                {"command": "not-a-list"},
+                "native required command manifest is missing or malformed",
+            ),
+            ([False], "native required command: expected a string"),
+            ([" "], "native required command is empty"),
+            (
+                list(reversed(original["required_commands"])),
+                "final checks differ from the pinned command manifest",
+            ),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            if commands is None:
+                del fixture.proof["required_commands"]
+            else:
+                fixture.proof["required_commands"] = commands
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        for change in ("missing-last", "extra", "reordered", "different"):
+            fixture.proof = copy.deepcopy(original)
+            checks = fixture.proof["artifacts"]["tests"]["checks"]
+            if change == "missing-last":
+                checks.pop()
+            elif change == "extra":
+                checks.append(copy.deepcopy(checks[-1]))
+            elif change == "reordered":
+                checks.reverse()
+            else:
+                checks[-1]["command"] = "fixture narrowed command"
+            fixture.save()
+            fixture.assert_denied(
+                "final checks differ from the pinned command manifest"
+            )
+        fixture.proof = fixture.protocol_fixture()
+        fixture.proof["required_commands"] = original["required_commands"]
+        fixture.save()
+        fixture.assert_denied(
+            "required_commands is only supported with a planning exception"
+        )
+
+
+def test_native_locators_require_proof_without_legacy_fallback() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        for key in pr_marker.NATIVE_LOCATORS:
+            original = fixture.env.pop(key)
+            fixture.assert_denied("both native run/attempt locators")
+            fixture.env[key] = ""
+            fixture.assert_denied("both native run/attempt locators")
+            fixture.env[key] = original
+        fixture.assert_denied("same-call ZACK_CONFIRMED_PR_CREATE", confirmed=False)
+        assert not fixture.verifier_calls.exists()
+        checked = fixture.marker("check")
+        assert checked.returncode == 1 and "actual gh argv" in checked.stderr
+        status = fixture.marker("status")
+        assert status.returncode == 1
+        assert "native handoff needs check --publication" in status.stdout
+        assert "all markers satisfied" not in status.stdout
+        fixture.env["FIXTURE_OLD_CLI"] = "1"
+        fixture.assert_denied("has no native publication verifier")
+        calls = [
+            json.loads(line)["argv"]
+            for line in fixture.verifier_calls.read_text().splitlines()
+        ]
+        assert calls == [["axi", "--help"], ["axi", "--help"]]
+        del fixture.env["FIXTURE_OLD_CLI"]
+        fixture.env["FIXTURE_NATIVE_EXIT"] = "1"
+        fixture.assert_denied("native verifier refused")
+
+
+def test_native_rejected_verifier_stdout_cannot_supply_proof() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        fixture.env["FIXTURE_NATIVE_EXIT_AFTER_OUTPUT"] = "1"
+        fixture.assert_denied("native verifier refused or is unavailable (exit 1)")
+
+
+def test_native_recheck_refusal_prevents_publication() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        fixture.env["FIXTURE_NATIVE_REJECT_ON_VERIFY"] = "2"
+        before, payload = fixture.snapshot(), fixture.payload.read_bytes()
+        result = fixture.native(guard=True)
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert "native verifier refused or is unavailable (exit 1)" in result.stderr
+        assert result.stdout == ""
+        assert (
+            not fixture.publications.exists()
+        ), "earlier proof overrode native refusal"
+        assert fixture.snapshot() == before
+        assert fixture.payload.read_bytes() == payload
+        verified = [
+            call
+            for line in fixture.verifier_calls.read_text().splitlines()
+            if (call := json.loads(line))["argv"][:3]
+            == ["axi", "publication", "verify"]
+        ]
+        assert len(verified) == 2 and verified[0] == verified[1], verified
+
+
+def test_native_proof_parser_rejects_malformed_and_inspection_responses() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        original = fixture.payload.read_bytes()
+        cases = [
+            (b"", "native proof is empty"),
+            (b"old review log", "malformed native proof JSON"),
+            (b"\xff", "malformed native proof JSON"),
+            (b"[]", "missing required fields"),
+            (
+                b'{"protocol":"no-mistakes.publication/v1","supported":true}',
+                "missing required fields",
+            ),
+            (
+                original.replace(
+                    b'"protocol":', b'"protocol":"duplicate","protocol":', 1
+                ),
+                "duplicate JSON key",
+            ),
+            (original[:-1] + b',"unimplemented_field":true}', "unsupported fields"),
+            (b"x" * (pr_marker.NATIVE_MAX_PAYLOAD + 1), "payload limit"),
+        ]
+        for payload, diagnostic in cases:
+            fixture.payload.write_bytes(payload)
+            fixture.assert_denied(diagnostic)
+
+
+def test_native_proof_binds_actual_store_branch_head_body_and_call() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        original = copy.deepcopy(fixture.proof)
+        for field, value, diagnostic in (
+            (
+                "requested_store",
+                str(Path(tmp) / "wrong.git"),
+                "requested_store mismatch",
+            ),
+            ("worktree", str(Path(tmp) / "wrong"), "worktree mismatch"),
+            ("branch", "fixture/wrong", "branch mismatch"),
+            ("head_sha", "0" * 40, "head_sha mismatch"),
+            ("repository", "other/public", "target repository mismatch"),
+            (
+                "head_repository",
+                "other/fork",
+                "head repository/branch selector mismatch",
+            ),
+            ("base_branch", "other-base", "base/draft mismatch"),
+            ("draft", False, "base/draft mismatch"),
+            ("operation", "update", "operation mismatch"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["binding"][field] = value
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        for field, value, diagnostic in (
+            ("run_id", "wrong-run", "producer/run/attempt identity mismatch"),
+            ("attempt_id", "stale-attempt", "producer/run/attempt identity mismatch"),
+            ("title", "different title", "title mismatch"),
+            ("body", original["body"].rstrip("\n"), "exact body mismatch"),
+            ("body_sha256", "0" * 64, "exact body mismatch"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof[field] = value
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        calls = [
+            json.loads(line) for line in fixture.verifier_calls.read_text().splitlines()
+        ]
+        verify = next(
+            call
+            for call in calls
+            if call["argv"][:3] == ["axi", "publication", "verify"]
+        )
+        assert verify == {
+            "cwd": str(fixture.repo),
+            "argv": [
+                "axi",
+                "publication",
+                "verify",
+                "--run",
+                "fixture-run",
+                "--attempt",
+                "fixture-attempt",
+                "--expected-store",
+                str(fixture.repo / ".git"),
+                "--branch",
+                "fixture/proof",
+                "--head",
+                fixture.head,
+                "--body-file",
+                str(fixture.body),
+                "--json",
+            ],
+        }
+
+
+def test_native_context_and_body_changes_cannot_relabel_old_proof() -> None:
+    for effect in ("head", "branch", "body"):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = NativePublicationFixture(Path(tmp))
+            fixture.env["FIXTURE_NATIVE_EFFECT"] = effect
+            fixture.assert_denied("changed during native verification")
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        fixture.run(["git", "checkout", "-q", "--detach"])
+        fixture.assert_denied("named branch, not detached HEAD")
+        assert not fixture.verifier_calls.exists()
+
+
+def test_native_dirty_worktree_refuses_before_verification() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        (fixture.repo / "unreviewed.txt").write_text("Uncommitted fixture input.\n")
+        fixture.assert_denied("native verification refuses a dirty worktree")
+        assert not fixture.verifier_calls.exists(), "dirty input invoked the producer"
+        staged = fixture.run(["git", "add", "unreviewed.txt"])
+        assert staged.returncode == 0, staged.stderr
+        fixture.assert_denied("native verification refuses a dirty worktree")
+        assert not fixture.verifier_calls.exists(), "staged input invoked the producer"
+
+
+def test_native_uses_requested_common_store_in_a_linked_worktree() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        common_store = str((fixture.repo / ".git").resolve())
+        linked = Path(tmp) / "linked"
+        added = fixture.run(
+            ["git", "worktree", "add", "-q", "-b", "fixture/linked", str(linked)]
+        )
+        assert added.returncode == 0, added.stderr
+        fixture.repo = linked
+        fixture.paths = {
+            name: Path(fixture.marker("path", name).stdout.strip())
+            for name in pr_marker.KINDS
+        }
+        fixture.populate_legacy_markers()
+        fixture.argv[fixture.argv.index("--head") + 1] = "fixture/linked"
+        for context in (fixture.proof["binding"], fixture.proof["plan"]):
+            context.update(
+                worktree=str(linked),
+                branch="fixture/linked",
+                requested_store=common_store,
+            )
+        fixture.save()
+        fixture.assert_fixture_accepted()
+        calls = [
+            json.loads(line)["argv"]
+            for line in fixture.verifier_calls.read_text().splitlines()
+        ]
+        verify = next(
+            argv for argv in calls if argv[:3] == ["axi", "publication", "verify"]
+        )
+        assert verify[verify.index("--expected-store") + 1] == common_store
+        per_worktree = fixture.run(
+            ["git", "rev-parse", "--absolute-git-dir"]
+        ).stdout.strip()
+        assert per_worktree != common_store
+        fixture.proof["binding"]["requested_store"] = per_worktree
+        fixture.save()
+        fixture.assert_denied("requested_store mismatch")
+
+
+def test_native_artifact_review_and_machine_check_requirements() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        original = copy.deepcopy(fixture.proof)
+        for name, kind in pr_marker.KINDS.items():
+            fixture.proof = copy.deepcopy(original)
+            del fixture.proof["artifacts"][name]
+            fixture.save()
+            fixture.assert_denied("native artifacts: missing required fields")
+            fixture.proof = copy.deepcopy(original)
+            artifact = fixture.proof["artifacts"][name]
+            artifact["content"] = "x" * (kind.min_bytes - 1)
+            artifact["bytes"] = kind.min_bytes - 1
+            artifact["sha256"] = fixture_digest(artifact["content"])
+            fixture.save()
+            fixture.assert_denied(f"{name} artifact floor/digest mismatch")
+            for size in (kind.min_bytes, kind.min_bytes + 1):
+                artifact["content"] = "x" * size
+                artifact["bytes"] = size
+                artifact["sha256"] = fixture_digest(artifact["content"])
+                fixture.save()
+                fixture.assert_fixture_accepted()
+        for name in ("plan", "code-review", "pr-review"):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["artifacts"][name]["reviews"].pop()
+            fixture.save()
+            fixture.assert_denied(f"{name} has insufficient distinct reviewers")
+            for served, model_id, diagnostic in (
+                ("google/Gemini-3", "gemini-3", "prohibited or duplicate reviewers"),
+                ("other/model-0", "model-0", "prohibited or duplicate reviewers"),
+                (
+                    "fixture/model-1",
+                    "invented",
+                    "requested/served model identity mismatch",
+                ),
+                (
+                    "provider/nested/model-1",
+                    "model-1",
+                    "unsupported native model spelling",
+                ),
+            ):
+                fixture.proof = copy.deepcopy(original)
+                review = fixture.proof["artifacts"][name]["reviews"][1]
+                review.update(
+                    requested_model=served, served_model=served, model_id=model_id
+                )
+                fixture.save()
+                fixture.assert_denied(diagnostic)
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["artifacts"][name]["attempts"].pop()
+            fixture.save()
+            fixture.assert_denied("clean review does not match its recorded attempt")
+        for field, value, diagnostic in (
+            ("checks", [], "machine checks are missing"),
+            ("exit_code", 1, "machine checks did not pass"),
+            ("head_sha", "0" * 40, "machine checks did not pass"),
+            ("completed_at", 500, "machine check completion"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            if field == "checks":
+                fixture.proof["artifacts"]["tests"][field] = value
+            else:
+                fixture.proof["artifacts"]["tests"]["checks"][0][field] = value
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["artifacts"]["code-review"]["reviews"][0]["started_at"] = 1999
+        fixture.save()
+        fixture.assert_denied("review preceded passing final-head checks")
+        for name in ("code-review", "pr-review", "demo", "tests"):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["artifacts"][name]["subject_sha256"] = "0" * 64
+            fixture.save()
+            fixture.assert_denied(f"{name} subject is stale")
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["artifacts"]["plan"]["attempts"] = [None]
+        fixture.save()
+        fixture.assert_denied("plan attempt: missing required fields")
+        for field, value in (("min_review_models", 2), ("requires_full_tests", False)):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["policy"][field] = value
+            fixture.save()
+            fixture.assert_denied("review/test/confirmation policy mismatch")
+
+
+def test_native_code_budget_retains_separate_plan_and_description_history() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        original = copy.deepcopy(fixture.proof)
+        fixture.proof["history_known"] = False
+        fixture.save()
+        fixture.assert_denied("history is unknown")
+        for field in (
+            "total_code_rounds",
+            "total_plan_rounds",
+            "total_description_rounds",
+        ):
+            for value in (None, True, 1 << 63, 0, -1, 1.5):
+                fixture.proof = copy.deepcopy(original)
+                fixture.proof[field] = value
+                fixture.save()
+                fixture.assert_denied("expected an integer")
+        fixture.proof = copy.deepcopy(original)
+        fixture.proof["total_code_rounds"] = 11
+        fixture.save()
+        fixture.assert_denied("cumulative review budget is exhausted")
+        for field, value, diagnostic in (
+            (
+                "review_budget_scope",
+                "combined",
+                "code-only review budget policy mismatch",
+            ),
+            ("max_review_rounds", 9, "code-only review budget policy mismatch"),
+            ("max_review_rounds", 11, "code-only review budget policy mismatch"),
+            ("max_review_rounds", True, "native review ceiling"),
+            ("plan_order", "after-implementation", "plan ordering policy mismatch"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof["policy"][field] = value
+            fixture.save()
+            fixture.assert_denied(diagnostic)
+        for code_rounds in (1, 10):
+            fixture.proof = copy.deepcopy(original)
+            fixture.proof.update(
+                total_code_rounds=code_rounds,
+                total_plan_rounds=11,
+                total_description_rounds=12,
+            )
+            failed = copy.deepcopy(
+                fixture.proof["artifacts"]["code-review"]["attempts"][0]
+            )
+            failed.update(
+                invocation_id="fixture-failed-format-attempt",
+                outcome="failed",
+                served_model="",
+                model_id="",
+                content="fixture formatting failure",
+            )
+            fixture.proof["artifacts"]["code-review"]["attempts"].insert(0, failed)
+            fixture.save()
+            fixture.assert_fixture_accepted()
+            fixture.assert_fixture_accepted()
+        for served, canonical in (
+            ("Gemini/model-1", "model-1"),
+            ("fixture/not-gemini-model", "not-gemini-model"),
+            ("fixture/ΟΣ", "οσ"),
+            ("fixture/İ", "i"),
+        ):
+            fixture.proof = copy.deepcopy(original)
+            for field in ("reviews", "attempts"):
+                row = fixture.proof["artifacts"]["code-review"][field][1]
+                row.update(
+                    requested_model=served,
+                    served_model=served,
+                    model_id=canonical,
+                )
+            fixture.save()
+            fixture.assert_fixture_accepted()
+
+
+def test_native_body_transport_and_update_target_cannot_bypass_guard() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        original_argv = fixture.argv[:]
+        for value in ("-", "relative.md"):
+            fixture.argv[-1] = value
+            fixture.assert_denied("body file must be an absolute regular file")
+        fixture.argv = original_argv[:]
+        link = Path(tmp) / "body-link.md"
+        link.symlink_to(fixture.body)
+        fixture.argv[-1] = str(link)
+        fixture.assert_denied("not a symlink or stream")
+        fixture.argv = [*original_argv, "--repo", "other/public"]
+        fixture.assert_denied("duplicate native publication argument")
+        fixture.argv = [*original_argv, "--proof-file", str(fixture.payload)]
+        fixture.assert_denied("unsupported native publication argument")
+        assert not fixture.verifier_calls.exists()
+        fixture.argv = original_argv[:]
+        fixture.argv[fixture.argv.index("--title") + 1] = "--help"
+        fixture.proof["title"] = "--help"
+        fixture.save()
+        fixture.assert_fixture_accepted()
+        fixture.proof["title"] = "fixture title"
+        fixture.proof["binding"].update(
+            operation="update",
+            pr_url="https://github.com/fixture/public/pull/17",
+            previous_body_sha256="a" * 64,
+        )
+        fixture.argv = [
+            "pr",
+            "edit",
+            "17",
+            "--repo",
+            "fixture/public",
+            "--title",
+            "fixture title",
+            "--body-file",
+            str(fixture.body),
+        ]
+        fixture.save()
+        fixture.assert_fixture_accepted(confirmed=False)
+        fixture.proof["binding"]["before_push"] = True
+        fixture.save()
+        fixture.argv[2] = fixture.proof["binding"]["pr_url"]
+        fixture.assert_fixture_accepted(confirmed=False)
+        title_index = fixture.argv.index("--title")
+        del fixture.argv[title_index : title_index + 2]
+        fixture.proof["title"] = ""
+        fixture.save()
+        fixture.assert_fixture_accepted(confirmed=False)
+        fixture.argv[2] = "18"
+        fixture.assert_denied("update selector mismatch", confirmed=False)
+        fixture.argv[2] = "17"
+        fixture.proof["binding"]["pr_url"] = "https://[malformed"
+        fixture.save()
+        fixture.assert_denied("malformed native update URL", confirmed=False)
+        fixture.argv += ["--base", "other"]
+        fixture.assert_denied(
+            "unsupported native publication argument", confirmed=False
+        )
+
+
+def test_native_requires_available_body_lint_tooling() -> None:
+    def exercise(operation: str) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = NativePublicationFixture(Path(tmp))
+            if operation == "update":
+                fixture.use_update()
+            lint = Path(fixture.env["HOME"]) / ".copilot/skills/validate-style/lint.py"
+            fixture.env.update(body_lint_passed="1", body_visibility_verified="1")
+            for unavailable in ("missing", "broken-link", "directory"):
+                if lint.is_symlink():
+                    lint.unlink()
+                if unavailable == "broken-link":
+                    lint.symlink_to(Path(tmp) / "missing-linter.py")
+                elif unavailable == "directory":
+                    lint.mkdir()
+                fixture.assert_lint_denied(
+                    "native publication requires completed body lint"
+                )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(exercise, ("create", "update")))
+
+
+def test_native_requires_verified_target_visibility() -> None:
+    def exercise(operation: str) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = NativePublicationFixture(Path(tmp))
+            if operation == "update":
+                fixture.use_update()
+            fixture.env.update(body_lint_passed="1", body_visibility_verified="1")
+            for visibility, code in (
+                ("", "1"),
+                ("public", "1"),
+                ("", "0"),
+                ("null", "0"),
+                ("unknown", "0"),
+            ):
+                fixture.env.update(
+                    FIXTURE_REPO_VISIBILITY=visibility,
+                    FIXTURE_REPO_VISIBILITY_EXIT=code,
+                )
+                fixture.assert_lint_denied(
+                    "native publication requires verified target visibility"
+                )
+            for visibility in ("public", "private", "internal"):
+                fixture.env.update(
+                    FIXTURE_REPO_VISIBILITY=visibility, FIXTURE_REPO_VISIBILITY_EXIT="0"
+                )
+                fixture.assert_fixture_accepted()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(exercise, ("create", "update")))
+
+
+def test_native_visibility_uses_the_bound_target_not_option_looking_titles() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        for title in (
+            "--repo=fixture/private",
+            "-R=fixture/private",
+            "--repo",
+            "-R",
+            "--repo=",
+        ):
+            fixture.body.write_text(
+                "I fixed https://github.com/fixture/private/pull/1.\n"
+            )
+            fixture.proof = fixture.protocol_fixture()
+            fixture.proof["title"] = title
+            fixture.argv[fixture.argv.index("--title") + 1] = title
+            fixture.save()
+            fixture.assert_lint_denied("no-private-repo-ref")
+        fixture.body.write_text("I preserve an option-looking title in this fixture.\n")
+        fixture.proof = fixture.protocol_fixture()
+        fixture.proof["title"] = "--repo="
+        fixture.argv[fixture.argv.index("--title") + 1] = "--repo="
+        fixture.save()
+        fixture.assert_fixture_accepted()
+
+
+def test_native_visibility_resolves_the_explicit_enterprise_repository() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        repository = "ghe.example.test/fixture/public"
+        lookups = Path(tmp) / "visibility-calls.jsonl"
+        fixture.env["FIXTURE_VISIBILITY_CALLS"] = str(lookups)
+        expected_lookup = [
+            "repo",
+            "view",
+            "--json",
+            "visibility",
+            "--jq",
+            ".visibility | ascii_downcase",
+            "--",
+            repository,
+        ]
+        for index, operation in enumerate(("create", "update"), 1):
+            if operation == "update":
+                fixture.use_update()
+                fixture.proof["binding"][
+                    "pr_url"
+                ] = "https://ghe.example.test/fixture/public/pull/1"
+            fixture.proof["binding"].update(
+                repository=repository, head_repository=repository
+            )
+            fixture.argv[fixture.argv.index("--repo") + 1] = repository
+            fixture.save()
+            fixture.assert_fixture_accepted()
+            assert [json.loads(line) for line in lookups.read_text().splitlines()] == [
+                expected_lookup
+            ] * index
+
+
+def test_legacy_lint_dependencies_keep_existing_behavior() -> None:
+    for unavailable in ("linter", "visibility-error", "visibility-unknown"):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = PublicationFixture(Path(tmp))
+            fixture.populate_legacy_markers()
+            markers = fixture.snapshot()
+            lookups = Path(tmp) / "visibility-calls.jsonl"
+            fixture.env["FIXTURE_VISIBILITY_CALLS"] = str(lookups)
+            if unavailable == "linter":
+                (
+                    Path(fixture.env["HOME"]) / ".copilot/skills/validate-style/lint.py"
+                ).unlink()
+            elif unavailable == "visibility-error":
+                fixture.env.update(
+                    FIXTURE_REPO_VISIBILITY="public", FIXTURE_REPO_VISIBILITY_EXIT="1"
+                )
+            else:
+                fixture.env["FIXTURE_REPO_VISIBILITY"] = "unknown"
+            body = "I exercise the unchanged ordinary lint dependency behavior."
+            result = fixture.create("--body", body)
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert result.stdout == "fixture publication intercepted\n"
+            assert result.stderr == ""
+            calls = [
+                json.loads(line)
+                for line in fixture.publications.read_text().splitlines()
+            ]
+            assert calls == [
+                {
+                    "argv": ["pr", "create", "--title", "fixture", "--body", body],
+                    "cwd": str(fixture.repo),
+                }
+            ]
+            assert fixture.snapshot() == markers
+            fixture.publications.unlink()
+            if unavailable == "linter":
+                assert not lookups.exists()
+            else:
+                assert [
+                    json.loads(line) for line in lookups.read_text().splitlines()
+                ] == [["api", "repos/fixture/public", "--jq", ".visibility"]]
+            if unavailable == "visibility-error":
+                result = fixture.create(
+                    "--body", "I fixed https://github.com/fixture/private/pull/1."
+                )
+                assert result.returncode == 1, (result.stdout, result.stderr)
+                assert "no-private-repo-ref" in result.stderr, result.stderr
+                assert not fixture.publications.exists()
+                assert fixture.snapshot() == markers
+
+
+def test_native_lint_reads_cannot_outlive_the_certified_head_or_body() -> None:
+    for effect, diagnostic in (
+        ("head", "head_sha mismatch"),
+        ("body", "exact body mismatch"),
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = NativePublicationFixture(Path(tmp))
+            before, payload = fixture.snapshot(), fixture.payload.read_bytes()
+            fixture.env.update(
+                FIXTURE_VISIBILITY_EFFECT=effect, FIXTURE_BODY_FILE=str(fixture.body)
+            )
+            result = fixture.native(guard=True)
+            assert result.returncode == 1, (result.stdout, result.stderr)
+            assert diagnostic in result.stderr, result.stderr
+            assert result.stdout == ""
+            assert not fixture.publications.exists()
+            assert fixture.snapshot() == before
+            assert fixture.payload.read_bytes() == payload
+            calls = [
+                json.loads(line)["argv"]
+                for line in fixture.verifier_calls.read_text().splitlines()
+            ]
+            assert (
+                sum(argv[:3] == ["axi", "publication", "verify"] for argv in calls) == 2
+            )
+
+
+def test_native_fork_selector_preserves_exact_utf8_body_bytes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        fixture.body.write_bytes(
+            "I preserve café and CRLF in this fixture.\r\n\r\n".encode("utf-8")
+        )
+        fixture.proof = fixture.protocol_fixture()
+        fixture.proof["binding"]["head_repository"] = "fork/public"
+        fixture.argv[fixture.argv.index("--head") + 1] = "fork:fixture/proof"
+        fixture.save()
+        fixture.assert_fixture_accepted()
+        fixture.body.write_bytes(fixture.body.read_bytes().replace(b"\r\n", b"\n"))
+        fixture.assert_denied("exact body mismatch")
+
+
+def test_read_only_help_needs_no_native_proof_or_confirmation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        help_calls = Path(tmp) / "help-calls.jsonl"
+        fixture.env["FIXTURE_HELP_CALLS"] = str(help_calls)
+        for path in fixture.paths.values():
+            path.unlink()
+        fixture.payload.write_text("Unavailable native proof, not a certificate.")
+        payload = fixture.payload.read_bytes()
+        expected = []
+        locator_cases = (
+            {},
+            {"NO_MISTAKES_PUBLICATION_RUN": "fixture-run"},
+            {"NO_MISTAKES_PUBLICATION_ATTEMPT": "fixture-attempt"},
+            {
+                "NO_MISTAKES_PUBLICATION_RUN": "",
+                "NO_MISTAKES_PUBLICATION_ATTEMPT": "",
+            },
+            {
+                "NO_MISTAKES_PUBLICATION_RUN": "fixture-run",
+                "NO_MISTAKES_PUBLICATION_ATTEMPT": "fixture-attempt",
+            },
+        )
+        for locators in locator_cases:
+            for name in pr_marker.NATIVE_LOCATORS:
+                fixture.env.pop(name, None)
+            fixture.env.update(locators)
+            for operation in ("create", "edit"):
+                for flag in ("--help", "-h"):
+                    fixture.argv = ["pr", operation, flag]
+                    result = fixture.native(guard=True, confirmed=False)
+                    assert result.returncode == 0, (result.stdout, result.stderr)
+                    assert result.stdout == f"Usage: gh pr {operation} [flags]\n"
+                    assert result.stderr == ""
+                    expected.append({"argv": fixture.argv, "cwd": str(fixture.repo)})
+                    assert [
+                        json.loads(line) for line in help_calls.read_text().splitlines()
+                    ] == expected
+                    assert not fixture.publications.exists(), "help published a body"
+                    assert not fixture.verifier_calls.exists(), "help required proof"
+                    assert fixture.snapshot() == {}
+                    assert fixture.payload.read_bytes() == payload
+
+
+def test_native_help_with_other_arguments_does_not_bypass_proof() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        help_calls = Path(tmp) / "help-calls.jsonl"
+        fixture.env["FIXTURE_HELP_CALLS"] = str(help_calls)
+        for argv in (
+            [*fixture.argv, "--help"],
+            [*fixture.argv, "-h"],
+            ["pr", "create", "--help", "--title", "unreviewed"],
+            ["pr", "create", "-h", "--title", "unreviewed"],
+            ["pr", "edit", "--help", "--repo", "fixture/public"],
+            ["pr", "edit", "-h", "--repo", "fixture/public"],
+            ["pr", "create", "help"],
+        ):
+            fixture.argv = argv
+            fixture.assert_denied("unsupported native publication argument")
+        assert not help_calls.exists(), "publication arguments reached help routing"
+        assert not fixture.verifier_calls.exists()
+
+
+def test_native_proof_does_not_bypass_body_visibility_or_help_value_rules() -> None:
+    for title in ("fixture title", "--help", "-h", "help"):
+        for body, diagnostic in (
+            ("This PR adds a guard.", "no-this-pr-subject"),
+            (
+                "I fixed https://github.com/fixture/private/pull/1.",
+                "no-private-repo-ref",
+            ),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                fixture = NativePublicationFixture(Path(tmp))
+                fixture.body.write_text(body, encoding="utf-8")
+                fixture.proof = fixture.protocol_fixture()
+                fixture.proof["title"] = title
+                fixture.argv[fixture.argv.index("--title") + 1] = title
+                fixture.save()
+                before, payload = fixture.snapshot(), fixture.payload.read_bytes()
+                checked = fixture.native()
+                assert checked.returncode == 0, checked.stderr
+                guarded = fixture.native(guard=True)
+                assert guarded.returncode == 1, (guarded.stdout, guarded.stderr)
+                assert diagnostic in guarded.stderr, guarded.stderr
+                assert guarded.stdout == ""
+                assert not fixture.publications.exists()
+                assert fixture.snapshot() == before
+                assert fixture.payload.read_bytes() == payload
+
+
+def test_legacy_marker_floors_through_entry_points() -> None:
+    """Every artifact and exact byte floor is enforced before native mutation."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = PublicationFixture(Path(tmp))
+        fixture.populate_legacy_markers()
+        fixture.assert_legacy_publication_intercepted()
+        originals = fixture.snapshot()
+        for name, floor in (
+            ("code-review", 200),
+            ("plan", 120),
+            ("demo", 120),
+            ("pr-review", 120),
+            ("tests", 120),
+        ):
+            path = fixture.paths[name]
+            path.unlink()
+            fixture.assert_markers_block_publication(name)
+            headers = b"".join(
+                line
+                for line in originals[name].splitlines(keepends=True)
+                if line.startswith(b"<!--")
+            )
+            assert len(headers) < floor
+            for size in (0, floor - 1, floor, floor + 1):
+                content = (headers + b"x" * floor)[:size]
+                path.write_bytes(content)
+                if size < floor:
+                    fixture.assert_markers_block_publication(name)
+                else:
+                    fixture.assert_legacy_publication_intercepted()
+            path.write_bytes(originals[name])
+
+
+def test_legacy_marker_rejections_stop_publication() -> None:
+    """Invalid pins, review metadata, and test results cannot reach the sink."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = PublicationFixture(Path(tmp))
+        fixture.populate_legacy_markers()
+        originals = fixture.snapshot()
+        for name in ("code-review", "tests"):
+            fixture.paths[name].write_bytes(
+                originals[name].replace(fixture.head.encode(), b"0" * 40)
+            )
+            fixture.assert_markers_block_publication(name)
+            fixture.paths[name].write_bytes(originals[name])
+        for name in ("plan", "code-review", "pr-review"):
+            for models in (b"", b"a, A, b", b"a, Gemini-3, b"):
+                fixture.paths[name].write_bytes(
+                    originals[name].replace(b"a, b, c", models)
+                )
+                fixture.assert_markers_block_publication(name)
+            fixture.paths[name].write_bytes(originals[name])
+        convergence = b"<!-- review-convergence: clean; rounds: 2 -->\n"
+        for replacement in (b"", convergence * 2, convergence.replace(b"2", b"100")):
+            fixture.paths["code-review"].write_bytes(
+                originals["code-review"].replace(convergence, replacement)
+            )
+            fixture.assert_markers_block_publication("code-review")
+        fixture.paths["code-review"].write_bytes(originals["code-review"])
+        fixture.paths["tests"].write_bytes(
+            originals["tests"].replace(
+                b"<!-- tests-result: passed -->", b"no passing result"
+            )
+        )
+        fixture.assert_markers_block_publication("tests")
+
+
+def test_legacy_confirmation_and_body_rules_stop_publication() -> None:
+    """Valid markers alone cannot authorize a create or bypass body linting."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = PublicationFixture(Path(tmp))
+        fixture.populate_legacy_markers()
+        before = fixture.snapshot()
+        for args, confirmed, diagnostic in (
+            ([], False, "ZACK_CONFIRMED_PR_CREATE"),
+            (["--body", "This PR adds a guard."], True, "no-this-pr-subject"),
+            (
+                ["--body", "I fixed https://github.com/fixture/private/pull/1."],
+                True,
+                "no-private-repo-ref",
+            ),
+        ):
+            result = fixture.create(*args, confirmed=confirmed)
+            assert result.returncode == 1, result.stderr
+            assert diagnostic in result.stderr, result.stderr
+            assert (
+                not fixture.publications.exists()
+            ), "rejected create reached native publication"
+            assert fixture.snapshot() == before
 
 
 def test_gh_guard_blocks_noninteractive_draft_conversion() -> None:
@@ -294,9 +2049,7 @@ def test_gh_guard_blocks_noninteractive_draft_conversion() -> None:
 
 def test_gh_guard_allows_explicit_draft_confirmation() -> None:
     """An explicit current-task confirmation can pass the draft guard."""
-    result = _gh_guard_ready(
-        ["pr", "ready", "32128", "--undo"], confirmed_draft=True
-    )
+    result = _gh_guard_ready(["pr", "ready", "32128", "--undo"], confirmed_draft=True)
 
     assert result.returncode == 0
     assert result.stdout.strip() == "pr ready 32128 --undo"
@@ -429,9 +2182,7 @@ def test_test_quality_preflight() -> None:
             marker = pr_marker.marker_path(tests, branch="feat/quality")
 
             assert (
-                pr_marker.main(
-                    ["run-tests", "--base-ref", "main", "--cmd", "true"]
-                )
+                pr_marker.main(["run-tests", "--base-ref", "main", "--cmd", "true"])
                 == 1
             )
             assert not marker.exists()
@@ -445,9 +2196,7 @@ def test_test_quality_preflight() -> None:
             _run("git", "add", "test_tool.py")
             _run("git", "commit", "-q", "-m", "test")
             assert (
-                pr_marker.main(
-                    ["run-tests", "--base-ref", "main", "--cmd", "true"]
-                )
+                pr_marker.main(["run-tests", "--base-ref", "main", "--cmd", "true"])
                 == 0
             )
             body = marker.read_text(encoding="utf-8")
@@ -513,9 +2262,7 @@ def test_test_quality_preflight() -> None:
             _run("git", "commit", "-q", "--allow-empty", "-m", "base")
 
             assert (
-                pr_marker.main(
-                    ["run-tests", "--base-ref", "missing", "--cmd", "true"]
-                )
+                pr_marker.main(["run-tests", "--base-ref", "missing", "--cmd", "true"])
                 == 1
             )
             marker = pr_marker.marker_path(
@@ -586,7 +2333,11 @@ def test_run_tests_requires_clean_repo() -> None:
 
             assert (
                 pr_marker.main(
-                    ["run-tests", "--cmd", f"{sys.executable} -c \"open('generated.txt', 'w').write('x')\""]
+                    [
+                        "run-tests",
+                        "--cmd",
+                        f"{sys.executable} -c \"open('generated.txt', 'w').write('x')\"",
+                    ]
                 )
                 == 1
             )
@@ -884,20 +2635,16 @@ def test_code_review_marker_rewrite() -> None:
             assert pr_marker.main(rewrite_args) == 0
             lines = marker.read_text(encoding="utf-8").splitlines()
             assert (
-                sum(
-                    line.startswith(pr_marker.REVIEWED_COMMIT_PREFIX)
-                    for line in lines
-                )
+                sum(line.startswith(pr_marker.REVIEWED_COMMIT_PREFIX) for line in lines)
                 == 1
             )
             assert (
-                sum(
-                    line.startswith(pr_marker.REVIEWED_MODELS_PREFIX)
-                    for line in lines
-                )
+                sum(line.startswith(pr_marker.REVIEWED_MODELS_PREFIX) for line in lines)
                 == 1
             )
-            assert sum(line.startswith("<!-- review-convergence:") for line in lines) == 1
+            assert (
+                sum(line.startswith("<!-- review-convergence:") for line in lines) == 1
+            )
             assert pr_marker.read_reviewed_models(marker) == ["d", "e", "f"]
             assert pr_marker.read_convergence_rounds(marker) == 3
             ok, detail, _size, _path = pr_marker.marker_status(
@@ -1014,7 +2761,9 @@ def test_gh_guard_gate() -> None:
             ]
             for headers in invalid_headers:
                 crpath.write_text(
-                    "\n".join([*without_convergence[:2], *headers, *without_convergence[2:]])
+                    "\n".join(
+                        [*without_convergence[:2], *headers, *without_convergence[2:]]
+                    )
                     + "\n",
                     encoding="utf-8",
                 )
@@ -1147,7 +2896,40 @@ def main() -> int:
         test_kinds_and_thresholds,
         test_branch_dir_and_paths,
         test_artifacts_dir_derivation,
-        test_gh_guard_matches_kinds,
+        test_native_capabilities_preserve_the_consumer_policy,
+        test_native_repository_projection_requires_complete_proof,
+        test_native_complete_fixture_does_not_require_or_write_legacy_markers,
+        test_native_preparation_binding_and_admission_are_required,
+        test_native_baseline_checks_and_plan_reviews_precede_implementation,
+        test_native_proposed_exception_requires_bound_native_authorization,
+        test_native_proposed_exception_preserves_remaining_proof_and_history,
+        test_native_authorizer_pid_matches_the_native_boundary,
+        test_native_authorization_reason_limit_counts_utf8_bytes,
+        test_native_exception_requires_exact_native_command_manifest,
+        test_native_locators_require_proof_without_legacy_fallback,
+        test_native_rejected_verifier_stdout_cannot_supply_proof,
+        test_native_recheck_refusal_prevents_publication,
+        test_native_proof_parser_rejects_malformed_and_inspection_responses,
+        test_native_proof_binds_actual_store_branch_head_body_and_call,
+        test_native_context_and_body_changes_cannot_relabel_old_proof,
+        test_native_dirty_worktree_refuses_before_verification,
+        test_native_uses_requested_common_store_in_a_linked_worktree,
+        test_native_artifact_review_and_machine_check_requirements,
+        test_native_code_budget_retains_separate_plan_and_description_history,
+        test_native_body_transport_and_update_target_cannot_bypass_guard,
+        test_native_requires_available_body_lint_tooling,
+        test_native_requires_verified_target_visibility,
+        test_native_visibility_uses_the_bound_target_not_option_looking_titles,
+        test_native_visibility_resolves_the_explicit_enterprise_repository,
+        test_legacy_lint_dependencies_keep_existing_behavior,
+        test_native_lint_reads_cannot_outlive_the_certified_head_or_body,
+        test_native_fork_selector_preserves_exact_utf8_body_bytes,
+        test_read_only_help_needs_no_native_proof_or_confirmation,
+        test_native_help_with_other_arguments_does_not_bypass_proof,
+        test_native_proof_does_not_bypass_body_visibility_or_help_value_rules,
+        test_legacy_marker_floors_through_entry_points,
+        test_legacy_marker_rejections_stop_publication,
+        test_legacy_confirmation_and_body_rules_stop_publication,
         test_pin_roundtrip,
         test_run_tests,
         test_test_quality_preflight,

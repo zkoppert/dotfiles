@@ -160,11 +160,31 @@ elif [ "$subcmd" = "pr" ] && [ "$op" = "edit" ]; then
   is_pr_edit=1
 fi
 
+# Only complete read-only help calls can skip proof; a title may itself be --help.
+if [ "$#" -eq 3 ] && [ "$1" = "pr" ] &&
+   { [ "$2" = "create" ] || [ "$2" = "edit" ]; } &&
+   { [ "$3" = "--help" ] || [ "$3" = "-h" ]; }; then
+  exec "$REAL_GH" "$@"
+fi
+
+# A partial native locator is still a required handoff, never a legacy fallback.
+native_publication=0
+native_repository=""
+if { [ "${NO_MISTAKES_PUBLICATION_RUN+x}" = "x" ] || [ "${NO_MISTAKES_PUBLICATION_ATTEMPT+x}" = "x" ]; } &&
+   { [ "$is_pr_create" = "1" ] || [ "$is_pr_edit" = "1" ]; }; then
+  if ! native_repository="$("$SCRIPT_PATH/pr-marker" check --print-publication-repository --publication "$@")"; then
+    echo 'gh-guard: native publication blocked; legacy markers cannot replace native proof.' >&2
+    exit 1
+  fi
+  native_publication=1
+fi
+
 # Help flags after the op (e.g. `gh pr create --help`, `gh pr ready -h`) are
 # not seen by the parser above because it breaks at `op`. Scan the full
 # argument list and let help requests pass through unguarded so agents can
 # introspect flags without tripping the gate.
-if [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ] || [ "$is_pr_draft" = "1" ] || [ "$is_pr_edit" = "1" ]; then
+if [ "$native_publication" = "0" ] &&
+   { [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ] || [ "$is_pr_draft" = "1" ] || [ "$is_pr_edit" = "1" ]; }; then
   for a in "$@"; do
     case "$a" in
       --help|-h|help)
@@ -191,6 +211,9 @@ fi
 #   $@ - the original argv to scan (caller forwards "$@").
 lint_pr_body_or_die() {
   local subcmd_label="$1"; shift
+  # Native callers must distinguish completed checks from legacy skips.
+  body_lint_passed=0
+  body_visibility_verified=0
   local body_content=""
   local body_source=""
   local body_skip_reason=""
@@ -251,13 +274,23 @@ lint_pr_body_or_die() {
       esac
       prev="$arg"
     done
-    # Fall back to current repo from git remote
-    if [ -z "$target_repo" ] && git rev-parse --show-toplevel >/dev/null 2>&1; then
+    # Native targets come from the verified binding, not option-looking values.
+    if [ "$native_publication" = "1" ]; then
+      target_repo="$native_repository"
+    elif [ -z "$target_repo" ] && git rev-parse --show-toplevel >/dev/null 2>&1; then
       target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
     fi
     if [ -n "$target_repo" ]; then
       local repo_vis=""
-      repo_vis="$("$REAL_GH" api "repos/$target_repo" --jq .visibility 2>/dev/null || true)"
+      local visibility_args=(api "repos/$target_repo" --jq .visibility)
+      if [ "$native_publication" = "1" ]; then
+        visibility_args=(repo view --json visibility --jq '.visibility | ascii_downcase' -- "$target_repo")
+      fi
+      if repo_vis="$("$REAL_GH" "${visibility_args[@]}" 2>/dev/null)"; then
+        case "$repo_vis" in
+          public|private|internal) body_visibility_verified=1 ;;
+        esac
+      fi
       if [ "$repo_vis" = "public" ]; then
         visibility_flag="--check-visibility"
       fi
@@ -280,10 +313,31 @@ $lint_output
 EOF
       exit 1
     fi
+    body_lint_passed=1
   elif [ -n "$body_skip_reason" ]; then
     echo "gh-guard: skipping validate-style lint ($body_skip_reason)." >&2
   fi
 }
+
+# Native evidence satisfies the same five artifact requirements without writing
+# caller-authored marker files. Recheck after lint's visibility reads, which can
+# outlive the verified head, body or native history, immediately before publication.
+if [ "$native_publication" = "1" ]; then
+  lint_pr_body_or_die "gh pr $op" "$@"
+  if [ "$body_lint_passed" != "1" ]; then
+    echo 'gh-guard: native publication requires completed body lint; tooling is unavailable or body input was skipped.' >&2
+    exit 1
+  fi
+  if [ "$body_visibility_verified" != "1" ]; then
+    echo 'gh-guard: native publication requires verified target visibility; the lookup failed or returned an unknown value.' >&2
+    exit 1
+  fi
+  if ! "$SCRIPT_PATH/pr-marker" check --publication "$@"; then
+    echo 'gh-guard: native publication blocked; legacy markers cannot replace native proof.' >&2
+    exit 1
+  fi
+  exec "$REAL_GH" "$@"
+fi
 
 # Minimum accepted size (bytes) for each PR-readiness marker. These MUST match
 # the per-kind thresholds in bin/pr-marker so the writer and the gate agree.
