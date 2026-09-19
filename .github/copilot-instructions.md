@@ -83,7 +83,7 @@ For context on this mindset, see [Kamil Gwozdz, "Reasons why your prompts suck (
 - **Never convert a ready PR back to draft** unless I explicitly ask for that exact transition in the current conversation. A manual ready-for-review transition is explicit approval and must be preserved, even when an earlier instruction said to keep the PR as a draft.
 - **Always assign me (`zkoppert`) as the assignee** when opening PRs; this helps me track work in progress and follow up
 - Always check a PR's status (open/merged/closed) before pushing commits to it
-- PR descriptions should be kept up to date with the actual changes; verify before finalizing
+- PR descriptions should be kept up to date with the actual changes and the strongest current evidence. Remove temporary harness caveats, workarounds, and uncertainty once later validation or CI supersedes them.
 - **Write PR descriptions in first person** - use "I" or "we" as the subject, not "This PR" or "This change." Active voice, first person: "I added retry logic" not "This PR adds retry logic." This matches the active voice rule in the Writing Style section.
 - PR descriptions should always include a **Testing** section. Do not list linting results in the Testing section; linting is a given, not something to highlight. Focus on meaningful tests: unit tests, integration tests, manual verification, etc.
 - When reviewing PRs, focus on critical issues (bugs, security, logic errors) not style nitpicks
@@ -102,8 +102,9 @@ For context on this mindset, see [Kamil Gwozdz, "Reasons why your prompts suck (
 - **Multi-model review at three gates**: Complete the multi-model Code Review Workflow (below) three times across my staged change workflow: against the **plan** (before drafting code), against the **code** diff (before drafting the PR), and against the **PR description** (before opening the PR). Record each synthesis with `pr-marker write <plan|code-review|pr-review> -` so the `gh pr create` gate can see it. Address verified findings at each gate, when they are cheapest to fix. See "My Standard Change Workflow" above.
 - **Self-review before marking ready**: After all CI checks pass on a PR you authored (see the Harnesses section), run the multi-model Code Review Workflow again as a final self-review before telling me the PR is ready. Catch your own issues before reviewers have to.
 - **Use the repo's PR template**: Before opening a PR, check for a pull request template (e.g., `.github/pull_request_template.md` or `.github/PULL_REQUEST_TEMPLATE.md`) and use it fully without leaving sections blank. If none exists, use `## Why`, `## What changed`, `## Testing`, and `## Rollout`, then prompt me to add a template.
-- **Before/after comparison in PR descriptions**: When possible, include a before/after table in the PR description showing output differences or screenshots of visual differences. If you are unable to produce artifacts for the before/after table (e.g., no dev server, no browser environment, no testable output), notify me when creating the draft PR so I can capture them myself.
-- **Quantify impact in every PR** - include at least one concrete number: latency change, number of users affected, percentage of requests covered, time saved, error rate reduction. Even rough estimates ("saves ~20 min/week", "covers 7 of 7 SLOs") are better than no numbers at all. If impact is genuinely unknown, say so explicitly rather than omitting the section.
+- **Before/after comparison in PR descriptions**: When possible, include a before/after table showing the user-visible or operational difference in plain language, or screenshots for visual changes. Prefer reviewer-relevant contrasts such as "verbose and provider-specific" versus "simple and opaque" over incidental implementation measurements. If you are unable to produce artifacts for the before/after table (e.g., no dev server, no browser environment, no testable output), notify me when creating the draft PR so I can capture them myself.
+- **Quantify impact in every PR** - include at least one reader-relevant number: latency change, number of users affected, percentage of requests covered, time saved, error rate reduction, or another measure that helps reviewers judge impact. Do not use byte counts, lines changed, assertion counts, or similar implementation trivia merely to satisfy this rule. Even rough product or operational estimates ("saves ~20 min/week", "covers 7 of 7 SLOs") are better than no number. If impact is genuinely unknown, say so explicitly rather than inventing a metric.
+- **Keep implementation bookkeeping out of PR descriptions** - omit details such as removed test invariants, internal string sizes, and temporary tool workarounds from every section, including Testing. State unresolved validation limits directly, without the workaround history. Put the user-visible outcome and decision rationale first.
 - **Document tradeoffs and alternatives** - every PR description should include at least one sentence on what was considered and why this approach was chosen. For non-trivial changes, include an explicit "Tradeoffs" or "Alternatives considered" section. Even small PRs benefit from one line: "Chose to guard at the view layer rather than the controller because the feed data is already computed by this point."
 - **Make non-visual work visible** - for backend, infrastructure, config, and workflow PRs, include at least one visual aid: a markdown table comparing old vs. new behavior, a mermaid diagram for architecture or flow changes, terminal output showing before/after, or a latency/error-rate table. Don't reserve screenshots only for UI changes.
 - **Include monitoring context in code PRs** - when a PR changes production behavior, include a link to the relevant Datadog dashboard, Splunk query, or SLO widget. Add a "What to watch after merge" note with the specific metric or alert that would surface a regression. Don't limit monitoring details to dedicated monitoring repos.
@@ -298,16 +299,18 @@ When creating or modifying GitHub Actions workflows:
 - For display in cells, use clean text (e.g., `github#418801`) without raw URLs
 - Match existing format/templates when extending reports; don't invent new layouts without asking
 
-## Writing Style (for reports, evaluations, documentation authored on my behalf)
+## Writing Style
+
+- **Use ASD-STE100 Simplified Technical English for all artifacts and communications.** Use controlled vocabulary, short sentences, one idea per sentence, active voice, consistent terminology, and explicit references. Avoid idioms, ambiguous pronouns, and unnecessary words. Preserve exact code, quotations, legal text, and required template language when those sources must remain unchanged.
 
 ### Voice & Tone
 - Use a **conversational, direct tone** - not corporate or stiff. Write like talking to a peer, not lecturing.
-- **Be a relatable human** - share honest experiences and frustrations ("my brain was too fried to make sense of it") without being self-deprecating. Vulnerability about learnings builds trust; putting yourself down undermines it.
+- **Be a relatable human** - share honest experiences and frustrations ("I was too tired to understand it") without being self-deprecating. Vulnerability about learnings builds trust; putting yourself down undermines it.
 - Use "we," "you," and "let's"; prefer first-person plural for team/company perspective. Use "I" when sharing personal experience or motivation.
 - Be **enthusiastic without overdoing it** - phrases like "we're excited to" are fine, but let energy come through naturally
 - **Lead with empathy** - describe the reader's pain point before presenting the solution. Frame tools as responses to real frustrations, ideally ones you've felt yourself.
-- Be **inclusive and community-oriented** - invite participation ("drop a comment," "let me know," "reach out")
-- **Warm closings** - end with something human ("Hopefully this makes FR 1% easier in the heat of an incident") not something corporate ("This is for you. Let's make it as useful as possible")
+- Be **inclusive and community-oriented** - invite participation ("leave a comment," "tell me," "contact me")
+- **Warm closings** - end with something human ("I hope this helps you during an incident") not something corporate ("This is for you. Let's make it as useful as possible")
 
 ### Structure & Flow
 - **Lead with the ask (BLUF)** - for proposals, requests, and recommendations where I want a decision or action, put the ask in the first or second paragraph. State what I want to do, then explain why. Don't bury the recommendation under context, data, or background. This applies to Slack messages, issue comments, review replies, emails, and short decision docs.
@@ -328,7 +331,7 @@ When creating or modifying GitHub Actions workflows:
 - Vary greetings and openings; don't default to "Hey team" every time
 
 ### Formatting Preferences
-- **H2 headers as questions or action phrases** - "How does it work?", "Understanding the report", "Jump in!"
+- **H2 headers as questions or action phrases** - "How does it work?", "Understanding the report", "Try the tool"
 - **Bulleted lists** for features or use cases; keep items parallel in structure
 - **Bold for key terms** on first mention, e.g., "**time to first response**", "**innersource contribution percentage**"
 - **Inline links always** - use `[descriptive text](url)` not raw URLs. Link text should describe the destination ("the [dashboard](url)" not the literal `click [here](url)`). This applies to discussion posts, PR descriptions, Slack messages, and documentation.
@@ -350,6 +353,9 @@ When creating or modifying GitHub Actions workflows:
 - **Lift others up, not yourself** - avoid sounding boastful. The goal is to help the reader, not to impress them. Don't cite personal stats or scale to sound impressive.
 
 ### Hard Rules
+
+These rules are subject to the preservation requirement in [Writing Style](#writing-style).
+
 - **Never use em dashes** (the long dash character). Rephrase using a comma, period, parentheses, or restructure the sentence. Do not substitute a spaced hyphen ( - ), which is also flagged (see the next rule).
 - **Never use a dash as sentence punctuation**: a hyphen or en-dash with spaces around it standing in for a comma, colon, or parenthetical pause (e.g., `our diff is dashboard only, so these are master drift - they came in`). Rephrase with a comma, period, parentheses, or sentence restructure. Word-joining hyphens with no surrounding spaces are fine ("runner-up", "well-known"). The `validate-style` linter blocks the spaced-dash pattern.
 - **Use "consistency" instead of "idempotency"** and **"consistent" instead of "idempotent"** in all written content (PRs, reviews, discussion posts, documentation, comments, etc.). These terms are more accessible to broader audiences.
@@ -398,7 +404,7 @@ Concrete good/bad pairs for the situations I correct most often. Match the patte
 - Avoid:
   > Here's the draft, take it with a grain of salt since AI wrote most of it.
 - Use:
-  > Here's the draft. I'd value a second pair of eyes on the rollback section.
+  > Here's the draft. Please review the rollback section.
 - Why: I own the artifact regardless of how it was produced. AI assistance is not a disclaimer that weakens confidence in the result.
 
 **Reporting an error you made (no agentic passive voice):**
@@ -412,15 +418,15 @@ Concrete good/bad pairs for the situations I correct most often. Match the patte
 - Avoid:
   > We hit this same bug in example-org/internal-payments-service last quarter, see [link to private issue].
 - Use:
-  > We hit this same bug in a private internal service last quarter and fixed it by [brief description of the fix].
+  > We found the same bug in a private internal service last quarter. We fixed it by [brief description of the fix].
 - Why: public repos, discussions, and conference talks can be read by anyone. Anonymize internal repo names and link only to public artifacts.
 
-**Quantified impact in PR descriptions (concrete number beats vague claim):**
+**Quantified impact in PR descriptions:**
 - Avoid:
   > This should make the dashboard faster.
 - Use:
   > p95 dashboard load drops from 2.4s to 0.9s in local benchmarks (n=50). I'll watch the [production p95 panel](link) for one business day after merge to confirm.
-- Why: one concrete number plus a monitoring plan beats a vague qualitative claim. Even rough estimates ("saves ~20 min/week") count.
+- Why: reports measured latency and links to the monitoring plan. Follow the impact rule in [Pull Requests](#pull-requests).
 
 ## File & Project Organization
 - Store automation scripts in a `scripts/` directory

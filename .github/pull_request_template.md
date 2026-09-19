@@ -16,7 +16,7 @@
 
 ## Impact
 
-<!-- At least one concrete number where possible: latency, % of requests covered, users affected, time saved, error rate, etc. If genuinely unknown, say so. -->
+<!-- Follow "Quantify impact in every PR" in .github/copilot-instructions.md under Pull Requests. -->
 
 ## Rollout
 
