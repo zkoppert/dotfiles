@@ -267,9 +267,16 @@ class PublicationFixture:
             "    print('Usage: gh pr ' + args[1] + ' [flags]')\n"
             "elif args[:2] in (['pr', 'create'], ['pr', 'edit']):\n"
             "    record = {'argv': args, 'cwd': os.getcwd()}\n"
-            "    for index, arg in enumerate(args):\n"
-            "        if arg == '--body-file':\n"
-            "            record['body'] = Path(args[index + 1]).read_bytes().decode('utf-8')\n"
+            "    index = 2\n"
+            "    while index < len(args):\n"
+            "        flag, equals, value = args[index].partition('=')\n"
+            "        if flag in ('--head', '--base', '--repo', '-R', '--title', '--body', '--body-file'):\n"
+            "            if not equals:\n"
+            "                index += 1\n"
+            "                value = args[index]\n"
+            "            if flag == '--body-file':\n"
+            "                record['body'] = Path(value).read_bytes().decode('utf-8')\n"
+            "        index += 1\n"
             "    with open(os.environ['FIXTURE_PUBLICATIONS'], 'a') as log:\n"
             "        log.write(json.dumps(record) + '\\n')\n"
             "    print('fixture publication intercepted')\n"
@@ -694,7 +701,12 @@ class NativePublicationFixture(PublicationFixture):
         self.payload.write_text(json.dumps(self.proof), encoding="utf-8")
 
     def native(
-        self, *, guard=False, confirmed=True, print_repository=False
+        self,
+        *,
+        guard=False,
+        confirmed=True,
+        print_repository=False,
+        print_lint_context=False,
     ) -> subprocess.CompletedProcess:
         env = dict(self.env)
         if confirmed and self.argv[1] == "create":
@@ -707,6 +719,7 @@ class NativePublicationFixture(PublicationFixture):
                 str(_MODULE_PATH),
                 "check",
                 *(["--print-publication-repository"] if print_repository else []),
+                *(["--print-publication-lint-context"] if print_lint_context else []),
                 "--publication",
                 *self.argv,
             ]
@@ -742,11 +755,11 @@ class NativePublicationFixture(PublicationFixture):
 
     def assert_lint_denied(self, diagnostic: str) -> None:
         markers, payload = self.snapshot(), self.payload.read_bytes()
-        checked = self.native()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = [pool.submit(self.native, guard=guard) for guard in (False, True)]
+            checked, guarded = [result.result() for result in pending]
         assert checked.returncode == 0, (checked.stdout, checked.stderr)
         assert checked.stdout == checked.stderr == ""
-        assert not self.publications.exists(), "helper performed publication"
-        guarded = self.native(guard=True)
         assert guarded.returncode == 1, (guarded.stdout, guarded.stderr)
         assert diagnostic in guarded.stderr, guarded.stderr
         assert guarded.stdout == ""
@@ -859,6 +872,78 @@ def test_native_repository_projection_requires_complete_proof() -> None:
         legacy = fixture.marker("check", "--print-publication-repository")
         assert legacy.returncode == 1, (legacy.stdout, legacy.stderr)
         assert legacy.stdout == "" and "requires --publication" in legacy.stderr
+
+
+def test_native_lint_context_projection_requires_complete_proof() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        fixture.body = fixture.body.rename(Path(tmp) / 'body "café"\n.md\n')
+        fixture.argv[-1] = str(fixture.body)
+        fixture.body.write_bytes(
+            "I preserve café and exact line endings.\r\n\r\n".encode()
+        )
+        fixture.proof = fixture.protocol_fixture()
+        fixture.save()
+        for operation in ("create", "update"):
+            if operation == "update":
+                fixture.use_update()
+                fixture.argv[-2:] = [f"--body-file={fixture.body}"]
+            markers, payload = fixture.snapshot(), fixture.payload.read_bytes()
+            result = fixture.native(print_lint_context=True)
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert json.loads(result.stdout) == {
+                "repository": "fixture/public",
+                "body_file": str(fixture.body),
+            }
+            assert result.stderr == "" and not fixture.publications.exists()
+            assert fixture.snapshot() == markers
+            assert fixture.payload.read_bytes() == payload
+            fixture.assert_fixture_accepted()
+        fixture.proof["history_known"] = False
+        fixture.save()
+        markers, payload = fixture.snapshot(), fixture.payload.read_bytes()
+        result = fixture.native(print_lint_context=True)
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert result.stdout == "" and "history is unknown" in result.stderr
+        assert not fixture.publications.exists()
+        assert fixture.snapshot() == markers and fixture.payload.read_bytes() == payload
+        legacy = fixture.marker("check", "--print-publication-lint-context")
+        assert legacy.returncode == 1, (legacy.stdout, legacy.stderr)
+        assert legacy.stdout == "" and "requires --publication" in legacy.stderr
+
+
+def test_native_malformed_lint_projection_cannot_reach_publication() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        wrapper = Path(tmp) / "adjacent-helper-fixture"
+        wrapper.mkdir()
+        guard = wrapper / "gh-guard"
+        guard.write_bytes(_MODULE_PATH.with_name("gh-guard").read_bytes())
+        guard.chmod(0o755)
+        helper = wrapper / "pr-marker"
+        helper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os\n"
+            "print(os.environ['FIXTURE_LINT_CONTEXT'])\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+        fixture.env.update(
+            ZACK_CONFIRMED_PR_CREATE="1",
+            native_repository="fixture/public",
+            native_body_file=str(fixture.body),
+        )
+        markers, payload = fixture.snapshot(), fixture.payload.read_bytes()
+        for malformed in ("", "{", "{}", '{"repository":"fixture/public"}'):
+            fixture.env["FIXTURE_LINT_CONTEXT"] = malformed
+            result = fixture.run([str(guard), *fixture.argv], stdin=subprocess.DEVNULL)
+            assert result.returncode == 1, (result.stdout, result.stderr)
+            assert result.stdout == ""
+            assert "native publication requires verified lint inputs" in result.stderr
+            assert not fixture.publications.exists()
+            assert not fixture.verifier_calls.exists()
+            assert fixture.snapshot() == markers
+            assert fixture.payload.read_bytes() == payload
 
 
 def test_native_complete_fixture_does_not_require_or_write_legacy_markers() -> None:
@@ -1729,6 +1814,72 @@ def test_native_visibility_uses_the_bound_target_not_option_looking_titles() -> 
         fixture.assert_fixture_accepted()
 
 
+def test_native_lint_uses_the_verified_body_not_option_looking_titles() -> None:
+    def exercise(operation: str) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = NativePublicationFixture(Path(tmp))
+            decoy = Path(tmp) / "title-body.md"
+            create_argv = fixture.argv[:]
+            clean = "I keep the actual reviewed body in this fixture.\n"
+            invalid = "This PR adds a guard.\n"
+            for transport in ("inline", "file"):
+                for actual, title_body, diagnostic in (
+                    (invalid, clean, "no-this-pr-subject"),
+                    (
+                        "I fixed https://github.com/fixture/private/pull/1.\n",
+                        clean,
+                        "no-private-repo-ref",
+                    ),
+                    (clean, invalid, None),
+                ):
+                    fixture.body.write_text(actual, encoding="utf-8")
+                    decoy.write_text(title_body, encoding="utf-8")
+                    fixture.proof = fixture.protocol_fixture()
+                    fixture.argv = create_argv[:]
+                    if operation == "update":
+                        fixture.use_update()
+                    title = (
+                        "--body=" + title_body
+                        if transport == "inline"
+                        else f"--body-file={decoy}"
+                    )
+                    at = fixture.argv.index("--title")
+                    del fixture.argv[at : at + 2]
+                    fixture.argv += ["--title", title]
+                    fixture.proof["title"] = title
+                    fixture.save()
+                    if diagnostic:
+                        fixture.assert_lint_denied(diagnostic)
+                    else:
+                        fixture.assert_fixture_accepted()
+                    assert fixture.body.read_bytes() == actual.encode("utf-8")
+                    assert decoy.read_bytes() == title_body.encode("utf-8")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(exercise, ("create", "update")))
+
+
+def test_native_non_body_edits_require_proof_without_changing_ordinary_edits() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        fixture.use_update()
+        del fixture.argv[-2:]
+        fixture.assert_denied("missing required native publication arguments")
+        assert not fixture.verifier_calls.exists()
+        for name in pr_marker.NATIVE_LOCATORS:
+            fixture.env.pop(name)
+        markers, payload = fixture.snapshot(), fixture.payload.read_bytes()
+        result = fixture.native(guard=True, confirmed=False)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert result.stdout == "fixture publication intercepted\n"
+        assert result.stderr == ""
+        assert [
+            json.loads(line) for line in fixture.publications.read_text().splitlines()
+        ] == [{"argv": fixture.argv, "cwd": str(fixture.repo)}]
+        assert fixture.snapshot() == markers and fixture.payload.read_bytes() == payload
+        assert not fixture.verifier_calls.exists()
+
+
 def test_native_visibility_resolves_the_explicit_enterprise_repository() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         fixture = NativePublicationFixture(Path(tmp))
@@ -1920,16 +2071,16 @@ def test_native_help_with_other_arguments_does_not_bypass_proof() -> None:
 
 
 def test_native_proof_does_not_bypass_body_visibility_or_help_value_rules() -> None:
-    for title in ("fixture title", "--help", "-h", "help"):
-        for body, diagnostic in (
-            ("This PR adds a guard.", "no-this-pr-subject"),
-            (
-                "I fixed https://github.com/fixture/private/pull/1.",
-                "no-private-repo-ref",
-            ),
-        ):
-            with tempfile.TemporaryDirectory() as tmp:
-                fixture = NativePublicationFixture(Path(tmp))
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        for title in ("fixture title", "--help", "-h", "help"):
+            for body, diagnostic in (
+                ("This PR adds a guard.", "no-this-pr-subject"),
+                (
+                    "I fixed https://github.com/fixture/private/pull/1.",
+                    "no-private-repo-ref",
+                ),
+            ):
                 fixture.body.write_text(body, encoding="utf-8")
                 fixture.proof = fixture.protocol_fixture()
                 fixture.proof["title"] = title
@@ -2898,6 +3049,8 @@ def main() -> int:
         test_artifacts_dir_derivation,
         test_native_capabilities_preserve_the_consumer_policy,
         test_native_repository_projection_requires_complete_proof,
+        test_native_lint_context_projection_requires_complete_proof,
+        test_native_malformed_lint_projection_cannot_reach_publication,
         test_native_complete_fixture_does_not_require_or_write_legacy_markers,
         test_native_preparation_binding_and_admission_are_required,
         test_native_baseline_checks_and_plan_reviews_precede_implementation,
@@ -2920,6 +3073,8 @@ def main() -> int:
         test_native_requires_available_body_lint_tooling,
         test_native_requires_verified_target_visibility,
         test_native_visibility_uses_the_bound_target_not_option_looking_titles,
+        test_native_lint_uses_the_verified_body_not_option_looking_titles,
+        test_native_non_body_edits_require_proof_without_changing_ordinary_edits,
         test_native_visibility_resolves_the_explicit_enterprise_repository,
         test_legacy_lint_dependencies_keep_existing_behavior,
         test_native_lint_reads_cannot_outlive_the_certified_head_or_body,
