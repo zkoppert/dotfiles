@@ -5,7 +5,7 @@ Use this development-only evaluation for [the writing instructions](../.github/c
 ## Run the focused evaluation
 
 1. Start a fresh agent session for each prompt below. Load the complete instruction file, not selected writing rules. Do not give the agent the evaluation criteria or recorded outputs.
-2. Disable tools, extensions, skills, personal context, and saved sessions. Keep disposable agent configuration, authentication copies, and caches inside the worktree. Do not install tools or change user configuration.
+2. Disable tools, extensions, skills, personal context, and saved sessions. Keep disposable agent configuration, authentication copies, and caches inside the worktree. Do not install tools or change user configuration. Before an offline Pi run, seed its disposable `auth.json` and `models-store.json` from the installed Pi files. Keep only the required provider credential and selected model. Preserve the model's API metadata and the surrounding JSON structure; an empty offline catalog can select an unsupported endpoint.
 3. Append this scope statement to the loaded instructions:
 
    ```text

@@ -299,18 +299,18 @@ When creating or modifying GitHub Actions workflows:
 - For display in cells, use clean text (e.g., `github#418801`) without raw URLs
 - Match existing format/templates when extending reports; don't invent new layouts without asking
 
-## Writing Style (for reports, evaluations, documentation authored on my behalf)
+## Writing Style
 
 - **Use ASD-STE100 Simplified Technical English for all artifacts and communications.** Use controlled vocabulary, short sentences, one idea per sentence, active voice, consistent terminology, and explicit references. Avoid idioms, ambiguous pronouns, and unnecessary words. Preserve exact code, quotations, legal text, and required template language when those sources must remain unchanged.
 
 ### Voice & Tone
 - Use a **conversational, direct tone** - not corporate or stiff. Write like talking to a peer, not lecturing.
-- **Be a relatable human** - share honest experiences and frustrations ("my brain was too fried to make sense of it") without being self-deprecating. Vulnerability about learnings builds trust; putting yourself down undermines it.
+- **Be a relatable human** - share honest experiences and frustrations ("I was too tired to understand it") without being self-deprecating. Vulnerability about learnings builds trust; putting yourself down undermines it.
 - Use "we," "you," and "let's"; prefer first-person plural for team/company perspective. Use "I" when sharing personal experience or motivation.
 - Be **enthusiastic without overdoing it** - phrases like "we're excited to" are fine, but let energy come through naturally
 - **Lead with empathy** - describe the reader's pain point before presenting the solution. Frame tools as responses to real frustrations, ideally ones you've felt yourself.
-- Be **inclusive and community-oriented** - invite participation ("drop a comment," "let me know," "reach out")
-- **Warm closings** - end with something human ("Hopefully this makes FR 1% easier in the heat of an incident") not something corporate ("This is for you. Let's make it as useful as possible")
+- Be **inclusive and community-oriented** - invite participation ("leave a comment," "tell me," "contact me")
+- **Warm closings** - end with something human ("I hope this helps you during an incident") not something corporate ("This is for you. Let's make it as useful as possible")
 
 ### Structure & Flow
 - **Lead with the ask (BLUF)** - for proposals, requests, and recommendations where I want a decision or action, put the ask in the first or second paragraph. State what I want to do, then explain why. Don't bury the recommendation under context, data, or background. This applies to Slack messages, issue comments, review replies, emails, and short decision docs.
@@ -331,7 +331,7 @@ When creating or modifying GitHub Actions workflows:
 - Vary greetings and openings; don't default to "Hey team" every time
 
 ### Formatting Preferences
-- **H2 headers as questions or action phrases** - "How does it work?", "Understanding the report", "Jump in!"
+- **H2 headers as questions or action phrases** - "How does it work?", "Understanding the report", "Try the tool"
 - **Bulleted lists** for features or use cases; keep items parallel in structure
 - **Bold for key terms** on first mention, e.g., "**time to first response**", "**innersource contribution percentage**"
 - **Inline links always** - use `[descriptive text](url)` not raw URLs. Link text should describe the destination ("the [dashboard](url)" not the literal `click [here](url)`). This applies to discussion posts, PR descriptions, Slack messages, and documentation.
@@ -353,6 +353,9 @@ When creating or modifying GitHub Actions workflows:
 - **Lift others up, not yourself** - avoid sounding boastful. The goal is to help the reader, not to impress them. Don't cite personal stats or scale to sound impressive.
 
 ### Hard Rules
+
+These rules are subject to the preservation requirement in [Writing Style](#writing-style).
+
 - **Never use em dashes** (the long dash character). Rephrase using a comma, period, parentheses, or restructure the sentence. Do not substitute a spaced hyphen ( - ), which is also flagged (see the next rule).
 - **Never use a dash as sentence punctuation**: a hyphen or en-dash with spaces around it standing in for a comma, colon, or parenthetical pause (e.g., `our diff is dashboard only, so these are master drift - they came in`). Rephrase with a comma, period, parentheses, or sentence restructure. Word-joining hyphens with no surrounding spaces are fine ("runner-up", "well-known"). The `validate-style` linter blocks the spaced-dash pattern.
 - **Use "consistency" instead of "idempotency"** and **"consistent" instead of "idempotent"** in all written content (PRs, reviews, discussion posts, documentation, comments, etc.). These terms are more accessible to broader audiences.
@@ -401,7 +404,7 @@ Concrete good/bad pairs for the situations I correct most often. Match the patte
 - Avoid:
   > Here's the draft, take it with a grain of salt since AI wrote most of it.
 - Use:
-  > Here's the draft. I'd value a second pair of eyes on the rollback section.
+  > Here's the draft. Please review the rollback section.
 - Why: I own the artifact regardless of how it was produced. AI assistance is not a disclaimer that weakens confidence in the result.
 
 **Reporting an error you made (no agentic passive voice):**
@@ -415,15 +418,15 @@ Concrete good/bad pairs for the situations I correct most often. Match the patte
 - Avoid:
   > We hit this same bug in example-org/internal-payments-service last quarter, see [link to private issue].
 - Use:
-  > We hit this same bug in a private internal service last quarter and fixed it by [brief description of the fix].
+  > We found the same bug in a private internal service last quarter. We fixed it by [brief description of the fix].
 - Why: public repos, discussions, and conference talks can be read by anyone. Anonymize internal repo names and link only to public artifacts.
 
-**Quantified impact in PR descriptions (concrete number beats vague claim):**
+**Quantified impact in PR descriptions:**
 - Avoid:
   > This should make the dashboard faster.
 - Use:
   > p95 dashboard load drops from 2.4s to 0.9s in local benchmarks (n=50). I'll watch the [production p95 panel](link) for one business day after merge to confirm.
-- Why: one concrete number plus a monitoring plan beats a vague qualitative claim. Even rough estimates ("saves ~20 min/week") count.
+- Why: reports measured latency and links to the monitoring plan. Follow the impact rule in [Pull Requests](#pull-requests).
 
 ## File & Project Organization
 - Store automation scripts in a `scripts/` directory

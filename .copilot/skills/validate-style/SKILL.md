@@ -78,16 +78,17 @@ python3 ~/.copilot/skills/validate-style/lint.py --json path/to/draft.md
 
 ## How to handle violations
 
-1. **Fix every violation before posting.** Hard rules are hard rules; do not ship text with violations.
-2. **If the linter has a false positive**, rephrase rather than disable the rule. The rules are intentionally narrow to keep false positives low; if you trip one, the wording probably is unclear.
-3. **Re-run the linter** after fixing to confirm the text is clean.
+1. **Fix violations in editable prose before posting.** Apply the preservation requirement in `~/.copilot/copilot-instructions.md` under **Writing Style** when a finding affects protected text.
+2. **If the linter has a false positive in editable prose**, rephrase rather than disable the rule.
+3. **Re-run the linter** after fixing. Report any remaining protected-text findings for resolution. Do not change protected text or bypass a publication gate to make the check pass.
 
-Do **not** silence the linter, comment it out, or skip it because the text "looks fine." If the linter flags something, treat it as a real bug.
+Do **not** silence the linter, comment it out, or skip it because the text "looks fine."
 
 ## What this skill does NOT catch
 
 The linter only catches mechanical, regex-detectable rules. It does **not** check:
 
+- The writing standard or protected-text requirement in **Writing Style**
 - Tone (additive vs. corrective, warmth for first-time contributors)
 - Voice (active vs. passive in general, first person vs. third)
 - Boastful framing or generic praise
