@@ -301,6 +301,8 @@ When creating or modifying GitHub Actions workflows:
 
 ## Writing Style (for reports, evaluations, documentation authored on my behalf)
 
+- **Use ASD-STE100 Simplified Technical English for all artifacts and communications.** Use controlled vocabulary, short sentences, one idea per sentence, active voice, consistent terminology, and explicit references. Avoid idioms, ambiguous pronouns, and unnecessary words. Preserve exact code, quotations, legal text, and required template language when those sources must remain unchanged.
+
 ### Voice & Tone
 - Use a **conversational, direct tone** - not corporate or stiff. Write like talking to a peer, not lecturing.
 - **Be a relatable human** - share honest experiences and frustrations ("my brain was too fried to make sense of it") without being self-deprecating. Vulnerability about learnings builds trust; putting yourself down undermines it.
