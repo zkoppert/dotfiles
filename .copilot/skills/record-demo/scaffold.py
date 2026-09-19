@@ -94,7 +94,7 @@ TEMPLATE = """# Demo: {branch}
 
 ## Impact
 
-<one concrete number: latency, users affected, requests covered, time saved>
+<!-- Follow "Quantify impact in every PR" under Pull Requests in ~/.copilot/copilot-instructions.md. -->
 """
 
 
