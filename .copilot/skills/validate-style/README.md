@@ -1,8 +1,8 @@
 # validate-style skill
 
-Text linter for Zack's writing-style hard rules. Used by the Copilot CLI to catch
-mechanical violations before any text ships to GitHub, Slack, email, gists, or
-other external surfaces.
+ASD-STE100 review procedure and text linter for Zack's writing-style rules. The
+Copilot CLI uses it before text ships to GitHub, Slack, email, gists, or other
+external surfaces.
 
 See [`SKILL.md`](./SKILL.md) for the description that drives skill discovery and
 [`lint.py`](./lint.py) for the linter itself.
@@ -29,7 +29,8 @@ python3 ~/.copilot/skills/validate-style/tests.py
 
 ## Add a new rule
 
-1. Add the regex and message to `RULES` in `lint.py`.
+1. Add the regex and message to `RULES` in `lint.py`, or add a focused finder
+   when the rule needs measured context such as sentence length.
 2. Add at least one positive and one negative test in `tests.py`.
 3. Document the rule in the table at the top of `SKILL.md`.
 4. If the rule comes from a new user directive, also add it to the **Writing

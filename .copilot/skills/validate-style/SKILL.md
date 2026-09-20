@@ -1,11 +1,30 @@
 ---
 name: validate-style
-description: This skill should be used BEFORE posting any text to GitHub (PR descriptions, issues, comments, discussions, gists), Slack, email, or any other external-facing surface, to catch hard-rule writing-style violations. Also triggered when the user asks to "lint this text", "check this for style violations", "validate this draft", or "run the writing style linter".
+description: Apply ASD-STE100 and hard writing rules before external text is posted. Also use for linting, draft validation, or ASD-STE100 requests.
 ---
 
-# Validate Style: enforce Zack's writing-style hard rules
+# Validate Style: apply ASD-STE100 and enforce hard rules
 
-Use this skill **before** finalizing any text that will be posted externally on Zack's behalf. The linter catches the rules that are easiest to forget under pressure and the ones Zack has explicitly flagged as hard rules in his Copilot instructions.
+Use this skill **before** finalizing any text that will be posted externally on Zack's behalf. Apply ASD-STE100 principles to editable prose, then run the linter for deterministic rules. Apply the preservation requirement in `~/.copilot/copilot-instructions.md` when protected text conflicts with a rule. Do not claim formal ASD-STE100 compliance without the applicable specification and an approved dictionary.
+
+## ASD-STE100 review
+
+Use these rules for conversations and authored prose:
+
+- Use short, active sentences.
+- Put one instruction in each sentence.
+- Keep instructions at 20 words or fewer.
+- Keep descriptive sentences at 25 words or fewer.
+- Use one term for each concept.
+- Define an abbreviation at its first use.
+- Prefer common words over jargon.
+- Use `I'll` instead of `I will` in natural prose.
+- Describe an empty quantity with `no`, `none`, `nothing`, or `not any`.
+- Combine repeated sentence openings when one natural sentence is clearer.
+
+Technical accuracy takes priority. Preserve exact quotations, code, commands, identifiers, legal text, and required repository-template text.
+
+The linter checks sentence length and other measurable patterns. After it passes, review the draft manually for active voice and undefined abbreviations. Also check terminology, jargon, complex instructions, and repetitive phrasing that a regular expression cannot judge safely.
 
 ## What this skill catches
 
@@ -27,6 +46,10 @@ At a high level, the rules cover:
 - **no-agentic-passive** - using a model name as the subject of verbs like made, wrote, generated
 - **no-this-pr-subject** - using "This PR / This change / This commit" as a sentence subject instead of first person
 - **no-subjectless-action-bullet** - bullets that lead with a bare past-tense action verb ("Added X") instead of first person ("I added X")
+- **use-ill-contraction** - using `I will` instead of the natural contraction `I'll`
+- **no-zero-quantity** - using "zero" or "0" for an empty count instead of "no", "none", "nothing", or "not any"
+- **no-repetitive-ill-openings** - starting three or more consecutive sentences with "I'll"
+- **ste-sentence-length** - exceeding 20 words in a checkbox instruction or 25 words in a descriptive sentence
 - **no-private-repo-ref** (requires `--check-visibility`) - referencing a private or internal GitHub repo in text destined for a public surface. Checks visibility via the `gh` CLI at lint time.
 
 When the linter flags a violation, it prints the exact rule name, file, line, and column. Use that to look up the full message and suggested fix in `lint.py`.
@@ -91,6 +114,11 @@ The linter only catches mechanical, regex-detectable rules. It does **not** chec
 - The writing standard or protected-text requirement in **Writing Style**
 - Tone (additive vs. corrective, warmth for first-time contributors)
 - Voice (active vs. passive in general, first person vs. third)
+- Whether two sentences with different wording still repeat the same idea
+- Undefined abbreviations
+- Inconsistent terminology
+- Whether technical jargon is necessary
+- Whether a sentence contains more than one instruction when it remains within the word limit
 - Boastful framing or generic praise
 - Internal repo/issue names leaking into public contexts
 - @-mentions of people without their confirmation
@@ -102,4 +130,3 @@ Those still require human or agent judgment. After running the linter, re-read t
 ## Source of the rules
 
 These rules come from `~/.copilot/copilot-instructions.md` under "Writing Style > Hard Rules" and from explicit user feedback captured in Copilot Memory. When a new hard rule is added, update both the instructions and `lint.py` (plus a test case in `tests.py`).
-

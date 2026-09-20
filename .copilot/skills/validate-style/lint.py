@@ -94,6 +94,29 @@ SUBJECTLESS_ACTION_BULLET_PATTERN = re.compile(
     r"Rendered|Pulled|Pinged|Posted|Sent|Triggered|Closed|Opened)\b",
 )
 
+I_WILL_PATTERN = re.compile(r"\bI will\b", re.IGNORECASE)
+
+ZERO_QUANTITY_PATTERN = re.compile(
+    r"\b(?:zero|0)\s+"
+    r"(?!(?:is|was|means|equals|to|and|or|if|trust)\b)"
+    r"(?:[A-Za-z][A-Za-z'\u2019-]*\s+){0,2}"
+    r"[A-Za-z][A-Za-z'\u2019-]*s\b",
+    re.IGNORECASE,
+)
+
+REPETITIVE_ILL_PATTERN = re.compile(
+    r"(?:\bI['\u2019]ll\b[^.!?\n]*[.!?](?:\s+|$)){3,}",
+    re.IGNORECASE,
+)
+
+WORD_PATTERN = re.compile(
+    r"\b[A-Za-z0-9]+(?:['\u2019][A-Za-z]+)?(?:-[A-Za-z0-9]+)*\b"
+)
+SENTENCE_PATTERN = re.compile(r"[^.!?]+(?:[.!?](?:\s+|$)|$)")
+MARKDOWN_PREFIX_PATTERN = re.compile(r"^\s*(?:[-*+]\s+|\d+\.\s+)")
+CHECKBOX_PREFIX_PATTERN = re.compile(r"^\s*[-*+]\s+\[[ xX]\]\s+")
+URL_PATTERN = re.compile(r"https?://\S+")
+
 
 FENCE_OPEN_PATTERN = re.compile(r"^(\s{0,3})(`{3,}|~{3,})")
 INLINE_CODE_PATTERN = re.compile(r"`[^`\n]+`")
@@ -208,7 +231,60 @@ RULES = [
         "are forbidden in PR descriptions - rewrite in first person ('I added X', "
         "'I removed Y') so the human is the explicit actor.",
     ),
+    (
+        "use-ill-contraction",
+        I_WILL_PATTERN,
+        "Use the natural contraction 'I'll' instead of 'I will' in prose. "
+        "Exact quotations, code, commands, required templates, and legal text are exempt.",
+    ),
+    (
+        "no-zero-quantity",
+        ZERO_QUANTITY_PATTERN,
+        "Describe an empty quantity with 'no', 'none', 'nothing', or 'not any'. "
+        "For example, write 'There were no test failures' instead of "
+        "'There were zero test failures'.",
+    ),
+    (
+        "no-repetitive-ill-openings",
+        REPETITIVE_ILL_PATTERN,
+        "Three or more consecutive sentences begin with 'I'll'. Combine related actions "
+        "into one natural sentence when that keeps the meaning clear.",
+    ),
 ]
+
+
+def _find_long_sentences(masked_text: str) -> list[Violation]:
+    """Find prose that exceeds ASD-STE100 sentence-length limits."""
+    violations: list[Violation] = []
+    for lineno, line in enumerate(masked_text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "|", "<!--", "---")):
+            continue
+
+        threshold = 20 if CHECKBOX_PREFIX_PATTERN.match(line) else 25
+        prefix = CHECKBOX_PREFIX_PATTERN.match(line) or MARKDOWN_PREFIX_PATTERN.match(line)
+        content_start = prefix.end() if prefix else 0
+        content = URL_PATTERN.sub("", line[content_start:])
+
+        for sentence_match in SENTENCE_PATTERN.finditer(content):
+            sentence = sentence_match.group(0).strip()
+            word_count = len(WORD_PATTERN.findall(sentence))
+            if word_count <= threshold:
+                continue
+            violations.append(
+                Violation(
+                    rule="ste-sentence-length",
+                    line=lineno,
+                    column=content_start + sentence_match.start() + 1,
+                    text=sentence,
+                    message=(
+                        f"This sentence has {word_count} words. "
+                        f"Use no more than {threshold} words for this "
+                        f"{'instruction' if threshold == 20 else 'descriptive sentence'}."
+                    ),
+                )
+            )
+    return violations
 
 
 def find_violations(text: str, check_visibility: bool = False) -> list[Violation]:
@@ -226,6 +302,7 @@ def find_violations(text: str, check_visibility: bool = False) -> list[Violation
                         message=message,
                     )
                 )
+    violations.extend(_find_long_sentences(masked))
     if check_visibility:
         violations.extend(_find_private_repo_refs(masked))
     violations.sort(key=lambda v: (v.line, v.column, v.rule))

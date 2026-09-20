@@ -301,7 +301,7 @@ When creating or modifying GitHub Actions workflows:
 
 ## Writing Style
 
-- **Use ASD-STE100 Simplified Technical English for all artifacts and communications.** Use controlled vocabulary, short sentences, one idea per sentence, active voice, consistent terminology, and explicit references. Avoid idioms, ambiguous pronouns, and unnecessary words. Preserve exact code, quotations, legal text, and required template language when those sources must remain unchanged.
+- **Use ASD-STE100 Simplified Technical English for all artifacts and communications.** Use controlled vocabulary, active voice, consistent terms, and explicit references. Keep instructions at 20 words or fewer. Keep descriptive sentences at 25 words or fewer. Avoid idioms, ambiguous pronouns, unnecessary words, and multiple instructions in one sentence. Preserve exact code, quotations, commands, identifiers, legal text, and required template language when those sources must remain unchanged. Do not claim formal ASD-STE100 compliance without the applicable specification and an approved dictionary. Run the `validate-style` skill before external publication.
 
 ### Voice & Tone
 - Use a **conversational, direct tone** - not corporate or stiff. Write like talking to a peer, not lecturing.
@@ -356,6 +356,9 @@ When creating or modifying GitHub Actions workflows:
 
 These rules are subject to the preservation requirement in [Writing Style](#writing-style).
 
+- **Use natural contractions in prose**: write `I'll` instead of `I will`. Preserve exact quotations, code, commands, required template text, and legal text.
+- **Describe an empty quantity without "zero"**: write `There were no test failures`, `None failed`, or `There were not any failures` instead of `There were zero test failures`.
+- **Combine repetitive sentence openings** when one clear sentence can express the same actions. Prefer `I'll go get some bread and eat it` over a sequence of short sentences that each begin with `I'll`.
 - **Never use em dashes** (the long dash character). Rephrase using a comma, period, parentheses, or restructure the sentence. Do not substitute a spaced hyphen ( - ), which is also flagged (see the next rule).
 - **Never use a dash as sentence punctuation**: a hyphen or en-dash with spaces around it standing in for a comma, colon, or parenthetical pause (e.g., `our diff is dashboard only, so these are master drift - they came in`). Rephrase with a comma, period, parentheses, or sentence restructure. Word-joining hyphens with no surrounding spaces are fine ("runner-up", "well-known"). The `validate-style` linter blocks the spaced-dash pattern.
 - **Use "consistency" instead of "idempotency"** and **"consistent" instead of "idempotent"** in all written content (PRs, reviews, discussion posts, documentation, comments, etc.). These terms are more accessible to broader audiences.

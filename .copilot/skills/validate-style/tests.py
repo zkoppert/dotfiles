@@ -377,6 +377,89 @@ class TestSubjectlessActionBullet(unittest.TestCase):
         self.assertNotIn("no-subjectless-action-bullet", rules_in(violations))
 
 
+class TestIWillContraction(unittest.TestCase):
+    def test_i_will_is_flagged(self):
+        violations = find_violations("I will merge this after pull request 123.")
+        self.assertIn("use-ill-contraction", rules_in(violations))
+
+    def test_ill_is_not_flagged(self):
+        violations = find_violations("I'll merge this after pull request 123.")
+        self.assertNotIn("use-ill-contraction", rules_in(violations))
+
+    def test_smart_ill_is_not_flagged(self):
+        violations = find_violations("I\u2019ll merge this after pull request 123.")
+        self.assertNotIn("use-ill-contraction", rules_in(violations))
+
+    def test_i_will_inside_code_is_ignored(self):
+        violations = find_violations("Avoid `I will merge this` in prose.")
+        self.assertNotIn("use-ill-contraction", rules_in(violations))
+
+
+class TestZeroQuantity(unittest.TestCase):
+    def test_zero_test_failures_is_flagged(self):
+        violations = find_violations("There were zero test failures.")
+        self.assertIn("no-zero-quantity", rules_in(violations))
+
+    def test_numeric_zero_warnings_is_flagged(self):
+        violations = find_violations("The run produced 0 warnings.")
+        self.assertIn("no-zero-quantity", rules_in(violations))
+
+    def test_no_test_failures_is_not_flagged(self):
+        violations = find_violations("There were no test failures.")
+        self.assertNotIn("no-zero-quantity", rules_in(violations))
+
+    def test_zero_day_is_not_flagged(self):
+        violations = find_violations("The patch fixes a zero-day vulnerability.")
+        self.assertNotIn("no-zero-quantity", rules_in(violations))
+
+    def test_zero_trust_system_is_not_flagged(self):
+        violations = find_violations("The service uses a zero trust system.")
+        self.assertNotIn("no-zero-quantity", rules_in(violations))
+
+    def test_zero_as_number_is_not_flagged(self):
+        violations = find_violations("Zero is less than one.")
+        self.assertNotIn("no-zero-quantity", rules_in(violations))
+
+
+class TestRepetitiveSentenceOpenings(unittest.TestCase):
+    def test_three_consecutive_ill_sentences_are_flagged(self):
+        text = "I'll go to the store. I'll get some bread. I'll eat the bread."
+        violations = find_violations(text)
+        self.assertIn("no-repetitive-ill-openings", rules_in(violations))
+
+    def test_two_consecutive_ill_sentences_are_not_flagged(self):
+        text = "I'll go to the store. I'll get some bread."
+        violations = find_violations(text)
+        self.assertNotIn("no-repetitive-ill-openings", rules_in(violations))
+
+    def test_combined_sentence_is_not_flagged(self):
+        text = "I'll go get some bread and eat it."
+        violations = find_violations(text)
+        self.assertNotIn("no-repetitive-ill-openings", rules_in(violations))
+
+
+class TestSteSentenceLength(unittest.TestCase):
+    def test_descriptive_sentence_over_25_words_is_flagged(self):
+        text = "One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three twenty-four twenty-five twenty-six."
+        violations = find_violations(text)
+        self.assertIn("ste-sentence-length", rules_in(violations))
+
+    def test_descriptive_sentence_at_25_words_is_not_flagged(self):
+        text = "One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two twenty-three twenty-four twenty-five."
+        violations = find_violations(text)
+        self.assertNotIn("ste-sentence-length", rules_in(violations))
+
+    def test_checkbox_instruction_over_20_words_is_flagged(self):
+        text = "- [ ] I'll inspect the logs and the metrics before I deploy the service to every production region this afternoon for the release."
+        violations = find_violations(text)
+        self.assertIn("ste-sentence-length", rules_in(violations))
+
+    def test_checkbox_instruction_at_20_words_is_not_flagged(self):
+        text = "- [ ] I'll inspect logs and metrics before I deploy the service to every production region during the planned release window."
+        violations = find_violations(text)
+        self.assertNotIn("ste-sentence-length", rules_in(violations))
+
+
 class TestLineAndColumn(unittest.TestCase):
     def test_line_number_reported_correctly(self):
         text = "Line one is clean.\nLine two has a \u2014 dash here.\nLine three is fine."
