@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+"""Run Copilot in a durable tmux session inside a GitHub Codespace."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
+from typing import Optional
+
+DEFAULT_DISPLAY_NAME = "gummyworm"
+DEFAULT_SESSION = "copilot2"
+DEFAULT_RECONNECT_SECONDS = 600
+SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+class Copilot2Error(Exception):
+    """Report an actionable launcher error."""
+
+
+def command_path(command: str) -> str:
+    """Resolve a required command on PATH."""
+    resolved = shutil.which(command)
+    if resolved is None:
+        raise Copilot2Error(f"{command} is not installed or is not on PATH")
+    return resolved
+
+
+def integer_setting(name: str, default: int) -> int:
+    """Read a nonnegative integer environment setting."""
+    value = os.environ.get(name, str(default))
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise Copilot2Error(f"{name} must be a nonnegative integer") from error
+    if parsed < 0:
+        raise Copilot2Error(f"{name} must be a nonnegative integer")
+    return parsed
+
+
+def positive_integer_setting(name: str, default: int) -> int:
+    """Read a positive integer environment setting."""
+    parsed = integer_setting(name, default)
+    if parsed == 0:
+        raise Copilot2Error(f"{name} must be a positive integer")
+    return parsed
+
+
+def retry_delays() -> tuple[int, ...]:
+    """Read the reconnect delays from the environment."""
+    values = os.environ.get("COPILOT2_RETRY_DELAYS", "2,4,8,15").split(",")
+    if not values or any(not value for value in values):
+        raise Copilot2Error("COPILOT2_RETRY_DELAYS must contain nonnegative integers")
+    try:
+        delays = tuple(int(value) for value in values)
+    except ValueError as error:
+        raise Copilot2Error(
+            "COPILOT2_RETRY_DELAYS must contain nonnegative integers"
+        ) from error
+    if any(delay < 0 for delay in delays):
+        raise Copilot2Error("COPILOT2_RETRY_DELAYS must contain nonnegative integers")
+    return delays
+
+
+def run_json(command: list[str], description: str) -> object:
+    """Run a command and parse its JSON output."""
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        raise Copilot2Error(f"{description}: {detail}")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise Copilot2Error(f"{description}: invalid JSON output") from error
+
+
+def resolve_codespace(
+    gh: str,
+    repository: Optional[str],
+    display_name: str,
+    explicit_name: Optional[str],
+) -> tuple[str, str]:
+    """Resolve one Codespace and return its generated name and state."""
+    if explicit_name:
+        data = run_json(
+            [
+                gh,
+                "codespace",
+                "view",
+                "--codespace",
+                explicit_name,
+                "--json",
+                "name,state,repository",
+            ],
+            f"cannot inspect Codespace {explicit_name}",
+        )
+        if not isinstance(data, dict):
+            raise Copilot2Error("Codespace details used an unexpected format")
+        actual_repository = data.get("repository")
+        if repository and actual_repository != repository:
+            raise Copilot2Error(
+                f"Codespace {explicit_name} belongs to {actual_repository}, not {repository}"
+            )
+        return str(data["name"]), str(data["state"])
+
+    command = [
+        gh,
+        "codespace",
+        "list",
+        "--limit",
+        "100",
+        "--json",
+        "name,displayName,state",
+    ]
+    if repository:
+        command.extend(["--repo", repository])
+    repository_note = f" for {repository}" if repository else ""
+    data = run_json(command, f"cannot list Codespaces{repository_note}")
+    if not isinstance(data, list):
+        raise Copilot2Error("Codespace list used an unexpected format")
+
+    matches = [item for item in data if item.get("displayName") == display_name]
+    if not matches:
+        raise Copilot2Error(
+            f"no Codespace named {display_name!r} exists{repository_note}"
+        )
+    if len(matches) > 1:
+        names = ", ".join(sorted(str(item.get("name")) for item in matches))
+        raise Copilot2Error(
+            f"multiple Codespaces are named {display_name!r}: {names}; "
+            "use --codespace"
+        )
+
+    return str(matches[0]["name"]), str(matches[0]["state"])
+
+
+def run_bounded(
+    command: list[str], timeout: float, *, capture_output: bool = False
+) -> subprocess.CompletedProcess[str]:
+    with subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+        text=True,
+        start_new_session=True,
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def get_codespace_state(gh: str, codespace: str, timeout: float) -> Optional[str]:
+    """Return the current state, or None when the API is unreachable."""
+    result = run_bounded(
+        [
+            gh,
+            "codespace",
+            "view",
+            "--codespace",
+            codespace,
+            "--json",
+            "state",
+        ],
+        timeout,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        normalized = detail.lower()
+        if any(
+            marker in normalized
+            for marker in (
+                "authentication",
+                "http 401",
+                "http 403",
+                "not logged",
+                "not found",
+                "http 404",
+            )
+        ):
+            raise Copilot2Error(
+                f"cannot inspect Codespace {codespace}: {detail or 'unknown error'}"
+            )
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    state = data.get("state") if isinstance(data, dict) else None
+    return str(state) if state else None
+
+
+def write_ssh_config(gh: str, codespace: str, destination: Path) -> str:
+    """Write GitHub's OpenSSH proxy configuration and return its host alias."""
+    with destination.open("w", encoding="utf-8") as output:
+        result = subprocess.run(
+            [
+                gh,
+                "codespace",
+                "ssh",
+                "--codespace",
+                codespace,
+                "--config",
+            ],
+            stdout=output,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    if result.returncode != 0:
+        raise Copilot2Error(
+            "cannot generate Codespaces SSH configuration: "
+            f"{result.stderr.strip() or 'unknown error'}"
+        )
+
+    for line in destination.read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0].lower() == "host" and fields[1] != "*":
+            return fields[1]
+    raise Copilot2Error("generated Codespaces SSH configuration has no host")
+
+
+def ssh_command(
+    ssh: str,
+    config: Path,
+    host: str,
+    session: str,
+    mode: str,
+    invocation_id: str,
+    action: str,
+    connect_timeout: float,
+    connected_marker: Optional[Path] = None,
+) -> list[str]:
+    """Request a terminal only for attachment, not for bounded preparation."""
+    remote_command = (
+        'exec "$HOME/.local/bin/copilot-codespace-session" '
+        f"{shlex.quote(session)} {mode} {invocation_id} {action}"
+    )
+    command = [
+        ssh,
+        "-F",
+        str(config),
+        "-tt" if action == "attach" else "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={max(1, min(15, int(connect_timeout)))}",
+        "-o",
+        "ConnectionAttempts=1",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "TCPKeepAlive=yes",
+    ]
+    if connected_marker is not None:
+        marker_path = shlex.quote(str(connected_marker)).replace("%", "%%")
+        command.extend(
+            [
+                "-o",
+                "PermitLocalCommand=yes",
+                "-o",
+                f"LocalCommand=printf connected > {marker_path}",
+            ]
+        )
+    command.extend([host, remote_command])
+    return command
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Run Copilot in a durable tmux session in gummyworm."
+    )
+    parser.add_argument(
+        "session",
+        nargs="?",
+        default=DEFAULT_SESSION,
+        help="tmux session name (default: copilot2)",
+    )
+    parser.add_argument(
+        "--codespace",
+        help="exact generated Codespace name instead of the gummyworm display name",
+    )
+    parser.add_argument(
+        "--new",
+        action="store_true",
+        help="clear a stale continuity marker when no tmux session exists",
+    )
+    parser.add_argument(
+        "--display-name",
+        default=os.environ.get("COPILOT2_DISPLAY_NAME", DEFAULT_DISPLAY_NAME),
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--repo",
+        default=os.environ.get("COPILOT2_REPOSITORY"),
+        help=argparse.SUPPRESS,
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    """Connect to the Codespace and reconnect after transport failures."""
+    args = parse_args()
+    if not SESSION_PATTERN.fullmatch(args.session):
+        raise Copilot2Error(
+            "session names can contain only letters, numbers, underscores, and hyphens"
+        )
+
+    gh = command_path("gh")
+    ssh = command_path("ssh")
+    auth = subprocess.run(
+        [gh, "auth", "status", "--hostname", "github.com"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if auth.returncode != 0:
+        raise Copilot2Error(
+            f"GitHub CLI authentication failed: {auth.stderr.strip() or 'run gh auth login'}"
+        )
+
+    codespace, _state = resolve_codespace(
+        gh,
+        args.repo,
+        args.display_name,
+        args.codespace,
+    )
+    max_reconnect_seconds = positive_integer_setting(
+        "COPILOT2_MAX_RECONNECT_SECONDS",
+        DEFAULT_RECONNECT_SECONDS,
+    )
+    delays = retry_delays()
+    attempt = 0
+    mode = "new" if args.new else "start"
+    invocation_id = uuid.uuid4().hex
+
+    with tempfile.TemporaryDirectory(prefix="copilot2-") as temp_dir:
+        config = Path(temp_dir) / "ssh-config"
+        connected_marker = Path(temp_dir) / "connected"
+        host = write_ssh_config(gh, codespace, config)
+        deadline = time.monotonic() + max_reconnect_seconds
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            connected_marker.unlink(missing_ok=True)
+            prepare_command = ssh_command(
+                ssh,
+                config,
+                host,
+                args.session,
+                mode,
+                invocation_id,
+                "prepare",
+                remaining,
+            )
+            try:
+                result = run_bounded(prepare_command, remaining)
+            except subprocess.TimeoutExpired:
+                break
+            if result.returncode == 0:
+                mode = "resume"
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                attach_command = ssh_command(
+                    ssh,
+                    config,
+                    host,
+                    args.session,
+                    mode,
+                    invocation_id,
+                    "attach",
+                    remaining,
+                    connected_marker,
+                )
+                result = subprocess.run(attach_command, check=False, text=True)
+            if result.returncode == 0:
+                return 0
+            if result.returncode != 255:
+                return result.returncode
+
+            if connected_marker.is_file():
+                deadline = time.monotonic() + max_reconnect_seconds
+                attempt = 0
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                state = get_codespace_state(gh, codespace, remaining)
+            except subprocess.TimeoutExpired:
+                break
+            remaining = deadline - time.monotonic()
+            if state is not None and state != "Available":
+                print(
+                    f"copilot2: Codespace {codespace} is {state}. "
+                    "The remote Copilot process did not survive.",
+                    file=sys.stderr,
+                )
+                print(
+                    "copilot2: Start a fresh copilot2 --new invocation with the same session and Codespace options. "
+                    "Use /resume if needed.",
+                    file=sys.stderr,
+                )
+                return 12
+            if remaining <= 0:
+                break
+
+            delay = min(delays[min(attempt, len(delays) - 1)], remaining)
+            state_note = state or "unavailable"
+            print(
+                f"copilot2: connection dropped; Codespace state is {state_note}; "
+                f"retrying in {delay:g} seconds",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+            attempt += 1
+
+    print(
+        "copilot2: reconnect deadline reached; run copilot2 again to retry",
+        file=sys.stderr,
+    )
+    return 124
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Copilot2Error as error:
+        print(f"copilot2: {error}", file=sys.stderr)
+        raise SystemExit(2) from error
+    except KeyboardInterrupt as error:
+        print("\ncopilot2: interrupted", file=sys.stderr)
+        raise SystemExit(130) from error

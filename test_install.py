@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,7 +57,17 @@ class InstallScriptTest(unittest.TestCase):
             "#!/bin/sh\n"
             "printf '%s\\n' \"$*\" >> \"$HOME/copilot.log\"\n"
             "if [ \"$1\" = plugin ] && [ \"$2\" = list ]; then\n"
-            "  [ -f \"$HOME/.copilot/gho11y-installed\" ] && printf '  \\342\\200\\242 gho11y (v1.0.0)\\n'\n"
+            '  [ "$3" = --json ] || exit 90\n'
+            '  if [ -n "${FAKE_COPILOT_PLUGINS_JSON+x}" ]; then\n'
+            '    printf \'%s\\n\' "$FAKE_COPILOT_PLUGINS_JSON"\n'
+            '  elif [ -f "$HOME/.copilot/gho11y-installed" ]; then\n'
+            "    enabled=true\n"
+            '    [ -f "$HOME/.copilot/gho11y-disabled" ] && enabled=false\n'
+            '    printf \'[{"name":"gho11y","enabled":%s}]\\n\' "$enabled"\n'
+            "  else\n"
+            "    printf '[]\\n'\n"
+            "  fi\n"
+            '  exit "${FAKE_COPILOT_LIST_STATUS:-0}"\n'
             "elif [ \"$1\" = plugin ] && [ \"$2\" = install ]; then\n"
             "  [ \"${FAKE_COPILOT_FAIL:-0}\" = 1 ] && exit 1\n"
             "  mkdir -p \"$HOME/.copilot\"\n"
@@ -68,6 +81,8 @@ class InstallScriptTest(unittest.TestCase):
         self.env["HOME"] = str(self.home)
         self.env["PATH"] = f"{self.fake_bin}{os.pathsep}{self.env['PATH']}"
         self.env["COPILOT_SKILL_CATALOG_REPO"] = "private/catalog"
+        self.env["FAKE_COPILOT_LIST_STATUS"] = "0"
+        self.env.pop("FAKE_COPILOT_PLUGINS_JSON", None)
 
     def run_installer(self) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -78,6 +93,82 @@ class InstallScriptTest(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+    def prepare_node_install(self) -> None:
+        scripts = {
+            "uname": (
+                "#!/bin/sh\n"
+                'if [ "$1" = -m ]; then\n'
+                "  printf 'x86_64\\n'\n"
+                "else\n"
+                "  printf 'Linux\\n'\n"
+                "fi\n"
+            ),
+            "node": "#!/bin/sh\nprintf '20\\n'\n",
+            "1up": "#!/bin/sh\nexit 0\n",
+            "curl": (
+                "#!/bin/sh\n"
+                'printf \'%s\\n\' "$*" >> "$HOME/curl.log"\n'
+                '[ "$1" = -fsSL ] || exit 2\n'
+                'case "$2" in\n'
+                "  https://nodejs.org/dist/index.json)\n"
+                '    printf \'%s\\n\' "$FAKE_NODE_INDEX"\n'
+                '    exit "$FAKE_NODE_INDEX_EXIT"\n'
+                "    ;;\n"
+                "  https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz)\n"
+                '    [ "$3" = -o ] && [ "$#" -eq 4 ] || exit 2\n'
+                '    printf \'%s\\n\' "$4" > "$HOME/node-archive-path"\n'
+                '    cp "$FAKE_NODE_ARCHIVE" "$4" || exit "$?"\n'
+                '    exit "${FAKE_NODE_ARCHIVE_EXIT:-0}"\n'
+                "    ;;\n"
+                "  *) exit 2 ;;\n"
+                "esac\n"
+            ),
+        }
+        for name, script in scripts.items():
+            command = self.fake_bin / name
+            command.write_text(script, encoding="utf-8")
+            command.chmod(0o755)
+        self.env.update(
+            {
+                "FAKE_NODE_INDEX": json.dumps(
+                    [{"version": "v24.0.0"}, {"version": "v22.0.0"}]
+                ),
+                "FAKE_NODE_INDEX_EXIT": "0",
+                "TMPDIR": str(self.root),
+            }
+        )
+        runtime = self.root / "node-runtime"
+        (runtime / "bin").mkdir(parents=True)
+        for name in ("node", "npm", "npx", "corepack"):
+            command = runtime / "bin" / name
+            command.write_text("#!/bin/sh\nprintf 'v22.0.0\\n'\n", encoding="utf-8")
+            command.chmod(0o755)
+        archive_path = self.root / "node-release.tar.xz"
+        with tarfile.open(archive_path, "w:xz") as archive:
+            archive.add(runtime, arcname="node-v22.0.0-linux-x64")
+        self.env["FAKE_NODE_ARCHIVE"] = str(archive_path)
+
+    def prepare_existing_node_runtime(self) -> Path:
+        runtime = self.home / ".local" / "share" / "node-v22"
+        (runtime / "bin").mkdir(parents=True)
+        local_bin = self.home / ".local" / "bin"
+        local_bin.mkdir(parents=True)
+        for name in ("node", "npm", "npx", "corepack"):
+            command = runtime / "bin" / name
+            command.write_text("#!/bin/sh\nprintf 'v20.19.0\\n'\n", encoding="utf-8")
+            command.chmod(0o755)
+            (local_bin / name).symlink_to(command)
+        (runtime / "obsolete.txt").write_text("previous runtime\n", encoding="utf-8")
+        return runtime
+
+    def assert_node_commands_version(self, version: str) -> None:
+        for name in ("node", "npm", "npx", "corepack"):
+            result = subprocess.run(
+                [str(self.home / ".local" / "bin" / name), "--version"],
+                env=self.env, check=True, capture_output=True, text=True,
+            )
+            self.assertEqual(result.stdout, version + "\n", name)
 
     def test_review_lab_alias_is_added_once_on_macos(self) -> None:
         self.run_installer()
@@ -97,6 +188,14 @@ class InstallScriptTest(unittest.TestCase):
             "session-portability",
             "cleanup-worktrees",
             "remediate-accessibility-audit",
+            "graphql-availability-investigator",
+            "milestone-release-tracking",
+            "prod-explain",
+            "gh-axi",
+        )
+        self.assertEqual(
+            {path.name for path in (self.home / ".copilot" / "skills").iterdir()},
+            set(expected_skills),
         )
         gh_calls = (self.home / "gh.log").read_text(encoding="utf-8").splitlines()
         for skill_name in expected_skills:
@@ -132,6 +231,43 @@ class InstallScriptTest(unittest.TestCase):
             second_run.stdout,
         )
 
+    def test_disabled_plugin_produces_an_enable_instruction(self) -> None:
+        plugin_dir = self.home / ".copilot"
+        plugin_dir.mkdir()
+        (plugin_dir / "gho11y-installed").touch()
+        disabled = plugin_dir / "gho11y-disabled"
+        disabled.touch()
+
+        result = self.run_installer()
+
+        self.assertIn("Copilot plugin gho11y is not enabled", result.stdout)
+        self.assertIn("copilot plugin enable gho11y", result.stdout)
+        self.assertNotIn("Copilot plugin gho11y is already installed", result.stdout)
+        self.assertNotIn("Installed Copilot plugin gho11y", result.stdout)
+        self.assertTrue(disabled.exists())
+        self.assertEqual(
+            (self.home / "copilot.log").read_text(encoding="utf-8").splitlines(),
+            ["plugin list --json"],
+        )
+        self.assertIn("Dotfiles install complete.", result.stdout)
+
+    def test_plugin_listing_failures_do_not_trigger_installation(self) -> None:
+        for payload, status in (
+            ("not JSON", 0),
+            ("{}", 0),
+            ('[{"name":"gho11y","enabled":true}]', 1),
+        ):
+            with self.subTest(payload=payload, status=status):
+                self.env["FAKE_COPILOT_PLUGINS_JSON"] = payload
+                self.env["FAKE_COPILOT_LIST_STATUS"] = str(status)
+
+                result = self.run_installer()
+
+                self.assertIn("Cannot list Copilot plugins", result.stdout)
+                self.assertIn("copilot plugin list --json", result.stdout)
+                self.assertIn("Dotfiles install complete.", result.stdout)
+                self.assertFalse((self.home / ".copilot" / "gho11y-installed").exists())
+
     def test_missing_catalog_source_skips_catalog_tools(self) -> None:
         del self.env["COPILOT_SKILL_CATALOG_REPO"]
 
@@ -143,6 +279,349 @@ class InstallScriptTest(unittest.TestCase):
         )
         self.assertFalse((self.home / "gh.log").exists())
         self.assertFalse((self.home / "copilot.log").exists())
+
+    def test_codespace_copilot_commands_are_linked(self) -> None:
+        bin_dir = self.repo / "bin"
+        bin_dir.mkdir()
+        commands = (
+            "copilot2",
+            "copilot-codespace-session",
+            "bootstrap-copilot-mcp",
+            "verify-codespace-copilot-env",
+        )
+        for command in commands:
+            source = bin_dir / command
+            source.write_text("#!/bin/sh\n", encoding="utf-8")
+            source.chmod(0o755)
+
+        first_run = self.run_installer()
+        second_run = self.run_installer()
+
+        for command in commands:
+            target = self.home / ".local" / "bin" / command
+            self.assertTrue(target.is_symlink())
+            self.assertEqual(target.resolve(), (bin_dir / command).resolve())
+            self.assertEqual(first_run.stdout.count(f"Linked {command}"), 1)
+            self.assertEqual(second_run.stdout.count(f"Linked {command}"), 1)
+
+    def test_linux_installs_node_22_when_current_version_is_older(self) -> None:
+        self.prepare_node_install()
+
+        result = self.run_installer()
+
+        self.assertIn("Installed Node.js v22.0.0", result.stdout)
+        for name in ("node", "npm", "npx", "corepack"):
+            target = self.home / ".local" / "bin" / name
+            self.assertTrue(target.is_symlink())
+            self.assertTrue(target.is_file())
+            self.assertEqual(
+                target.resolve(),
+                (self.home / ".local" / "share" / "node-v22" / "bin" / name).resolve(),
+            )
+        version = subprocess.run(
+            [str(self.home / ".local" / "bin" / "node"), "--version"],
+            env=self.env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(version.stdout, "v22.0.0\n")
+        downloaded_archive = Path((self.home / "node-archive-path").read_text().strip())
+        self.assertFalse(downloaded_archive.exists())
+
+    def test_node_update_replaces_the_existing_runtime_after_extraction(self) -> None:
+        self.prepare_node_install()
+        runtime = self.prepare_existing_node_runtime()
+        self.assert_node_commands_version("v20.19.0")
+
+        for _ in range(2):
+            result = self.run_installer()
+
+            self.assertIn("Installed Node.js v22.0.0", result.stdout)
+            self.assert_node_commands_version("v22.0.0")
+            self.assertFalse((runtime / "obsolete.txt").exists())
+            self.assertEqual(set(runtime.parent.iterdir()), {runtime})
+
+    def test_partial_node_extraction_preserves_the_existing_runtime(self) -> None:
+        self.prepare_node_install()
+        runtime = self.prepare_existing_node_runtime()
+        self.assert_node_commands_version("v20.19.0")
+        (self.root / "node-runtime" / "new-only.txt").write_text("new runtime\n", encoding="utf-8")
+        with tarfile.open(self.env["FAKE_NODE_ARCHIVE"], "w:xz") as archive:
+            archive.add(self.root / "node-runtime", arcname="node-v22.0.0-linux-x64")
+            broken_link = tarfile.TarInfo("node-v22.0.0-linux-x64/broken-link")
+            broken_link.type = tarfile.LNKTYPE
+            broken_link.linkname = "node-v22.0.0-linux-x64/missing-target"
+            archive.addfile(broken_link)
+
+        result = self.run_installer()
+
+        self.assertIn("Failed to install Node.js 22", result.stdout)
+        self.assertIn("Dotfiles install complete.", result.stdout)
+        self.assert_node_commands_version("v20.19.0")
+        self.assertEqual((runtime / "obsolete.txt").read_text(), "previous runtime\n")
+        self.assertFalse((runtime / "new-only.txt").exists())
+        self.assertEqual(set(runtime.parent.iterdir()), {runtime})
+        downloaded_archive = Path((self.home / "node-archive-path").read_text().strip())
+        self.assertFalse(downloaded_archive.exists())
+
+    def test_failed_node_promotion_restores_the_existing_runtime(self) -> None:
+        self.prepare_node_install()
+        runtime = self.prepare_existing_node_runtime()
+        real_mv = shutil.which("mv")
+        if real_mv is None:
+            self.fail("mv is required to exercise install.sh")
+        mv = self.fake_bin / "mv"
+        mv.write_text(
+            "#!/bin/sh\n"
+            'if [ "$2" = "$HOME/.local/share/node-v22" ] && [ ! -e "$HOME/node-move-failed" ]; then\n'
+            '  : > "$HOME/node-move-failed"\n'
+            "  exit 1\n"
+            "fi\n"
+            f'exec {shlex.quote(real_mv)} "$@"\n',
+            encoding="utf-8",
+        )
+        mv.chmod(0o755)
+
+        result = self.run_installer()
+
+        self.assertIn("Failed to install Node.js 22", result.stdout)
+        self.assertIn("Dotfiles install complete.", result.stdout)
+        self.assertTrue((self.home / "node-move-failed").exists())
+        self.assert_node_commands_version("v20.19.0")
+        self.assertEqual((runtime / "obsolete.txt").read_text(), "previous runtime\n")
+        self.assertEqual(set(runtime.parent.iterdir()), {runtime})
+
+    def test_node_staging_is_cleaned_when_command_linking_fails(self) -> None:
+        self.prepare_node_install()
+        runtime = self.prepare_existing_node_runtime()
+        ln = self.fake_bin / "ln"
+        ln.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        ln.chmod(0o755)
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_installer()
+
+        self.assert_node_commands_version("v22.0.0")
+        self.assertEqual(set(runtime.parent.iterdir()), {runtime})
+        downloaded_archive = Path((self.home / "node-archive-path").read_text().strip())
+        self.assertFalse(downloaded_archive.exists())
+
+    def test_node_download_does_not_follow_a_preexisting_archive_symlink(self) -> None:
+        self.prepare_node_install()
+        owned = self.root / "owned-file"
+        owned.write_text("keep me\n", encoding="utf-8")
+        predictable = self.root / "node-v22.0.0-linux-x64.tar.xz"
+        predictable.symlink_to(owned)
+
+        result = self.run_installer()
+
+        self.assertIn("Installed Node.js v22.0.0", result.stdout)
+        self.assertEqual(owned.read_text(encoding="utf-8"), "keep me\n")
+        self.assertTrue(predictable.is_symlink())
+        self.assertEqual(predictable.readlink(), owned)
+        downloaded_archive = Path((self.home / "node-archive-path").read_text().strip())
+        self.assertNotEqual(downloaded_archive, predictable)
+        self.assertFalse(downloaded_archive.exists())
+
+    def test_node_archive_is_removed_after_download_or_extraction_failure(self) -> None:
+        self.prepare_node_install()
+        for failure in ("download", "extraction"):
+            with self.subTest(failure=failure):
+                self.env["FAKE_NODE_ARCHIVE_EXIT"] = "22" if failure == "download" else "0"
+                if failure == "extraction":
+                    Path(self.env["FAKE_NODE_ARCHIVE"]).write_bytes(b"not an archive")
+
+                result = self.run_installer()
+
+                self.assertIn("Failed to install Node.js 22", result.stdout)
+                self.assertIn("Dotfiles install complete.", result.stdout)
+                self.assertFalse((self.home / ".local" / "bin" / "node").exists())
+                downloaded_archive = Path((self.home / "node-archive-path").read_text().strip())
+                self.assertFalse(downloaded_archive.exists())
+
+    def test_node_install_preserves_a_non_directory_runtime_path(self) -> None:
+        self.prepare_node_install()
+        node_dir = self.home / ".local" / "share" / "node-v22"
+        node_dir.parent.mkdir(parents=True)
+        node_dir.write_text("keep me\n", encoding="utf-8")
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_installer()
+
+        self.assertEqual(node_dir.read_text(encoding="utf-8"), "keep me\n")
+        self.assertFalse((self.home / ".local" / "bin" / "node").exists())
+
+    def test_node_install_preserves_user_managed_commands(self) -> None:
+        self.prepare_node_install()
+        local_bin = self.home / ".local" / "bin"
+        local_bin.mkdir(parents=True)
+        for name in ("node", "npm", "npx", "corepack"):
+            command = local_bin / name
+            command.write_text(
+                f"#!/bin/sh\nprintf 'user-managed {name}\\n'\n", encoding="utf-8"
+            )
+            command.chmod(0o755)
+
+        for _ in range(2):
+            result = self.run_installer()
+
+            self.assertIn("Dotfiles install complete.", result.stdout)
+            for name in ("node", "npm", "npx", "corepack"):
+                command = local_bin / name
+                self.assertFalse(command.is_symlink())
+                self.assertEqual(
+                    command.read_text(encoding="utf-8"),
+                    f"#!/bin/sh\nprintf 'user-managed {name}\\n'\n",
+                )
+                self.assertIn(
+                    f"{command} exists and is not a symlink - skipping", result.stdout
+                )
+
+    def test_node_install_preserves_directories_and_refreshes_symlinks(self) -> None:
+        self.prepare_node_install()
+        local_bin = self.home / ".local" / "bin"
+        owned_directory = local_bin / "node"
+        owned_directory.mkdir(parents=True)
+        (owned_directory / "owned.txt").write_text("keep me\n", encoding="utf-8")
+        old_target = self.root / "old-npm"
+        old_target.write_text("owned command\n", encoding="utf-8")
+        (local_bin / "npm").symlink_to(old_target)
+        (local_bin / "npx").symlink_to(self.root / "missing-npx")
+
+        result = self.run_installer()
+
+        self.assertIn(
+            f"{owned_directory} exists and is not a symlink - skipping", result.stdout
+        )
+        self.assertEqual({path.name for path in owned_directory.iterdir()}, {"owned.txt"})
+        self.assertEqual(old_target.read_text(encoding="utf-8"), "owned command\n")
+        for name in ("npm", "npx", "corepack"):
+            target = local_bin / name
+            self.assertTrue(target.is_symlink())
+            self.assertTrue(target.is_file())
+            self.assertEqual(
+                target.resolve(),
+                (self.home / ".local" / "share" / "node-v22" / "bin" / name).resolve(),
+            )
+
+    def test_node_release_lookup_failures_do_not_stop_command_linking(self) -> None:
+        self.prepare_node_install()
+        source = self.repo / "bin" / "copilot2"
+        source.parent.mkdir()
+        source.write_text("#!/bin/sh\n", encoding="utf-8")
+        source.chmod(0o755)
+        target = self.home / ".local" / "bin" / "copilot2"
+        curl_log = self.home / "curl.log"
+        cases = (
+            ("network failure", "", 6),
+            ("invalid JSON", "{", 0),
+            ("no Node.js 22 release", '[{"version":"v24.0.0"}]', 0),
+            ("failed transfer with valid JSON", '[{"version":"v22.0.0"}]', 18),
+        )
+        for name, index, status in cases:
+            with self.subTest(case=name):
+                target.unlink(missing_ok=True)
+                curl_log.unlink(missing_ok=True)
+                self.env["FAKE_NODE_INDEX"] = index
+                self.env["FAKE_NODE_INDEX_EXIT"] = str(status)
+
+                result = self.run_installer()
+
+                self.assertIn("Cannot look up Node.js 22", result.stdout)
+                self.assertIn("rerun ./install.sh", result.stdout)
+                self.assertIn("Dotfiles install complete.", result.stdout)
+                self.assertTrue(target.is_symlink())
+                self.assertEqual(target.resolve(), source.resolve())
+                self.assertFalse((self.home / ".local/share/node-v22").exists())
+                self.assertEqual(
+                    curl_log.read_text(encoding="utf-8").splitlines(),
+                    ["-fsSL https://nodejs.org/dist/index.json"],
+                )
+
+    def prepare_1up_install(self) -> None:
+        (self.fake_bin / "uname").write_text(
+            "#!/bin/sh\nprintf 'Linux\\n'\n",
+            encoding="utf-8",
+        )
+        npx = self.fake_bin / "npx"
+        npx.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        npx.chmod(0o755)
+        node = self.fake_bin / "node"
+        node.write_text("#!/bin/sh\nprintf '22\\n'\n", encoding="utf-8")
+        node.chmod(0o755)
+        go = self.fake_bin / "go"
+        go.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$*\" >> \"$HOME/go.log\"\n"
+            "mkdir -p \"$GOBIN\"\n"
+            "printf '#!/bin/sh\\nexit 0\\n' > \"$GOBIN/1up\"\n"
+            "chmod +x \"$GOBIN/1up\"\n",
+            encoding="utf-8",
+        )
+        go.chmod(0o755)
+        self.env["COPILOT_1UP_MODULE"] = "private.example/one-up@v1.2.3"
+        # A host-installed 1up would skip the installation this test exercises.
+        for name in ("dirname", "mkdir", "chmod", "python3"):
+            command = shutil.which(name)
+            self.assertIsNotNone(command, f"{name} is required to exercise install.sh")
+            (self.fake_bin / name).symlink_to(command)
+        self.env["PATH"] = str(self.fake_bin)
+
+    def test_linux_installs_private_1up_module(self) -> None:
+        self.prepare_1up_install()
+
+        result = self.run_installer()
+
+        self.assertIn("Installed 1up", result.stdout)
+        target = self.home / ".local" / "bin" / "1up"
+        self.assertTrue(target.is_file())
+        installed = target.read_bytes()
+        repeated = self.run_installer()
+        self.assertIn("exists - skipping 1up install", repeated.stdout)
+        self.assertEqual(target.read_bytes(), installed)
+        self.assertEqual(
+            (self.home / "go.log").read_text(encoding="utf-8").splitlines(),
+            ["install private.example/one-up@v1.2.3"],
+        )
+
+    def test_1up_install_preserves_existing_targets_outside_path(self) -> None:
+        self.prepare_1up_install()
+        target = self.home / ".local" / "bin" / "1up"
+        target.parent.mkdir(parents=True)
+        owned = self.home / "owned-1up"
+        owned.write_text("keep me\n", encoding="utf-8")
+        missing = self.home / "missing-1up"
+        content = "#!/bin/sh\nprintf 'user-managed 1up\\n'\n"
+
+        for kind in ("executable", "file", "directory", "symlink", "dangling-symlink"):
+            with self.subTest(kind=kind):
+                if kind == "directory":
+                    target.mkdir()
+                    (target / "owned.txt").write_text(content, encoding="utf-8")
+                elif kind in ("symlink", "dangling-symlink"):
+                    target.symlink_to(owned if kind == "symlink" else missing)
+                else:
+                    target.write_text(content, encoding="utf-8")
+                    target.chmod(0o755 if kind == "executable" else 0o644)
+                mode = target.lstat().st_mode
+
+                result = self.run_installer()
+
+                self.assertIn("exists - skipping 1up install", result.stdout)
+                self.assertFalse((self.home / "go.log").exists())
+                self.assertEqual(target.lstat().st_mode, mode)
+                self.assertEqual(owned.read_text(encoding="utf-8"), "keep me\n")
+                self.assertFalse(missing.exists())
+                if kind == "directory":
+                    self.assertEqual((target / "owned.txt").read_text(encoding="utf-8"), content)
+                    shutil.rmtree(target)
+                elif kind in ("symlink", "dangling-symlink"):
+                    self.assertEqual(target.readlink(), owned if kind == "symlink" else missing)
+                    target.unlink()
+                else:
+                    self.assertEqual(target.read_text(encoding="utf-8"), content)
+                    target.unlink()
 
     def test_missing_catalog_commands_are_nonfatal(self) -> None:
         (self.fake_bin / "gh").unlink()
@@ -167,7 +646,7 @@ class InstallScriptTest(unittest.TestCase):
 
         self.assertEqual(
             result.stdout.count("Failed to install Copilot skill"),
-            4,
+            8,
         )
         self.assertIn("Failed to install Copilot plugin gho11y", result.stdout)
         self.assertIn("Dotfiles install complete.", result.stdout)

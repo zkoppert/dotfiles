@@ -32,7 +32,7 @@ fi
 # Install private catalog tools only when the source is supplied outside this
 # public repository.
 CATALOG_REPO="${COPILOT_SKILL_CATALOG_REPO:-}"
-CATALOG_SKILLS="validate-pr-with-codespace session-portability cleanup-worktrees remediate-accessibility-audit"
+CATALOG_SKILLS="validate-pr-with-codespace session-portability cleanup-worktrees remediate-accessibility-audit graphql-availability-investigator milestone-release-tracking prod-explain gh-axi"
 if [ -z "$CATALOG_REPO" ]; then
   echo "⚠ COPILOT_SKILL_CATALOG_REPO is not set - skipping private catalog tools"
 else
@@ -52,15 +52,118 @@ else
   fi
 
   if command -v copilot >/dev/null 2>&1; then
-    if copilot plugin list 2>/dev/null | grep -Eq '(^|[[:space:]])gho11y([[:space:](]|$)'; then
-      echo "✓ Copilot plugin gho11y is already installed"
-    elif copilot plugin install "$CATALOG_REPO:plugins/gho11y" </dev/null; then
-      echo "✓ Installed Copilot plugin gho11y"
+    if plugin_state="$(
+      set -o pipefail
+      copilot plugin list --json 2>/dev/null |
+        python3 -c '
+import json, sys
+try:
+    plugins = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+if not isinstance(plugins, list):
+    sys.exit(1)
+matches = [plugin for plugin in plugins if isinstance(plugin, dict) and plugin.get("name") == "gho11y"]
+print("enabled" if any(plugin.get("enabled") is True for plugin in matches) else "disabled" if matches else "missing")
+'
+    )"; then
+      case "$plugin_state" in
+        enabled)
+          echo "✓ Copilot plugin gho11y is already installed"
+          ;;
+        disabled)
+          echo "⚠ Copilot plugin gho11y is not enabled; run 'copilot plugin enable gho11y'"
+          ;;
+        missing)
+          if copilot plugin install "$CATALOG_REPO:plugins/gho11y" </dev/null; then
+            echo "✓ Installed Copilot plugin gho11y"
+          else
+            echo "⚠ Failed to install Copilot plugin gho11y - continuing dotfiles setup"
+          fi
+          ;;
+      esac
     else
-      echo "⚠ Failed to install Copilot plugin gho11y - continuing dotfiles setup"
+      echo "⚠ Cannot list Copilot plugins; run 'copilot plugin list --json' before retrying"
     fi
   else
     echo "⚠ copilot is missing - skipping Copilot plugin gho11y"
+  fi
+fi
+
+# Install Linux-only dependencies for the remote Copilot environment.
+if [ "$(uname)" = "Linux" ]; then
+  node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+  if [ -z "$node_major" ] || [ "$node_major" -lt 22 ]; then
+    case "$(uname -m)" in
+      x86_64) node_arch="x64" ;;
+      aarch64 | arm64) node_arch="arm64" ;;
+      *) node_arch="" ;;
+    esac
+    if [ -n "$node_arch" ] &&
+      command -v curl >/dev/null 2>&1 &&
+      command -v python3 >/dev/null 2>&1 &&
+      command -v tar >/dev/null 2>&1; then
+      if node_version="$(
+        set -o pipefail
+        curl -fsSL https://nodejs.org/dist/index.json |
+          python3 -c 'import json, sys; print(next(item["version"] for item in json.load(sys.stdin) if item["version"].startswith("v22.")))'
+      )"; then
+        node_dir="$HOME/.local/share/node-v22"
+        mkdir -p "$node_dir" "$HOME/.local/bin"
+        node_stage="$(mktemp -d "$HOME/.local/share/.node-v22.XXXXXX")"
+        node_archive="$node_stage/archive.tar.xz"
+        cleanup_node_install() {
+          if { [ -e "$node_stage/previous" ] || [ -L "$node_stage/previous" ]; } &&
+            [ ! -e "$node_dir" ] && [ ! -L "$node_dir" ]; then
+            mv "$node_stage/previous" "$node_dir" || return 1
+          fi
+          rm -rf "$node_stage"
+        }
+        trap cleanup_node_install EXIT
+        mkdir "$node_stage/runtime"
+        if curl -fsSL "https://nodejs.org/dist/$node_version/node-$node_version-linux-$node_arch.tar.xz" -o "$node_archive" &&
+          tar -xJf "$node_archive" --strip-components=1 -C "$node_stage/runtime" &&
+          mv "$node_dir" "$node_stage/previous" &&
+          mv "$node_stage/runtime" "$node_dir"; then
+          for node_command in node npm npx corepack; do
+            node_target="$HOME/.local/bin/$node_command"
+            if [ -L "$node_target" ] || [ ! -e "$node_target" ]; then
+              ln -sfn "$node_dir/bin/$node_command" "$node_target"
+            else
+              echo "⚠ $node_target exists and is not a symlink - skipping"
+            fi
+          done
+          echo "✓ Installed Node.js $node_version → ~/.local/share/node-v22"
+        else
+          echo "⚠ Failed to install Node.js 22 - continuing dotfiles setup"
+        fi
+        cleanup_node_install
+        trap - EXIT
+      else
+        echo "⚠ Cannot look up Node.js 22. Check access to https://nodejs.org/dist/index.json and rerun ./install.sh. Continuing dotfiles setup."
+      fi
+    else
+      echo "⚠ Node.js 22 is required and this system has no supported automatic installer"
+    fi
+  fi
+
+  if ! command -v 1up >/dev/null 2>&1; then
+    one_up_target="$HOME/.local/bin/1up"
+    ONE_UP_MODULE="${COPILOT_1UP_MODULE:-}"
+    if [ -e "$one_up_target" ] || [ -L "$one_up_target" ]; then
+      echo "⚠ $one_up_target exists - skipping 1up install"
+    elif [ -n "$ONE_UP_MODULE" ] && command -v go >/dev/null 2>&1; then
+      mkdir -p "$HOME/.local/bin"
+      one_up_path="${ONE_UP_MODULE%@*}"
+      one_up_owner="${one_up_path%/*}"
+      if GOBIN="$HOME/.local/bin" GOPRIVATE="$one_up_owner/*" go install "$ONE_UP_MODULE"; then
+        echo "✓ Installed 1up → ~/.local/bin/1up"
+      else
+        echo "⚠ Failed to install 1up - continuing dotfiles setup"
+      fi
+    else
+      echo "⚠ 1up is missing - set COPILOT_1UP_MODULE to its versioned Go module"
+    fi
   fi
 fi
 
@@ -81,7 +184,7 @@ if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
   # over the real gh binary. Cover both zsh (macOS default) and bash (Codespaces,
   # Linux). brew shellenv (in .zprofile) prepends /opt/homebrew/bin, so we add
   # our own prepend AFTER brew runs.
-  PATH_LINE='export PATH="$HOME/.local/bin:$PATH"  # dotfiles: gh wrapper'
+  PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\"  # dotfiles: gh wrapper"
   for shell_rc in "$HOME/.zprofile" "$HOME/.profile" "$HOME/.bashrc"; do
     rc_short="${shell_rc/#$HOME/~}"
     if [ -f "$shell_rc" ] && grep -q "dotfiles: gh wrapper" "$shell_rc"; then
@@ -92,6 +195,26 @@ if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
     fi
   done
 fi
+
+# Install durable Codespace Copilot commands.
+for copilot_command in \
+  copilot2 \
+  copilot-codespace-session \
+  bootstrap-copilot-mcp \
+  verify-codespace-copilot-env; do
+  source_path="$DOTFILES_DIR/bin/$copilot_command"
+  target_path="$HOME/.local/bin/$copilot_command"
+  if [ ! -x "$source_path" ]; then
+    continue
+  fi
+  mkdir -p "$HOME/.local/bin"
+  if [ -L "$target_path" ] || [ ! -e "$target_path" ]; then
+    ln -sfn "$source_path" "$target_path"
+    echo "✓ Linked $copilot_command → $target_path"
+  else
+    echo "⚠ $target_path exists and is not a symlink - skipping"
+  fi
+done
 
 # Add the local-only review environment shortcut on macOS.
 if [ "$(uname)" = "Darwin" ]; then

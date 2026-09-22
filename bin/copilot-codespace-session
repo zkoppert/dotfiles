@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+"""Manage a durable Copilot process and its serialized continuity state."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator, Optional
+
+TOKEN = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+class SessionError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+@dataclass
+class Continuity:
+    identity: Optional[str]
+    invocations: dict[str, str]
+
+
+@dataclass(frozen=True)
+class Process:
+    session: str
+    pane: str
+    pid: str
+
+
+def tmux(*arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["tmux", *arguments], capture_output=True, text=True, check=False
+    )
+
+
+def lost(session: str) -> SessionError:
+    return SessionError(
+        12,
+        f"session {session} did not survive for this invocation; "
+        "start a fresh copilot2 --new invocation with the same session and Codespace options. "
+        "Use Copilot /resume for conversation context.",
+    )
+
+
+@contextmanager
+def session_lock(marker: Path) -> Iterator[None]:
+    descriptor = os.open(str(marker) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(descriptor, "a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        yield
+
+
+def read_state(marker: Path) -> Continuity:
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        if marker.is_symlink():
+            raise SessionError(13, f"cannot read continuity state: {marker}")
+        return Continuity(None, {})
+    except (ValueError, UnicodeError) as error:
+        raise SessionError(13, f"invalid continuity state: {marker}") from error
+    if not isinstance(payload, dict) or set(payload) != {"identity", "invocations"}:
+        raise SessionError(13, f"invalid continuity state: {marker}")
+    identity = payload["identity"]
+    invocations = payload["invocations"]
+    if (
+        (identity is not None and (not isinstance(identity, str) or not TOKEN.fullmatch(identity)))
+        or not isinstance(invocations, dict)
+        or any(
+            not isinstance(invocation, str)
+            or not TOKEN.fullmatch(invocation)
+            or not isinstance(generation, str)
+            or not TOKEN.fullmatch(generation)
+            for invocation, generation in invocations.items()
+        )
+    ):
+        raise SessionError(13, f"invalid continuity state: {marker}")
+    if (
+        identity is not None and invocations.get(identity) != identity
+    ) or any(invocations.get(generation) != generation for generation in invocations.values()):
+        raise SessionError(13, f"incomplete invocation history: {marker}")
+    return Continuity(identity, invocations)
+
+
+@contextmanager
+def staged_state(marker: Path, state: Continuity) -> Iterator[Path]:
+    if marker.exists() and (not marker.is_file() or not os.access(marker, os.W_OK)):
+        raise SessionError(13, f"cannot write continuity state: {marker}")
+    descriptor, name = tempfile.mkstemp(prefix=f".{marker.stem}.", dir=marker.parent)
+    pending = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(
+                {"identity": state.identity, "invocations": state.invocations},
+                output,
+                sort_keys=True,
+            )
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        yield pending
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def save_state(marker: Path, state: Continuity) -> None:
+    with staged_state(marker, state) as pending:
+        os.replace(pending, marker)
+        directory = os.open(marker.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
+def migrate_legacy_state(state_dir: Path) -> None:
+    legacy_dir = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "copilot2"
+    try:
+        if legacy_dir.samefile(state_dir):
+            return
+        legacy_markers = sorted(legacy_dir.iterdir())
+    except FileNotFoundError:
+        if legacy_dir.is_symlink():
+            raise SessionError(13, f"cannot read legacy continuity state: {legacy_dir}")
+        return
+    for legacy in legacy_markers:
+        if legacy.suffix != ".identity":
+            continue
+        marker = state_dir / legacy.name
+        with session_lock(marker):
+            if marker.exists() or marker.is_symlink():
+                continue
+            with session_lock(legacy):
+                save_state(marker, read_state(legacy))
+
+
+def require_live(process: Process, session: str) -> None:
+    result = tmux(
+        "display-message", "-p", "-t", process.pane,
+        "#{session_id} #{pane_pid} #{pane_dead}",
+    )
+    if result.returncode or result.stdout.strip() != f"{process.session} {process.pid} 0":
+        raise SessionError(
+            12,
+            f"original Copilot process in session {session} is unavailable; "
+            "use a new session name and Copilot /resume",
+        )
+
+
+def inspect_session(session: str, identity: str) -> Process:
+    target = tmux("display-message", "-p", "-t", f"={session}:", "#{session_id}")
+    session_id = target.stdout.strip()
+    if target.returncode or not re.fullmatch(r"\$[0-9]+", session_id):
+        raise lost(session)
+    live_identity = tmux("show-options", "-qv", "-t", session_id, "@copilot2_identity")
+    if live_identity.returncode or live_identity.stdout.strip() != identity:
+        raise SessionError(13, f"session-name collision: {session} does not match its continuity marker")
+    origin = tmux("show-options", "-qv", "-t", session_id, "@copilot2_origin")
+    fields = origin.stdout.split()
+    if (
+        origin.returncode or len(fields) != 2
+        or not re.fullmatch(r"%[0-9]+", fields[0])
+        or not re.fullmatch(r"[1-9][0-9]*", fields[1])
+    ):
+        raise SessionError(12, f"original Copilot process in session {session} is unavailable")
+    process = Process(session_id, fields[0], fields[1])
+    require_live(process, session)
+    return process
+
+
+def create_session(
+    marker: Path, state: Continuity, session: str, invocation: str, workspace: str
+) -> Process:
+    replacement = Continuity(invocation, {**state.invocations, invocation: invocation})
+    # Reserve first so interrupted startup cannot silently create a replacement.
+    save_state(marker, replacement)
+    process = None
+    result = None
+    try:
+        result = tmux(
+            "new-session", "-d", "-s", session, "-c", workspace,
+            "-e", f"PATH={os.environ.get('PATH', os.defpath)}", "-P", "-F",
+            "#{session_id} #{pane_id} #{pane_pid}", "exec copilot --allow-all",
+            ";", "set-option", "-t", f"={session}:", "@copilot2_identity", invocation,
+            ";", "set-option", "-F", "-t", f"={session}:",
+            "@copilot2_origin", "#{pane_id} #{pane_pid}",
+        )
+        fields = result.stdout.split()
+        if (
+            len(fields) == 3
+            and re.fullmatch(r"\$[0-9]+", fields[0])
+            and re.fullmatch(r"%[0-9]+", fields[1])
+            and re.fullmatch(r"[1-9][0-9]*", fields[2])
+        ):
+            process = Process(*fields)
+        if result.returncode or process is None:
+            raise SessionError(13, f"could not identify new session {session}")
+        require_live(process, session)
+    except BaseException:
+        if process is not None:
+            removed = tmux("kill-session", "-t", process.session)
+            if removed.returncode and tmux("has-session", "-t", process.session).returncode == 0:
+                print(f"copilot-codespace-session: could not remove incomplete session {session}", file=sys.stderr)
+                raise
+        elif (result is None or result.returncode == 0) and tmux("has-session", "-t", f"={session}").returncode == 0:
+            raise
+        save_state(marker, state)
+        raise
+    return process
+
+
+def authorize(
+    marker: Path, session: str, mode: str, invocation: str, action: str, workspace: str
+) -> tuple[Process, str]:
+    with session_lock(marker):
+        state = read_state(marker)
+        previous = state.invocations.get(invocation)
+        if (mode == "resume" and previous is None) or (
+            previous is not None and previous != state.identity
+        ):
+            raise lost(session)
+        if tmux("has-session", "-t", f"={session}").returncode == 0:
+            identity = state.identity
+            if identity is None:
+                raise SessionError(13, f"session-name collision: {session} has no continuity marker")
+            process = inspect_session(session, identity)
+            if previous is None:
+                if action != "prepare":
+                    raise SessionError(13, "prepare this invocation before attaching")
+                state.invocations[invocation] = identity
+                save_state(marker, state)
+            return process, identity
+        if previous is not None or action != "prepare" or (state.identity is not None and mode != "new"):
+            raise lost(session)
+        process = create_session(marker, state, session, invocation, workspace)
+        return process, invocation
+
+
+def attach(marker: Path, session: str, process: Process, identity: str) -> int:
+    guard = (
+        "#{&&:#{==:#{session_id}," + process.session + "},"
+        "#{&&:#{==:#{pane_pid}," + process.pid + "},#{==:#{pane_dead},0}}}"
+    )
+    guard = "#{&&:#{==:#{@copilot2_identity}," + identity + "}," + guard + "}"
+    status = subprocess.run(
+        [
+            "tmux", "if-shell", "-F", "-t", process.pane, guard,
+            f"attach-session -d -t {process.pane}", "run-shell 'exit 12'",
+        ],
+        check=False,
+    ).returncode
+    if status == 12:
+        raise SessionError(12, f"original Copilot pane in session {session} is unavailable")
+    if status != 0:
+        require_live(process, session)
+        return 13 if status == 255 else status
+    with session_lock(marker):
+        state = read_state(marker)
+        if state.identity == identity and tmux("has-session", "-t", f"={session}").returncode != 0:
+            state.identity = None
+            save_state(marker, state)
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("session", nargs="?", default="copilot2")
+    parser.add_argument("mode", nargs="?", default="resume")
+    parser.add_argument("invocation", nargs="?", default="unknown")
+    parser.add_argument("action", nargs="?", default="attach")
+    args = parser.parse_args(["--", *sys.argv[1:]])
+    if os.environ.get("CODESPACES") != "true" and not Path("/workspaces/.codespaces").is_dir():
+        raise SessionError(10, "this command must run in a Codespace")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", args.session):
+        raise SessionError(11, f"invalid tmux session name: {args.session}")
+    if not TOKEN.fullmatch(args.invocation):
+        raise SessionError(11, "invalid invocation ID")
+    if args.mode not in ("start", "resume", "new") or args.action not in ("prepare", "attach"):
+        raise SessionError(11, "invalid mode or action")
+    for command in ("tmux", "copilot"):
+        if shutil.which(command) is None:
+            raise SessionError(10, f"missing required command: {command}")
+    workspace = os.environ.get("COPILOT2_REMOTE_CWD")
+    if not workspace:
+        repository = os.environ.get("GITHUB_REPOSITORY")
+        if not repository:
+            raise SessionError(11, "set COPILOT2_REMOTE_CWD when GITHUB_REPOSITORY is unavailable")
+        workspace = f"/workspaces/{repository.rsplit('/', 1)[-1]}"
+    if not Path(workspace).is_dir():
+        raise SessionError(11, f"missing workspace: {workspace}")
+    state_dir = Path("/workspaces") / ".copilot2"
+    state_dir.mkdir(mode=0o700, exist_ok=True)
+    migrate_legacy_state(state_dir)
+    marker = state_dir / f"{args.session}.identity"
+    process, identity = authorize(marker, args.session, args.mode, args.invocation, args.action, workspace)
+    if args.action == "prepare":
+        return 0
+    return attach(marker, args.session, process, identity)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except SessionError as error:
+        print(f"copilot-codespace-session: {error}", file=sys.stderr)
+        raise SystemExit(error.status) from error
+    except (OSError, UnicodeError) as error:
+        print(f"copilot-codespace-session: cannot access continuity state: {error}", file=sys.stderr)
+        raise SystemExit(13) from error
+    except KeyboardInterrupt:
+        raise SystemExit(130)

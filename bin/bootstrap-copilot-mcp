@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Create a portable Copilot MCP configuration without copying credentials."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import tempfile
+from pathlib import Path
+
+MCP_SERVERS = {
+    "1up": {
+        "args": [],
+        "command": "1up",
+        "source": "user",
+        "tools": ["*"],
+        "type": "local",
+    },
+    "DataDog": {
+        "headers": {},
+        "source": "user",
+        "tools": ["*"],
+        "type": "http",
+        "url": "https://mcp.datadoghq.com/v1/mcp",
+    },
+    "Kusto": {
+        "args": ["-y", "@azure/mcp@latest", "server", "start"],
+        "command": "npx",
+        "source": "user",
+        "tools": ["*"],
+        "type": "local",
+    },
+    "Sentry": {
+        "headers": {},
+        "source": "user",
+        "tools": ["*"],
+        "type": "http",
+        "url": "https://mcp.sentry.dev/mcp",
+    },
+    "Slack": {
+        "headers": {},
+        "oauthClientId": "12348411142.11062036567072",
+        "oauthPublicClient": True,
+        "source": "user",
+        "tools": ["*"],
+        "type": "http",
+        "url": "https://mcp.slack.com/mcp",
+    },
+    "Splunk": {
+        "args": [
+            "run",
+            "-i",
+            "--rm",
+            "--dns=100.100.100.100",
+            "-e",
+            "SPLUNK_HOST",
+            "-e",
+            "SPLUNK_BEARER_TOKEN",
+            "-e",
+            "SPLUNK_PORT=443",
+            "-e",
+            "SPLUNK_SCHEME=https",
+            "-e",
+            "VERIFY_SSL=true",
+            "ghcr.io/github/splunk-mcp-server:latest",
+        ],
+        "command": "docker",
+        "env": {
+            "SPLUNK_BEARER_TOKEN": "${COPILOT_MCP_SPLUNK_BEARER_TOKEN}",
+            "SPLUNK_HOST": "${COPILOT_MCP_SPLUNK_HOST}",
+        },
+        "source": "user",
+        "tools": ["*"],
+        "type": "local",
+    },
+    "pagerduty": {
+        "headers": {},
+        "source": "user",
+        "tools": ["*"],
+        "type": "http",
+        "url": "https://mcp.pagerduty.com/mcp",
+    },
+    "playwright": {
+        "args": ["-y", "@playwright/mcp@0.0.76"],
+        "command": "npx",
+        "source": "user",
+        "tools": ["*"],
+        "type": "local",
+    },
+}
+
+
+def main() -> int:
+    """Write the configuration atomically with private file permissions."""
+    argparse.ArgumentParser(
+        description="Write the portable Copilot MCP server definitions."
+    ).parse_args()
+    output = Path.home() / ".copilot" / "mcp-config.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {}
+    if output.exists():
+        try:
+            payload = json.loads(output.read_text(encoding="utf-8"))
+        except OSError as error:
+            raise SystemExit(
+                f"bootstrap-copilot-mcp: cannot read {output}: {error}"
+            ) from error
+        except json.JSONDecodeError as error:
+            raise SystemExit(
+                f"bootstrap-copilot-mcp: {output} contains invalid JSON"
+            ) from error
+        if not isinstance(payload, dict):
+            raise SystemExit(
+                f"bootstrap-copilot-mcp: {output} must contain a JSON object"
+            )
+
+    configured = payload.setdefault("mcpServers", {})
+    if not isinstance(configured, dict):
+        raise SystemExit(
+            f"bootstrap-copilot-mcp: {output} mcpServers must be a JSON object"
+        )
+    configured.update(MCP_SERVERS)
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=output.parent,
+        prefix=f".{output.name}.",
+        text=True,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
+            json.dump(payload, temporary, indent=2, sort_keys=True)
+            temporary.write("\n")
+        os.chmod(temporary_name, 0o600)
+        os.replace(temporary_name, output)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+    print(f"Ensured {len(MCP_SERVERS)} MCP server definitions in {output}")
+    print("Authenticate DataDog, Sentry, and Slack inside Copilot with /mcp.")
+    print("Splunk and PagerDuty remain configured but intentionally unauthenticated.")
+    print("Set catalog values as Codespaces secrets.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

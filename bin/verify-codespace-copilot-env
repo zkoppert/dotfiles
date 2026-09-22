@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""Verify the Copilot CLI environment in a GitHub Codespace."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import runpy
+import shutil
+import subprocess
+from pathlib import Path
+
+REQUIRED_SKILLS = {
+    "actions-security",
+    "cleanup-worktrees",
+    "feature-flag-rollout",
+    "gh-axi",
+    "graphql-availability-investigator",
+    "memory-sweep",
+    "milestone-release-tracking",
+    "nux-fr-handoff",
+    "pr-body-render-check",
+    "prod-explain",
+    "record-demo",
+    "remediate-accessibility-audit",
+    "session-portability",
+    "test-quality",
+    "triage-dependabot",
+    "triage-notifications",
+    "validate-pr-with-codespace",
+    "validate-style",
+}
+MANAGED_MCP_SERVERS = runpy.run_path(
+    str(Path(__file__).resolve().with_name("bootstrap-copilot-mcp"))
+)["MCP_SERVERS"]
+REQUIRED_TOOLS = {
+    "1up",
+    "az",
+    "copilot",
+    "docker",
+    "gh",
+    "node",
+    "npx",
+    "tailscale",
+    "tmux",
+}
+REQUIRED_ENVIRONMENT = {
+    "COPILOT_SKILL_CATALOG_REPO",
+    "COPILOT_MCP_SPLUNK_BEARER_TOKEN",
+    "COPILOT_MCP_SPLUNK_HOST",
+}
+
+
+def command_succeeds(command: list[str]) -> bool:
+    """Return whether a command exits successfully."""
+    try:
+        return (
+            subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            ).returncode
+            == 0
+        )
+    except FileNotFoundError:
+        return False
+
+
+def main() -> int:
+    """Print a safe environment report and return nonzero when incomplete."""
+    failures: list[str] = []
+
+    if (
+        os.environ.get("CODESPACES") != "true"
+        and not Path("/workspaces/.codespaces").exists()
+    ):
+        failures.append("not running in a GitHub Codespace")
+
+    missing_tools = sorted(
+        tool for tool in REQUIRED_TOOLS if shutil.which(tool) is None
+    )
+    if missing_tools:
+        failures.append(f"missing tools: {', '.join(missing_tools)}")
+
+    if "node" not in missing_tools:
+        try:
+            node_version = subprocess.run(
+                ["node", "--version"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            version_match = re.fullmatch(r"v([0-9]+)\.[0-9]+\.[0-9]+", node_version)
+            if version_match is None:
+                raise ValueError("invalid Node.js version")
+            if int(version_match.group(1)) < 22:
+                failures.append(
+                    f"Node.js 22 or later is required (found {node_version})"
+                )
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            failures.append(
+                "cannot verify Node.js version; install Node.js 22 or later"
+            )
+
+    remote_helper = Path.home() / ".local" / "bin" / "copilot-codespace-session"
+    if not remote_helper.is_file() or not os.access(remote_helper, os.X_OK):
+        failures.append(f"remote helper is missing or not executable: {remote_helper}")
+
+    skills_dir = Path.home() / ".copilot" / "skills"
+    installed_skills = (
+        {
+            path.name
+            for path in skills_dir.iterdir()
+            if (path / "SKILL.md").is_file()
+        }
+        if skills_dir.is_dir()
+        else set()
+    )
+    missing_skills = sorted(REQUIRED_SKILLS - installed_skills)
+    if missing_skills:
+        failures.append(f"missing skills: {', '.join(missing_skills)}")
+
+    if "copilot" in missing_tools:
+        failures.append("cannot list Copilot plugins")
+    else:
+        try:
+            plugins = json.loads(
+                subprocess.run(
+                    ["copilot", "plugin", "list", "--json"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout
+            )
+            if not isinstance(plugins, list):
+                raise ValueError("plugin list must be a JSON array")
+            if not any(
+                isinstance(plugin, dict)
+                and plugin.get("name") == "gho11y"
+                and plugin.get("enabled") is True
+                for plugin in plugins
+            ):
+                failures.append("missing or disabled Copilot plugin: gho11y")
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            failures.append("cannot list Copilot plugins")
+
+    mcp_config = Path.home() / ".copilot" / "mcp-config.json"
+    configured_servers: set[str] = set()
+    try:
+        payload = json.loads(mcp_config.read_text(encoding="utf-8"))
+        servers = payload.get("mcpServers") if isinstance(payload, dict) else None
+        if not isinstance(servers, dict):
+            raise ValueError("mcpServers must be a JSON object")
+        configured_servers = set(servers)
+        for name in sorted(MANAGED_MCP_SERVERS.keys() & configured_servers):
+            expected = json.dumps(MANAGED_MCP_SERVERS[name], sort_keys=True)
+            if json.dumps(servers[name], sort_keys=True) != expected:
+                failures.append(
+                    f"invalid MCP server {name}: does not match the managed definition; "
+                    "run bootstrap-copilot-mcp"
+                )
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        failures.append(f"cannot read MCP configuration: {mcp_config}")
+    missing_servers = sorted(MANAGED_MCP_SERVERS.keys() - configured_servers)
+    if missing_servers:
+        failures.append(f"missing MCP servers: {', '.join(missing_servers)}")
+
+    missing_environment = sorted(
+        name for name in REQUIRED_ENVIRONMENT if not os.environ.get(name)
+    )
+    if missing_environment:
+        failures.append(
+            "missing Codespaces secret environment: "
+            f"{', '.join(missing_environment)}"
+        )
+
+    if shutil.which("docker") and not command_succeeds(["docker", "info"]):
+        failures.append("Docker is installed but unavailable")
+    if shutil.which("tailscale") and not command_succeeds(["tailscale", "status"]):
+        failures.append("Tailscale is not connected")
+    if shutil.which("az") and not command_succeeds(["az", "account", "show"]):
+        failures.append("Azure CLI is not authenticated")
+
+    print(f"Installed skills: {len(installed_skills)}")
+    print(f"Configured MCP servers: {len(configured_servers)}")
+    print("OAuth status: verify DataDog, Sentry, and Slack with /mcp")
+    if failures:
+        print("Codespace Copilot environment is incomplete:")
+        for failure in failures:
+            print(f"  - {failure}")
+        return 1
+
+    print("Codespace Copilot environment is ready.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
