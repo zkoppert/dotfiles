@@ -61,6 +61,14 @@ CLICK_HERE_PATTERN = re.compile(r"\[\s*(click here|here)\s*\][\(\[]", re.IGNOREC
 
 ISP_INCIDENT_PATTERN = re.compile(r"\bISP\s+incidents?\b", re.IGNORECASE)
 
+# URLs match the "skip" group so a link, which cannot be rephrased, is never
+# flagged. Any other word in the family is flagged, including compounds such as
+# "non-idempotent" and "nonidempotent".
+IDEMPOTENT_PATTERN = re.compile(
+    r"(?P<skip>[A-Za-z][A-Za-z0-9+.-]*://\S*)|\w*idempoten\w*",
+    re.IGNORECASE,
+)
+
 AGENTIC_PASSIVE_PATTERN = re.compile(
     r"\b(Claude|(?:Chat)?GPT|Copilot|Gemini|the (?:AI|model|assistant|agent))\s+"
     r"(made|wrote|generated|produced|created|drafted|composed|authored)\b",
@@ -211,6 +219,13 @@ RULES = [
         "The prefix I-S-P before 'incident' is forbidden - just say 'incident'.",
     ),
     (
+        "no-idempotent",
+        IDEMPOTENT_PATTERN,
+        "'idempotent' / 'idempotency' is forbidden. Use 'consistent' / 'consistency', "
+        "which are more accessible to broader audiences. Wrap literal code identifiers "
+        "(e.g., an `Idempotency-Key` header) in backticks.",
+    ),
+    (
         "no-agentic-passive",
         AGENTIC_PASSIVE_PATTERN,
         "Agentic passive voice (model name as subject of verbs like made/wrote/generated) "
@@ -293,6 +308,10 @@ def find_violations(text: str, check_visibility: bool = False) -> list[Violation
     for lineno, line in enumerate(masked.splitlines(), start=1):
         for rule_name, pattern, message in RULES:
             for match in pattern.finditer(line):
+                # A rule can consume text it must ignore (for example, a URL)
+                # with a "skip" group.
+                if "skip" in pattern.groupindex and match.group("skip") is not None:
+                    continue
                 violations.append(
                     Violation(
                         rule=rule_name,

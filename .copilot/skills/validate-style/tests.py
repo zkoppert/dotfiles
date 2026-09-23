@@ -232,6 +232,52 @@ class TestIspIncident(unittest.TestCase):
         self.assertNotIn("no-isp-incident", rules_in(violations))
 
 
+class TestIdempotent(unittest.TestCase):
+    def test_idempotent_flagged_with_matched_word(self):
+        violations = find_violations("The retry path is idempotent.")
+        matches = [v for v in violations if v.rule == "no-idempotent"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].text, "idempotent")
+        self.assertEqual(matches[0].column, 19)
+
+    def test_word_forms_each_flagged(self):
+        for word in ("idempotency", "idempotence", "idempotently", "idempotencies", "nonidempotent"):
+            with self.subTest(word=word):
+                violations = find_violations(f"We rely on {word} for retries.")
+                matches = [v for v in violations if v.rule == "no-idempotent"]
+                self.assertEqual([m.text for m in matches], [word])
+
+    def test_case_insensitive(self):
+        violations = find_violations("Idempotency matters for retries.")
+        self.assertIn("no-idempotent", rules_in(violations))
+
+    def test_hyphenated_negation_flagged(self):
+        violations = find_violations("Those are non-idempotent writes.")
+        self.assertIn("no-idempotent", rules_in(violations))
+
+    def test_consistent_not_flagged(self):
+        violations = find_violations("The retry path is consistent, and consistency matters.")
+        self.assertNotIn("no-idempotent", rules_in(violations))
+
+    def test_inside_inline_code_not_flagged(self):
+        violations = find_violations("Send the `Idempotency-Key` header on every retry.")
+        self.assertNotIn("no-idempotent", rules_in(violations))
+
+    def test_bare_url_not_flagged(self):
+        violations = find_violations("See https://stripe.com/docs/api/idempotent_requests for retries.")
+        self.assertNotIn("no-idempotent", rules_in(violations))
+
+    def test_link_text_flagged_but_link_url_not_flagged(self):
+        violations = find_violations("[idempotent](https://example.com/idempotency-keys)")
+        matches = [v for v in violations if v.rule == "no-idempotent"]
+        self.assertEqual([(m.text, m.column) for m in matches], [("idempotent", 2)])
+
+    def test_word_after_url_on_same_line_flagged(self):
+        violations = find_violations("See https://example.com/docs, the handler is idempotent.")
+        matches = [v for v in violations if v.rule == "no-idempotent"]
+        self.assertEqual([m.text for m in matches], ["idempotent"])
+
+
 class TestAgenticPassive(unittest.TestCase):
     def test_claude_made_flagged(self):
         violations = find_violations("Claude made an error in my writeup.")

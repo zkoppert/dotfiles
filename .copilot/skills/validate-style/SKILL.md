@@ -43,6 +43,7 @@ At a high level, the rules cover:
 - **no-prayer-hands** - the folded-hands emoji for thanks or please
 - **no-click-here** - non-descriptive Markdown link text
 - **no-isp-incident** - prefixing the word "incident" with extra letters
+- **`no-idempotent`** - using `idempotent` or `idempotency` instead of "consistent" or "consistency" (URLs are skipped)
 - **no-agentic-passive** - using a model name as the subject of verbs like made, wrote, generated
 - **no-this-pr-subject** - using "This PR / This change / This commit" as a sentence subject instead of first person
 - **no-subjectless-action-bullet** - bullets that lead with a bare past-tense action verb ("Added X") instead of first person ("I added X")
