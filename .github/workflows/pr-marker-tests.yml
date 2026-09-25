@@ -30,7 +30,7 @@ jobs:
       - name: Run babysit-prs wrapper tests
         run: python3 test_babysit_prs_wrapper.py
       - name: Run durable Codespace Copilot tests
-        run: python3 test_copilot2.py && python3 test_copilot_codespace_session.py && python3 test_copilot_environment.py
+        run: python3 test_copilot2.py && python3 test_copilot_codespace_session.py && python3 test_copilot_environment.py && python3 test_setup_copilot2_codespace.py
       - name: Run accessibility picker wrapper tests
         run: python3 test_accessibility_issue_picker_wrapper.py
       - name: Install accessibility test dependency

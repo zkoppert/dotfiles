@@ -38,9 +38,36 @@ Install dotfiles on the laptop and [configure the Codespace](#how-do-i-configure
 copilot2
 ```
 
-The command finds your `gummyworm` Codespace by its display name. It runs `copilot --allow-all` inside `tmux` and reconnects after SSH transport failures. The `--allow-all` flag permits all Copilot tools without individual approval. Use this command only in a trusted workspace.
+The command uses the exact Codespace selected by `setup-copilot2-codespace`. It falls back to finding `gummyworm` by display name when no default configuration exists. It runs `copilot --allow-all` inside `tmux` and reconnects after SSH transport failures. The `--allow-all` flag permits all Copilot tools without individual approval. Use this command only in a trusted workspace.
 
-Use `--codespace NAME` to select an exact generated Codespace name. Use `--repo OWNER/REPOSITORY` or `COPILOT2_REPOSITORY` to filter discovery without storing private repository names here. Set `COPILOT2_DISPLAY_NAME` or pass `--display-name NAME` to search for another display name instead of `gummyworm`.
+Use `--codespace NAME` or `COPILOT2_CODESPACE` to override the selected default. Use `--repo OWNER/REPOSITORY` or `COPILOT2_REPOSITORY` to validate or filter the repository. Set `COPILOT2_DISPLAY_NAME` or pass `--display-name NAME` to search by display name when no exact Codespace is selected.
+
+## How do I replace the default Copilot Codespace?
+
+Run one command on the laptop:
+
+```bash
+setup-copilot2-codespace
+```
+
+The command copies the repository, machine type, devcontainer path, and region from `gummyworm`. It creates `copilot2-default` with a four-hour idle timeout and 30-day retention. It waits for dotfiles, reruns `install.sh`, refreshes the managed MCP definitions, and runs `verify-codespace-copilot-env`.
+
+The command copies required local-only skills from `~/.copilot/skills`. It excludes Git metadata, Python caches, and test caches. It does not copy Copilot sessions, logs, MCP credentials, or OAuth state.
+
+The command forwards the local GitHub CLI token through encrypted SSH during bootstrap. It does not write the token to the Codespace. The temporary token lets the installer fetch catalog skills, the plugin, and `1up`.
+
+The command updates `~/.config/copilot2/default.json` only after tool verification succeeds. Tailscale and Azure CLI authentication can remain pending because they require interactive login. The command does not delete or modify the source Codespace. Use `--source-codespace NAME` when multiple source Codespaces share the same display name.
+
+Use explicit values when the source Codespace is unavailable:
+
+```bash
+setup-copilot2-codespace \
+  --repo OWNER/REPOSITORY \
+  --machine MACHINE \
+  --devcontainer-path PATH
+```
+
+OAuth services still require interactive authentication. After creation, run `copilot2`, open `/mcp`, and authenticate DataDog, Sentry, and Slack. Run `az login` for Kusto.
 
 The remote helper derives `/workspaces/<repository-name>` from `GITHUB_REPOSITORY`. Set `COPILOT2_REMOTE_CWD` inside the Codespace if that variable is unavailable or the checkout uses another path.
 

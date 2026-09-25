@@ -200,6 +200,7 @@ fi
 for copilot_command in \
   copilot2 \
   copilot-codespace-session \
+  setup-copilot2-codespace \
   bootstrap-copilot-mcp \
   verify-codespace-copilot-env; do
   source_path="$DOTFILES_DIR/bin/$copilot_command"

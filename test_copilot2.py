@@ -122,6 +122,7 @@ sys.exit(result)
         self.env = dict(os.environ)
         self.env.pop("COPILOT2_REPOSITORY", None)
         self.env.pop("COPILOT2_DISPLAY_NAME", None)
+        self.env.pop("COPILOT2_CODESPACE", None)
         self.env.update(
             {
                 "HOME": str(self.home),
@@ -422,6 +423,55 @@ sys.exit(result)
         self.assertNotIn("codespace list", calls)
         self.assertIn("codespace view --codespace exact-name", calls)
         self.assertIn("codespace ssh --codespace exact-name --config", calls)
+
+    def test_configured_default_codespace_skips_display_name_discovery(self) -> None:
+        config = self.home / ".config" / "copilot2" / "default.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            json.dumps(
+                {
+                    "codespace": "configured-name",
+                    "repository": "example/project",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_wrapper()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.home / "gh.log").read_text(encoding="utf-8")
+        self.assertNotIn("codespace list", calls)
+        self.assertIn("codespace view --codespace configured-name", calls)
+        self.assertIn("codespace ssh --codespace configured-name --config", calls)
+
+    def test_environment_codespace_overrides_configured_default(self) -> None:
+        config = self.home / ".config" / "copilot2" / "default.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            json.dumps({"codespace": "configured-name"}),
+            encoding="utf-8",
+        )
+        self.env["COPILOT2_CODESPACE"] = "environment-name"
+
+        result = self.run_wrapper()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.home / "gh.log").read_text(encoding="utf-8")
+        self.assertIn("codespace view --codespace environment-name", calls)
+        self.assertNotIn("configured-name", calls)
+
+    def test_invalid_default_configuration_is_actionable(self) -> None:
+        config = self.home / ".config" / "copilot2" / "default.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("not JSON\n", encoding="utf-8")
+
+        result = self.run_wrapper()
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("contains invalid JSON", result.stderr)
+        self.assertIn("run setup-copilot2-codespace", result.stderr)
+        self.assertFalse((self.home / "gh.log").exists())
 
     def test_repository_filter_is_optional_and_supports_cli_and_environment(self) -> None:
         self.env["FAKE_CODESPACES_JSON"] = json.dumps(

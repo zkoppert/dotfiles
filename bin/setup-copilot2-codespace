@@ -1,0 +1,463 @@
+#!/usr/bin/env python3
+"""Create, configure, verify, and select a default Copilot Codespace."""
+
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from pathlib import Path
+from typing import Optional
+
+DEFAULT_DISPLAY_NAME = "copilot2-default"
+DEFAULT_SOURCE_DISPLAY_NAME = "gummyworm"
+DEFAULT_IDLE_TIMEOUT = "4h"
+DEFAULT_RETENTION_PERIOD = "720h"
+PORTABLE_LOCAL_SKILLS = (
+    "gh-axi",
+    "graphql-availability-investigator",
+    "milestone-release-tracking",
+    "prod-explain",
+)
+
+
+class SetupError(Exception):
+    """Report an actionable setup error."""
+
+
+def command_path(command: str) -> str:
+    """Resolve a required command on PATH."""
+    resolved = shutil.which(command)
+    if resolved is None:
+        raise SetupError(f"{command} is not installed or is not on PATH")
+    return resolved
+
+
+def run(
+    command: list[str],
+    description: str,
+    *,
+    capture_output: bool = True,
+    input_text: Optional[str] = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command and report its useful failure output."""
+    result = subprocess.run(
+        command,
+        capture_output=capture_output,
+        input=input_text,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (
+            (result.stderr or "").strip()
+            or (result.stdout or "").strip()
+            or "unknown error"
+        )
+        raise SetupError(f"{description}: {detail}")
+    return result
+
+
+def run_json(command: list[str], description: str) -> object:
+    """Run a command and parse its JSON output."""
+    result = run(command, description)
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise SetupError(f"{description}: invalid JSON output") from error
+
+
+def resolve_source(
+    gh: str,
+    source_codespace: Optional[str],
+    source_display_name: str,
+) -> dict[str, str]:
+    """Resolve the source Codespace used to copy repository and machine settings."""
+    if source_codespace:
+        source_name = source_codespace
+    else:
+        payload = run_json(
+            [
+                gh,
+                "codespace",
+                "list",
+                "--limit",
+                "100",
+                "--json",
+                "name,displayName",
+            ],
+            "cannot list Codespaces",
+        )
+        if not isinstance(payload, list):
+            raise SetupError("Codespace list used an unexpected format")
+        matches = [
+            item
+            for item in payload
+            if isinstance(item, dict)
+            and item.get("displayName") == source_display_name
+        ]
+        if len(matches) != 1:
+            if not matches:
+                raise SetupError(
+                    f"no source Codespace named {source_display_name!r} exists; "
+                    "provide --repo and --machine"
+                )
+            names = ", ".join(sorted(str(item.get("name")) for item in matches))
+            raise SetupError(
+                f"multiple source Codespaces are named {source_display_name!r}: {names}; "
+                "use --source-codespace"
+            )
+        source_name = matches[0].get("name")
+        if not isinstance(source_name, str) or not source_name:
+            raise SetupError("source Codespace details have no generated name")
+
+    source = run_json(
+        [
+            gh,
+            "codespace",
+            "view",
+            "--codespace",
+            source_name,
+            "--json",
+            "name,repository,machineName,devcontainerPath,location",
+        ],
+        f"cannot inspect source Codespace {source_name}",
+    )
+    if not isinstance(source, dict):
+        raise SetupError("source Codespace details used an unexpected format")
+    repository = source.get("repository")
+    machine = source.get("machineName")
+    name = source.get("name")
+    if not all(isinstance(value, str) and value for value in (repository, machine, name)):
+        raise SetupError("source Codespace details are missing a name, repository, or machine")
+    resolved = {
+        "name": name,
+        "repository": repository,
+        "machine": machine,
+    }
+    for source_key, target_key in (
+        ("devcontainerPath", "devcontainer_path"),
+        ("location", "location"),
+    ):
+        value = source.get(source_key)
+        if isinstance(value, str) and value:
+            resolved[target_key] = value
+    return resolved
+
+
+def find_named_codespace(
+    gh: str,
+    repository: str,
+    display_name: str,
+) -> Optional[tuple[str, str]]:
+    """Find the single Codespace with the requested display name."""
+    payload = run_json(
+        [
+            gh,
+            "codespace",
+            "list",
+            "--limit",
+            "100",
+            "--repo",
+            repository,
+            "--json",
+            "name,displayName,state",
+        ],
+        f"cannot find the Codespace for {repository}",
+    )
+    if not isinstance(payload, list):
+        raise SetupError("Codespace list used an unexpected format")
+    matches = [
+        item
+        for item in payload
+        if isinstance(item, dict) and item.get("displayName") == display_name
+    ]
+    if len(matches) > 1:
+        names = ", ".join(sorted(str(item.get("name")) for item in matches))
+        raise SetupError(
+            f"multiple Codespaces are named {display_name!r}: {names}"
+        )
+    if not matches:
+        return None
+    name = matches[0].get("name")
+    state = matches[0].get("state")
+    if not all(isinstance(value, str) and value for value in (name, state)):
+        raise SetupError("Codespace details have no generated name or state")
+    return name, state
+
+
+def configure_codespace(gh: str, codespace: str, github_token: str) -> None:
+    """Run the checked-in setup and verifier inside the new Codespace."""
+    remote_command = (
+        "set -euo pipefail; "
+        "IFS= read -r GH_TOKEN; "
+        "export GH_TOKEN; "
+        "gh auth setup-git >/dev/null; "
+        'dotfiles="/workspaces/.codespaces/.persistedshare/dotfiles"; '
+        'test -x "$dotfiles/install.sh"; '
+        '"$dotfiles/install.sh"; '
+        'export PATH="$HOME/.local/bin:$PATH"; '
+        "bootstrap-copilot-mcp; "
+        "unset GH_TOKEN; "
+        'verification="$(mktemp)"; '
+        'trap \'rm -f "$verification"\' EXIT; '
+        "if verify-codespace-copilot-env >\"$verification\" 2>&1; then "
+        'cat "$verification"; '
+        "else "
+        'cat "$verification"; '
+        'issues="$(grep \'^  - \' "$verification" || true)"; '
+        'if [ -z "$issues" ]; then exit 1; fi; '
+        'unexpected="$(printf \'%s\\n\' "$issues" | '
+        "grep -Ev '^  - (Tailscale is not connected|Azure CLI is not authenticated)$' "
+        "|| true)\"; "
+        'if [ -n "$unexpected" ]; then exit 1; fi; '
+        'printf \'%s\\n\' "Interactive authentication remains for Tailscale and Azure CLI."; '
+        "fi"
+    )
+    quoted_command = f"bash -lc {shlex.quote(remote_command)}"
+    run(
+        [
+            gh,
+            "codespace",
+            "ssh",
+            "--codespace",
+            codespace,
+            "--",
+            quoted_command,
+        ],
+        f"Codespace {codespace} setup or verification failed",
+        capture_output=False,
+        input_text=f"{github_token}\n",
+    )
+
+
+def sync_local_skills(gh: str, codespace: str) -> None:
+    """Copy local-only required skills without copying credentials or state."""
+    skill_root = Path.home() / ".copilot" / "skills"
+    sources: list[tuple[str, Path]] = []
+    for name in PORTABLE_LOCAL_SKILLS:
+        source = (skill_root / name).resolve()
+        if not (source / "SKILL.md").is_file():
+            raise SetupError(
+                f"required local skill {name} is missing from {skill_root / name}"
+            )
+        sources.append((name, source))
+
+    archive = io.BytesIO()
+
+    def portable_member(info: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
+        parts = Path(info.name).parts
+        if any(part in {".git", ".pytest_cache", "__pycache__"} for part in parts):
+            return None
+        if info.name.endswith((".pyc", ".pyo")):
+            return None
+        return info
+
+    with tarfile.open(fileobj=archive, mode="w:gz", dereference=True) as bundle:
+        for name, source in sources:
+            bundle.add(source, arcname=name, filter=portable_member)
+
+    remote_command = (
+        'mkdir -p "$HOME/.copilot/skills" && '
+        'tar -xzf - -C "$HOME/.copilot/skills"'
+    )
+    result = subprocess.run(
+        [
+            gh,
+            "codespace",
+            "ssh",
+            "--codespace",
+            codespace,
+            "--",
+            remote_command,
+        ],
+        input=archive.getvalue(),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SetupError(
+            f"cannot copy local-only skills to Codespace {codespace}"
+        )
+
+
+def config_path() -> Path:
+    """Return the local default Codespace configuration path."""
+    config_home = Path(
+        os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
+    )
+    return config_home / "copilot2" / "default.json"
+
+
+def write_default(
+    codespace: str,
+    repository: str,
+    display_name: str,
+    machine: str,
+) -> Path:
+    """Atomically select the verified Codespace as the copilot2 default."""
+    destination = config_path()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "codespace": codespace,
+        "displayName": display_name,
+        "machine": machine,
+        "repository": repository,
+    }
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        text=True,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
+            json.dump(payload, temporary, indent=2, sort_keys=True)
+            temporary.write("\n")
+        os.chmod(temporary_name, 0o600)
+        os.replace(temporary_name, destination)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+    return destination
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Create and select a fully configured default Codespace for copilot2."
+    )
+    parser.add_argument("--repo", help="repository for the new Codespace")
+    parser.add_argument("--machine", help="machine type for the new Codespace")
+    parser.add_argument(
+        "--source-codespace",
+        help="exact existing Codespace name used to copy repository and machine settings",
+    )
+    parser.add_argument(
+        "--source-display-name",
+        default=DEFAULT_SOURCE_DISPLAY_NAME,
+        help=f"source display name (default: {DEFAULT_SOURCE_DISPLAY_NAME})",
+    )
+    parser.add_argument(
+        "--display-name",
+        default=DEFAULT_DISPLAY_NAME,
+        help=f"new Codespace display name (default: {DEFAULT_DISPLAY_NAME})",
+    )
+    parser.add_argument("--branch", help="branch for the new Codespace")
+    parser.add_argument("--devcontainer-path", help="devcontainer path for the new Codespace")
+    parser.add_argument("--location", help="Codespace region")
+    parser.add_argument(
+        "--idle-timeout",
+        default=DEFAULT_IDLE_TIMEOUT,
+        help=f"idle timeout (default: {DEFAULT_IDLE_TIMEOUT})",
+    )
+    parser.add_argument(
+        "--retention-period",
+        default=DEFAULT_RETENTION_PERIOD,
+        help=f"retention period (default: {DEFAULT_RETENTION_PERIOD})",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    """Create, configure, verify, and select the new default Codespace."""
+    args = parse_args()
+    gh = command_path("gh")
+    run(
+        [gh, "auth", "status", "--hostname", "github.com"],
+        "GitHub CLI authentication failed",
+    )
+    github_token = run(
+        [gh, "auth", "token"],
+        "cannot read the local GitHub CLI token",
+    ).stdout.strip()
+    if not github_token:
+        raise SetupError("the local GitHub CLI returned an empty token")
+
+    source: Optional[dict[str, str]] = None
+    if not args.repo or not args.machine:
+        source = resolve_source(gh, args.source_codespace, args.source_display_name)
+    repository = args.repo or source["repository"]
+    machine = args.machine or source["machine"]
+    devcontainer_path = args.devcontainer_path or (
+        source.get("devcontainer_path") if source else None
+    )
+    location = args.location or (source.get("location") if source else None)
+
+    create_command = [
+        gh,
+        "codespace",
+        "create",
+        "--repo",
+        repository,
+        "--machine",
+        machine,
+        "--display-name",
+        args.display_name,
+        "--idle-timeout",
+        args.idle_timeout,
+        "--retention-period",
+        args.retention_period,
+        "--default-permissions",
+        "--status",
+    ]
+    if args.branch:
+        create_command.extend(["--branch", args.branch])
+    if devcontainer_path:
+        create_command.extend(["--devcontainer-path", devcontainer_path])
+    if location:
+        create_command.extend(["--location", location])
+
+    existing = find_named_codespace(gh, repository, args.display_name)
+    if existing is None:
+        try:
+            run(
+                create_command,
+                f"cannot create Codespace for {repository}",
+                capture_output=False,
+                input_text="y\n",
+            )
+        except SetupError:
+            existing = find_named_codespace(gh, repository, args.display_name)
+            if existing is None or existing[1] != "Available":
+                raise
+            print(
+                f"Creation status failed after {existing[0]} became available; continuing.",
+                file=sys.stderr,
+            )
+        else:
+            existing = find_named_codespace(gh, repository, args.display_name)
+            if existing is None:
+                raise SetupError(
+                    f"Codespace {args.display_name!r} was not found after creation"
+                )
+    else:
+        print(f"Reusing existing Codespace {existing[0]}.")
+
+    codespace, state = existing
+    if state != "Available":
+        raise SetupError(
+            f"Codespace {codespace} is {state}; wait until it is Available and retry"
+        )
+    sync_local_skills(gh, codespace)
+    configure_codespace(gh, codespace, github_token)
+    destination = write_default(codespace, repository, args.display_name, machine)
+    print(f"Selected {codespace} as the copilot2 default in {destination}")
+    print("Run copilot2 to connect.")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except SetupError as error:
+        print(f"setup-copilot2-codespace: {error}", file=sys.stderr)
+        raise SystemExit(2) from error
+    except KeyboardInterrupt as error:
+        print("\nsetup-copilot2-codespace: interrupted", file=sys.stderr)
+        raise SystemExit(130) from error

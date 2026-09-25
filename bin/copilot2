@@ -22,6 +22,7 @@ DEFAULT_DISPLAY_NAME = "gummyworm"
 DEFAULT_SESSION = "copilot2"
 DEFAULT_RECONNECT_SECONDS = 600
 SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+DEFAULT_CONFIG_NAME = "default.json"
 
 
 class Copilot2Error(Exception):
@@ -82,6 +83,50 @@ def run_json(command: list[str], description: str) -> object:
         return json.loads(result.stdout)
     except json.JSONDecodeError as error:
         raise Copilot2Error(f"{description}: invalid JSON output") from error
+
+
+def default_config_path() -> Path:
+    """Return the local default Codespace configuration path."""
+    config_home = Path(
+        os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
+    )
+    return config_home / "copilot2" / DEFAULT_CONFIG_NAME
+
+
+def read_default_codespace() -> tuple[Optional[str], Optional[str]]:
+    """Read the exact default Codespace name and repository when configured."""
+    path = default_config_path()
+    if not path.exists():
+        return None, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise Copilot2Error(f"cannot read default configuration {path}: {error}") from error
+    except json.JSONDecodeError as error:
+        raise Copilot2Error(
+            f"default configuration {path} contains invalid JSON; "
+            "run setup-copilot2-codespace"
+        ) from error
+    if not isinstance(payload, dict):
+        raise Copilot2Error(
+            f"default configuration {path} must contain a JSON object; "
+            "run setup-copilot2-codespace"
+        )
+    codespace = payload.get("codespace")
+    repository = payload.get("repository")
+    if not isinstance(codespace, str) or not codespace.strip():
+        raise Copilot2Error(
+            f"default configuration {path} has no valid codespace; "
+            "run setup-copilot2-codespace"
+        )
+    if repository is not None and (
+        not isinstance(repository, str) or not repository.strip()
+    ):
+        raise Copilot2Error(
+            f"default configuration {path} has an invalid repository; "
+            "run setup-copilot2-codespace"
+        )
+    return codespace, repository
 
 
 def resolve_codespace(
@@ -288,8 +333,9 @@ def ssh_command(
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
+    configured_codespace, configured_repository = read_default_codespace()
     parser = argparse.ArgumentParser(
-        description="Run Copilot in a durable tmux session in gummyworm."
+        description="Run Copilot in a durable tmux session in the default Codespace."
     )
     parser.add_argument(
         "session",
@@ -299,7 +345,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--codespace",
-        help="exact generated Codespace name instead of the gummyworm display name",
+        default=os.environ.get("COPILOT2_CODESPACE", configured_codespace),
+        help="exact generated Codespace name instead of the configured default",
     )
     parser.add_argument(
         "--new",
@@ -313,7 +360,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--repo",
-        default=os.environ.get("COPILOT2_REPOSITORY"),
+        default=os.environ.get("COPILOT2_REPOSITORY", configured_repository),
         help=argparse.SUPPRESS,
     )
     return parser.parse_args()
