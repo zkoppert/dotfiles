@@ -134,8 +134,8 @@ def resolve_codespace(
     repository: Optional[str],
     display_name: str,
     explicit_name: Optional[str],
-) -> tuple[str, str]:
-    """Resolve one Codespace and return its generated name and state."""
+) -> tuple[str, str, Optional[str]]:
+    """Resolve one Codespace and return its name, state, and repository."""
     if explicit_name:
         data = run_json(
             [
@@ -156,7 +156,7 @@ def resolve_codespace(
             raise Copilot2Error(
                 f"Codespace {explicit_name} belongs to {actual_repository}, not {repository}"
             )
-        return str(data["name"]), str(data["state"])
+        return str(data["name"]), str(data["state"]), str(actual_repository)
 
     command = [
         gh,
@@ -165,7 +165,7 @@ def resolve_codespace(
         "--limit",
         "100",
         "--json",
-        "name,displayName,state",
+        "name,displayName,state,repository",
     ]
     if repository:
         command.extend(["--repo", repository])
@@ -186,7 +186,12 @@ def resolve_codespace(
             "use --codespace"
         )
 
-    return str(matches[0]["name"]), str(matches[0]["state"])
+    actual_repository = matches[0].get("repository") or repository
+    return (
+        str(matches[0]["name"]),
+        str(matches[0]["state"]),
+        str(actual_repository) if actual_repository else None,
+    )
 
 
 def run_bounded(
@@ -292,11 +297,17 @@ def ssh_command(
     invocation_id: str,
     action: str,
     connect_timeout: float,
+    remote_cwd: Optional[str],
     connected_marker: Optional[Path] = None,
 ) -> list[str]:
     """Request a terminal only for attachment, not for bounded preparation."""
+    environment = (
+        f"COPILOT2_REMOTE_CWD={shlex.quote(remote_cwd)} "
+        if remote_cwd
+        else ""
+    )
     remote_command = (
-        'exec "$HOME/.local/bin/copilot-codespace-session" '
+        f'{environment}exec "$HOME/.local/bin/copilot-codespace-session" '
         f"{shlex.quote(session)} {mode} {invocation_id} {action}"
     )
     command = [
@@ -388,11 +399,16 @@ def main() -> int:
             f"GitHub CLI authentication failed: {auth.stderr.strip() or 'run gh auth login'}"
         )
 
-    codespace, _state = resolve_codespace(
+    codespace, _state, repository = resolve_codespace(
         gh,
         args.repo,
         args.display_name,
         args.codespace,
+    )
+    remote_cwd = (
+        f"/workspaces/{repository.rsplit('/', 1)[-1]}"
+        if repository
+        else None
     )
     max_reconnect_seconds = positive_integer_setting(
         "COPILOT2_MAX_RECONNECT_SECONDS",
@@ -423,6 +439,7 @@ def main() -> int:
                 invocation_id,
                 "prepare",
                 remaining,
+                remote_cwd,
             )
             try:
                 result = run_bounded(prepare_command, remaining)
@@ -442,6 +459,7 @@ def main() -> int:
                     invocation_id,
                     "attach",
                     remaining,
+                    remote_cwd,
                     connected_marker,
                 )
                 result = subprocess.run(attach_command, check=False, text=True)

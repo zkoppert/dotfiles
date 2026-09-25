@@ -69,7 +69,7 @@ setup-copilot2-codespace \
 
 OAuth services still require interactive authentication. After creation, run `copilot2`, open `/mcp`, and authenticate DataDog, Sentry, and Slack. Run `az login` for Kusto.
 
-The remote helper derives `/workspaces/<repository-name>` from `GITHUB_REPOSITORY`. Set `COPILOT2_REMOTE_CWD` inside the Codespace if that variable is unavailable or the checkout uses another path.
+The launcher passes `/workspaces/<repository-name>` to the remote helper from the resolved Codespace repository. Set `COPILOT2_REMOTE_CWD` inside the Codespace only when the checkout uses another path.
 
 The helper stores continuity state in `/workspaces/.copilot2`, outside repository checkouts. This Codespace-local directory survives rebuilds and is shared by all launcher devices. Keep it between connections and rebuilds.
 

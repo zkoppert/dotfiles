@@ -35,10 +35,10 @@ class Copilot2Test(unittest.TestCase):
             'printf \'%s\\n\' "$*" >> "$HOME/gh.log"\n'
             'case "$*" in\n'
             "  'auth status --hostname github.com') exit 0 ;;\n"
-            "  'codespace list --limit 100 --json name,displayName,state')\n"
+            "  'codespace list --limit 100 --json name,displayName,state,repository')\n"
             "    printf '%s\\n' \"${FAKE_CODESPACES_JSON}\"\n"
             "    ;;\n"
-            "  'codespace list --limit 100 --json name,displayName,state --repo example/project')\n"
+            "  'codespace list --limit 100 --json name,displayName,state,repository --repo example/project')\n"
             "    printf '%s\\n' \"${FAKE_FILTERED_CODESPACES_JSON}\"\n"
             "    ;;\n"
             "  codespace\\ view\\ --codespace*)\n"
@@ -138,6 +138,7 @@ sys.exit(result)
                             "name": "generated-name",
                             "displayName": "gummyworm",
                             "state": "Available",
+                            "repository": "example/project",
                         }
                     ]
                 ),
@@ -166,6 +167,7 @@ sys.exit(result)
         self.assertIn("ServerAliveInterval=15", ssh_args)
         self.assertIn("ServerAliveCountMax=3", ssh_args)
         self.assertIn("copilot-codespace-session", ssh_args)
+        self.assertIn("COPILOT2_REMOTE_CWD=/workspaces/project", ssh_args)
         self.assertIn("review-one", ssh_args)
         self.assertIn("resume", ssh_args)
         self.assertIn("prepare", ssh_args)
@@ -481,7 +483,14 @@ sys.exit(result)
             ]
         )
         self.env["FAKE_FILTERED_CODESPACES_JSON"] = json.dumps(
-            [{"name": "matching-project", "displayName": "gummyworm", "state": "Available"}]
+            [
+                {
+                    "name": "matching-project",
+                    "displayName": "gummyworm",
+                    "state": "Available",
+                    "repository": "example/project",
+                }
+            ]
         )
         for arguments in (("--repo", "example/project"), ()):
             with self.subTest(arguments=arguments):
