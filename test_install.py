@@ -42,7 +42,12 @@ class InstallScriptTest(unittest.TestCase):
         gh.write_text(
             "#!/bin/sh\n"
             "printf '%s\\n' \"$*\" >> \"$HOME/gh.log\"\n"
-            "if [ \"$1\" = skill ] && [ \"$2\" = install ]; then\n"
+            "if [ \"$1\" = stack ] && [ \"$2\" = --help ]; then\n"
+            "  [ -f \"$HOME/.gh-stack-installed\" ] && exit 0\n"
+            "  exit 1\n"
+            "elif [ \"$1\" = extension ] && [ \"$2\" = install ] && [ \"$3\" = github/gh-stack ]; then\n"
+            "  : > \"$HOME/.gh-stack-installed\"\n"
+            "elif [ \"$1\" = skill ] && [ \"$2\" = install ]; then\n"
             "  [ \"${FAKE_GH_FAIL:-0}\" = 1 ] && exit 1\n"
             "  skill_name=${4#skills/}\n"
             "  mkdir -p \"$HOME/.copilot/skills/$skill_name\"\n"
@@ -279,7 +284,10 @@ class InstallScriptTest(unittest.TestCase):
             "COPILOT_SKILL_CATALOG_REPO is not set",
             result.stdout,
         )
-        self.assertFalse((self.home / "gh.log").exists())
+        self.assertEqual(
+            (self.home / "gh.log").read_text(encoding="utf-8").splitlines(),
+            ["stack --help", "extension install github/gh-stack"],
+        )
         self.assertFalse((self.home / "copilot.log").exists())
 
     def test_codespace_copilot_commands_are_linked(self) -> None:
@@ -326,6 +334,21 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), str(hooks_dir))
         self.assertIn("Configured personal Git hooks", first_run.stdout)
         self.assertIn("Configured personal Git hooks", second_run.stdout)
+
+    def test_stack_extension_is_installed_once(self) -> None:
+        first_run = self.run_installer()
+        second_run = self.run_installer()
+
+        gh_calls = (self.home / "gh.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            gh_calls.count("extension install github/gh-stack"),
+            1,
+        )
+        self.assertIn("Installed GitHub stack extension", first_run.stdout)
+        self.assertIn(
+            "GitHub stack extension is already installed",
+            second_run.stdout,
+        )
 
     def test_linux_installs_node_22_when_current_version_is_older(self) -> None:
         self.prepare_node_install()

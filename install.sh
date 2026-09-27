@@ -196,6 +196,17 @@ if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
   done
 fi
 
+# Install the official stack extension used to split oversized PRs.
+if command -v gh >/dev/null 2>&1; then
+  if gh stack --help >/dev/null 2>&1; then
+    echo "✓ GitHub stack extension is already installed"
+  elif gh extension install github/gh-stack </dev/null; then
+    echo "✓ Installed GitHub stack extension"
+  else
+    echo "⚠ Failed to install GitHub stack extension - stacked PR commands are unavailable"
+  fi
+fi
+
 # Activate personal Git hooks for every local clone without changing any repository.
 if command -v git >/dev/null 2>&1 && [ -x "$DOTFILES_DIR/git-hooks/pre-push" ]; then
   desired_hooks_path="$DOTFILES_DIR/git-hooks"

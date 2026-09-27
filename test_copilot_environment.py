@@ -232,6 +232,8 @@ class CopilotEnvironmentTest(unittest.TestCase):
         remote_helper.symlink_to(remote_command)
         gh_guard = Path(__file__).resolve().parent / "bin" / "gh-guard"
         (remote_helper.parent / "gh").symlink_to(gh_guard)
+        pr_marker = Path(__file__).resolve().parent / "bin" / "pr-marker"
+        (remote_helper.parent / "pr-marker").symlink_to(pr_marker)
 
         result = self.run_bootstrap()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -257,7 +259,15 @@ class CopilotEnvironmentTest(unittest.TestCase):
                     encoding="utf-8",
                 )
             else:
-                path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                if command == "gh":
+                    path.write_text(
+                        "#!/bin/sh\n"
+                        '[ "$*" = "stack --help" ] && exit 0\n'
+                        "exit 0\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             path.chmod(0o755)
         node = self.bin_dir / "node"
         node.write_text(
@@ -376,6 +386,43 @@ class CopilotEnvironmentTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("gh must resolve to the personal wrapper", result.stdout)
         self.assertNotIn("environment is ready", result.stdout)
+
+    def test_verifier_rejects_missing_pr_marker(self) -> None:
+        env = self.prepare_complete_environment()
+        (self.home / ".local" / "bin" / "pr-marker").unlink()
+
+        result = subprocess.run(
+            [str(self.verifier)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("pr-marker must resolve to the personal helper", result.stdout)
+
+    def test_verifier_rejects_missing_stack_extension(self) -> None:
+        env = self.prepare_complete_environment()
+        real_gh = self.bin_dir / "gh"
+        real_gh.write_text(
+            "#!/bin/sh\n"
+            '[ "$*" = "stack --help" ] && exit 1\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        real_gh.chmod(0o755)
+
+        result = subprocess.run(
+            [str(self.verifier)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("missing GitHub extension: github/gh-stack", result.stdout)
 
     def test_verifier_rejects_unsupported_node_versions(self) -> None:
         env = self.prepare_complete_environment()

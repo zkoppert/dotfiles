@@ -107,7 +107,9 @@ def main() -> int:
             failures.append(f"PR size guard is missing or not executable: {required_path}")
 
     expected_gh_guard = dotfiles_root / "bin" / "gh-guard"
+    expected_pr_marker = dotfiles_root / "bin" / "pr-marker"
     installed_gh = Path.home() / ".local" / "bin" / "gh"
+    installed_pr_marker = Path.home() / ".local" / "bin" / "pr-marker"
     active_gh = shutil.which("gh")
     if (
         not installed_gh.is_symlink()
@@ -118,6 +120,15 @@ def main() -> int:
         failures.append(
             f"gh must resolve to the personal wrapper at {expected_gh_guard}"
         )
+    if (
+        not installed_pr_marker.is_symlink()
+        or installed_pr_marker.resolve() != expected_pr_marker
+    ):
+        failures.append(
+            f"pr-marker must resolve to the personal helper at {expected_pr_marker}"
+        )
+    if active_gh and not command_succeeds(["gh", "stack", "--help"]):
+        failures.append("missing GitHub extension: github/gh-stack")
 
     if "node" not in missing_tools:
         try:

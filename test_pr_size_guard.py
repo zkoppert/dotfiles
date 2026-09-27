@@ -157,6 +157,12 @@ class PrSizeGuardTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("override accepted", result.stdout)
 
+    def test_explicit_override_allows_a_check_failure(self) -> None:
+        result = self.run_size_guard("missing-commit", override=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("override accepted despite check failure", result.stderr)
+
     def test_non_target_repository_is_not_gated(self) -> None:
         result = self.run_size_guard("not-a-commit", repository="example/project")
 
@@ -191,6 +197,9 @@ class PrSizeGuardTest(unittest.TestCase):
     def test_shallow_clone_is_deepened_to_find_merge_base(self) -> None:
         self.commit_added_lines(1)
         self.run_command(["git", "push", "origin", "feature"])
+        for branch in ("extra-one", "extra-two"):
+            self.run_command(["git", "branch", branch, "main"])
+            self.run_command(["git", "push", "origin", branch])
         shallow = self.root / "shallow"
         self.run_command(
             [
@@ -198,6 +207,7 @@ class PrSizeGuardTest(unittest.TestCase):
                 "clone",
                 "--depth",
                 "1",
+                "--no-single-branch",
                 "--branch",
                 "feature",
                 f"file://{self.remote}",
@@ -209,6 +219,10 @@ class PrSizeGuardTest(unittest.TestCase):
             ["git", "remote", "set-url", "origin", "git@github.com:github/github.git"],
             cwd=shallow,
         )
+        extra_count_before = self.run_command(
+            ["git", "rev-list", "--count", "origin/extra-one"],
+            cwd=shallow,
+        ).stdout.strip()
         self.run_command(
             [
                 "git",
@@ -246,8 +260,15 @@ class PrSizeGuardTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("1/800 added lines", result.stdout)
+        self.assertEqual(
+            self.run_command(
+                ["git", "rev-list", "--count", "origin/extra-one"],
+                cwd=shallow,
+            ).stdout.strip(),
+            extra_count_before,
+        )
 
-    def test_first_stacked_push_uses_gh_stack_base(self) -> None:
+    def test_first_stacked_push_uses_live_gh_stack_parent(self) -> None:
         stack_a = self.commit_added_lines(500)
         self.run_command(["git", "checkout", "-b", "stack-b"])
         (self.repo / "stack-b.txt").write_text(
@@ -306,6 +327,43 @@ class PrSizeGuardTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("500/800 added lines", result.stdout)
+
+        self.run_command(["git", "checkout", "feature"])
+        (self.repo / "parent-more.txt").write_text(
+            "".join(f"parent {number}\n" for number in range(400)),
+            encoding="utf-8",
+        )
+        self.run_command(["git", "add", "parent-more.txt"])
+        self.run_command(["git", "commit", "-m", "grow parent"])
+        self.run_command(["git", "checkout", "stack-b"])
+        self.run_command(["git", "rebase", "feature"])
+
+        rebased = subprocess.run(
+            [
+                str(self.guard),
+                "--repo",
+                "github/github",
+                "--remote",
+                "origin",
+                "--branch",
+                "stack-b",
+                "--source",
+                "HEAD",
+                "--gh",
+                str(self.fake_bin / "gh"),
+                "--context",
+                "push",
+                "--check-open-pr",
+            ],
+            cwd=self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(rebased.returncode, 0, rebased.stderr)
+        self.assertIn("500/800 added lines", rebased.stdout)
 
     def test_pre_push_hook_blocks_target_branch_update(self) -> None:
         source = self.commit_added_lines(801)
@@ -408,6 +466,45 @@ class PrSizeGuardTest(unittest.TestCase):
         self.commit_added_lines(801)
         self.run_command(["git", "config", "branch.feature.gh-merge-base", "main"])
         failing_bin = self.root / "failing-bin"
+        failing_bin.mkdir()
+        failing_gh = failing_bin / "gh"
+        failing_gh.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
+        failing_gh.chmod(0o755)
+
+        result = subprocess.run(
+            [str(self.gh_guard), "pr", "create", "--draft"],
+            cwd=self.repo,
+            env={
+                **self.env,
+                "PATH": f"{failing_bin}{os.pathsep}{os.environ['PATH']}",
+                "ZACK_CONFIRMED_PR_CREATE": "1",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("801 added lines", result.stderr)
+
+    def test_gh_guard_finds_target_remote_when_origin_is_a_fork(self) -> None:
+        self.commit_added_lines(801)
+        self.run_command(
+            ["git", "remote", "set-url", "origin", "git@github.com:zkoppert/github.git"]
+        )
+        self.run_command(
+            ["git", "remote", "add", "upstream", "git@github.com:github/github.git"]
+        )
+        self.run_command(
+            [
+                "git",
+                "config",
+                f"url.file://{self.remote}.insteadOf",
+                "git@github.com:github/github.git",
+            ]
+        )
+        self.run_command(["git", "config", "branch.feature.gh-merge-base", "main"])
+        failing_bin = self.root / "failing-upstream-bin"
         failing_bin.mkdir()
         failing_gh = failing_bin / "gh"
         failing_gh.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")

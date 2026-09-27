@@ -94,8 +94,10 @@ def branch_merge_base(root: Path, branch: str) -> Optional[str]:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def stack_merge_base(root: Path, branch: str) -> Optional[str]:
-    """Return the base commit recorded by the gh-stack extension."""
+def stack_parent_branch(
+    root: Path, repository: str, branch: str
+) -> Optional[str]:
+    """Return the live parent branch recorded by the gh-stack extension."""
     common_dir = Path(git(root, "rev-parse", "--git-common-dir"))
     if not common_dir.is_absolute():
         common_dir = root / common_dir
@@ -104,7 +106,11 @@ def stack_merge_base(root: Path, branch: str) -> Optional[str]:
         payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
-    if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schemaVersion") != 1
+        or payload.get("repository") not in ("", repository)
+    ):
         return None
     stacks = payload.get("stacks")
     if not isinstance(stacks, list):
@@ -112,16 +118,21 @@ def stack_merge_base(root: Path, branch: str) -> Optional[str]:
     for stack in stacks:
         if not isinstance(stack, dict):
             continue
+        trunk = stack.get("trunk")
+        if not isinstance(trunk, dict) or not isinstance(trunk.get("branch"), str):
+            continue
         branches = stack.get("branches")
         if not isinstance(branches, list):
             continue
+        parent = trunk["branch"]
         for entry in branches:
             if (
                 isinstance(entry, dict)
                 and entry.get("branch") == branch
-                and isinstance(entry.get("base"), str)
             ):
-                return entry["base"]
+                return parent
+            if isinstance(entry, dict) and isinstance(entry.get("branch"), str):
+                parent = entry["branch"]
     return None
 
 
@@ -176,21 +187,21 @@ def resolve_base(
     branch: str,
     explicit_base: Optional[str],
     check_open_pr: bool,
-) -> Tuple[str, bool]:
+) -> Tuple[str, str]:
     """Resolve the base branch using GitHub CLI precedence."""
     if explicit_base:
-        return explicit_base, False
+        return explicit_base, "remote"
     if check_open_pr:
         pr_base = open_pr_base(root, executable, repository, branch)
         if pr_base:
-            return pr_base, False
-    stack_base = stack_merge_base(root, branch)
-    if stack_base:
-        return stack_base, True
+            return pr_base, "remote"
+    stack_parent = stack_parent_branch(root, repository, branch)
+    if stack_parent:
+        return stack_parent, "local"
     configured_base = branch_merge_base(root, branch)
     if configured_base:
-        return configured_base, False
-    return default_branch(root, executable, repository), False
+        return configured_base, "remote"
+    return default_branch(root, executable, repository), "remote"
 
 
 def fetch_base(root: Path, remote: str, base: str) -> str:
@@ -220,6 +231,7 @@ def ensure_merge_base(
     *,
     remote: str,
     base: str,
+    source_branch: str,
     base_commit: str,
     source_commit: str,
 ) -> str:
@@ -235,16 +247,39 @@ def ensure_merge_base(
         raise GuardError(f"no merge base exists between {base} and the source commit")
 
     for depth in (1000, 10000):
-        git(root, "fetch", "--quiet", "--no-tags", f"--deepen={depth}", remote)
-        git(
-            root,
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            remote,
-            f"refs/heads/{base}",
+        refspecs = [
+            f"refs/heads/{base}:refs/remotes/{remote}/{base}",
+            f"refs/heads/{source_branch}:refs/remotes/{remote}/{source_branch}",
+        ]
+        fetch_result = run(
+            [
+                "git",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                f"--deepen={depth}",
+                remote,
+                *refspecs,
+            ],
+            cwd=root,
+            check=False,
         )
-        base_commit = git(root, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
+        if fetch_result.returncode != 0:
+            git(
+                root,
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                f"--deepen={depth}",
+                remote,
+                refspecs[0],
+            )
+        base_commit = git(
+            root,
+            "rev-parse",
+            "--verify",
+            f"refs/remotes/{remote}/{base}^{{commit}}",
+        )
         result = run(
             ["git", "merge-base", base_commit, source_commit],
             cwd=root,
@@ -284,7 +319,7 @@ def check_size(args: argparse.Namespace) -> int:
 
     root = repository_root()
     remote = args.remote or remote_for_repository(root, args.repository)
-    base, base_is_commit = resolve_base(
+    base, base_location = resolve_base(
         root,
         executable=args.gh,
         repository=args.repository,
@@ -293,8 +328,8 @@ def check_size(args: argparse.Namespace) -> int:
         check_open_pr=args.check_open_pr,
     )
     base_commit = (
-        git(root, "rev-parse", "--verify", f"{base}^{{commit}}")
-        if base_is_commit
+        resolve_source(root, remote, base)
+        if base_location == "local"
         else fetch_base(root, remote, base)
     )
     source_commit = resolve_source(root, remote, args.source)
@@ -302,6 +337,7 @@ def check_size(args: argparse.Namespace) -> int:
         root,
         remote=remote,
         base=base,
+        source_branch=args.branch,
         base_commit=base_commit,
         source_commit=source_commit,
     )
@@ -364,6 +400,15 @@ def main(arguments: Optional[list[str]] = None) -> int:
     try:
         return check_size(args)
     except (GuardError, ValueError) as error:
+        if (
+            args.repository in TARGET_REPOSITORIES
+            and os.environ.get(OVERRIDE_VARIABLE) == "1"
+        ):
+            print(
+                f"pr-size-guard: override accepted despite check failure: {error}",
+                file=sys.stderr,
+            )
+            return 0
         print(
             f"pr-size-guard: blocked {args.context} for {args.repository}: {error}",
             file=sys.stderr,

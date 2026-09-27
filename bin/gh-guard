@@ -209,11 +209,18 @@ enforce_pr_size_or_die() {
     target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
   fi
   if [ -z "$target_repo" ]; then
-    local origin_url
-    origin_url="$(git config --get remote.origin.url 2>/dev/null || true)"
-    if [[ "$origin_url" =~ github\.com[:/]([^/]+/[^/]+)$ ]]; then
-      target_repo="${BASH_REMATCH[1]}"
-    fi
+    local remote_name remote_url
+    while IFS= read -r remote_name; do
+      remote_url="$(git config --get "remote.$remote_name.url" 2>/dev/null || true)"
+      if [[ "$remote_url" =~ github\.com[:/]([^/]+/[^/]+)$ ]]; then
+        case "${BASH_REMATCH[1]%.git}" in
+          github/github|github/github-ui)
+            target_repo="${BASH_REMATCH[1]%.git}"
+            break
+            ;;
+        esac
+      fi
+    done < <(git remote 2>/dev/null || true)
   fi
   target_repo="${target_repo%.git}"
   case "$target_repo" in
