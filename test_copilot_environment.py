@@ -239,12 +239,23 @@ class CopilotEnvironmentTest(unittest.TestCase):
             "az",
             "docker",
             "gh",
+            "git",
             "npx",
             "tailscale",
             "tmux",
         ):
             path = self.bin_dir / command
-            path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            if command == "git":
+                hooks_path = Path(__file__).resolve().parent / "git-hooks"
+                path.write_text(
+                    "#!/bin/sh\n"
+                    'if [ "$*" = "config --global --get core.hooksPath" ]; then\n'
+                    f"  printf '%s\\n' {str(hooks_path)!r}\n"
+                    "fi\n",
+                    encoding="utf-8",
+                )
+            else:
+                path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             path.chmod(0o755)
         node = self.bin_dir / "node"
         node.write_text(
@@ -318,6 +329,30 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 self.assertEqual(result.returncode, int(missing_secrets), result.stdout + result.stderr)
                 guidance = [line for line in result.stdout.splitlines() if line.startswith("OAuth status:")]
                 self.assertEqual(guidance, ["OAuth status: verify DataDog, Sentry, and Slack with /mcp"])
+
+    def test_verifier_rejects_inactive_personal_git_hooks(self) -> None:
+        env = self.prepare_complete_environment()
+        git = self.bin_dir / "git"
+        git.write_text(
+            "#!/bin/sh\n"
+            'if [ "$*" = "config --global --get core.hooksPath" ]; then\n'
+            "  printf '/wrong/hooks\\n'\n"
+            "fi\n",
+            encoding="utf-8",
+        )
+        git.chmod(0o755)
+
+        result = subprocess.run(
+            [str(self.verifier)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("core.hooksPath must point to", result.stdout)
+        self.assertNotIn("environment is ready", result.stdout)
 
     def test_verifier_rejects_unsupported_node_versions(self) -> None:
         env = self.prepare_complete_environment()

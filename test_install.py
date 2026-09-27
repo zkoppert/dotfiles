@@ -304,6 +304,27 @@ class InstallScriptTest(unittest.TestCase):
             self.assertEqual(first_run.stdout.count(f"Linked {command}"), 1)
             self.assertEqual(second_run.stdout.count(f"Linked {command}"), 1)
 
+    def test_personal_git_hooks_are_configured(self) -> None:
+        hooks_dir = self.repo / "git-hooks"
+        hooks_dir.mkdir()
+        pre_push = hooks_dir / "pre-push"
+        pre_push.write_text("#!/bin/sh\n", encoding="utf-8")
+        pre_push.chmod(0o755)
+
+        first_run = self.run_installer()
+        second_run = self.run_installer()
+
+        result = subprocess.run(
+            ["git", "config", "--global", "--get", "core.hooksPath"],
+            env=self.env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.stdout.strip(), str(hooks_dir))
+        self.assertIn("Configured personal Git hooks", first_run.stdout)
+        self.assertIn("Configured personal Git hooks", second_run.stdout)
+
     def test_linux_installs_node_22_when_current_version_is_older(self) -> None:
         self.prepare_node_install()
 

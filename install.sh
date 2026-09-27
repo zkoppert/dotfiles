@@ -196,6 +196,18 @@ if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
   done
 fi
 
+# Activate personal Git hooks for every local clone without changing any repository.
+if command -v git >/dev/null 2>&1 && [ -x "$DOTFILES_DIR/git-hooks/pre-push" ]; then
+  desired_hooks_path="$DOTFILES_DIR/git-hooks"
+  current_hooks_path="$(git config --global --get core.hooksPath 2>/dev/null || true)"
+  if [ -z "$current_hooks_path" ] || [ "$current_hooks_path" = "$desired_hooks_path" ]; then
+    git config --global core.hooksPath "$desired_hooks_path"
+    echo "✓ Configured personal Git hooks → $desired_hooks_path"
+  else
+    echo "⚠ core.hooksPath already points to $current_hooks_path - skipping personal Git hooks"
+  fi
+fi
+
 # Install durable Codespace Copilot commands.
 for copilot_command in \
   copilot2 \

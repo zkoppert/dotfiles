@@ -559,6 +559,54 @@ fi
 
 # --- gh pr create --------------------------------------------------------
 if [ "$is_pr_create" = "1" ]; then
+  target_repo=""
+  create_base=""
+  create_head=""
+  previous_arg=""
+  for arg in "$@"; do
+    case "$previous_arg" in
+      -R|--repo) target_repo="$arg" ;;
+      --base) create_base="$arg" ;;
+      --head) create_head="$arg" ;;
+    esac
+    case "$arg" in
+      -R=*|--repo=*) target_repo="${arg#*=}" ;;
+      --base=*) create_base="${arg#--base=}" ;;
+      --head=*) create_head="${arg#--head=}" ;;
+    esac
+    previous_arg="$arg"
+  done
+  if [ -z "$target_repo" ]; then
+    target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
+  fi
+  case "$target_repo" in
+    github/github|github/github-ui)
+      create_branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
+      create_source="${create_head:-HEAD}"
+      if [[ "$create_source" == *:* ]]; then
+        create_source="${create_source#*:}"
+      fi
+      if [ "$create_source" != "HEAD" ]; then
+        create_branch="$create_source"
+      fi
+      if [ -z "$create_branch" ]; then
+        echo "gh-guard: cannot enforce the 800-addition limit from a detached HEAD." >&2
+        exit 1
+      fi
+      size_args=(
+        --repo "$target_repo"
+        --branch "$create_branch"
+        --source "$create_source"
+        --gh "$REAL_GH"
+        --context "draft creation"
+      )
+      if [ -n "$create_base" ]; then
+        size_args+=(--base "$create_base")
+      fi
+      python3 "$SCRIPT_PATH/pr-size-guard" "${size_args[@]}" || exit $?
+      ;;
+  esac
+
   # Lint the PR body via the validate-style skill before doing anything else.
   # This catches violations of Zack's hard rules (em-dashes, "per" misuse,
   # "This PR" as a sentence subject, subjectless action-verb bullets, etc.)

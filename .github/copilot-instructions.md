@@ -78,6 +78,7 @@ Before claiming work is done, build a way to *see* the output yourself. Don't ma
 For context on this mindset, see [Kamil Gwozdz, "Reasons why your prompts suck (part 1)"](https://kamilgwozdz.substack.com/p/reasons-why-your-prompts-suck-part).
 
 ## Pull Requests
+- **Keep large internal PRs reviewable**: For `github/github` and `github/github-ui`, never create or push a PR with more than 800 added lines. Count all additions, including tests, generated files, lockfiles, and snapshots. Check the full PR diff before draft creation and before every later push. Split the work before review additions cross the limit. Use `npx -y gh-axi stack init`, `npx -y gh-axi stack add`, and `npx -y gh-axi stack submit --open` to create stacked PRs when one reviewable unit cannot stay within the limit. Use `ZACK_CONFIRMED_LARGE_PR=1` only after Zack explicitly approves the exception in the current conversation.
 - **Check CONTRIBUTING.md before opening PRs**: Before opening a PR or draft PR, search the target repository for a `CONTRIBUTING.md` (or `contributing.md`, `.github/CONTRIBUTING.md`) and follow any guidance there (e.g., commit signing, branch naming, PR format, required checks). This applies to every repo, not just ours.
 - **Always create PRs as draft** unless I explicitly say otherwise
 - **Never convert a ready PR back to draft** unless I explicitly ask for that exact transition in the current conversation. A manual ready-for-review transition is explicit approval and must be preserved, even when an earlier instruction said to keep the PR as a draft.

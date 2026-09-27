@@ -26,7 +26,7 @@ jobs:
       - name: Run memory-sweep tests
         run: python3 .copilot/skills/memory-sweep/tests.py
       - name: Run install script tests
-        run: python3 test_install.py
+        run: python3 test_install.py && python3 test_pr_size_guard.py
       - name: Run babysit-prs wrapper tests
         run: python3 test_babysit_prs_wrapper.py
       - name: Run durable Codespace Copilot tests

@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""Block oversized personal pull requests in selected repositories."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Optional
+
+MAX_ADDITIONS = 800
+TARGET_REPOSITORIES = {"github/github", "github/github-ui"}
+OVERRIDE_VARIABLE = "ZACK_CONFIRMED_LARGE_PR"
+ZERO_SHA = "0" * 40
+
+
+class GuardError(RuntimeError):
+    """Report a size check that cannot complete safely."""
+
+
+def run(
+    command: list[str],
+    *,
+    cwd: Path,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command without hook-specific Git environment leaking into it."""
+    environment = dict(os.environ)
+    for name in ("GIT_COMMON_DIR", "GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"):
+        environment.pop(name, None)
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=check,
+    )
+
+
+def git(cwd: Path, *arguments: str) -> str:
+    """Run Git and return trimmed stdout."""
+    try:
+        return run(["git", *arguments], cwd=cwd).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) else str(error)
+        raise GuardError(f"git {' '.join(arguments)} failed: {detail}") from error
+
+
+def gh(cwd: Path, executable: str, *arguments: str) -> str:
+    """Run GitHub CLI and return trimmed stdout."""
+    try:
+        return run([executable, *arguments], cwd=cwd).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) else str(error)
+        raise GuardError(f"gh {' '.join(arguments)} failed: {detail}") from error
+
+
+def repository_from_url(url: str) -> Optional[str]:
+    """Return an owner/repository pair for a GitHub remote URL."""
+    match = re.search(r"github\.com(?::|/)([^/]+/[^/]+)$", url)
+    return match.group(1).removesuffix(".git") if match else None
+
+
+def repository_root() -> Path:
+    """Return the current worktree root."""
+    try:
+        return Path(git(Path.cwd(), "rev-parse", "--show-toplevel"))
+    except GuardError as error:
+        raise GuardError("the current directory is not a Git worktree") from error
+
+
+def remote_for_repository(root: Path, repository: str) -> str:
+    """Find a configured remote that points at the target repository."""
+    remotes = git(root, "remote").splitlines()
+    for remote in remotes:
+        url = git(root, "config", "--get", f"remote.{remote}.url")
+        if repository_from_url(url) == repository:
+            return remote
+    raise GuardError(f"no configured remote points at {repository}")
+
+
+def branch_merge_base(root: Path, branch: str) -> Optional[str]:
+    """Return the branch-specific GitHub merge base when configured."""
+    result = run(
+        ["git", "config", "--get", f"branch.{branch}.gh-merge-base"],
+        cwd=root,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def open_pr_base(
+    root: Path, executable: str, repository: str, branch: str
+) -> Optional[str]:
+    """Return the base branch for an open PR, if one exists."""
+    output = gh(
+        root,
+        executable,
+        "pr",
+        "list",
+        "--repo",
+        repository,
+        "--head",
+        branch,
+        "--state",
+        "open",
+        "--limit",
+        "1",
+        "--json",
+        "baseRefName",
+        "--jq",
+        ".[0].baseRefName // \"\"",
+    )
+    return output or None
+
+
+def default_branch(root: Path, executable: str, repository: str) -> str:
+    """Return the repository's default branch."""
+    branch = gh(
+        root,
+        executable,
+        "repo",
+        "view",
+        repository,
+        "--json",
+        "defaultBranchRef",
+        "--jq",
+        ".defaultBranchRef.name",
+    )
+    if not branch:
+        raise GuardError(f"cannot resolve the default branch for {repository}")
+    return branch
+
+
+def resolve_base(
+    root: Path,
+    *,
+    executable: str,
+    repository: str,
+    branch: str,
+    explicit_base: Optional[str],
+    check_open_pr: bool,
+) -> str:
+    """Resolve the base branch using GitHub CLI precedence."""
+    if explicit_base:
+        return explicit_base
+    if check_open_pr:
+        pr_base = open_pr_base(root, executable, repository, branch)
+        if pr_base:
+            return pr_base
+    configured_base = branch_merge_base(root, branch)
+    if configured_base:
+        return configured_base
+    return default_branch(root, executable, repository)
+
+
+def fetch_base(root: Path, remote: str, base: str) -> str:
+    """Fetch the current base branch and return its commit."""
+    git(root, "fetch", "--quiet", "--no-tags", remote, f"refs/heads/{base}")
+    return git(root, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
+
+
+def count_additions(root: Path, base_commit: str, source: str) -> int:
+    """Count text additions in the pull request diff."""
+    source_commit = git(root, "rev-parse", "--verify", f"{source}^{{commit}}")
+    output = git(
+        root,
+        "diff",
+        "--numstat",
+        "--find-renames",
+        f"{base_commit}...{source_commit}",
+    )
+    additions = 0
+    for line in output.splitlines():
+        added, _deleted, _path = line.split("\t", 2)
+        if added != "-":
+            additions += int(added)
+    return additions
+
+
+def check_size(args: argparse.Namespace) -> int:
+    """Check one prospective pull request diff."""
+    if args.repository not in TARGET_REPOSITORIES:
+        return 0
+    if args.source == ZERO_SHA:
+        return 0
+
+    root = repository_root()
+    remote = args.remote or remote_for_repository(root, args.repository)
+    base = resolve_base(
+        root,
+        executable=args.gh,
+        repository=args.repository,
+        branch=args.branch,
+        explicit_base=args.base,
+        check_open_pr=args.check_open_pr,
+    )
+    base_commit = fetch_base(root, remote, base)
+    additions = count_additions(root, base_commit, args.source)
+
+    if additions <= MAX_ADDITIONS:
+        print(
+            f"pr-size-guard: {args.repository} {args.branch} has "
+            f"{additions}/{MAX_ADDITIONS} added lines."
+        )
+        return 0
+
+    if os.environ.get(OVERRIDE_VARIABLE) == "1":
+        print(
+            f"pr-size-guard: override accepted for {args.repository} "
+            f"with {additions} added lines."
+        )
+        return 0
+
+    print(
+        f"pr-size-guard: blocked {args.context} for {args.repository}.",
+        file=sys.stderr,
+    )
+    print(
+        f"The prospective PR has {additions} added lines. The personal limit is "
+        f"{MAX_ADDITIONS}.",
+        file=sys.stderr,
+    )
+    print(
+        "Split the work into a stacked PR before continuing. Use "
+        "`npx -y gh-axi stack init` or `npx -y gh-axi stack add`, then "
+        "`npx -y gh-axi stack submit --open`.",
+        file=sys.stderr,
+    )
+    print(
+        f"Only after Zack explicitly approves an exception, retry with "
+        f"{OVERRIDE_VARIABLE}=1 in the same command.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def parse_args(arguments: list[str]) -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo", dest="repository", required=True)
+    parser.add_argument("--branch", required=True)
+    parser.add_argument("--source", required=True)
+    parser.add_argument("--base")
+    parser.add_argument("--remote")
+    parser.add_argument("--gh", default="gh")
+    parser.add_argument("--context", choices=("draft creation", "push"), required=True)
+    parser.add_argument("--check-open-pr", action="store_true")
+    return parser.parse_args(arguments)
+
+
+def main(arguments: Optional[list[str]] = None) -> int:
+    """Run the guard."""
+    args = parse_args(arguments or sys.argv[1:])
+    try:
+        return check_size(args)
+    except (GuardError, ValueError) as error:
+        print(
+            f"pr-size-guard: blocked {args.context} for {args.repository}: {error}",
+            file=sys.stderr,
+        )
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

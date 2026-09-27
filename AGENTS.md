@@ -4,6 +4,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 
 - Repository-wide guidance lives in `.github/copilot-instructions.md`.
 - `bin/pr-marker` owns readiness formats and validation; `bin/gh-guard` consumes it, with behavioral regressions in `bin/test_pr_marker.py`.
+- `bin/pr-size-guard` owns the personal 800-addition limit; `bin/gh-guard` and `git-hooks/pre-push` consume it.
 - `.github/workflows/pr-marker-tests.yml` owns the declared CI test commands and Python runtime floor.
 
 ## Maintaining this file
