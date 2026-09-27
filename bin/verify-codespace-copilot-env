@@ -101,20 +101,47 @@ def main() -> int:
             )
     except (OSError, subprocess.CalledProcessError):
         failures.append(f"core.hooksPath is not configured for {expected_hooks_path}")
-    for required_path in (
+    forwarded_hook_names = {
+        "applypatch-msg",
+        "pre-applypatch",
+        "post-applypatch",
+        "pre-merge-commit",
+        "prepare-commit-msg",
+        "commit-msg",
+        "post-commit",
+        "pre-rebase",
+        "post-checkout",
+        "post-merge",
+        "post-rewrite",
+        "post-index-change",
+        "pre-auto-gc",
+        "reference-transaction",
+        "push-to-checkout",
+        "sendemail-validate",
+        "fsmonitor-watchman",
+        "p4-changelist",
+        "p4-prepare-changelist",
+        "p4-post-changelist",
+        "p4-pre-submit",
+    }
+    required_paths = {
         expected_hooks_path / "pre-push",
         expected_hooks_path / "pre-commit",
-        expected_hooks_path / "commit-msg",
         dotfiles_root / "bin" / "pr-size-guard",
-    ):
+        *(expected_hooks_path / name for name in forwarded_hook_names),
+    }
+    for required_path in required_paths:
         if not required_path.is_file() or not os.access(required_path, os.X_OK):
             failures.append(f"PR size guard is missing or not executable: {required_path}")
     expected_hook_targets = {
         expected_hooks_path / "pre-push": dotfiles_root / "git-hooks" / "pre-push",
         expected_hooks_path / "pre-commit": dotfiles_root / "git-hooks" / "pre-commit",
-        expected_hooks_path / "commit-msg": (
-            dotfiles_root / "git-hooks" / "repository-hook-forwarder"
-        ),
+        **{
+            expected_hooks_path / name: (
+                dotfiles_root / "git-hooks" / "repository-hook-forwarder"
+            )
+            for name in forwarded_hook_names
+        },
     }
     for hook_path, expected_target in expected_hook_targets.items():
         if not hook_path.is_symlink() or hook_path.resolve() != expected_target:

@@ -198,6 +198,8 @@ class PrSizeGuardTest(unittest.TestCase):
 
         urls = (
             "ssh://git@ssh.github.com:443/GitHub/GitHub.git",
+            "ssh://git@github.com:22/GitHub/GitHub.git",
+            "https://github.com:443/GitHub/GitHub.git",
             "git@GitHub.com:GitHub/GitHub.git",
             "ssh://git@github.com/GitHub/GitHub.git",
             "https://zkoppert@github.com/GitHub/GitHub.git",
@@ -217,6 +219,26 @@ class PrSizeGuardTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("801 added lines", result.stderr)
+
+    def test_pre_push_hook_blocks_fork_only_clone_until_upstream_exists(self) -> None:
+        source = self.commit_added_lines(1)
+        self.run_command(
+            ["git", "remote", "set-url", "origin", "git@github.com:zkoppert/github.git"]
+        )
+        hook_input = f"refs/heads/feature {source} refs/heads/feature {'0' * 40}\n"
+
+        result = subprocess.run(
+            [str(self.pre_push), "origin", "git@github.com:zkoppert/github.git"],
+            cwd=self.repo,
+            env=self.env,
+            input=hook_input,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("blocked fork-only push", result.stderr)
 
     def test_pre_push_hook_delegates_to_repository_hook(self) -> None:
         local_hook = self.repo / ".git" / "hooks" / "pre-push"
@@ -292,7 +314,7 @@ class PrSizeGuardTest(unittest.TestCase):
         result = self.run_size_guard(source)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("1/800 added lines", result.stdout)
+        self.assertIn("0/800 added lines", result.stdout)
 
     def test_text_marked_binary_still_counts_added_lines(self) -> None:
         (self.repo / ".gitattributes").write_text(
@@ -352,6 +374,41 @@ class PrSizeGuardTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("801 added lines", result.stderr)
+
+    def test_gh_guard_blocks_fork_only_clone_without_upstream(self) -> None:
+        self.commit_added_lines(1)
+        self.run_command(
+            ["git", "remote", "set-url", "origin", "git@github.com:zkoppert/github.git"]
+        )
+        fork_bin = self.root / "fork-bin"
+        fork_bin.mkdir()
+        fork_gh = fork_bin / "gh"
+        fork_gh.write_text(
+            "#!/bin/sh\n"
+            'if [ "$*" = "repo view --json nameWithOwner --jq .nameWithOwner" ]; then\n'
+            "  printf 'zkoppert/github\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 2\n",
+            encoding="utf-8",
+        )
+        fork_gh.chmod(0o755)
+
+        result = subprocess.run(
+            [str(self.gh_guard), "pr", "create", "--draft"],
+            cwd=self.repo,
+            env={
+                **self.env,
+                "PATH": f"{fork_bin}{os.pathsep}{os.environ['PATH']}",
+                "ZACK_CONFIRMED_PR_CREATE": "1",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no configured remote points at github/github", result.stderr)
 
     def test_remote_tracking_source_is_resolved(self) -> None:
         source = self.commit_added_lines(1)

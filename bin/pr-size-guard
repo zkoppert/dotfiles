@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import difflib
 import json
 import os
 import re
@@ -229,7 +228,11 @@ def resolve_base(
         if pr_base:
             return pr_base, "remote"
         stack_parent = stack_parent_branch(root, repository, branch)
-        if stack_parent:
+        if stack_parent and run(
+            ["git", "rev-parse", "--verify", f"{stack_parent}^{{commit}}"],
+            cwd=root,
+            check=False,
+        ).returncode == 0:
             return stack_parent, "local"
     configured_base = branch_merge_base(root, branch)
     if configured_base and configured_base != branch:
@@ -327,16 +330,6 @@ def ensure_merge_base(
 
 def count_additions(root: Path, merge_base: str, source_commit: str) -> int:
     """Count text additions in the pull request diff."""
-    status_output = git(
-        root,
-        "-c",
-        "core.quotePath=false",
-        "diff",
-        "--name-status",
-        "--find-renames",
-        merge_base,
-        source_commit,
-    )
     output = git(
         root,
         "-c",
@@ -348,46 +341,28 @@ def count_additions(root: Path, merge_base: str, source_commit: str) -> int:
         source_commit,
     )
     additions = 0
-    status_lines = status_output.splitlines()
-    numstat_lines = output.splitlines()
-    if len(status_lines) != len(numstat_lines):
-        raise GuardError("cannot align changed paths with addition counts")
-    for line, status_line in zip(numstat_lines, status_lines):
+    for line in output.splitlines():
         added, _deleted, _path = line.split("\t", 2)
         if added == "-":
-            fields = status_line.split("\t")
-            status = fields[0][:1]
-            if status == "D":
-                continue
-            if status in ("R", "C") and len(fields) == 3:
-                old_path, new_path = fields[1], fields[2]
-            elif len(fields) == 2:
-                old_path = new_path = fields[1]
-            else:
-                raise GuardError(f"cannot parse binary diff entry: {status_line}")
-            old_blob = (
-                run_bytes(["git", "show", f"{merge_base}:{old_path}"], cwd=root)
-                if status != "A"
-                else None
-            )
             new_blob = run_bytes(
-                ["git", "show", f"{source_commit}:{new_path}"],
+                ["git", "show", f"{source_commit}:{_path}"],
                 cwd=root,
             )
-            if new_blob.returncode != 0:
-                raise GuardError(f"cannot read changed file {new_path}")
-            old_lines = (
-                old_blob.stdout.splitlines()
-                if old_blob is not None and old_blob.returncode == 0
-                else []
+            if new_blob.returncode != 0 or b"\x00" in new_blob.stdout:
+                continue
+            text_diff = git(
+                root,
+                "diff",
+                "--text",
+                "--unified=0",
+                merge_base,
+                source_commit,
+                "--",
+                _path,
             )
-            new_lines = new_blob.stdout.splitlines()
             additions += sum(
-                new_end - new_start
-                for tag, _old_start, _old_end, new_start, new_end in difflib.SequenceMatcher(
-                    None, old_lines, new_lines
-                ).get_opcodes()
-                if tag in ("insert", "replace")
+                line.startswith("+") and not line.startswith("+++")
+                for line in text_diff.splitlines()
             )
         else:
             additions += int(added)

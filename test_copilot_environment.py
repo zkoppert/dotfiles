@@ -239,9 +239,32 @@ class CopilotEnvironmentTest(unittest.TestCase):
         hooks_path.mkdir(parents=True)
         (hooks_path / "pre-push").symlink_to(hooks_source / "pre-push")
         (hooks_path / "pre-commit").symlink_to(hooks_source / "pre-commit")
-        (hooks_path / "commit-msg").symlink_to(
-            hooks_source / "repository-hook-forwarder"
-        )
+        for hook_name in (
+            "applypatch-msg",
+            "pre-applypatch",
+            "post-applypatch",
+            "pre-merge-commit",
+            "prepare-commit-msg",
+            "commit-msg",
+            "post-commit",
+            "pre-rebase",
+            "post-checkout",
+            "post-merge",
+            "post-rewrite",
+            "post-index-change",
+            "pre-auto-gc",
+            "reference-transaction",
+            "push-to-checkout",
+            "sendemail-validate",
+            "fsmonitor-watchman",
+            "p4-changelist",
+            "p4-prepare-changelist",
+            "p4-post-changelist",
+            "p4-pre-submit",
+        ):
+            (hooks_path / hook_name).symlink_to(
+                hooks_source / "repository-hook-forwarder"
+            )
 
         result = self.run_bootstrap()
         self.assertEqual(result.returncode, 0, result.stderr)

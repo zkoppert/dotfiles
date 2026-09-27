@@ -30,7 +30,15 @@ github_repo_from_url() {
   case "$url" in
     git@github.com:*) repository="${url#git@github.com:}" ;;
     ssh://git@github.com/*) repository="${url#ssh://git@github.com/}" ;;
+    ssh://git@github.com:[0-9]*/*)
+      repository="${url#ssh://git@github.com:}"
+      repository="${repository#*/}"
+      ;;
     https://github.com/*) repository="${url#https://github.com/}" ;;
+    https://github.com:[0-9]*/*)
+      repository="${url#https://github.com:}"
+      repository="${repository#*/}"
+      ;;
     https://*@github.com/*) repository="${url#https://*@github.com/}" ;;
     http://github.com/*) repository="${url#http://github.com/}" ;;
     git://github.com/*) repository="${url#git://github.com/}" ;;
@@ -93,6 +101,20 @@ if [ "$is_size_target" = "0" ]; then
           ;;
       esac
     fi
+    if [ "$is_size_target" = "0" ]; then
+      case "${owner_repo#*/}" in
+        github)
+          is_size_target=1
+          size_repo="github/github"
+          size_remote=""
+          ;;
+        github-ui)
+          is_size_target=1
+          size_repo="github/github-ui"
+          size_remote=""
+          ;;
+      esac
+    fi
   done < <(git remote 2>/dev/null || true)
 fi
 
@@ -119,6 +141,11 @@ while read -r _ local_sha remote_ref remote_sha; do
       exit 1
     fi
     branch="${remote_ref#refs/heads/}"
+    if [ -z "$size_remote" ]; then
+      echo "pre-push: blocked fork-only push for $size_repo." >&2
+      echo "Add a remote for the canonical repository so the PR base can be measured." >&2
+      exit 1
+    fi
     python3 "$SIZE_GUARD" \
       --repo "$size_repo" \
       --remote "$size_remote" \

@@ -174,7 +174,15 @@ github_repo_from_url() {
   case "$url" in
     git@github.com:*) repository="${url#git@github.com:}" ;;
     ssh://git@github.com/*) repository="${url#ssh://git@github.com/}" ;;
+    ssh://git@github.com:[0-9]*/*)
+      repository="${url#ssh://git@github.com:}"
+      repository="${repository#*/}"
+      ;;
     https://github.com/*) repository="${url#https://github.com/}" ;;
+    https://github.com:[0-9]*/*)
+      repository="${url#https://github.com:}"
+      repository="${repository#*/}"
+      ;;
     https://*@github.com/*) repository="${url#https://*@github.com/}" ;;
     http://github.com/*) repository="${url#http://github.com/}" ;;
     git://github.com/*) repository="${url#git://github.com/}" ;;
@@ -191,6 +199,7 @@ enforce_pr_size_or_die() {
   [ "$is_pr_create" = "1" ] || return 0
 
   local target_repo=""
+  local checkout_repo=""
   local target_repo_explicit=0
   local create_base=""
   local create_head=""
@@ -237,6 +246,7 @@ enforce_pr_size_or_die() {
   esac
   if [ -z "$target_repo" ] && [ "$target_repo_explicit" = "0" ]; then
     target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
+    checkout_repo="$target_repo"
   fi
   if [ "$target_repo_explicit" = "0" ]; then
     case "$target_repo" in
@@ -258,6 +268,12 @@ enforce_pr_size_or_die() {
         esac
       fi
     done < <(git remote 2>/dev/null || true)
+  fi
+  if [ -z "$target_repo" ] && [ "$target_repo_explicit" = "0" ]; then
+    case "$(printf '%s' "${checkout_repo#*/}" | tr '[:upper:]' '[:lower:]')" in
+      github) target_repo="github/github" ;;
+      github-ui) target_repo="github/github-ui" ;;
+    esac
   fi
   target_repo="${target_repo%.git}"
   target_repo="$(printf '%s' "$target_repo" | tr '[:upper:]' '[:lower:]')"
@@ -309,7 +325,9 @@ fi
 
 # Help flags after the operation are not seen by the parser above. Legacy help
 # calls pass through, while native calls still require their verified handoff.
-if [ "$native_locator_present" = "0" ] &&
+if { [ "$native_locator_present" = "0" ] ||
+     [ "$is_pr_ready" = "1" ] ||
+     [ "$is_pr_draft" = "1" ]; } &&
    { [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ] || [ "$is_pr_draft" = "1" ] || [ "$is_pr_edit" = "1" ]; }; then
   for a in "$@"; do
     case "$a" in
