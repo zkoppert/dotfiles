@@ -270,9 +270,10 @@ enforce_pr_size_or_die() {
     done < <(git remote 2>/dev/null || true)
   fi
   if [ -z "$target_repo" ] && [ "$target_repo_explicit" = "0" ]; then
-    case "$(printf '%s' "${checkout_repo#*/}" | tr '[:upper:]' '[:lower:]')" in
-      github) target_repo="github/github" ;;
-      github-ui) target_repo="github/github-ui" ;;
+    case "$(printf '%s' "$checkout_repo" | tr '[:upper:]' '[:lower:]')" in
+      zkoppert/github) target_repo="github/github" ;;
+      zkoppert/github-ui) target_repo="github/github-ui" ;;
+      ?*/?*) return 0 ;;
     esac
   fi
   target_repo="${target_repo%.git}"

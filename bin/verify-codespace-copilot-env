@@ -116,7 +116,6 @@ def main() -> int:
         "post-index-change",
         "pre-auto-gc",
         "reference-transaction",
-        "push-to-checkout",
         "sendemail-validate",
         "fsmonitor-watchman",
         "p4-changelist",

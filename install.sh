@@ -211,6 +211,33 @@ fi
 if command -v git >/dev/null 2>&1 &&
    [ -x "$DOTFILES_DIR/git-hooks/pre-push" ] &&
    [ -x "$DOTFILES_DIR/git-hooks/repository-hook-forwarder" ]; then
+  github_repo_from_url() {
+    local url repository
+    url="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    repository=""
+    case "$url" in
+      git@github.com:*) repository="${url#git@github.com:}" ;;
+      ssh://git@github.com/*) repository="${url#ssh://git@github.com/}" ;;
+      ssh://git@github.com:[0-9]*/*)
+        repository="${url#ssh://git@github.com:}"
+        repository="${repository#*/}"
+        ;;
+      https://github.com/*) repository="${url#https://github.com/}" ;;
+      https://github.com:[0-9]*/*)
+        repository="${url#https://github.com:}"
+        repository="${repository#*/}"
+        ;;
+      https://*@github.com/*) repository="${url#https://*@github.com/}" ;;
+      http://github.com/*) repository="${url#http://github.com/}" ;;
+      git://github.com/*) repository="${url#git://github.com/}" ;;
+      ssh://git@ssh.github.com:[0-9]*/*)
+        repository="${url#ssh://git@ssh.github.com:}"
+        repository="${repository#*/}"
+        ;;
+    esac
+    printf '%s' "${repository%.git}"
+  }
+
   desired_hooks_path="$HOME/.local/share/dotfiles-git-hooks"
   mkdir -p "$desired_hooks_path"
   ln -sfn "$DOTFILES_DIR/git-hooks/pre-commit" "$desired_hooks_path/pre-commit"
@@ -230,7 +257,6 @@ if command -v git >/dev/null 2>&1 &&
     post-index-change \
     pre-auto-gc \
     reference-transaction \
-    push-to-checkout \
     sendemail-validate \
     fsmonitor-watchman \
     p4-changelist \
@@ -254,9 +280,9 @@ if command -v git >/dev/null 2>&1 &&
     is_target_repo=0
     while IFS= read -r candidate_remote; do
       candidate_name="$(git -C "$candidate_repo" remote get-url "$candidate_remote" 2>/dev/null || true)"
-      candidate_name="$(printf '%s' "$candidate_name" | tr '[:upper:]' '[:lower:]')"
+      candidate_name="$(github_repo_from_url "$candidate_name")"
       case "$candidate_name" in
-        *github.com:github/github|*github.com:github/github.git|*github.com/github/github|*github.com/github/github.git|*github.com:github/github-ui|*github.com:github/github-ui.git|*github.com/github/github-ui|*github.com/github/github-ui.git|*ssh.github.com:*github/github|*ssh.github.com:*github/github.git|*ssh.github.com:*github/github-ui|*ssh.github.com:*github/github-ui.git)
+        github/github|github/github-ui)
           is_target_repo=1
           break
           ;;

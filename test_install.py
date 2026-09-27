@@ -365,7 +365,13 @@ class InstallScriptTest(unittest.TestCase):
             check=True,
         )
         subprocess.run(
-            ["git", "remote", "add", "origin", "git@github.com:github/github"],
+            [
+                "git",
+                "remote",
+                "add",
+                "origin",
+                "ssh://git@github.com:22/GitHub/GitHub.git",
+            ],
             cwd=target_repo,
             env=self.env,
             check=True,

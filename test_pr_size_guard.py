@@ -133,7 +133,30 @@ class PrSizeGuardTest(unittest.TestCase):
     def test_exact_limit_passes_and_limit_plus_one_blocks(self) -> None:
         source = self.commit_added_lines(800)
 
-        result = self.run_size_guard(source)
+        result = subprocess.run(
+            [
+                str(self.guard),
+                "--repo",
+                "github/github",
+                "--base",
+                "main",
+                "--branch",
+                "feature",
+                "--head-owner",
+                "github",
+                "--source",
+                source,
+                "--gh",
+                str(self.fake_bin / "gh"),
+                "--context",
+                "push",
+            ],
+            cwd=self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("800/800 added lines", result.stdout)
@@ -311,7 +334,30 @@ class PrSizeGuardTest(unittest.TestCase):
         self.run_command(["git", "commit", "-m", "add binary"])
         source = self.run_command(["git", "rev-parse", "HEAD"]).stdout.strip()
 
-        result = self.run_size_guard(source)
+        result = subprocess.run(
+            [
+                str(self.guard),
+                "--repo",
+                "github/github",
+                "--base",
+                "main",
+                "--branch",
+                "feature",
+                "--head-owner",
+                "github",
+                "--source",
+                source,
+                "--gh",
+                str(self.fake_bin / "gh"),
+                "--context",
+                "push",
+            ],
+            cwd=self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("0/800 added lines", result.stdout)
@@ -413,6 +459,47 @@ class PrSizeGuardTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("801 added lines", result.stderr)
+
+    def test_python_remote_parser_accepts_explicit_port(self) -> None:
+        source = self.commit_added_lines(1)
+        port_url = "ssh://git@github.com:22/GitHub/GitHub.git"
+        self.run_command(["git", "remote", "set-url", "origin", port_url])
+        self.run_command(
+            [
+                "git",
+                "config",
+                f"url.file://{self.remote}.insteadOf",
+                port_url,
+            ]
+        )
+
+        result = subprocess.run(
+            [
+                str(self.guard),
+                "--repo",
+                "github/github",
+                "--base",
+                "main",
+                "--branch",
+                "feature",
+                "--head-owner",
+                "github",
+                "--source",
+                source,
+                "--gh",
+                str(self.fake_bin / "gh"),
+                "--context",
+                "push",
+            ],
+            cwd=self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("1/800 added lines", result.stdout)
 
     def test_gh_guard_blocks_fork_only_clone_without_upstream(self) -> None:
         self.commit_added_lines(1)
@@ -591,6 +678,8 @@ class PrSizeGuardTest(unittest.TestCase):
                 "--context",
                 "push",
                 "--check-open-pr",
+                "--pushed-branch",
+                "feature",
             ],
             cwd=self.repo,
             env=self.env,
@@ -630,6 +719,8 @@ class PrSizeGuardTest(unittest.TestCase):
                 "--context",
                 "push",
                 "--check-open-pr",
+                "--pushed-branch",
+                "feature",
             ],
             cwd=self.repo,
             env=self.env,
@@ -695,6 +786,8 @@ class PrSizeGuardTest(unittest.TestCase):
                 "--context",
                 "push",
                 "--check-open-pr",
+                "--pushed-branch",
+                "feature",
             ],
             cwd=self.repo,
             env=self.env,
@@ -824,6 +917,8 @@ class PrSizeGuardTest(unittest.TestCase):
                 "--context",
                 "push",
                 "--check-open-pr",
+                "--pushed-branch",
+                "feature",
             ],
             cwd=worktree,
             env=self.env,
@@ -871,6 +966,25 @@ class PrSizeGuardTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_pre_push_hook_does_not_guard_unrelated_repo_named_github(self) -> None:
+        source = self.commit_added_lines(801)
+        self.run_command(
+            ["git", "remote", "set-url", "origin", "git@github.com:example/github.git"]
+        )
+        hook_input = f"refs/heads/feature {source} refs/heads/feature {'0' * 40}\n"
+
+        result = subprocess.run(
+            [str(self.pre_push), "origin", "git@github.com:example/github.git"],
+            cwd=self.repo,
+            env=self.env,
+            input=hook_input,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_gh_guard_blocks_oversized_draft_before_marker_checks(self) -> None:
         self.commit_added_lines(801)
 
@@ -886,6 +1000,40 @@ class PrSizeGuardTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("blocked draft creation", result.stderr)
         self.assertIn("801 added lines", result.stderr)
+
+    def test_gh_guard_keeps_non_target_repository_behavior(self) -> None:
+        self.run_command(
+            ["git", "remote", "set-url", "origin", "git@github.com:example/project.git"]
+        )
+        non_target_bin = self.root / "non-target-bin"
+        non_target_bin.mkdir()
+        non_target_gh = non_target_bin / "gh"
+        non_target_gh.write_text(
+            "#!/bin/sh\n"
+            'if [ "$*" = "repo view --json nameWithOwner --jq .nameWithOwner" ]; then\n'
+            "  printf 'example/project\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "printf 'real gh reached\\n'\n",
+            encoding="utf-8",
+        )
+        non_target_gh.chmod(0o755)
+
+        result = subprocess.run(
+            [str(self.gh_guard), "pr", "create", "--draft"],
+            cwd=self.repo,
+            env={
+                **self.env,
+                "PATH": f"{non_target_bin}{os.pathsep}{os.environ['PATH']}",
+                "ZACK_CONFIRMED_PR_CREATE": "1",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertNotIn("cannot resolve the PR target", result.stderr)
+        self.assertNotIn("pr-size-guard:", result.stderr)
 
     def test_gh_guard_does_not_treat_title_value_as_help(self) -> None:
         self.commit_added_lines(801)

@@ -9,7 +9,7 @@ import os
 import re
 import subprocess
 import sys
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -82,12 +82,18 @@ def gh(cwd: Path, executable: str, *arguments: str) -> str:
 
 def repository_from_url(url: str) -> Optional[str]:
     """Return an owner/repository pair for a GitHub remote URL."""
-    match = re.search(
-        r"(?:github\.com(?::|/)|ssh\.github\.com:[0-9]+/)([^/]+/[^/]+)$",
+    scp_match = re.fullmatch(
+        r"git@github\.com:([^/]+/[^/]+)",
         url,
         re.IGNORECASE,
     )
-    return match.group(1).removesuffix(".git").lower() if match else None
+    if scp_match:
+        return scp_match.group(1).removesuffix(".git").lower()
+    parsed = urlparse(url)
+    if parsed.hostname not in ("github.com", "ssh.github.com"):
+        return None
+    path = parsed.path.strip("/").removesuffix(".git")
+    return path.lower() if path.count("/") == 1 else None
 
 
 def repository_root() -> Path:
@@ -217,6 +223,8 @@ def resolve_base(
     repository: str,
     branch: str,
     head_owner: str,
+    head_remote: str,
+    pushed_branches: set[str],
     explicit_base: Optional[str],
     check_open_pr: bool,
 ) -> Tuple[str, str]:
@@ -228,12 +236,31 @@ def resolve_base(
         if pr_base:
             return pr_base, "remote"
         stack_parent = stack_parent_branch(root, repository, branch)
-        if stack_parent and run(
-            ["git", "rev-parse", "--verify", f"{stack_parent}^{{commit}}"],
-            cwd=root,
-            check=False,
-        ).returncode == 0:
-            return stack_parent, "local"
+        if stack_parent:
+            local_parent = run(
+                ["git", "rev-parse", "--verify", f"{stack_parent}^{{commit}}"],
+                cwd=root,
+                check=False,
+            )
+            if local_parent.returncode == 0:
+                if stack_parent in pushed_branches:
+                    return stack_parent, "local"
+                fetched_parent = run(
+                    [
+                        "git",
+                        "fetch",
+                        "--quiet",
+                        "--no-tags",
+                        head_remote,
+                        f"refs/heads/{stack_parent}",
+                    ],
+                    cwd=root,
+                    check=False,
+                )
+                if fetched_parent.returncode == 0 and git(
+                    root, "rev-parse", "--verify", "FETCH_HEAD^{commit}"
+                ) == local_parent.stdout.strip():
+                    return stack_parent, "local"
     configured_base = branch_merge_base(root, branch)
     if configured_base and configured_base != branch:
         return configured_base, "remote"
@@ -346,7 +373,7 @@ def count_additions(root: Path, merge_base: str, source_commit: str) -> int:
         raise GuardError(result.stderr.decode("utf-8", "replace").strip())
     records = result.stdout.split(b"\0")
     additions = 0
-    attributed_text_paths: list[str] = []
+    attributed_text_paths: set[str] = set()
     index = 0
     while index < len(records) and records[index]:
         fields = records[index].split(b"\t", 2)
@@ -356,38 +383,49 @@ def count_additions(root: Path, merge_base: str, source_commit: str) -> int:
         path_bytes = fields[2]
         index += 1
         if path_bytes:
-            path = path_bytes.decode("utf-8", "surrogateescape")
+            old_path = new_path = path_bytes.decode("utf-8", "surrogateescape")
         else:
             if index + 1 >= len(records):
                 raise GuardError("cannot parse renamed addition count")
+            old_path = records[index].decode("utf-8", "surrogateescape")
             index += 1
-            path = records[index].decode("utf-8", "surrogateescape")
+            new_path = records[index].decode("utf-8", "surrogateescape")
             index += 1
         if added == "-":
             new_blob = run_bytes(
-                ["git", "show", f"{source_commit}:{path}"],
+                ["git", "show", f"{source_commit}:{new_path}"],
                 cwd=root,
             )
             if new_blob.returncode != 0 or b"\x00" in new_blob.stdout:
                 continue
-            attributed_text_paths.append(path)
+            attributed_text_paths.update((old_path, new_path))
         else:
             additions += int(added)
     if attributed_text_paths:
-        text_diff = git(
-            root,
-            "diff",
-            "--text",
-            "--unified=0",
-            merge_base,
-            source_commit,
-            "--",
-            *attributed_text_paths,
+        text_diff = run_bytes(
+            [
+                "git",
+                "diff",
+                "--text",
+                "--find-renames",
+                "--unified=0",
+                merge_base,
+                source_commit,
+                "--",
+                *sorted(attributed_text_paths),
+            ],
+            cwd=root,
         )
-        additions += sum(
-            line.startswith("+") and not line.startswith("+++")
-            for line in text_diff.splitlines()
-        )
+        if text_diff.returncode != 0:
+            raise GuardError(text_diff.stderr.decode("utf-8", "replace").strip())
+        in_hunk = False
+        for line in text_diff.stdout.splitlines():
+            if line.startswith(b"diff --git "):
+                in_hunk = False
+            elif line.startswith(b"@@"):
+                in_hunk = True
+            elif in_hunk and line.startswith(b"+"):
+                additions += 1
     return additions
 
 
@@ -401,12 +439,15 @@ def check_size(args: argparse.Namespace) -> int:
 
     root = repository_root()
     remote = args.remote or remote_for_repository(root, args.repository)
+    head_remote = args.head_remote or remote
     base, base_location = resolve_base(
         root,
         executable=args.gh,
         repository=args.repository,
         branch=args.branch,
         head_owner=args.head_owner,
+        head_remote=head_remote,
+        pushed_branches=set(args.pushed_branch),
         explicit_base=args.base,
         check_open_pr=args.check_open_pr,
     )
@@ -473,6 +514,8 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     parser.add_argument("--remote")
     parser.add_argument("--gh", default="gh")
     parser.add_argument("--head-owner", required=True)
+    parser.add_argument("--head-remote")
+    parser.add_argument("--pushed-branch", action="append", default=[])
     parser.add_argument("--context", choices=("draft creation", "push"), required=True)
     parser.add_argument("--check-open-pr", action="store_true")
     return parser.parse_args(arguments)

@@ -22,6 +22,13 @@ LINT_PATH="$HOME/.copilot/skills/validate-style/lint.py"
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIZE_GUARD="$HOOK_DIR/../bin/pr-size-guard"
 push_updates="$(cat)"
+pushed_branch_args=()
+while read -r _ local_sha pushed_remote_ref _; do
+  if [ "$local_sha" != "0000000000000000000000000000000000000000" ] &&
+     [[ "$pushed_remote_ref" == refs/heads/* ]]; then
+    pushed_branch_args+=(--pushed-branch "${pushed_remote_ref#refs/heads/}")
+  fi
+done <<< "$push_updates"
 
 github_repo_from_url() {
   local url
@@ -104,13 +111,13 @@ if [ "$is_size_target" = "0" ]; then
   done < <(git remote 2>/dev/null || true)
 fi
 if [ "$is_size_target" = "0" ]; then
-  case "${owner_repo#*/}" in
-    github)
+  case "$owner_repo" in
+    zkoppert/github)
       is_size_target=1
       size_repo="github/github"
       size_remote=""
       ;;
-    github-ui)
+    zkoppert/github-ui)
       is_size_target=1
       size_repo="github/github-ui"
       size_remote=""
@@ -149,11 +156,13 @@ while read -r _ local_sha remote_ref remote_sha; do
     python3 "$SIZE_GUARD" \
       --repo "$size_repo" \
       --remote "$size_remote" \
+      --head-remote "$remote_name" \
       --head-owner "${owner_repo%%/*}" \
       --branch "$branch" \
       --source "$local_sha" \
       --context push \
-      --check-open-pr || exit $?
+      --check-open-pr \
+      "${pushed_branch_args[@]}" || exit $?
   fi
 
   if [ "$repo_vis" != "public" ]; then
