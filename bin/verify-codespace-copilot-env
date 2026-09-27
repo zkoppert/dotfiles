@@ -85,7 +85,9 @@ def main() -> int:
         failures.append(f"missing tools: {', '.join(missing_tools)}")
 
     dotfiles_root = Path(__file__).resolve().parents[1]
-    expected_hooks_path = dotfiles_root / "git-hooks"
+    expected_hooks_path = (
+        Path.home() / ".local" / "share" / "dotfiles-git-hooks"
+    ).resolve()
     try:
         hooks_path = subprocess.run(
             ["git", "config", "--get", "core.hooksPath"],
@@ -101,10 +103,22 @@ def main() -> int:
         failures.append(f"core.hooksPath is not configured for {expected_hooks_path}")
     for required_path in (
         expected_hooks_path / "pre-push",
+        expected_hooks_path / "pre-commit",
+        expected_hooks_path / "commit-msg",
         dotfiles_root / "bin" / "pr-size-guard",
     ):
         if not required_path.is_file() or not os.access(required_path, os.X_OK):
             failures.append(f"PR size guard is missing or not executable: {required_path}")
+    expected_hook_targets = {
+        expected_hooks_path / "pre-push": dotfiles_root / "git-hooks" / "pre-push",
+        expected_hooks_path / "pre-commit": dotfiles_root / "git-hooks" / "pre-commit",
+        expected_hooks_path / "commit-msg": (
+            dotfiles_root / "git-hooks" / "repository-hook-forwarder"
+        ),
+    }
+    for hook_path, expected_target in expected_hook_targets.items():
+        if not hook_path.is_symlink() or hook_path.resolve() != expected_target:
+            failures.append(f"managed Git hook has the wrong target: {hook_path}")
 
     expected_gh_guard = dotfiles_root / "bin" / "gh-guard"
     expected_pr_marker = dotfiles_root / "bin" / "pr-marker"

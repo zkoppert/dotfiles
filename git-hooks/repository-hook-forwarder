@@ -1,0 +1,15 @@
+#!/bin/bash
+# Forward a global hook name to the repository's own hook.
+
+set -euo pipefail
+
+hook_name="$(basename "$0")"
+common_dir="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+[ -n "$common_dir" ] || exit 0
+if [[ "$common_dir" != /* ]]; then
+  common_dir="$(pwd)/$common_dir"
+fi
+repository_hook="$common_dir/hooks/$hook_name"
+if [ -x "$repository_hook" ] && [ ! "$repository_hook" -ef "$0" ]; then
+  exec "$repository_hook" "$@"
+fi

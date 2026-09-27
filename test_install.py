@@ -320,6 +320,12 @@ class InstallScriptTest(unittest.TestCase):
         pre_push = hooks_dir / "pre-push"
         pre_push.write_text("#!/bin/sh\n", encoding="utf-8")
         pre_push.chmod(0o755)
+        pre_commit = hooks_dir / "pre-commit"
+        pre_commit.write_text("#!/bin/sh\n", encoding="utf-8")
+        pre_commit.chmod(0o755)
+        forwarder = hooks_dir / "repository-hook-forwarder"
+        forwarder.write_text("#!/bin/sh\n", encoding="utf-8")
+        forwarder.chmod(0o755)
 
         first_run = self.run_installer()
         second_run = self.run_installer()
@@ -331,9 +337,57 @@ class InstallScriptTest(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(result.stdout.strip(), str(hooks_dir))
+        managed_hooks = self.home / ".local" / "share" / "dotfiles-git-hooks"
+        self.assertEqual(result.stdout.strip(), str(managed_hooks))
+        self.assertEqual((managed_hooks / "pre-push").resolve(), pre_push.resolve())
+        self.assertEqual(
+            (managed_hooks / "commit-msg").resolve(),
+            forwarder.resolve(),
+        )
         self.assertIn("Configured personal Git hooks", first_run.stdout)
         self.assertIn("Configured personal Git hooks", second_run.stdout)
+
+    def test_target_repo_local_hooks_override_blocks_install(self) -> None:
+        hooks_dir = self.repo / "git-hooks"
+        hooks_dir.mkdir()
+        pre_push = hooks_dir / "pre-push"
+        pre_push.write_text("#!/bin/sh\n", encoding="utf-8")
+        pre_push.chmod(0o755)
+        forwarder = hooks_dir / "repository-hook-forwarder"
+        forwarder.write_text("#!/bin/sh\n", encoding="utf-8")
+        forwarder.chmod(0o755)
+        target_repo = self.home / "repos" / "github"
+        target_repo.mkdir()
+        subprocess.run(
+            ["git", "init", "-q"],
+            cwd=target_repo,
+            env=self.env,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:github/github"],
+            cwd=target_repo,
+            env=self.env,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "core.hooksPath", ".custom-hooks"],
+            cwd=target_repo,
+            env=self.env,
+            check=True,
+        )
+
+        result = subprocess.run(
+            [str(self.installer)],
+            cwd=self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Personal pre-push guard is inactive", result.stderr)
 
     def test_stack_extension_is_installed_once(self) -> None:
         first_run = self.run_installer()

@@ -234,6 +234,14 @@ class CopilotEnvironmentTest(unittest.TestCase):
         (remote_helper.parent / "gh").symlink_to(gh_guard)
         pr_marker = Path(__file__).resolve().parent / "bin" / "pr-marker"
         (remote_helper.parent / "pr-marker").symlink_to(pr_marker)
+        hooks_source = Path(__file__).resolve().parent / "git-hooks"
+        hooks_path = self.home / ".local" / "share" / "dotfiles-git-hooks"
+        hooks_path.mkdir(parents=True)
+        (hooks_path / "pre-push").symlink_to(hooks_source / "pre-push")
+        (hooks_path / "pre-commit").symlink_to(hooks_source / "pre-commit")
+        (hooks_path / "commit-msg").symlink_to(
+            hooks_source / "repository-hook-forwarder"
+        )
 
         result = self.run_bootstrap()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -250,7 +258,6 @@ class CopilotEnvironmentTest(unittest.TestCase):
         ):
             path = self.bin_dir / command
             if command == "git":
-                hooks_path = Path(__file__).resolve().parent / "git-hooks"
                 path.write_text(
                     "#!/bin/sh\n"
                     'if [ "$*" = "config --get core.hooksPath" ]; then\n'

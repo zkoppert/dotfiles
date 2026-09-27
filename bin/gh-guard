@@ -167,6 +167,22 @@ if [ "$#" -eq 3 ] && [ "$1" = "pr" ] &&
   exec "$REAL_GH" "$@"
 fi
 
+github_repo_from_url() {
+  local url="$1"
+  local repository=""
+  case "$url" in
+    git@github.com:*) repository="${url#git@github.com:}" ;;
+    https://github.com/*) repository="${url#https://github.com/}" ;;
+    http://github.com/*) repository="${url#http://github.com/}" ;;
+    ssh://git@ssh.github.com:[0-9]*/*)
+      repository="${url#ssh://git@ssh.github.com:}"
+      repository="${repository#*/}"
+      ;;
+  esac
+  repository="${repository%.git}"
+  printf '%s' "$repository" | tr '[:upper:]' '[:lower:]'
+}
+
 enforce_pr_size_or_die() {
   [ "$is_pr_create" = "1" ] || return 0
 
@@ -228,10 +244,11 @@ enforce_pr_size_or_die() {
     local remote_name remote_url
     while IFS= read -r remote_name; do
       remote_url="$(git config --get "remote.$remote_name.url" 2>/dev/null || true)"
-      if [[ "$remote_url" =~ github\.com[:/]([^/]+/[^/]+)$ ]]; then
-        case "${BASH_REMATCH[1]%.git}" in
+      remote_repo="$(github_repo_from_url "$remote_url")"
+      if [ -n "$remote_repo" ]; then
+        case "$remote_repo" in
           github/github|github/github-ui)
-            target_repo="${BASH_REMATCH[1]%.git}"
+            target_repo="$remote_repo"
             break
             ;;
         esac
@@ -245,6 +262,7 @@ enforce_pr_size_or_die() {
     git@github.com:*) target_repo="${target_repo#git@github.com:}" ;;
     github.com/*) target_repo="${target_repo#github.com/}" ;;
   esac
+  target_repo="$(printf '%s' "$target_repo" | tr '[:upper:]' '[:lower:]')"
 
   case "$target_repo" in
     github/github|github/github-ui)
@@ -267,6 +285,7 @@ enforce_pr_size_or_die() {
         --repo "$target_repo"
         --branch "$create_branch"
         --source "$create_source"
+        --head-owner "${target_repo%%/*}"
         --gh "$REAL_GH"
         --context "draft creation"
       )

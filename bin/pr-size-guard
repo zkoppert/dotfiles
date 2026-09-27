@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
 import subprocess
 import sys
+from urllib.parse import quote
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -81,8 +83,12 @@ def gh(cwd: Path, executable: str, *arguments: str) -> str:
 
 def repository_from_url(url: str) -> Optional[str]:
     """Return an owner/repository pair for a GitHub remote URL."""
-    match = re.search(r"github\.com(?::|/)([^/]+/[^/]+)$", url)
-    return match.group(1).removesuffix(".git") if match else None
+    match = re.search(
+        r"(?:github\.com(?::|/)|ssh\.github\.com:[0-9]+/)([^/]+/[^/]+)$",
+        url,
+        re.IGNORECASE,
+    )
+    return match.group(1).removesuffix(".git").lower() if match else None
 
 
 def repository_root() -> Path:
@@ -117,10 +123,15 @@ def stack_parent_branch(
     root: Path, repository: str, branch: str
 ) -> Optional[str]:
     """Return the live parent branch recorded by the gh-stack extension."""
-    common_dir = Path(git(root, "rev-parse", "--git-common-dir"))
-    if not common_dir.is_absolute():
-        common_dir = root / common_dir
-    metadata_path = common_dir / "gh-stack"
+    git_dir = Path(git(root, "rev-parse", "--git-dir"))
+    if not git_dir.is_absolute():
+        git_dir = root / git_dir
+    metadata_path = git_dir / "gh-stack"
+    if not metadata_path.is_file():
+        common_dir = Path(git(root, "rev-parse", "--git-common-dir"))
+        if not common_dir.is_absolute():
+            common_dir = root / common_dir
+        metadata_path = common_dir / "gh-stack"
     try:
         payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -156,26 +167,21 @@ def stack_parent_branch(
 
 
 def open_pr_base(
-    root: Path, executable: str, repository: str, branch: str
+    root: Path,
+    executable: str,
+    repository: str,
+    branch: str,
+    head_owner: str,
 ) -> Optional[str]:
     """Return the base branch for an open PR, if one exists."""
+    head = quote(f"{head_owner}:{branch}", safe="")
     output = gh(
         root,
         executable,
-        "pr",
-        "list",
-        "--repo",
-        repository,
-        "--head",
-        branch,
-        "--state",
-        "open",
-        "--limit",
-        "1",
-        "--json",
-        "baseRefName",
+        "api",
+        f"repos/{repository}/pulls?state=open&head={head}&per_page=1",
         "--jq",
-        ".[0].baseRefName // \"\"",
+        ".[0].base.ref // \"\"",
     )
     return output or None
 
@@ -204,6 +210,7 @@ def resolve_base(
     executable: str,
     repository: str,
     branch: str,
+    head_owner: str,
     explicit_base: Optional[str],
     check_open_pr: bool,
 ) -> Tuple[str, str]:
@@ -211,7 +218,7 @@ def resolve_base(
     if explicit_base:
         return explicit_base, "remote"
     if check_open_pr:
-        pr_base = open_pr_base(root, executable, repository, branch)
+        pr_base = open_pr_base(root, executable, repository, branch, head_owner)
         if pr_base:
             return pr_base, "remote"
         stack_parent = stack_parent_branch(root, repository, branch)
@@ -313,6 +320,16 @@ def ensure_merge_base(
 
 def count_additions(root: Path, merge_base: str, source_commit: str) -> int:
     """Count text additions in the pull request diff."""
+    status_output = git(
+        root,
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--name-status",
+        "--find-renames",
+        merge_base,
+        source_commit,
+    )
     output = git(
         root,
         "-c",
@@ -324,15 +341,50 @@ def count_additions(root: Path, merge_base: str, source_commit: str) -> int:
         source_commit,
     )
     additions = 0
-    for line in output.splitlines():
+    status_lines = status_output.splitlines()
+    numstat_lines = output.splitlines()
+    if len(status_lines) != len(numstat_lines):
+        raise GuardError("cannot align changed paths with addition counts")
+    for line, status_line in zip(numstat_lines, status_lines):
         added, _deleted, _path = line.split("\t", 2)
         if added == "-":
-            blob = run_bytes(
-                ["git", "show", f"{source_commit}:{_path}"],
+            fields = status_line.split("\t")
+            status = fields[0][:1]
+            if status == "D":
+                continue
+            if status in ("R", "C") and len(fields) == 3:
+                old_path, new_path = fields[1], fields[2]
+            elif len(fields) == 2:
+                old_path = new_path = fields[1]
+            else:
+                raise GuardError(f"cannot parse binary diff entry: {status_line}")
+            old_blob = (
+                run_bytes(["git", "show", f"{merge_base}:{old_path}"], cwd=root)
+                if status != "A"
+                else None
+            )
+            new_blob = run_bytes(
+                ["git", "show", f"{source_commit}:{new_path}"],
                 cwd=root,
             )
-            if blob.returncode == 0:
-                additions += len(blob.stdout.splitlines())
+            if new_blob.returncode != 0:
+                raise GuardError(f"cannot read changed file {new_path}")
+            old_lines = (
+                old_blob.stdout.splitlines()
+                if old_blob is not None and old_blob.returncode == 0
+                else []
+            )
+            new_lines = new_blob.stdout.splitlines()
+            additions += sum(
+                new_end - new_start
+                for tag, _old_start, _old_end, new_start, new_end in difflib.SequenceMatcher(
+                    None,
+                    old_lines,
+                    new_lines,
+                    autojunk=False,
+                ).get_opcodes()
+                if tag in ("insert", "replace")
+            )
         else:
             additions += int(added)
     return additions
@@ -340,6 +392,7 @@ def count_additions(root: Path, merge_base: str, source_commit: str) -> int:
 
 def check_size(args: argparse.Namespace) -> int:
     """Check one prospective pull request diff."""
+    args.repository = args.repository.lower()
     if args.repository not in TARGET_REPOSITORIES:
         return 0
     if args.source == ZERO_SHA:
@@ -352,6 +405,7 @@ def check_size(args: argparse.Namespace) -> int:
         executable=args.gh,
         repository=args.repository,
         branch=args.branch,
+        head_owner=args.head_owner,
         explicit_base=args.base,
         check_open_pr=args.check_open_pr,
     )
@@ -417,6 +471,7 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     parser.add_argument("--base")
     parser.add_argument("--remote")
     parser.add_argument("--gh", default="gh")
+    parser.add_argument("--head-owner", required=True)
     parser.add_argument("--context", choices=("draft creation", "push"), required=True)
     parser.add_argument("--check-open-pr", action="store_true")
     return parser.parse_args(arguments)
@@ -429,7 +484,7 @@ def main(arguments: Optional[list[str]] = None) -> int:
         return check_size(args)
     except (GuardError, ValueError) as error:
         if (
-            args.repository in TARGET_REPOSITORIES
+            args.repository.lower() in TARGET_REPOSITORIES
             and os.environ.get(OVERRIDE_VARIABLE) == "1"
         ):
             print(

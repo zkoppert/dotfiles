@@ -207,11 +207,38 @@ if command -v gh >/dev/null 2>&1; then
   fi
 fi
 
-# Activate personal Git hooks for every local clone without changing any repository.
-if command -v git >/dev/null 2>&1 && [ -x "$DOTFILES_DIR/git-hooks/pre-push" ]; then
-  desired_hooks_path="$DOTFILES_DIR/git-hooks"
+# Activate personal Git hooks and forward all other hook names to each repository.
+if command -v git >/dev/null 2>&1 &&
+   [ -x "$DOTFILES_DIR/git-hooks/pre-push" ] &&
+   [ -x "$DOTFILES_DIR/git-hooks/repository-hook-forwarder" ]; then
+  desired_hooks_path="$HOME/.local/share/dotfiles-git-hooks"
+  mkdir -p "$desired_hooks_path"
+  ln -sfn "$DOTFILES_DIR/git-hooks/pre-commit" "$desired_hooks_path/pre-commit"
+  ln -sfn "$DOTFILES_DIR/git-hooks/pre-push" "$desired_hooks_path/pre-push"
+  for hook_name in \
+    applypatch-msg \
+    pre-applypatch \
+    post-applypatch \
+    pre-merge-commit \
+    prepare-commit-msg \
+    commit-msg \
+    post-commit \
+    pre-rebase \
+    post-checkout \
+    post-merge \
+    post-rewrite \
+    sendemail-validate \
+    fsmonitor-watchman \
+    p4-changelist \
+    p4-prepare-changelist \
+    p4-post-changelist \
+    p4-pre-submit; do
+    ln -sfn "$DOTFILES_DIR/git-hooks/repository-hook-forwarder" "$desired_hooks_path/$hook_name"
+  done
   current_hooks_path="$(git config --global --get core.hooksPath 2>/dev/null || true)"
-  if [ -z "$current_hooks_path" ] || [ "$current_hooks_path" = "$desired_hooks_path" ]; then
+  if [ -z "$current_hooks_path" ] ||
+     [ "$current_hooks_path" = "$desired_hooks_path" ] ||
+     [ "$current_hooks_path" = "$DOTFILES_DIR/git-hooks" ]; then
     git config --global core.hooksPath "$desired_hooks_path"
     echo "✓ Configured personal Git hooks → $desired_hooks_path"
   else
@@ -223,8 +250,9 @@ if command -v git >/dev/null 2>&1 && [ -x "$DOTFILES_DIR/git-hooks/pre-push" ]; 
     is_target_repo=0
     while IFS= read -r candidate_remote; do
       candidate_name="$(git -C "$candidate_repo" remote get-url "$candidate_remote" 2>/dev/null || true)"
+      candidate_name="$(printf '%s' "$candidate_name" | tr '[:upper:]' '[:lower:]')"
       case "$candidate_name" in
-        *github.com:github/github.git|*github.com/github/github.git|*github.com:github/github-ui.git|*github.com/github/github-ui.git)
+        *github.com:github/github|*github.com:github/github.git|*github.com/github/github|*github.com/github/github.git|*github.com:github/github-ui|*github.com:github/github-ui.git|*github.com/github/github-ui|*github.com/github/github-ui.git|*ssh.github.com:*github/github|*ssh.github.com:*github/github.git|*ssh.github.com:*github/github-ui|*ssh.github.com:*github/github-ui.git)
           is_target_repo=1
           break
           ;;
