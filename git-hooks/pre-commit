@@ -9,31 +9,30 @@
 
 set -euo pipefail
 
-if [ "${SKIP_TODO_VALIDATE:-}" = "1" ]; then
-  exit 0
-fi
-
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-if [ -z "$repo_root" ]; then
-  exit 0
+if [ "${SKIP_TODO_VALIDATE:-}" != "1" ] &&
+   [ -n "$repo_root" ] &&
+   [ -f "$repo_root/scripts/validate_todo.py" ] &&
+   [ -f "$repo_root/todo.yml" ] &&
+   command -v python3 >/dev/null 2>&1; then
+  if ! python3 "$repo_root/scripts/validate_todo.py" "$repo_root/todo.yml"; then
+    echo "" >&2
+    echo "Commit blocked: todo.yml failed structure validation. Every item must live in the inbox or a quadrant." >&2
+    echo "Skip: SKIP_TODO_VALIDATE=1 git commit (use sparingly)" >&2
+    echo "" >&2
+    exit 1
+  fi
 fi
 
-# Two-file signature identifies zkoppert-todo without a network call.
-if [ ! -f "$repo_root/scripts/validate_todo.py" ] || [ ! -f "$repo_root/todo.yml" ]; then
-  exit 0
-fi
-
-# Missing python3 must never block commits in unrelated repos.
-if ! command -v python3 >/dev/null 2>&1; then
-  exit 0
-fi
-
-if ! python3 "$repo_root/scripts/validate_todo.py" "$repo_root/todo.yml"; then
-  echo "" >&2
-  echo "Commit blocked: todo.yml failed structure validation. Every item must live in the inbox or a quadrant." >&2
-  echo "Skip: SKIP_TODO_VALIDATE=1 git commit (use sparingly)" >&2
-  echo "" >&2
-  exit 1
+common_dir="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+if [ -n "$common_dir" ]; then
+  if [[ "$common_dir" != /* ]]; then
+    common_dir="$(pwd)/$common_dir"
+  fi
+  local_hook="$common_dir/hooks/pre-commit"
+  if [ -x "$local_hook" ] && [ ! "$local_hook" -ef "$0" ]; then
+    exec "$local_hook" "$@"
+  fi
 fi
 
 exit 0

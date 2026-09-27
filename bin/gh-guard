@@ -171,6 +171,7 @@ enforce_pr_size_or_die() {
   [ "$is_pr_create" = "1" ] || return 0
 
   local target_repo=""
+  local target_repo_explicit=0
   local create_base=""
   local create_head=""
   local expected_value=""
@@ -178,7 +179,7 @@ enforce_pr_size_or_die() {
   for arg in "$@"; do
     if [ -n "$expected_value" ]; then
       case "$expected_value" in
-        repo) target_repo="$arg" ;;
+        repo) target_repo="$arg"; target_repo_explicit=1 ;;
         base) create_base="$arg" ;;
         head) create_head="$arg" ;;
       esac
@@ -195,20 +196,35 @@ enforce_pr_size_or_die() {
       --repo=*|--base=*|--head=*)
         value="${arg#*=}"
         case "${arg%%=*}" in
-          --repo) target_repo="$value" ;;
+          --repo) target_repo="$value"; target_repo_explicit=1 ;;
           --base) create_base="$value" ;;
           --head) create_head="$value" ;;
         esac
         ;;
-      -R?*) target_repo="${arg#-R}"; target_repo="${target_repo#=}" ;;
+      -R?*) target_repo="${arg#-R}"; target_repo="${target_repo#=}"; target_repo_explicit=1 ;;
       -B?*) create_base="${arg#-B}"; create_base="${create_base#=}" ;;
       -H?*) create_head="${arg#-H}"; create_head="${create_head#=}" ;;
     esac
   done
-  if [ -z "$target_repo" ]; then
+  case "$target_repo" in
+    github/github|github/github-ui|github.com/github/github|github.com/github/github-ui|https://github.com/github/github|https://github.com/github/github-ui)
+      ;;
+    *)
+      if [ "$target_repo_explicit" = "0" ]; then
+        target_repo=""
+      fi
+      ;;
+  esac
+  if [ -z "$target_repo" ] && [ "$target_repo_explicit" = "0" ]; then
     target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
   fi
-  if [ -z "$target_repo" ]; then
+  if [ "$target_repo_explicit" = "0" ]; then
+    case "$target_repo" in
+      github/github|github/github-ui) ;;
+      *) target_repo="" ;;
+    esac
+  fi
+  if [ -z "$target_repo" ] && [ "$target_repo_explicit" = "0" ]; then
     local remote_name remote_url
     while IFS= read -r remote_name; do
       remote_url="$(git config --get "remote.$remote_name.url" 2>/dev/null || true)"

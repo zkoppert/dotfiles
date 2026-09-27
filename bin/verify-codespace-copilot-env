@@ -88,7 +88,7 @@ def main() -> int:
     expected_hooks_path = dotfiles_root / "git-hooks"
     try:
         hooks_path = subprocess.run(
-            ["git", "config", "--global", "--get", "core.hooksPath"],
+            ["git", "config", "--get", "core.hooksPath"],
             capture_output=True,
             text=True,
             check=True,

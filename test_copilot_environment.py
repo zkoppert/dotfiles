@@ -253,7 +253,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 hooks_path = Path(__file__).resolve().parent / "git-hooks"
                 path.write_text(
                     "#!/bin/sh\n"
-                    'if [ "$*" = "config --global --get core.hooksPath" ]; then\n'
+                    'if [ "$*" = "config --get core.hooksPath" ]; then\n'
                     f"  printf '%s\\n' {str(hooks_path)!r}\n"
                     "fi\n",
                     encoding="utf-8",
@@ -350,7 +350,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
         git = self.bin_dir / "git"
         git.write_text(
             "#!/bin/sh\n"
-            'if [ "$*" = "config --global --get core.hooksPath" ]; then\n'
+            'if [ "$*" = "config --get core.hooksPath" ]; then\n'
             "  printf '/wrong/hooks\\n'\n"
             "fi\n",
             encoding="utf-8",

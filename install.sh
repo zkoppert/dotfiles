@@ -217,6 +217,27 @@ if command -v git >/dev/null 2>&1 && [ -x "$DOTFILES_DIR/git-hooks/pre-push" ]; 
   else
     echo "⚠ core.hooksPath already points to $current_hooks_path - skipping personal Git hooks"
   fi
+
+  for candidate_repo in "$PWD" "$HOME/repos/github" "$HOME/repos/github-ui"; do
+    [ -d "$candidate_repo" ] || continue
+    is_target_repo=0
+    while IFS= read -r candidate_remote; do
+      candidate_name="$(git -C "$candidate_repo" remote get-url "$candidate_remote" 2>/dev/null || true)"
+      case "$candidate_name" in
+        *github.com:github/github.git|*github.com/github/github.git|*github.com:github/github-ui.git|*github.com/github/github-ui.git)
+          is_target_repo=1
+          break
+          ;;
+      esac
+    done < <(git -C "$candidate_repo" remote 2>/dev/null || true)
+    if [ "$is_target_repo" = "1" ]; then
+      effective_hooks_path="$(git -C "$candidate_repo" config --get core.hooksPath 2>/dev/null || true)"
+      if [ "$effective_hooks_path" != "$desired_hooks_path" ]; then
+        echo "✗ Personal pre-push guard is inactive in $candidate_repo because core.hooksPath resolves to ${effective_hooks_path:-nothing}" >&2
+        exit 1
+      fi
+    fi
+  done
 fi
 
 # Install durable Codespace Copilot commands.

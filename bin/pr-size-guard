@@ -42,6 +42,25 @@ def run(
     )
 
 
+def run_bytes(
+    command: list[str],
+    *,
+    cwd: Path,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run a command and preserve binary stdout."""
+    environment = dict(os.environ)
+    for name in ("GIT_COMMON_DIR", "GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"):
+        environment.pop(name, None)
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
 def git(cwd: Path, *arguments: str) -> str:
     """Run Git and return trimmed stdout."""
     try:
@@ -195,9 +214,9 @@ def resolve_base(
         pr_base = open_pr_base(root, executable, repository, branch)
         if pr_base:
             return pr_base, "remote"
-    stack_parent = stack_parent_branch(root, repository, branch)
-    if stack_parent:
-        return stack_parent, "local"
+        stack_parent = stack_parent_branch(root, repository, branch)
+        if stack_parent:
+            return stack_parent, "local"
     configured_base = branch_merge_base(root, branch)
     if configured_base:
         return configured_base, "remote"
@@ -296,6 +315,8 @@ def count_additions(root: Path, merge_base: str, source_commit: str) -> int:
     """Count text additions in the pull request diff."""
     output = git(
         root,
+        "-c",
+        "core.quotePath=false",
         "diff",
         "--numstat",
         "--find-renames",
@@ -305,7 +326,14 @@ def count_additions(root: Path, merge_base: str, source_commit: str) -> int:
     additions = 0
     for line in output.splitlines():
         added, _deleted, _path = line.split("\t", 2)
-        if added != "-":
+        if added == "-":
+            blob = run_bytes(
+                ["git", "show", f"{source_commit}:{_path}"],
+                cwd=root,
+            )
+            if blob.returncode == 0:
+                additions += len(blob.stdout.splitlines())
+        else:
             additions += int(added)
     return additions
 

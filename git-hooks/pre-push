@@ -21,11 +21,26 @@ set -euo pipefail
 LINT_PATH="$HOME/.copilot/skills/validate-style/lint.py"
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIZE_GUARD="$HOOK_DIR/../bin/pr-size-guard"
+push_updates="$(cat)"
+
+run_repository_pre_push() {
+  local common_dir local_hook
+  common_dir="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+  [ -n "$common_dir" ] || return 0
+  if [[ "$common_dir" != /* ]]; then
+    common_dir="$(pwd)/$common_dir"
+  fi
+  local_hook="$common_dir/hooks/pre-push"
+  if [ -x "$local_hook" ] && [ ! "$local_hook" -ef "$0" ]; then
+    printf '%s\n' "$push_updates" | "$local_hook" "$@"
+  fi
+}
 
 # $1 = remote name, $2 = remote URL
 remote_name="${1:-}"
 remote_url="${2:-}"
 if [ -z "$remote_url" ]; then
+  run_repository_pre_push "$@"
   exit 0
 fi
 
@@ -38,13 +53,32 @@ if [[ "$remote_url" =~ github\.com[:/]([^/]+/[^/]+)$ ]]; then
 fi
 
 if [ -z "$owner_repo" ]; then
+  run_repository_pre_push "$@"
   exit 0
 fi
 
 is_size_target=0
+size_repo="$owner_repo"
+size_remote="$remote_name"
 case "$owner_repo" in
   github/github|github/github-ui) is_size_target=1 ;;
 esac
+if [ "$is_size_target" = "0" ]; then
+  while IFS= read -r candidate_remote; do
+    candidate_url="$(git config --get "remote.$candidate_remote.url" 2>/dev/null || true)"
+    if [[ "$candidate_url" =~ github\.com[:/]([^/]+/[^/]+)$ ]]; then
+      candidate_repo="${BASH_REMATCH[1]%.git}"
+      case "$candidate_repo" in
+        github/github|github/github-ui)
+          is_size_target=1
+          size_repo="$candidate_repo"
+          size_remote="$candidate_remote"
+          break
+          ;;
+      esac
+    fi
+  done < <(git remote 2>/dev/null || true)
+fi
 
 repo_vis=""
 if [ "${SKIP_PREPUSH_VISIBILITY:-}" != "1" ] &&
@@ -70,8 +104,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     fi
     branch="${remote_ref#refs/heads/}"
     python3 "$SIZE_GUARD" \
-      --repo "$owner_repo" \
-      --remote "$remote_name" \
+      --repo "$size_repo" \
+      --remote "$size_remote" \
       --branch "$branch" \
       --source "$local_sha" \
       --context push \
@@ -113,10 +147,11 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     echo "" >&2
     violations_found=1
   fi
-done
+done <<< "$push_updates"
 
 if [ "$violations_found" = "1" ]; then
   exit 1
 fi
 
+run_repository_pre_push "$@"
 exit 0

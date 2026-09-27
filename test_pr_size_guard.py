@@ -24,6 +24,7 @@ class PrSizeGuardTest(unittest.TestCase):
         self.fake_bin = self.root / "bin"
         self.fake_bin.mkdir()
         self.guard = Path(__file__).with_name("bin") / "pr-size-guard"
+        self.pre_commit = Path(__file__).with_name("git-hooks") / "pre-commit"
         self.pre_push = Path(__file__).with_name("git-hooks") / "pre-push"
         self.gh_guard = Path(__file__).with_name("bin") / "gh-guard"
 
@@ -168,6 +169,70 @@ class PrSizeGuardTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_pre_push_hook_blocks_fork_push_with_target_upstream(self) -> None:
+        source = self.commit_added_lines(801)
+        self.run_command(["git", "remote", "rename", "origin", "upstream"])
+        self.run_command(
+            ["git", "remote", "add", "origin", "git@github.com:zkoppert/github.git"]
+        )
+        hook_input = f"refs/heads/feature {source} refs/heads/feature {'0' * 40}\n"
+
+        result = subprocess.run(
+            [str(self.pre_push), "origin", "git@github.com:zkoppert/github.git"],
+            cwd=self.repo,
+            env=self.env,
+            input=hook_input,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("801 added lines", result.stderr)
+
+    def test_pre_push_hook_delegates_to_repository_hook(self) -> None:
+        local_hook = self.repo / ".git" / "hooks" / "pre-push"
+        local_hook.write_text(
+            "#!/bin/sh\nprintf 'repository pre-push ran\\n' >&2\nexit 7\n",
+            encoding="utf-8",
+        )
+        local_hook.chmod(0o755)
+        source = self.commit_added_lines(1)
+        hook_input = f"refs/heads/feature {source} refs/heads/feature {'0' * 40}\n"
+
+        result = subprocess.run(
+            [str(self.pre_push), "origin", "git@github.com:example/project.git"],
+            cwd=self.repo,
+            env=self.env,
+            input=hook_input,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 7)
+        self.assertIn("repository pre-push ran", result.stderr)
+
+    def test_pre_commit_hook_delegates_to_repository_hook(self) -> None:
+        local_hook = self.repo / ".git" / "hooks" / "pre-commit"
+        local_hook.write_text(
+            "#!/bin/sh\nprintf 'repository pre-commit ran\\n' >&2\nexit 7\n",
+            encoding="utf-8",
+        )
+        local_hook.chmod(0o755)
+
+        result = subprocess.run(
+            [str(self.pre_commit)],
+            cwd=self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 7)
+        self.assertIn("repository pre-commit ran", result.stderr)
+
     def test_binary_files_do_not_break_the_count(self) -> None:
         (self.repo / "image.bin").write_bytes(b"\x00\x01\x02")
         self.run_command(["git", "add", "image.bin"])
@@ -177,7 +242,24 @@ class PrSizeGuardTest(unittest.TestCase):
         result = self.run_size_guard(source)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("0/800 added lines", result.stdout)
+        self.assertIn("1/800 added lines", result.stdout)
+
+    def test_text_marked_binary_still_counts_added_lines(self) -> None:
+        (self.repo / ".gitattributes").write_text(
+            "payload.txt binary\n", encoding="utf-8"
+        )
+        (self.repo / "payload.txt").write_text(
+            "".join(f"line {number}\n" for number in range(801)),
+            encoding="utf-8",
+        )
+        self.run_command(["git", "add", ".gitattributes", "payload.txt"])
+        self.run_command(["git", "commit", "-m", "add attributed text"])
+        source = self.run_command(["git", "rev-parse", "HEAD"]).stdout.strip()
+
+        result = self.run_size_guard(source)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("802 added lines", result.stderr)
 
     def test_remote_tracking_source_is_resolved(self) -> None:
         source = self.commit_added_lines(1)
@@ -365,6 +447,65 @@ class PrSizeGuardTest(unittest.TestCase):
         self.assertEqual(rebased.returncode, 0, rebased.stderr)
         self.assertIn("500/800 added lines", rebased.stdout)
 
+    def test_draft_creation_ignores_gh_stack_metadata_without_base_flag(self) -> None:
+        stack_a = self.commit_added_lines(500)
+        self.run_command(["git", "checkout", "-b", "stack-b"])
+        (self.repo / "stack-b.txt").write_text(
+            "".join(f"child {number}\n" for number in range(500)),
+            encoding="utf-8",
+        )
+        self.run_command(["git", "add", "stack-b.txt"])
+        self.run_command(["git", "commit", "-m", "add stacked child"])
+        common_dir = Path(
+            self.run_command(["git", "rev-parse", "--git-common-dir"]).stdout.strip()
+        )
+        if not common_dir.is_absolute():
+            common_dir = self.repo / common_dir
+        (common_dir / "gh-stack").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "repository": "github/github",
+                    "stacks": [
+                        {
+                            "trunk": {"branch": "main"},
+                            "branches": [
+                                {"branch": "feature", "base": "HEAD"},
+                                {"branch": "stack-b", "base": stack_a},
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                str(self.guard),
+                "--repo",
+                "github/github",
+                "--remote",
+                "origin",
+                "--branch",
+                "stack-b",
+                "--source",
+                "HEAD",
+                "--gh",
+                str(self.fake_bin / "gh"),
+                "--context",
+                "draft creation",
+            ],
+            cwd=self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("1000 added lines", result.stderr)
+
     def test_pre_push_hook_blocks_target_branch_update(self) -> None:
         source = self.commit_added_lines(801)
         hook_input = f"refs/heads/feature {source} refs/heads/feature {'0' * 40}\n"
@@ -384,6 +525,9 @@ class PrSizeGuardTest(unittest.TestCase):
 
     def test_pre_push_hook_skips_non_target_repository(self) -> None:
         source = self.commit_added_lines(801)
+        self.run_command(
+            ["git", "remote", "set-url", "origin", "git@github.com:example/project.git"]
+        )
         hook_input = f"refs/heads/feature {source} refs/heads/feature {'0' * 40}\n"
 
         result = subprocess.run(
