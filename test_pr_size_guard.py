@@ -172,6 +172,80 @@ class PrSizeGuardTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("0/800 added lines", result.stdout)
 
+    def test_remote_tracking_source_is_resolved(self) -> None:
+        source = self.commit_added_lines(1)
+        self.run_command(["git", "push", "origin", "feature"])
+        self.run_command(["git", "checkout", "main"])
+        self.run_command(["git", "branch", "-D", "feature"])
+
+        result = self.run_size_guard("feature")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("1/800 added lines", result.stdout)
+        self.assertEqual(
+            self.run_command(["git", "rev-parse", "origin/feature"]).stdout.strip(),
+            source,
+        )
+
+    def test_shallow_clone_is_deepened_to_find_merge_base(self) -> None:
+        self.commit_added_lines(1)
+        self.run_command(["git", "push", "origin", "feature"])
+        shallow = self.root / "shallow"
+        self.run_command(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                "feature",
+                f"file://{self.remote}",
+                str(shallow),
+            ],
+            cwd=self.root,
+        )
+        self.run_command(
+            ["git", "remote", "set-url", "origin", "git@github.com:github/github.git"],
+            cwd=shallow,
+        )
+        self.run_command(
+            [
+                "git",
+                "config",
+                f"url.file://{self.remote}.insteadOf",
+                "git@github.com:github/github.git",
+            ],
+            cwd=shallow,
+        )
+
+        result = subprocess.run(
+            [
+                str(self.guard),
+                "--repo",
+                "github/github",
+                "--remote",
+                "origin",
+                "--base",
+                "main",
+                "--branch",
+                "feature",
+                "--source",
+                "HEAD",
+                "--gh",
+                str(self.fake_bin / "gh"),
+                "--context",
+                "push",
+            ],
+            cwd=shallow,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("1/800 added lines", result.stdout)
+
     def test_pre_push_hook_blocks_target_branch_update(self) -> None:
         source = self.commit_added_lines(801)
         hook_input = f"refs/heads/feature {source} refs/heads/feature {'0' * 40}\n"
@@ -220,6 +294,53 @@ class PrSizeGuardTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("blocked draft creation", result.stderr)
         self.assertIn("801 added lines", result.stderr)
+
+    def test_gh_guard_blocks_native_publication_before_proof_checks(self) -> None:
+        self.commit_added_lines(801)
+
+        result = subprocess.run(
+            [str(self.gh_guard), "pr", "create", "--draft"],
+            cwd=self.repo,
+            env={
+                **self.env,
+                "NO_MISTAKES_PUBLICATION_RUN": "native-run",
+                "ZACK_CONFIRMED_PR_CREATE": "1",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("blocked draft creation", result.stderr)
+        self.assertNotIn("native publication blocked", result.stderr)
+
+    def test_gh_guard_parses_short_and_host_qualified_flags(self) -> None:
+        self.commit_added_lines(801)
+        self.run_command(["git", "branch", "large", "HEAD"])
+        self.run_command(["git", "checkout", "main"])
+        (self.repo / "small.txt").write_text("small\n", encoding="utf-8")
+        self.run_command(["git", "add", "small.txt"])
+        self.run_command(["git", "commit", "-m", "small change"])
+
+        invocations = (
+            ["-Rgithub/github", "-H", "large"],
+            ["--repo", "github.com/github/github", "--head", "large"],
+            ["-R", "github/github", "-Hlarge"],
+        )
+        for flags in invocations:
+            with self.subTest(flags=flags):
+                result = subprocess.run(
+                    [str(self.gh_guard), "pr", "create", "--draft", *flags],
+                    cwd=self.repo,
+                    env={**self.env, "ZACK_CONFIRMED_PR_CREATE": "1"},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("801 added lines", result.stderr)
 
 
 if __name__ == "__main__":

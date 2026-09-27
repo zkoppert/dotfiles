@@ -164,15 +164,73 @@ def fetch_base(root: Path, remote: str, base: str) -> str:
     return git(root, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
 
 
-def count_additions(root: Path, base_commit: str, source: str) -> int:
+def resolve_source(root: Path, remote: str, source: str) -> str:
+    """Resolve a local or remote-tracking source commit."""
+    candidates = [source]
+    if not source.startswith("refs/"):
+        candidates.append(f"refs/remotes/{remote}/{source}")
+    for candidate in candidates:
+        result = run(
+            ["git", "rev-parse", "--verify", f"{candidate}^{{commit}}"],
+            cwd=root,
+            check=False,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    raise GuardError(f"cannot resolve the source commit {source}")
+
+
+def ensure_merge_base(
+    root: Path,
+    *,
+    remote: str,
+    base: str,
+    base_commit: str,
+    source_commit: str,
+) -> str:
+    """Deepen a shallow clone when necessary to find the PR merge base."""
+    result = run(
+        ["git", "merge-base", base_commit, source_commit],
+        cwd=root,
+        check=False,
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    if git(root, "rev-parse", "--is-shallow-repository") != "true":
+        raise GuardError(f"no merge base exists between {base} and the source commit")
+
+    for depth in (1000, 10000):
+        git(root, "fetch", "--quiet", "--no-tags", f"--deepen={depth}", remote)
+        git(
+            root,
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            remote,
+            f"refs/heads/{base}",
+        )
+        base_commit = git(root, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
+        result = run(
+            ["git", "merge-base", base_commit, source_commit],
+            cwd=root,
+            check=False,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    raise GuardError(
+        f"cannot find a merge base after deepening the shallow clone for {base}"
+    )
+
+
+def count_additions(root: Path, merge_base: str, source_commit: str) -> int:
     """Count text additions in the pull request diff."""
-    source_commit = git(root, "rev-parse", "--verify", f"{source}^{{commit}}")
     output = git(
         root,
         "diff",
         "--numstat",
         "--find-renames",
-        f"{base_commit}...{source_commit}",
+        merge_base,
+        source_commit,
     )
     additions = 0
     for line in output.splitlines():
@@ -200,7 +258,15 @@ def check_size(args: argparse.Namespace) -> int:
         check_open_pr=args.check_open_pr,
     )
     base_commit = fetch_base(root, remote, base)
-    additions = count_additions(root, base_commit, args.source)
+    source_commit = resolve_source(root, remote, args.source)
+    merge_base = ensure_merge_base(
+        root,
+        remote=remote,
+        base=base,
+        base_commit=base_commit,
+        source_commit=source_commit,
+    )
+    additions = count_additions(root, merge_base, source_commit)
 
     if additions <= MAX_ADDITIONS:
         print(

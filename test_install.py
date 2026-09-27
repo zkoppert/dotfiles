@@ -80,6 +80,8 @@ class InstallScriptTest(unittest.TestCase):
         self.env = dict(os.environ)
         self.env["HOME"] = str(self.home)
         self.env["PATH"] = f"{self.fake_bin}{os.pathsep}{self.env['PATH']}"
+        self.env["GIT_CONFIG_GLOBAL"] = str(self.home / ".gitconfig")
+        self.env["GIT_CONFIG_SYSTEM"] = os.devnull
         self.env["COPILOT_SKILL_CATALOG_REPO"] = "private/catalog"
         self.env["FAKE_COPILOT_LIST_STATUS"] = "0"
         self.env.pop("FAKE_COPILOT_PLUGINS_JSON", None)

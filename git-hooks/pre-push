@@ -12,8 +12,9 @@
 #      through validate-style with --check-visibility.
 #   5. Blocks the push if any private repo references are found.
 #
-# Skipping:
-#   Set SKIP_PREPUSH_VISIBILITY=1 to bypass this hook (e.g., for known-safe pushes).
+# Overrides:
+#   SKIP_PREPUSH_VISIBILITY=1 skips only the public-repository visibility lint.
+#   ZACK_CONFIRMED_LARGE_PR=1 permits an oversized PR after Zack approves it.
 
 set -euo pipefail
 

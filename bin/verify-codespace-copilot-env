@@ -106,6 +106,19 @@ def main() -> int:
         if not required_path.is_file() or not os.access(required_path, os.X_OK):
             failures.append(f"PR size guard is missing or not executable: {required_path}")
 
+    expected_gh_guard = dotfiles_root / "bin" / "gh-guard"
+    installed_gh = Path.home() / ".local" / "bin" / "gh"
+    active_gh = shutil.which("gh")
+    if (
+        not installed_gh.is_symlink()
+        or installed_gh.resolve() != expected_gh_guard
+        or active_gh is None
+        or Path(active_gh).resolve() != expected_gh_guard
+    ):
+        failures.append(
+            f"gh must resolve to the personal wrapper at {expected_gh_guard}"
+        )
+
     if "node" not in missing_tools:
         try:
             node_version = subprocess.run(

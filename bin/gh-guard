@@ -167,11 +167,111 @@ if [ "$#" -eq 3 ] && [ "$1" = "pr" ] &&
   exec "$REAL_GH" "$@"
 fi
 
+enforce_pr_size_or_die() {
+  [ "$is_pr_create" = "1" ] || return 0
+
+  local target_repo=""
+  local create_base=""
+  local create_head=""
+  local expected_value=""
+  local arg value
+  for arg in "$@"; do
+    if [ -n "$expected_value" ]; then
+      case "$expected_value" in
+        repo) target_repo="$arg" ;;
+        base) create_base="$arg" ;;
+        head) create_head="$arg" ;;
+      esac
+      expected_value=""
+      continue
+    fi
+    case "$arg" in
+      -R|--repo) expected_value="repo" ;;
+      -B|--base) expected_value="base" ;;
+      -H|--head) expected_value="head" ;;
+      -a|--assignee|--attach|-b|--body|-F|--body-file|-l|--label|-m|--milestone|-p|--project|--recover|-r|--reviewer|-T|--template|-t|--title|--hostname|--token)
+        expected_value="ignore"
+        ;;
+      --repo=*|--base=*|--head=*)
+        value="${arg#*=}"
+        case "${arg%%=*}" in
+          --repo) target_repo="$value" ;;
+          --base) create_base="$value" ;;
+          --head) create_head="$value" ;;
+        esac
+        ;;
+      -R?*) target_repo="${arg#-R}"; target_repo="${target_repo#=}" ;;
+      -B?*) create_base="${arg#-B}"; create_base="${create_base#=}" ;;
+      -H?*) create_head="${arg#-H}"; create_head="${create_head#=}" ;;
+    esac
+  done
+  if [ -z "$target_repo" ]; then
+    target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
+  fi
+  if [[ "$target_repo" == */*/* ]]; then
+    target_repo="${target_repo#*/}"
+  fi
+
+  case "$target_repo" in
+    github/github|github/github-ui)
+      local create_branch create_source
+      create_branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
+      create_source="${create_head:-HEAD}"
+      if [[ "$create_source" == *:* ]]; then
+        create_source="${create_source#*:}"
+      fi
+      if [ "$create_source" != "HEAD" ]; then
+        create_branch="$create_source"
+      fi
+      if [ -z "$create_branch" ]; then
+        echo "gh-guard: cannot enforce the 800-addition limit from a detached HEAD." >&2
+        exit 1
+      fi
+      local size_args=(
+        --repo "$target_repo"
+        --branch "$create_branch"
+        --source "$create_source"
+        --gh "$REAL_GH"
+        --context "draft creation"
+      )
+      if [ -n "$create_base" ]; then
+        size_args+=(--base "$create_base")
+      fi
+      python3 "$SCRIPT_PATH/pr-size-guard" "${size_args[@]}" || exit $?
+      ;;
+  esac
+}
+
+native_locator_present=0
+if [ "${NO_MISTAKES_PUBLICATION_RUN+x}" = "x" ] ||
+   [ "${NO_MISTAKES_PUBLICATION_ATTEMPT+x}" = "x" ]; then
+  native_locator_present=1
+fi
+
+# Help flags after the operation are not seen by the parser above. Legacy help
+# calls pass through, while native calls still require their verified handoff.
+if [ "$native_locator_present" = "0" ] &&
+   { [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ] || [ "$is_pr_draft" = "1" ] || [ "$is_pr_edit" = "1" ]; }; then
+  for a in "$@"; do
+    case "$a" in
+      --help|-h|help)
+        is_pr_create=0
+        is_pr_ready=0
+        is_pr_draft=0
+        is_pr_edit=0
+        break
+        ;;
+    esac
+  done
+fi
+
+enforce_pr_size_or_die "$@"
+
 # A partial native locator is still a required handoff, never a legacy fallback.
 native_publication=0
 native_repository=""
 native_body_file=""
-if { [ "${NO_MISTAKES_PUBLICATION_RUN+x}" = "x" ] || [ "${NO_MISTAKES_PUBLICATION_ATTEMPT+x}" = "x" ]; } &&
+if [ "$native_locator_present" = "1" ] &&
    { [ "$is_pr_create" = "1" ] || [ "$is_pr_edit" = "1" ]; }; then
   if ! native_lint_context="$("$SCRIPT_PATH/pr-marker" check --print-publication-lint-context --publication "$@")"; then
     echo 'gh-guard: native publication blocked; legacy markers cannot replace native proof.' >&2
@@ -189,25 +289,6 @@ sys.stdout.buffer.write(b"\0".join(context[key].encode("utf-8") for key in ("rep
     exit 1
   fi
   native_publication=1
-fi
-
-# Help flags after the op (e.g. `gh pr create --help`, `gh pr ready -h`) are
-# not seen by the parser above because it breaks at `op`. Scan the full
-# argument list and let help requests pass through unguarded so agents can
-# introspect flags without tripping the gate.
-if [ "$native_publication" = "0" ] &&
-   { [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ] || [ "$is_pr_draft" = "1" ] || [ "$is_pr_edit" = "1" ]; }; then
-  for a in "$@"; do
-    case "$a" in
-      --help|-h|help)
-        is_pr_create=0
-        is_pr_ready=0
-        is_pr_draft=0
-        is_pr_edit=0
-        break
-        ;;
-    esac
-  done
 fi
 
 # Native calls lint the verified file; legacy calls extract the body from
@@ -559,54 +640,6 @@ fi
 
 # --- gh pr create --------------------------------------------------------
 if [ "$is_pr_create" = "1" ]; then
-  target_repo=""
-  create_base=""
-  create_head=""
-  previous_arg=""
-  for arg in "$@"; do
-    case "$previous_arg" in
-      -R|--repo) target_repo="$arg" ;;
-      --base) create_base="$arg" ;;
-      --head) create_head="$arg" ;;
-    esac
-    case "$arg" in
-      -R=*|--repo=*) target_repo="${arg#*=}" ;;
-      --base=*) create_base="${arg#--base=}" ;;
-      --head=*) create_head="${arg#--head=}" ;;
-    esac
-    previous_arg="$arg"
-  done
-  if [ -z "$target_repo" ]; then
-    target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
-  fi
-  case "$target_repo" in
-    github/github|github/github-ui)
-      create_branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
-      create_source="${create_head:-HEAD}"
-      if [[ "$create_source" == *:* ]]; then
-        create_source="${create_source#*:}"
-      fi
-      if [ "$create_source" != "HEAD" ]; then
-        create_branch="$create_source"
-      fi
-      if [ -z "$create_branch" ]; then
-        echo "gh-guard: cannot enforce the 800-addition limit from a detached HEAD." >&2
-        exit 1
-      fi
-      size_args=(
-        --repo "$target_repo"
-        --branch "$create_branch"
-        --source "$create_source"
-        --gh "$REAL_GH"
-        --context "draft creation"
-      )
-      if [ -n "$create_base" ]; then
-        size_args+=(--base "$create_base")
-      fi
-      python3 "$SCRIPT_PATH/pr-size-guard" "${size_args[@]}" || exit $?
-      ;;
-  esac
-
   # Lint the PR body via the validate-style skill before doing anything else.
   # This catches violations of Zack's hard rules (em-dashes, "per" misuse,
   # "This PR" as a sentence subject, subjectless action-verb bullets, etc.)

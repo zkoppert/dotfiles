@@ -230,6 +230,8 @@ class CopilotEnvironmentTest(unittest.TestCase):
         remote_helper = self.home / ".local" / "bin" / "copilot-codespace-session"
         remote_helper.parent.mkdir(parents=True)
         remote_helper.symlink_to(remote_command)
+        gh_guard = Path(__file__).resolve().parent / "bin" / "gh-guard"
+        (remote_helper.parent / "gh").symlink_to(gh_guard)
 
         result = self.run_bootstrap()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -280,7 +282,10 @@ class CopilotEnvironmentTest(unittest.TestCase):
         env.update(
             {
                 "HOME": str(self.home),
-                "PATH": f"{self.bin_dir}{os.pathsep}{env['PATH']}",
+                "PATH": (
+                    f"{self.home / '.local' / 'bin'}{os.pathsep}"
+                    f"{self.bin_dir}{os.pathsep}{env['PATH']}"
+                ),
                 "CODESPACES": "true",
                 "COPILOT_SKILL_CATALOG_REPO": "private/catalog",
                 "COPILOT_MCP_SPLUNK_BEARER_TOKEN": "not-printed",
@@ -352,6 +357,24 @@ class CopilotEnvironmentTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("core.hooksPath must point to", result.stdout)
+        self.assertNotIn("environment is ready", result.stdout)
+
+    def test_verifier_rejects_inactive_gh_wrapper(self) -> None:
+        env = self.prepare_complete_environment()
+        installed_gh = self.home / ".local" / "bin" / "gh"
+        installed_gh.unlink()
+        installed_gh.symlink_to(self.bin_dir / "gh")
+
+        result = subprocess.run(
+            [str(self.verifier)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("gh must resolve to the personal wrapper", result.stdout)
         self.assertNotIn("environment is ready", result.stdout)
 
     def test_verifier_rejects_unsupported_node_versions(self) -> None:
