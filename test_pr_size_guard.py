@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import tempfile
 import unittest
@@ -51,8 +52,8 @@ class PrSizeGuardTest(unittest.TestCase):
         fake_gh = self.fake_bin / "gh"
         fake_gh.write_text(
             "#!/bin/sh\n"
+            'if [ "$1" = pr ] && [ "$2" = list ]; then exit 0; fi\n'
             'case "$*" in\n'
-            '  "pr list --repo github/github --head feature --state open --limit 1 --json baseRefName --jq .[0].baseRefName // \\\"\\\"") exit 0 ;;\n'
             '  "repo view github/github --json defaultBranchRef --jq .defaultBranchRef.name") printf "main\\n" ;;\n'
             '  "repo view --json nameWithOwner --jq .nameWithOwner") printf "github/github\\n" ;;\n'
             '  "api repos/github/github --jq .visibility") printf "internal\\n" ;;\n'
@@ -246,6 +247,66 @@ class PrSizeGuardTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("1/800 added lines", result.stdout)
 
+    def test_first_stacked_push_uses_gh_stack_base(self) -> None:
+        stack_a = self.commit_added_lines(500)
+        self.run_command(["git", "checkout", "-b", "stack-b"])
+        (self.repo / "stack-b.txt").write_text(
+            "".join(f"child {number}\n" for number in range(500)),
+            encoding="utf-8",
+        )
+        self.run_command(["git", "add", "stack-b.txt"])
+        self.run_command(["git", "commit", "-m", "add stacked child"])
+        common_dir = Path(
+            self.run_command(["git", "rev-parse", "--git-common-dir"]).stdout.strip()
+        )
+        if not common_dir.is_absolute():
+            common_dir = self.repo / common_dir
+        (common_dir / "gh-stack").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "repository": "github/github",
+                    "stacks": [
+                        {
+                            "trunk": {"branch": "main"},
+                            "branches": [
+                                {"branch": "feature", "base": "HEAD"},
+                                {"branch": "stack-b", "base": stack_a},
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                str(self.guard),
+                "--repo",
+                "github/github",
+                "--remote",
+                "origin",
+                "--branch",
+                "stack-b",
+                "--source",
+                "HEAD",
+                "--gh",
+                str(self.fake_bin / "gh"),
+                "--context",
+                "push",
+                "--check-open-pr",
+            ],
+            cwd=self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("500/800 added lines", result.stdout)
+
     def test_pre_push_hook_blocks_target_branch_update(self) -> None:
         source = self.commit_added_lines(801)
         hook_input = f"refs/heads/feature {source} refs/heads/feature {'0' * 40}\n"
@@ -326,6 +387,7 @@ class PrSizeGuardTest(unittest.TestCase):
         invocations = (
             ["-Rgithub/github", "-H", "large"],
             ["--repo", "github.com/github/github", "--head", "large"],
+            ["--repo", "https://github.com/github/github", "--head", "large"],
             ["-R", "github/github", "-Hlarge"],
         )
         for flags in invocations:
@@ -341,6 +403,79 @@ class PrSizeGuardTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("801 added lines", result.stderr)
+
+    def test_gh_guard_uses_origin_when_repo_lookup_fails(self) -> None:
+        self.commit_added_lines(801)
+        self.run_command(["git", "config", "branch.feature.gh-merge-base", "main"])
+        failing_bin = self.root / "failing-bin"
+        failing_bin.mkdir()
+        failing_gh = failing_bin / "gh"
+        failing_gh.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
+        failing_gh.chmod(0o755)
+
+        result = subprocess.run(
+            [str(self.gh_guard), "pr", "create", "--draft"],
+            cwd=self.repo,
+            env={
+                **self.env,
+                "PATH": f"{failing_bin}{os.pathsep}{os.environ['PATH']}",
+                "ZACK_CONFIRMED_PR_CREATE": "1",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("801 added lines", result.stderr)
+
+    def test_gh_guard_blocks_owner_qualified_head(self) -> None:
+        self.commit_added_lines(1)
+
+        result = subprocess.run(
+            [
+                str(self.gh_guard),
+                "pr",
+                "create",
+                "--draft",
+                "--repo",
+                "github/github",
+                "--head",
+                "someone:feature",
+            ],
+            cwd=self.repo,
+            env={**self.env, "ZACK_CONFIRMED_PR_CREATE": "1"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot verify an owner-qualified --head", result.stderr)
+
+    def test_installed_gh_symlink_finds_size_guard(self) -> None:
+        self.commit_added_lines(801)
+        shim_dir = self.root / "shim"
+        shim_dir.mkdir()
+        (shim_dir / "gh").symlink_to(self.gh_guard)
+        env = {
+            **self.env,
+            "PATH": f"{shim_dir}{os.pathsep}{self.fake_bin}{os.pathsep}{os.environ['PATH']}",
+            "ZACK_CONFIRMED_PR_CREATE": "1",
+        }
+
+        result = subprocess.run(
+            [str(shim_dir / "gh"), "pr", "create", "--draft"],
+            cwd=self.repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("801 added lines", result.stderr)
+        self.assertNotIn("can't open file", result.stderr)
 
 
 if __name__ == "__main__":

@@ -208,9 +208,20 @@ enforce_pr_size_or_die() {
   if [ -z "$target_repo" ]; then
     target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
   fi
-  if [[ "$target_repo" == */*/* ]]; then
-    target_repo="${target_repo#*/}"
+  if [ -z "$target_repo" ]; then
+    local origin_url
+    origin_url="$(git config --get remote.origin.url 2>/dev/null || true)"
+    if [[ "$origin_url" =~ github\.com[:/]([^/]+/[^/]+)$ ]]; then
+      target_repo="${BASH_REMATCH[1]}"
+    fi
   fi
+  target_repo="${target_repo%.git}"
+  case "$target_repo" in
+    https://github.com/*) target_repo="${target_repo#https://github.com/}" ;;
+    http://github.com/*) target_repo="${target_repo#http://github.com/}" ;;
+    git@github.com:*) target_repo="${target_repo#git@github.com:}" ;;
+    github.com/*) target_repo="${target_repo#github.com/}" ;;
+  esac
 
   case "$target_repo" in
     github/github|github/github-ui)
@@ -218,7 +229,9 @@ enforce_pr_size_or_die() {
       create_branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
       create_source="${create_head:-HEAD}"
       if [[ "$create_source" == *:* ]]; then
-        create_source="${create_source#*:}"
+        echo "gh-guard: cannot verify an owner-qualified --head against local commits." >&2
+        echo "Push and check out the branch locally before creating this PR." >&2
+        exit 1
       fi
       if [ "$create_source" != "HEAD" ]; then
         create_branch="$create_source"
@@ -237,7 +250,7 @@ enforce_pr_size_or_die() {
       if [ -n "$create_base" ]; then
         size_args+=(--base "$create_base")
       fi
-      python3 "$SCRIPT_PATH/pr-size-guard" "${size_args[@]}" || exit $?
+      python3 "$SELF_REAL_PATH/pr-size-guard" "${size_args[@]}" || exit $?
       ;;
   esac
 }

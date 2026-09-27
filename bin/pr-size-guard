@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 MAX_ADDITIONS = 800
 TARGET_REPOSITORIES = {"github/github", "github/github-ui"}
@@ -93,6 +94,37 @@ def branch_merge_base(root: Path, branch: str) -> Optional[str]:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def stack_merge_base(root: Path, branch: str) -> Optional[str]:
+    """Return the base commit recorded by the gh-stack extension."""
+    common_dir = Path(git(root, "rev-parse", "--git-common-dir"))
+    if not common_dir.is_absolute():
+        common_dir = root / common_dir
+    metadata_path = common_dir / "gh-stack"
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
+        return None
+    stacks = payload.get("stacks")
+    if not isinstance(stacks, list):
+        return None
+    for stack in stacks:
+        if not isinstance(stack, dict):
+            continue
+        branches = stack.get("branches")
+        if not isinstance(branches, list):
+            continue
+        for entry in branches:
+            if (
+                isinstance(entry, dict)
+                and entry.get("branch") == branch
+                and isinstance(entry.get("base"), str)
+            ):
+                return entry["base"]
+    return None
+
+
 def open_pr_base(
     root: Path, executable: str, repository: str, branch: str
 ) -> Optional[str]:
@@ -144,18 +176,21 @@ def resolve_base(
     branch: str,
     explicit_base: Optional[str],
     check_open_pr: bool,
-) -> str:
+) -> Tuple[str, bool]:
     """Resolve the base branch using GitHub CLI precedence."""
     if explicit_base:
-        return explicit_base
+        return explicit_base, False
     if check_open_pr:
         pr_base = open_pr_base(root, executable, repository, branch)
         if pr_base:
-            return pr_base
+            return pr_base, False
+    stack_base = stack_merge_base(root, branch)
+    if stack_base:
+        return stack_base, True
     configured_base = branch_merge_base(root, branch)
     if configured_base:
-        return configured_base
-    return default_branch(root, executable, repository)
+        return configured_base, False
+    return default_branch(root, executable, repository), False
 
 
 def fetch_base(root: Path, remote: str, base: str) -> str:
@@ -249,7 +284,7 @@ def check_size(args: argparse.Namespace) -> int:
 
     root = repository_root()
     remote = args.remote or remote_for_repository(root, args.repository)
-    base = resolve_base(
+    base, base_is_commit = resolve_base(
         root,
         executable=args.gh,
         repository=args.repository,
@@ -257,7 +292,11 @@ def check_size(args: argparse.Namespace) -> int:
         explicit_base=args.base,
         check_open_pr=args.check_open_pr,
     )
-    base_commit = fetch_base(root, remote, base)
+    base_commit = (
+        git(root, "rev-parse", "--verify", f"{base}^{{commit}}")
+        if base_is_commit
+        else fetch_base(root, remote, base)
+    )
     source_commit = resolve_source(root, remote, args.source)
     merge_base = ensure_merge_base(
         root,
