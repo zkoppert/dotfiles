@@ -330,42 +330,64 @@ def ensure_merge_base(
 
 def count_additions(root: Path, merge_base: str, source_commit: str) -> int:
     """Count text additions in the pull request diff."""
-    output = git(
-        root,
-        "-c",
-        "core.quotePath=false",
-        "diff",
-        "--numstat",
-        "--find-renames",
-        merge_base,
-        source_commit,
+    result = run_bytes(
+        [
+            "git",
+            "diff",
+            "--numstat",
+            "--find-renames",
+            "-z",
+            merge_base,
+            source_commit,
+        ],
+        cwd=root,
     )
+    if result.returncode != 0:
+        raise GuardError(result.stderr.decode("utf-8", "replace").strip())
+    records = result.stdout.split(b"\0")
     additions = 0
-    for line in output.splitlines():
-        added, _deleted, _path = line.split("\t", 2)
+    attributed_text_paths: list[str] = []
+    index = 0
+    while index < len(records) and records[index]:
+        fields = records[index].split(b"\t", 2)
+        if len(fields) != 3:
+            raise GuardError("cannot parse NUL-delimited addition counts")
+        added = fields[0].decode()
+        path_bytes = fields[2]
+        index += 1
+        if path_bytes:
+            path = path_bytes.decode("utf-8", "surrogateescape")
+        else:
+            if index + 1 >= len(records):
+                raise GuardError("cannot parse renamed addition count")
+            index += 1
+            path = records[index].decode("utf-8", "surrogateescape")
+            index += 1
         if added == "-":
             new_blob = run_bytes(
-                ["git", "show", f"{source_commit}:{_path}"],
+                ["git", "show", f"{source_commit}:{path}"],
                 cwd=root,
             )
             if new_blob.returncode != 0 or b"\x00" in new_blob.stdout:
                 continue
-            text_diff = git(
-                root,
-                "diff",
-                "--text",
-                "--unified=0",
-                merge_base,
-                source_commit,
-                "--",
-                _path,
-            )
-            additions += sum(
-                line.startswith("+") and not line.startswith("+++")
-                for line in text_diff.splitlines()
-            )
+            attributed_text_paths.append(path)
         else:
             additions += int(added)
+    if attributed_text_paths:
+        text_diff = git(
+            root,
+            "diff",
+            "--text",
+            "--unified=0",
+            merge_base,
+            source_commit,
+            "--",
+            *attributed_text_paths,
+        )
+        additions += sum(
+            line.startswith("+") and not line.startswith("+++")
+            for line in text_diff.splitlines()
+        )
     return additions
 
 
@@ -462,15 +484,6 @@ def main(arguments: Optional[list[str]] = None) -> int:
     try:
         return check_size(args)
     except (GuardError, ValueError) as error:
-        if (
-            args.repository.lower() in TARGET_REPOSITORIES
-            and os.environ.get(OVERRIDE_VARIABLE) == "1"
-        ):
-            print(
-                f"pr-size-guard: override accepted despite check failure: {error}",
-                file=sys.stderr,
-            )
-            return 0
         print(
             f"pr-size-guard: blocked {args.context} for {args.repository}: {error}",
             file=sys.stderr,

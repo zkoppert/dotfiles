@@ -101,21 +101,21 @@ if [ "$is_size_target" = "0" ]; then
           ;;
       esac
     fi
-    if [ "$is_size_target" = "0" ]; then
-      case "${owner_repo#*/}" in
-        github)
-          is_size_target=1
-          size_repo="github/github"
-          size_remote=""
-          ;;
-        github-ui)
-          is_size_target=1
-          size_repo="github/github-ui"
-          size_remote=""
-          ;;
-      esac
-    fi
   done < <(git remote 2>/dev/null || true)
+fi
+if [ "$is_size_target" = "0" ]; then
+  case "${owner_repo#*/}" in
+    github)
+      is_size_target=1
+      size_repo="github/github"
+      size_remote=""
+      ;;
+    github-ui)
+      is_size_target=1
+      size_repo="github/github-ui"
+      size_remote=""
+      ;;
+  esac
 fi
 
 repo_vis=""

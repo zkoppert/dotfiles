@@ -249,7 +249,7 @@ if command -v git >/dev/null 2>&1 &&
     echo "⚠ core.hooksPath already points to $current_hooks_path - skipping personal Git hooks"
   fi
 
-  for candidate_repo in "$PWD" "$HOME/repos/github" "$HOME/repos/github-ui"; do
+  for candidate_repo in "$PWD" "$HOME/repos/github" "$HOME/repos/github-ui" /workspaces/*; do
     [ -d "$candidate_repo" ] || continue
     is_target_repo=0
     while IFS= read -r candidate_remote; do

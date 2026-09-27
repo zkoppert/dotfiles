@@ -160,11 +160,11 @@ class PrSizeGuardTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("override accepted", result.stdout)
 
-    def test_explicit_override_allows_a_check_failure(self) -> None:
+    def test_explicit_override_does_not_hide_a_check_failure(self) -> None:
         result = self.run_size_guard("missing-commit", override=True)
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("override accepted despite check failure", result.stderr)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot resolve the source commit", result.stderr)
 
     def test_non_target_repository_is_not_gated(self) -> None:
         result = self.run_size_guard("not-a-commit", repository="example/project")
@@ -366,6 +366,45 @@ class PrSizeGuardTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("1/800 added lines", result.stdout)
+
+    def test_renamed_text_marked_binary_counts_new_path_additions(self) -> None:
+        (self.repo / ".gitattributes").write_text(
+            "vendor/** -diff\n", encoding="utf-8"
+        )
+        source_dir = self.repo / "vendor" / "old"
+        source_dir.mkdir(parents=True)
+        (source_dir / "payload.txt").write_text(
+            "".join(f"line {number}\n" for number in range(10)),
+            encoding="utf-8",
+        )
+        self.run_command(["git", "add", ".gitattributes", "vendor"])
+        self.run_command(["git", "commit", "-m", "add vendored baseline"])
+        baseline = self.run_command(["git", "rev-parse", "HEAD"]).stdout.strip()
+        self.run_command(
+            [
+                "git",
+                f"--git-dir={self.remote}",
+                "fetch",
+                str(self.repo),
+                f"{baseline}:refs/heads/main",
+            ]
+        )
+        destination_dir = self.repo / "vendor" / "new"
+        destination_dir.mkdir()
+        (source_dir / "payload.txt").rename(destination_dir / "payload.txt")
+        source_dir.rmdir()
+        (destination_dir / "payload.txt").write_text(
+            "".join(f"line {number}\n" for number in range(900)),
+            encoding="utf-8",
+        )
+        self.run_command(["git", "add", "-A"])
+        self.run_command(["git", "commit", "-m", "rename vendored payload"])
+        source = self.run_command(["git", "rev-parse", "HEAD"]).stdout.strip()
+
+        result = self.run_size_guard(source)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("900 added lines", result.stderr)
 
     def test_repository_matching_is_case_insensitive(self) -> None:
         source = self.commit_added_lines(801)
@@ -846,6 +885,29 @@ class PrSizeGuardTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("blocked draft creation", result.stderr)
+        self.assertIn("801 added lines", result.stderr)
+
+    def test_gh_guard_does_not_treat_title_value_as_help(self) -> None:
+        self.commit_added_lines(801)
+
+        result = subprocess.run(
+            [
+                str(self.gh_guard),
+                "pr",
+                "create",
+                "--title",
+                "--help",
+                "--body",
+                "body",
+            ],
+            cwd=self.repo,
+            env={**self.env, "ZACK_CONFIRMED_PR_CREATE": "1"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
         self.assertIn("801 added lines", result.stderr)
 
     def test_gh_guard_blocks_native_publication_before_proof_checks(self) -> None:

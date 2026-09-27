@@ -277,6 +277,11 @@ enforce_pr_size_or_die() {
   fi
   target_repo="${target_repo%.git}"
   target_repo="$(printf '%s' "$target_repo" | tr '[:upper:]' '[:lower:]')"
+  if [ -z "$target_repo" ]; then
+    echo "gh-guard: cannot resolve the PR target repository for size enforcement." >&2
+    exit 1
+  fi
+
   case "$target_repo" in
     https://github.com/*) target_repo="${target_repo#https://github.com/}" ;;
     http://github.com/*) target_repo="${target_repo#http://github.com/}" ;;
@@ -325,10 +330,7 @@ fi
 
 # Help flags after the operation are not seen by the parser above. Legacy help
 # calls pass through, while native calls still require their verified handoff.
-if { [ "$native_locator_present" = "0" ] ||
-     [ "$is_pr_ready" = "1" ] ||
-     [ "$is_pr_draft" = "1" ]; } &&
-   { [ "$is_pr_create" = "1" ] || [ "$is_pr_ready" = "1" ] || [ "$is_pr_draft" = "1" ] || [ "$is_pr_edit" = "1" ]; }; then
+if [ "$is_pr_ready" = "1" ] || [ "$is_pr_draft" = "1" ]; then
   for a in "$@"; do
     case "$a" in
       --help|-h|help)
