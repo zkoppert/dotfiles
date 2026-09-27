@@ -985,6 +985,49 @@ class PrSizeGuardTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_pre_push_hook_ignores_unrelated_repo_with_target_remote(self) -> None:
+        source = self.commit_added_lines(801)
+        self.run_command(
+            ["git", "remote", "set-url", "origin", "git@github.com:example/project.git"]
+        )
+        self.run_command(
+            ["git", "remote", "add", "upstream", "git@github.com:github/github.git"]
+        )
+        hook_input = f"refs/heads/feature {source} refs/heads/feature {'0' * 40}\n"
+
+        result = subprocess.run(
+            [str(self.pre_push), "origin", "git@github.com:example/project.git"],
+            cwd=self.repo,
+            env=self.env,
+            input=hook_input,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_installed_pre_push_symlink_finds_size_guard(self) -> None:
+        source = self.commit_added_lines(1)
+        shim_dir = self.root / "hook-shim"
+        shim_dir.mkdir()
+        installed_hook = shim_dir / "pre-push"
+        installed_hook.symlink_to(self.pre_push)
+        hook_input = f"refs/heads/feature {source} refs/heads/feature {'0' * 40}\n"
+
+        result = subprocess.run(
+            [str(installed_hook), "origin", "git@github.com:github/github.git"],
+            cwd=self.repo,
+            env=self.env,
+            input=hook_input,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("pr-size-guard is unavailable", result.stderr)
+
     def test_gh_guard_blocks_oversized_draft_before_marker_checks(self) -> None:
         self.commit_added_lines(801)
 
@@ -1004,6 +1047,9 @@ class PrSizeGuardTest(unittest.TestCase):
     def test_gh_guard_keeps_non_target_repository_behavior(self) -> None:
         self.run_command(
             ["git", "remote", "set-url", "origin", "git@github.com:example/project.git"]
+        )
+        self.run_command(
+            ["git", "remote", "add", "upstream", "git@github.com:github/github.git"]
         )
         non_target_bin = self.root / "non-target-bin"
         non_target_bin.mkdir()

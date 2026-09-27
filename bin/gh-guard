@@ -200,6 +200,7 @@ enforce_pr_size_or_die() {
 
   local target_repo=""
   local checkout_repo=""
+  local checkout_parent=""
   local target_repo_explicit=0
   local create_base=""
   local create_head=""
@@ -247,6 +248,7 @@ enforce_pr_size_or_die() {
   if [ -z "$target_repo" ] && [ "$target_repo_explicit" = "0" ]; then
     target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
     checkout_repo="$target_repo"
+    checkout_parent="$("$REAL_GH" repo view --json parent --jq '.parent.nameWithOwner // ""' 2>/dev/null || true)"
   fi
   if [ "$target_repo_explicit" = "0" ]; then
     case "$target_repo" in
@@ -254,7 +256,17 @@ enforce_pr_size_or_die() {
       *) target_repo="" ;;
     esac
   fi
-  if [ -z "$target_repo" ] && [ "$target_repo_explicit" = "0" ]; then
+  checkout_parent="$(printf '%s' "$checkout_parent" | tr '[:upper:]' '[:lower:]')"
+  case "$(printf '%s' "$checkout_repo" | tr '[:upper:]' '[:lower:]')" in
+    zkoppert/github) checkout_parent="${checkout_parent:-github/github}" ;;
+    zkoppert/github-ui) checkout_parent="${checkout_parent:-github/github-ui}" ;;
+  esac
+  if [ -z "$target_repo" ] &&
+     [ "$target_repo_explicit" = "0" ] &&
+     { [ -z "$checkout_repo" ] ||
+       [ "$checkout_parent" = "github/github" ] ||
+       [ "$checkout_parent" = "github/github-ui" ]; }; then
+    target_repo="$checkout_parent"
     local remote_name remote_url
     while IFS= read -r remote_name; do
       remote_url="$(git config --get "remote.$remote_name.url" 2>/dev/null || true)"
@@ -270,11 +282,7 @@ enforce_pr_size_or_die() {
     done < <(git remote 2>/dev/null || true)
   fi
   if [ -z "$target_repo" ] && [ "$target_repo_explicit" = "0" ]; then
-    case "$(printf '%s' "$checkout_repo" | tr '[:upper:]' '[:lower:]')" in
-      zkoppert/github) target_repo="github/github" ;;
-      zkoppert/github-ui) target_repo="github/github-ui" ;;
-      ?*/?*) return 0 ;;
-    esac
+    [ -n "$checkout_repo" ] && return 0
   fi
   target_repo="${target_repo%.git}"
   target_repo="$(printf '%s' "$target_repo" | tr '[:upper:]' '[:lower:]')"

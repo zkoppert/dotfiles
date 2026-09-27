@@ -19,7 +19,13 @@
 set -euo pipefail
 
 LINT_PATH="$HOME/.copilot/skills/validate-style/lint.py"
-HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOOK_SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$HOOK_SOURCE" ]; do
+  HOOK_DIRECTORY="$(cd "$(dirname "$HOOK_SOURCE")" && pwd)"
+  HOOK_SOURCE="$(readlink "$HOOK_SOURCE")"
+  [[ "$HOOK_SOURCE" == /* ]] || HOOK_SOURCE="$HOOK_DIRECTORY/$HOOK_SOURCE"
+done
+HOOK_DIR="$(cd "$(dirname "$HOOK_SOURCE")" && pwd)"
 SIZE_GUARD="$HOOK_DIR/../bin/pr-size-guard"
 push_updates="$(cat)"
 pushed_branch_args=()
@@ -94,7 +100,21 @@ size_remote="$remote_name"
 case "$owner_repo" in
   github/github|github/github-ui) is_size_target=1 ;;
 esac
-if [ "$is_size_target" = "0" ]; then
+fork_target=""
+if [ "$is_size_target" = "0" ] && [[ "$owner_repo" == zkoppert/* ]]; then
+  fork_target="$(gh repo view "$owner_repo" --json parent --jq '.parent.nameWithOwner // ""' 2>/dev/null || true)"
+  fork_target="$(printf '%s' "$fork_target" | tr '[:upper:]' '[:lower:]')"
+  case "$owner_repo" in
+    zkoppert/github) fork_target="${fork_target:-github/github}" ;;
+    zkoppert/github-ui) fork_target="${fork_target:-github/github-ui}" ;;
+  esac
+  case "$fork_target" in
+    github/github|github/github-ui) size_repo="$fork_target" ;;
+    "") ;;
+    *) fork_target="" ;;
+  esac
+fi
+if [ -n "$fork_target" ]; then
   while IFS= read -r candidate_remote; do
     candidate_url="$(git config --get "remote.$candidate_remote.url" 2>/dev/null || true)"
     candidate_repo="$(github_repo_from_url "$candidate_url")"
@@ -111,18 +131,10 @@ if [ "$is_size_target" = "0" ]; then
   done < <(git remote 2>/dev/null || true)
 fi
 if [ "$is_size_target" = "0" ]; then
-  case "$owner_repo" in
-    zkoppert/github)
-      is_size_target=1
-      size_repo="github/github"
-      size_remote=""
-      ;;
-    zkoppert/github-ui)
-      is_size_target=1
-      size_repo="github/github-ui"
-      size_remote=""
-      ;;
-  esac
+  if [ -n "$fork_target" ]; then
+    is_size_target=1
+    size_remote=""
+  fi
 fi
 
 repo_vis=""
