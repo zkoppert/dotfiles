@@ -227,6 +227,10 @@ if command -v git >/dev/null 2>&1 &&
     post-checkout \
     post-merge \
     post-rewrite \
+    post-index-change \
+    pre-auto-gc \
+    reference-transaction \
+    push-to-checkout \
     sendemail-validate \
     fsmonitor-watchman \
     p4-changelist \

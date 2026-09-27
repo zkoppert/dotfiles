@@ -168,12 +168,16 @@ if [ "$#" -eq 3 ] && [ "$1" = "pr" ] &&
 fi
 
 github_repo_from_url() {
-  local url="$1"
+  local url
+  url="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   local repository=""
   case "$url" in
     git@github.com:*) repository="${url#git@github.com:}" ;;
+    ssh://git@github.com/*) repository="${url#ssh://git@github.com/}" ;;
     https://github.com/*) repository="${url#https://github.com/}" ;;
+    https://*@github.com/*) repository="${url#https://*@github.com/}" ;;
     http://github.com/*) repository="${url#http://github.com/}" ;;
+    git://github.com/*) repository="${url#git://github.com/}" ;;
     ssh://git@ssh.github.com:[0-9]*/*)
       repository="${url#ssh://git@ssh.github.com:}"
       repository="${repository#*/}"
@@ -256,13 +260,13 @@ enforce_pr_size_or_die() {
     done < <(git remote 2>/dev/null || true)
   fi
   target_repo="${target_repo%.git}"
+  target_repo="$(printf '%s' "$target_repo" | tr '[:upper:]' '[:lower:]')"
   case "$target_repo" in
     https://github.com/*) target_repo="${target_repo#https://github.com/}" ;;
     http://github.com/*) target_repo="${target_repo#http://github.com/}" ;;
     git@github.com:*) target_repo="${target_repo#git@github.com:}" ;;
     github.com/*) target_repo="${target_repo#github.com/}" ;;
   esac
-  target_repo="$(printf '%s' "$target_repo" | tr '[:upper:]' '[:lower:]')"
 
   case "$target_repo" in
     github/github|github/github-ui)

@@ -125,6 +125,7 @@ def main() -> int:
     installed_gh = Path.home() / ".local" / "bin" / "gh"
     installed_pr_marker = Path.home() / ".local" / "bin" / "pr-marker"
     active_gh = shutil.which("gh")
+    active_pr_marker = shutil.which("pr-marker")
     if (
         not installed_gh.is_symlink()
         or installed_gh.resolve() != expected_gh_guard
@@ -137,6 +138,8 @@ def main() -> int:
     if (
         not installed_pr_marker.is_symlink()
         or installed_pr_marker.resolve() != expected_pr_marker
+        or active_pr_marker is None
+        or Path(active_pr_marker).resolve() != expected_pr_marker
     ):
         failures.append(
             f"pr-marker must resolve to the personal helper at {expected_pr_marker}"

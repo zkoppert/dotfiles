@@ -24,12 +24,16 @@ SIZE_GUARD="$HOOK_DIR/../bin/pr-size-guard"
 push_updates="$(cat)"
 
 github_repo_from_url() {
-  local url="$1"
+  local url
+  url="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   local repository=""
   case "$url" in
     git@github.com:*) repository="${url#git@github.com:}" ;;
+    ssh://git@github.com/*) repository="${url#ssh://git@github.com/}" ;;
     https://github.com/*) repository="${url#https://github.com/}" ;;
+    https://*@github.com/*) repository="${url#https://*@github.com/}" ;;
     http://github.com/*) repository="${url#http://github.com/}" ;;
+    git://github.com/*) repository="${url#git://github.com/}" ;;
     ssh://git@ssh.github.com:[0-9]*/*)
       repository="${url#ssh://git@ssh.github.com:}"
       repository="${repository#*/}"

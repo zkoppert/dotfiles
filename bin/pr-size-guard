@@ -139,7 +139,11 @@ def stack_parent_branch(
     if (
         not isinstance(payload, dict)
         or payload.get("schemaVersion") != 1
-        or payload.get("repository") not in ("", repository)
+        or (
+            isinstance(payload.get("repository"), str)
+            and payload["repository"]
+            and payload["repository"].split(":", 1)[-1].lower() != repository
+        )
     ):
         return None
     stacks = payload.get("stacks")
@@ -175,14 +179,17 @@ def open_pr_base(
 ) -> Optional[str]:
     """Return the base branch for an open PR, if one exists."""
     head = quote(f"{head_owner}:{branch}", safe="")
-    output = gh(
-        root,
-        executable,
-        "api",
-        f"repos/{repository}/pulls?state=open&head={head}&per_page=1",
-        "--jq",
-        ".[0].base.ref // \"\"",
-    )
+    try:
+        output = gh(
+            root,
+            executable,
+            "api",
+            f"repos/{repository}/pulls?state=open&head={head}&per_page=1",
+            "--jq",
+            ".[0].base.ref // \"\"",
+        )
+    except GuardError:
+        return None
     return output or None
 
 
@@ -225,7 +232,7 @@ def resolve_base(
         if stack_parent:
             return stack_parent, "local"
     configured_base = branch_merge_base(root, branch)
-    if configured_base:
+    if configured_base and configured_base != branch:
         return configured_base, "remote"
     return default_branch(root, executable, repository), "remote"
 
@@ -378,10 +385,7 @@ def count_additions(root: Path, merge_base: str, source_commit: str) -> int:
             additions += sum(
                 new_end - new_start
                 for tag, _old_start, _old_end, new_start, new_end in difflib.SequenceMatcher(
-                    None,
-                    old_lines,
-                    new_lines,
-                    autojunk=False,
+                    None, old_lines, new_lines
                 ).get_opcodes()
                 if tag in ("insert", "replace")
             )

@@ -196,22 +196,27 @@ class PrSizeGuardTest(unittest.TestCase):
         source = self.commit_added_lines(801)
         hook_input = f"refs/heads/feature {source} refs/heads/feature {'0' * 40}\n"
 
-        result = subprocess.run(
-            [
-                str(self.pre_push),
-                "origin",
-                "ssh://git@ssh.github.com:443/GitHub/GitHub.git",
-            ],
-            cwd=self.repo,
-            env=self.env,
-            input=hook_input,
-            capture_output=True,
-            text=True,
-            check=False,
+        urls = (
+            "ssh://git@ssh.github.com:443/GitHub/GitHub.git",
+            "git@GitHub.com:GitHub/GitHub.git",
+            "ssh://git@github.com/GitHub/GitHub.git",
+            "https://zkoppert@github.com/GitHub/GitHub.git",
+            "git://github.com/GitHub/GitHub.git",
         )
+        for url in urls:
+            with self.subTest(url=url):
+                result = subprocess.run(
+                    [str(self.pre_push), "origin", url],
+                    cwd=self.repo,
+                    env=self.env,
+                    input=hook_input,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("801 added lines", result.stderr)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("801 added lines", result.stderr)
 
     def test_pre_push_hook_delegates_to_repository_hook(self) -> None:
         local_hook = self.repo / ".git" / "hooks" / "pre-push"
@@ -457,7 +462,7 @@ class PrSizeGuardTest(unittest.TestCase):
             json.dumps(
                 {
                     "schemaVersion": 1,
-                    "repository": "github/github",
+                    "repository": "github.com:github/github",
                     "stacks": [
                         {
                             "trunk": {"branch": "main"},
@@ -539,6 +544,71 @@ class PrSizeGuardTest(unittest.TestCase):
 
         self.assertEqual(rebased.returncode, 0, rebased.stderr)
         self.assertIn("500/800 added lines", rebased.stdout)
+
+    def test_stack_fallback_survives_open_pr_lookup_failure(self) -> None:
+        self.commit_added_lines(500)
+        self.run_command(["git", "checkout", "-b", "stack-b"])
+        (self.repo / "stack-b.txt").write_text(
+            "".join(f"child {number}\n" for number in range(500)),
+            encoding="utf-8",
+        )
+        self.run_command(["git", "add", "stack-b.txt"])
+        self.run_command(["git", "commit", "-m", "add stacked child"])
+        git_dir = Path(
+            self.run_command(["git", "rev-parse", "--git-dir"]).stdout.strip()
+        )
+        if not git_dir.is_absolute():
+            git_dir = self.repo / git_dir
+        (git_dir / "gh-stack").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "repository": "github.com:github/github",
+                    "stacks": [
+                        {
+                            "trunk": {"branch": "main"},
+                            "branches": [
+                                {"branch": "feature", "base": "HEAD"},
+                                {"branch": "stack-b", "base": "HEAD"},
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        failing_gh = self.root / "failing-gh"
+        failing_gh.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
+        failing_gh.chmod(0o755)
+
+        result = subprocess.run(
+            [
+                str(self.guard),
+                "--repo",
+                "github/github",
+                "--remote",
+                "origin",
+                "--branch",
+                "stack-b",
+                "--head-owner",
+                "github",
+                "--source",
+                "HEAD",
+                "--gh",
+                str(failing_gh),
+                "--context",
+                "push",
+                "--check-open-pr",
+            ],
+            cwd=self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("500/800 added lines", result.stdout)
 
     def test_draft_creation_ignores_gh_stack_metadata_without_base_flag(self) -> None:
         stack_a = self.commit_added_lines(500)
@@ -752,6 +822,7 @@ class PrSizeGuardTest(unittest.TestCase):
         invocations = (
             ["-Rgithub/github", "-H", "large"],
             ["-RGitHub/GitHub", "-H", "large"],
+            ["-RGitHub.Com/GitHub/GitHub", "-H", "large"],
             ["--repo", "github.com/github/github", "--head", "large"],
             ["--repo", "https://github.com/github/github", "--head", "large"],
             ["-R", "github/github", "-Hlarge"],

@@ -409,6 +409,26 @@ class CopilotEnvironmentTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("pr-marker must resolve to the personal helper", result.stdout)
 
+    def test_verifier_rejects_inactive_pr_marker(self) -> None:
+        env = self.prepare_complete_environment()
+        fake_bin = self.root / "earlier-bin"
+        fake_bin.mkdir()
+        fake_pr_marker = fake_bin / "pr-marker"
+        fake_pr_marker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake_pr_marker.chmod(0o755)
+        env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+        result = subprocess.run(
+            [str(self.verifier)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("pr-marker must resolve to the personal helper", result.stdout)
+
     def test_verifier_rejects_missing_stack_extension(self) -> None:
         env = self.prepare_complete_environment()
         real_gh = self.bin_dir / "gh"
