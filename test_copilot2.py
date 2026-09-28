@@ -126,6 +126,7 @@ sys.exit(result)
         self.env.update(
             {
                 "HOME": str(self.home),
+                "XDG_CONFIG_HOME": str(self.home / ".config"),
                 "PATH": f"{self.bin_dir}{os.pathsep}{self.env['PATH']}",
                 "COPILOT2_RETRY_DELAYS": "0",
                 "COPILOT2_MAX_RECONNECT_SECONDS": "10",
