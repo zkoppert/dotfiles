@@ -79,6 +79,7 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
         self.env = {
             **os.environ,
             "HOME": str(self.home),
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
             "PATH": f"{self.bin_dir}{os.pathsep}{os.environ['PATH']}",
             "FAKE_SOURCE_JSON": json.dumps(
                 [
