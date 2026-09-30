@@ -119,6 +119,14 @@ case "$1" in
     shift
     expand=0
     if [ "$1" = -F ]; then expand=1; shift; fi
+    case "$1" in
+      -s|-as)
+        case "$2 $3" in
+          "extended-keys on"|"extended-keys-format csi-u"|"terminal-features ,xterm*:extkeys"|"set-clipboard on") exit 0 ;;
+          *) exit 90 ;;
+        esac
+        ;;
+    esac
     [ "$1" = -t ] || exit 90
     case "$2" in '$0'|=*:) ;; *) exit 90 ;; esac
     [ "${FAKE_TMUX_IDENTITY_FAIL:-0}" = 1 ] && exit 1
@@ -129,6 +137,7 @@ case "$1" in
       value='%0 1234'
     fi
     case "$option" in
+      mouse) [ "$value" = on ] || exit 90 ;;
       @copilot2_identity) printf '%s\n' "$value" > "$identity_file" ;;
       @copilot2_origin) printf '%s\n' "$value" > "$origin_file" ;;
       *) exit 90 ;;
@@ -450,6 +459,11 @@ os.fsync = fsync
         calls = (self.home / "tmux.log").read_text(encoding="utf-8")
         self.assertIn("new-session -d -s review-one", calls)
         self.assertIn("exec copilot --allow-all", calls)
+        self.assertIn("set-option -s extended-keys on", calls)
+        self.assertIn("set-option -s extended-keys-format csi-u", calls)
+        self.assertIn("set-option -as terminal-features ,xterm*:extkeys", calls)
+        self.assertIn("set-option -s set-clipboard on", calls)
+        self.assertIn("set-option -t =review-one: mouse on", calls)
         self.assertTrue((self.home / "tmux-session").is_file())
         self.assertEqual(
             self.read_state("review-one"),
@@ -458,6 +472,26 @@ os.fsync = fsync
         self.assertEqual(
             (self.home / "tmux-identity").read_text(encoding="utf-8").strip(),
             "test-invocation",
+        )
+
+    def test_real_tmux_enables_modified_keys_and_clipboard_copy(self) -> None:
+        self.use_real_tmux()
+
+        result = self.run_helper("review-one")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tmux_output("show-options", "-sv", "extended-keys"), "on")
+        self.assertEqual(
+            self.tmux_output("show-options", "-sv", "extended-keys-format"), "csi-u"
+        )
+        self.assertEqual(self.tmux_output("show-options", "-sv", "set-clipboard"), "on")
+        self.assertEqual(
+            self.tmux_output("show-options", "-v", "-t", "=review-one:", "mouse"),
+            "on",
+        )
+        self.assertIn(
+            "xterm*:extkeys",
+            self.tmux_output("show-options", "-sv", "terminal-features"),
         )
 
     def test_new_launcher_after_rebuild_requires_explicit_replacement(self) -> None:
