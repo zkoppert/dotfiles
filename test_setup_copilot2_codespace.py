@@ -403,7 +403,7 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
         result = subprocess.run(
             [
                 "bash",
-                "-lc",
+                "-c",
                 f"set -euo pipefail; {module['refresh_git_shell'](expected_commit)}",
             ],
             cwd=checkout,
