@@ -444,10 +444,12 @@ def refresh_default_codespace(gh: str) -> None:
         'test -d "$dotfiles/.git"; '
         'cd "$dotfiles"; '
         'test -z "$(git status --porcelain)"; '
+        f"expected_commit={shlex.quote(expected_commit)}; "
         "git fetch origin main; "
+        'test "$(git rev-parse origin/main)" = "$expected_commit"; '
         'git merge-base --is-ancestor HEAD origin/main; '
         "git merge --ff-only origin/main; "
-        f'test "$(git rev-parse HEAD)" = {shlex.quote(expected_commit)}; '
+        'test "$(git rev-parse HEAD)" = "$expected_commit"; '
         '"$dotfiles/install.sh"; '
         'export PATH="$HOME/.local/bin:$PATH"; '
         "unset GH_TOKEN; "
