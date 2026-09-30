@@ -70,7 +70,10 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
             'printf \'%s\\n\' "$*" >> "$HOME/gh.log"\n'
             'case "$*" in\n'
             "  'auth status --hostname github.com') exit 0 ;;\n"
-            "  'auth token') printf 'fixture-token\\n'; exit 0 ;;\n"
+            "  'auth token')\n"
+            '    [ "${FAKE_TOKEN_STATUS:-0}" = 0 ] || exit "$FAKE_TOKEN_STATUS"\n'
+            "    printf 'fixture-token\\n'\n"
+            "    ;;\n"
             "  'codespace list --limit 100 --json name,displayName')\n"
             "    printf '%s\\n' \"$FAKE_SOURCE_JSON\"\n"
             "    ;;\n"
@@ -356,6 +359,21 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
         self.assertIn("local dotfiles checkout has uncommitted changes", result.stderr)
         calls = (self.home / "gh.log").read_text(encoding="utf-8")
         self.assertEqual(calls.splitlines(), ["auth status --hostname github.com"])
+
+    def test_refresh_token_failure_precedes_local_installation(self) -> None:
+        self.prepare_refresh_checkout()
+        self.write_default()
+        self.env["FAKE_TOKEN_STATUS"] = "1"
+
+        result = self.run_script("--refresh-default")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read the local GitHub CLI token", result.stderr)
+        self.assertFalse(
+            (self.home / ".copilot" / "copilot-instructions.md").exists()
+        )
+        calls = (self.home / "gh.log").read_text(encoding="utf-8")
+        self.assertNotIn("codespace ssh", calls)
 
     def test_refresh_default_rejects_a_commit_that_is_not_on_origin_main(self) -> None:
         self.prepare_refresh_checkout()
