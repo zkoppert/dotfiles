@@ -392,6 +392,19 @@ def verify_local_guidance_links(repository_root: Path) -> None:
             raise SetupError(f"local guidance link does not resolve to {source}: {target}")
 
 
+def refresh_git_shell(expected_commit: str) -> str:
+    """Return the remote git checks that protect the persisted checkout."""
+    return (
+        'test -z "$(git status --porcelain)"; '
+        f"expected_commit={shlex.quote(expected_commit)}; "
+        "git fetch origin main; "
+        'test "$(git rev-parse origin/main)" = "$expected_commit"; '
+        'git merge-base --is-ancestor HEAD origin/main; '
+        "git merge --ff-only origin/main; "
+        'test "$(git rev-parse HEAD)" = "$expected_commit"; '
+    )
+
+
 def refresh_default_codespace(gh: str) -> None:
     """Deploy origin/main guidance to the laptop and selected Codespace."""
     repository_root = Path(__file__).resolve().parent.parent
@@ -443,13 +456,7 @@ def refresh_default_codespace(gh: str) -> None:
         'dotfiles="/workspaces/.codespaces/.persistedshare/dotfiles"; '
         'test -d "$dotfiles/.git"; '
         'cd "$dotfiles"; '
-        'test -z "$(git status --porcelain)"; '
-        f"expected_commit={shlex.quote(expected_commit)}; "
-        "git fetch origin main; "
-        'test "$(git rev-parse origin/main)" = "$expected_commit"; '
-        'git merge-base --is-ancestor HEAD origin/main; '
-        "git merge --ff-only origin/main; "
-        'test "$(git rev-parse HEAD)" = "$expected_commit"; '
+        f"{refresh_git_shell(expected_commit)}"
         '"$dotfiles/install.sh"; '
         'export PATH="$HOME/.local/bin:$PATH"; '
         "unset GH_TOKEN; "

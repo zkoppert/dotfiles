@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import shutil
 import stat
 import subprocess
@@ -368,6 +369,69 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
         self.assertIn("local dotfiles checkout is not aligned with origin/main", result.stderr)
         calls = (self.home / "gh.log").read_text(encoding="utf-8")
         self.assertEqual(calls.splitlines(), ["auth status --hostname github.com"])
+
+    def test_remote_git_guard_refuses_to_advance_past_the_expected_commit(self) -> None:
+        expected_commit = self.prepare_refresh_checkout()
+        remote = self.root / "origin.git"
+        checkout = self.root / "remote-checkout"
+        advancer = self.root / "advancer"
+        subprocess.run(["git", "clone", "-q", str(remote), str(checkout)], check=True)
+        subprocess.run(["git", "clone", "-q", str(remote), str(advancer)], check=True)
+        self.assertEqual(
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=checkout,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip(),
+            expected_commit,
+        )
+        subprocess.run(["git", "config", "user.name", "Fixture"], cwd=advancer, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "fixture@example.com"],
+            cwd=advancer,
+            check=True,
+        )
+        (advancer / "advanced.txt").write_text("advanced\n", encoding="utf-8")
+        subprocess.run(["git", "add", "advanced.txt"], cwd=advancer, check=True)
+        subprocess.run(["git", "commit", "-qm", "advance main"], cwd=advancer, check=True)
+        subprocess.run(["git", "push", "-q", "origin", "main"], cwd=advancer, check=True)
+
+        module = runpy.run_path(str(self.script))
+        result = subprocess.run(
+            [
+                "bash",
+                "-lc",
+                f"set -euo pipefail; {module['refresh_git_shell'](expected_commit)}",
+            ],
+            cwd=checkout,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=checkout,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip(),
+            expected_commit,
+        )
+        self.assertNotEqual(
+            subprocess.run(
+                ["git", "rev-parse", "origin/main"],
+                cwd=checkout,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip(),
+            expected_commit,
+        )
 
     def test_refresh_failure_reports_partial_deployment_without_changing_default(self) -> None:
         self.prepare_refresh_checkout()
