@@ -206,20 +206,7 @@ def configure_codespace(gh: str, codespace: str, github_token: str) -> None:
         'export PATH="$HOME/.local/bin:$PATH"; '
         "bootstrap-copilot-mcp; "
         "unset GH_TOKEN; "
-        'verification="$(mktemp)"; '
-        'trap \'rm -f "$verification"\' EXIT; '
-        "if verify-codespace-copilot-env >\"$verification\" 2>&1; then "
-        'cat "$verification"; '
-        "else "
-        'cat "$verification"; '
-        'issues="$(grep \'^  - \' "$verification" || true)"; '
-        'if [ -z "$issues" ]; then exit 1; fi; '
-        'unexpected="$(printf \'%s\\n\' "$issues" | '
-        "grep -Ev '^  - (Tailscale is not connected|Azure CLI is not authenticated)$' "
-        "|| true)\"; "
-        'if [ -n "$unexpected" ]; then exit 1; fi; '
-        'printf \'%s\\n\' "Interactive authentication remains for Tailscale and Azure CLI."; '
-        "fi"
+        f"{verification_shell()}"
     )
     quoted_command = f"bash -lc {shlex.quote(remote_command)}"
     run(
@@ -235,6 +222,26 @@ def configure_codespace(gh: str, codespace: str, github_token: str) -> None:
         f"Codespace {codespace} setup or verification failed",
         capture_output=False,
         input_text=f"{github_token}\n",
+    )
+
+
+def verification_shell() -> str:
+    """Return the remote verifier command with allowed interactive gaps."""
+    return (
+        'verification="$(mktemp)"; '
+        'trap \'rm -f "$verification"\' EXIT; '
+        "if verify-codespace-copilot-env >\"$verification\" 2>&1; then "
+        'cat "$verification"; '
+        "else "
+        'cat "$verification"; '
+        'issues="$(grep \'^  - \' "$verification" || true)"; '
+        'if [ -z "$issues" ]; then exit 1; fi; '
+        'unexpected="$(printf \'%s\\n\' "$issues" | '
+        "grep -Ev '^  - (Tailscale is not connected|Azure CLI is not authenticated)$' "
+        "|| true)\"; "
+        'if [ -n "$unexpected" ]; then exit 1; fi; '
+        'printf \'%s\\n\' "Interactive authentication remains for Tailscale and Azure CLI."; '
+        "fi"
     )
 
 
@@ -327,6 +334,147 @@ def write_default(
     return destination
 
 
+def read_default() -> dict[str, str]:
+    """Read and validate the selected default Codespace."""
+    source = config_path()
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise SetupError(
+            "no default copilot2 Codespace is configured; run setup-copilot2-codespace"
+        ) from error
+    except (OSError, json.JSONDecodeError) as error:
+        raise SetupError(f"cannot read default Codespace configuration: {error}") from error
+    if not isinstance(payload, dict):
+        raise SetupError("default Codespace configuration used an unexpected format")
+    required = ("codespace", "repository")
+    if not all(isinstance(payload.get(key), str) and payload[key] for key in required):
+        raise SetupError("default Codespace configuration is missing a Codespace or repository")
+    return {key: value for key, value in payload.items() if isinstance(value, str)}
+
+
+def checked_out_main_commit(repository_root: Path) -> str:
+    """Return the clean local commit when it matches origin/main."""
+    status = run(
+        ["git", "-C", str(repository_root), "status", "--porcelain"],
+        "cannot inspect the local dotfiles checkout",
+    ).stdout
+    if status:
+        raise SetupError("local dotfiles checkout has uncommitted changes")
+    run(
+        ["git", "-C", str(repository_root), "fetch", "origin", "main"],
+        "cannot refresh origin/main",
+        capture_output=False,
+    )
+    head = run(
+        ["git", "-C", str(repository_root), "rev-parse", "HEAD"],
+        "cannot read the local dotfiles commit",
+    ).stdout.strip()
+    upstream = run(
+        ["git", "-C", str(repository_root), "rev-parse", "origin/main"],
+        "cannot read origin/main",
+    ).stdout.strip()
+    if head != upstream:
+        raise SetupError("local dotfiles checkout is not aligned with origin/main")
+    return head
+
+
+def verify_local_guidance_links(repository_root: Path) -> None:
+    """Verify that local Copilot guidance resolves to this checkout."""
+    expected = {
+        Path.home() / ".copilot" / "copilot-instructions.md":
+            repository_root / ".github" / "copilot-instructions.md",
+        Path.home() / ".copilot" / "skills" / "test-quality":
+            repository_root / ".copilot" / "skills" / "test-quality",
+    }
+    for target, source in expected.items():
+        if not target.is_symlink() or target.resolve() != source.resolve():
+            raise SetupError(f"local guidance link does not resolve to {source}: {target}")
+
+
+def refresh_default_codespace(gh: str) -> None:
+    """Deploy origin/main guidance to the laptop and selected Codespace."""
+    repository_root = Path(__file__).resolve().parent.parent
+    expected_commit = checked_out_main_commit(repository_root)
+    selected = read_default()
+    codespace = selected["codespace"]
+    repository = selected["repository"]
+    details = run_json(
+        [
+            gh,
+            "codespace",
+            "view",
+            "--codespace",
+            codespace,
+            "--json",
+            "name,repository,state",
+        ],
+        f"cannot inspect Codespace {codespace}",
+    )
+    if not isinstance(details, dict):
+        raise SetupError("default Codespace details used an unexpected format")
+    if details.get("state") != "Available":
+        raise SetupError(
+            f"Codespace {codespace} is {details.get('state')}; wait until it is Available"
+        )
+    if details.get("repository") != repository:
+        raise SetupError(
+            f"Codespace {codespace} belongs to {details.get('repository')}, not {repository}"
+        )
+
+    run(
+        [str(repository_root / "install.sh")],
+        "local dotfiles installation failed",
+        capture_output=False,
+    )
+    verify_local_guidance_links(repository_root)
+
+    github_token = run(
+        [gh, "auth", "token"],
+        "cannot read the local GitHub CLI token",
+    ).stdout.strip()
+    if not github_token:
+        raise SetupError("the local GitHub CLI returned an empty token")
+    remote_command = (
+        "set -euo pipefail; "
+        "IFS= read -r GH_TOKEN; "
+        "export GH_TOKEN; "
+        "gh auth setup-git >/dev/null; "
+        'dotfiles="/workspaces/.codespaces/.persistedshare/dotfiles"; '
+        'test -d "$dotfiles/.git"; '
+        'cd "$dotfiles"; '
+        'test -z "$(git status --porcelain)"; '
+        "git fetch origin main; "
+        'git merge-base --is-ancestor HEAD origin/main; '
+        "git merge --ff-only origin/main; "
+        f'test "$(git rev-parse HEAD)" = {shlex.quote(expected_commit)}; '
+        '"$dotfiles/install.sh"; '
+        'export PATH="$HOME/.local/bin:$PATH"; '
+        "unset GH_TOKEN; "
+        f"{verification_shell()}"
+    )
+    try:
+        run(
+            [
+                gh,
+                "codespace",
+                "ssh",
+                "--codespace",
+                codespace,
+                "--",
+                f"bash -lc {shlex.quote(remote_command)}",
+            ],
+            f"Codespace {codespace} refresh failed",
+            capture_output=False,
+            input_text=f"{github_token}\n",
+        )
+    except SetupError as error:
+        raise SetupError(
+            f"local guidance is updated, but {error}; the default selection was unchanged"
+        ) from error
+    print(f"Deployed dotfiles commit {expected_commit} to this laptop and {codespace}.")
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -361,6 +509,11 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_RETENTION_PERIOD,
         help=f"retention period (default: {DEFAULT_RETENTION_PERIOD})",
     )
+    parser.add_argument(
+        "--refresh-default",
+        action="store_true",
+        help="deploy origin/main guidance to this laptop and the configured default Codespace",
+    )
     return parser.parse_args()
 
 
@@ -372,6 +525,9 @@ def main() -> int:
         [gh, "auth", "status", "--hostname", "github.com"],
         "GitHub CLI authentication failed",
     )
+    if args.refresh_default:
+        refresh_default_codespace(gh)
+        return 0
     github_token = run(
         [gh, "auth", "token"],
         "cannot read the local GitHub CLI token",

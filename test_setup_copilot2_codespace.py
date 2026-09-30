@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -23,6 +24,33 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
         self.bin_dir = self.root / "bin"
         self.home.mkdir()
         self.bin_dir.mkdir()
+        self.repo = self.root / "dotfiles"
+        (self.repo / "bin").mkdir(parents=True)
+        source_script = Path(__file__).with_name("bin") / "setup-copilot2-codespace"
+        self.script = self.repo / "bin" / "setup-copilot2-codespace"
+        shutil.copy2(source_script, self.script)
+        install = self.repo / "install.sh"
+        install.write_text(
+            "#!/bin/sh\n"
+            'dotfiles="$(cd "$(dirname "$0")" && pwd)"\n'
+            'mkdir -p "$HOME/.copilot/skills"\n'
+            'ln -sfn "$dotfiles/.github/copilot-instructions.md" '
+            '"$HOME/.copilot/copilot-instructions.md"\n'
+            'ln -sfn "$dotfiles/.copilot/skills/test-quality" '
+            '"$HOME/.copilot/skills/test-quality"\n',
+            encoding="utf-8",
+        )
+        install.chmod(0o755)
+        (self.repo / ".github").mkdir()
+        (self.repo / ".github" / "copilot-instructions.md").write_text(
+            "# fixture instructions\n",
+            encoding="utf-8",
+        )
+        (self.repo / ".copilot" / "skills" / "test-quality").mkdir(parents=True)
+        (self.repo / ".copilot" / "skills" / "test-quality" / "SKILL.md").write_text(
+            "# fixture test-quality\n",
+            encoding="utf-8",
+        )
         for skill in (
             "gh-axi",
             "graphql-availability-investigator",
@@ -35,7 +63,6 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
                 f"---\nname: {skill}\n---\n",
                 encoding="utf-8",
             )
-        self.script = Path(__file__).with_name("bin") / "setup-copilot2-codespace"
         self.gh = self.bin_dir / "gh"
         self.gh.write_text(
             "#!/bin/sh\n"
@@ -51,6 +78,9 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
             "    ;;\n"
             "  'codespace view --codespace source-exact --json name,repository,machineName,devcontainerPath,location')\n"
             "    printf '%s\\n' \"$FAKE_EXACT_SOURCE_JSON\"\n"
+            "    ;;\n"
+            "  'codespace view --codespace configured-generated --json name,repository,state')\n"
+            "    printf '%s\\n' \"$FAKE_DEFAULT_DETAILS_JSON\"\n"
             "    ;;\n"
             "  codespace\\ create*)\n"
             '    touch "$HOME/created"\n'
@@ -68,6 +98,10 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
             "    exit 0\n"
             "    ;;\n"
             "  codespace\\ ssh\\ --codespace\\ new-generated*)\n"
+            '    [ "$#" -eq 6 ] || exit 91\n'
+            '    exit "${FAKE_REMOTE_STATUS:-0}"\n'
+            "    ;;\n"
+            "  codespace\\ ssh\\ --codespace\\ configured-generated*)\n"
             '    [ "$#" -eq 6 ] || exit 91\n'
             '    exit "${FAKE_REMOTE_STATUS:-0}"\n'
             "    ;;\n"
@@ -115,6 +149,13 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
                         "state": "Available",
                     }
                 ]
+            ),
+            "FAKE_DEFAULT_DETAILS_JSON": json.dumps(
+                {
+                    "name": "configured-generated",
+                    "repository": "example/project",
+                    "state": "Available",
+                }
             ),
         }
 
@@ -223,6 +264,120 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
             "codespace list --limit 100 --json name,displayName",
             calls,
         )
+
+    def prepare_refresh_checkout(self) -> str:
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self.repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Fixture"], cwd=self.repo, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "fixture@example.com"],
+            cwd=self.repo,
+            check=True,
+        )
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "fixture"], cwd=self.repo, check=True)
+        remote = self.root / "origin.git"
+        subprocess.run(
+            ["git", "clone", "--bare", "-q", str(self.repo), str(remote)],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "remote", "add", "origin", str(remote)],
+            cwd=self.repo,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "fetch", "-q", "origin", "main"],
+            cwd=self.repo,
+            check=True,
+        )
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    def write_default(self) -> Path:
+        destination = self.home / ".config" / "copilot2" / "default.json"
+        destination.parent.mkdir(parents=True)
+        destination.write_text(
+            json.dumps(
+                {
+                    "codespace": "configured-generated",
+                    "repository": "example/project",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return destination
+
+    def test_refresh_default_deploys_the_exact_main_commit(self) -> None:
+        expected_commit = self.prepare_refresh_checkout()
+        self.write_default()
+
+        result = self.run_script("--refresh-default")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.home / "gh.log").read_text(encoding="utf-8")
+        self.assertIn(
+            "codespace view --codespace configured-generated --json name,repository,state",
+            calls,
+        )
+        self.assertIn("codespace ssh --codespace configured-generated", calls)
+        self.assertIn(expected_commit, calls)
+        self.assertIn("git status --porcelain", calls)
+        self.assertIn("git merge-base --is-ancestor HEAD origin/main", calls)
+        self.assertIn("git merge --ff-only origin/main", calls)
+        self.assertIn("verify-codespace-copilot-env", calls)
+        self.assertIn(
+            f"Deployed dotfiles commit {expected_commit}",
+            result.stdout,
+        )
+        instructions = self.home / ".copilot" / "copilot-instructions.md"
+        self.assertEqual(
+            instructions.resolve(),
+            (self.repo / ".github" / "copilot-instructions.md").resolve(),
+        )
+
+    def test_refresh_default_rejects_a_dirty_local_checkout(self) -> None:
+        self.prepare_refresh_checkout()
+        self.write_default()
+        (self.repo / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+        result = self.run_script("--refresh-default")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("local dotfiles checkout has uncommitted changes", result.stderr)
+        calls = (self.home / "gh.log").read_text(encoding="utf-8")
+        self.assertEqual(calls.splitlines(), ["auth status --hostname github.com"])
+
+    def test_refresh_default_rejects_a_commit_that_is_not_on_origin_main(self) -> None:
+        self.prepare_refresh_checkout()
+        self.write_default()
+        (self.repo / "local.txt").write_text("local\n", encoding="utf-8")
+        subprocess.run(["git", "add", "local.txt"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "local"], cwd=self.repo, check=True)
+
+        result = self.run_script("--refresh-default")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("local dotfiles checkout is not aligned with origin/main", result.stderr)
+        calls = (self.home / "gh.log").read_text(encoding="utf-8")
+        self.assertEqual(calls.splitlines(), ["auth status --hostname github.com"])
+
+    def test_refresh_failure_reports_partial_deployment_without_changing_default(self) -> None:
+        self.prepare_refresh_checkout()
+        destination = self.write_default()
+        original = destination.read_text(encoding="utf-8")
+        self.env["FAKE_REMOTE_STATUS"] = "1"
+
+        result = self.run_script("--refresh-default")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("local guidance is updated", result.stderr)
+        self.assertIn("default selection was unchanged", result.stderr)
+        self.assertEqual(destination.read_text(encoding="utf-8"), original)
 
 
 if __name__ == "__main__":

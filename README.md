@@ -104,6 +104,20 @@ Keep the same session name and Codespace options when you run `--new`. If that C
 
 Set the Codespaces idle timeout to the maximum value your organization allows. GitHub supports values up to four hours.
 
+## How do I deploy updated Copilot guidance?
+
+Merge the dotfiles change to `main`, update the local checkout to `origin/main`, then run:
+
+```bash
+setup-copilot2-codespace --refresh-default
+```
+
+The command requires a clean local checkout at the exact `origin/main` commit. It runs `install.sh` on the laptop, verifies the instruction and `test-quality` links, then refreshes the configured `copilot2` Codespace.
+
+The remote refresh requires a clean persisted dotfiles checkout that can fast-forward to the same commit. It runs the installer and environment verifier before reporting success. The command does not change `~/.config/copilot2/default.json`.
+
+If the remote refresh fails after local installation, the command reports a partial deployment. Resolve the remote checkout or environment error, then run the same command again.
+
 ## How do I configure Copilot tools in a Codespace?
 
 Set `COPILOT_SKILL_CATALOG_REPO` and `COPILOT_1UP_MODULE` as user-level Codespaces secrets before running the installer. Restrict their repository access to the target repository. Use the approved versioned Go module for `COPILOT_1UP_MODULE`.

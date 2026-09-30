@@ -230,6 +230,12 @@ class CopilotEnvironmentTest(unittest.TestCase):
         remote_helper = self.home / ".local" / "bin" / "copilot-codespace-session"
         remote_helper.parent.mkdir(parents=True)
         remote_helper.symlink_to(remote_command)
+        instructions = self.home / ".copilot" / "copilot-instructions.md"
+        instructions.symlink_to(
+            Path(__file__).resolve().parent
+            / ".github"
+            / "copilot-instructions.md"
+        )
         gh_guard = Path(__file__).resolve().parent / "bin" / "gh-guard"
         (remote_helper.parent / "gh").symlink_to(gh_guard)
         pr_marker = Path(__file__).resolve().parent / "bin" / "pr-marker"
@@ -550,6 +556,28 @@ class CopilotEnvironmentTest(unittest.TestCase):
                     helper.rmdir()
                 else:
                     helper.unlink(missing_ok=True)
+
+    def test_verifier_requires_instructions_from_the_dotfiles_checkout(self) -> None:
+        env = self.prepare_complete_environment()
+        instructions = self.home / ".copilot" / "copilot-instructions.md"
+
+        instructions.unlink()
+        instructions.write_text("# stale instructions\n", encoding="utf-8")
+
+        result = subprocess.run(
+            [str(self.verifier)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "Copilot instructions do not resolve to the dotfiles checkout",
+            result.stdout,
+        )
+        self.assertNotIn("environment is ready", result.stdout)
 
     def test_verifier_rejects_skills_without_skill_files(self) -> None:
         env = self.prepare_complete_environment()

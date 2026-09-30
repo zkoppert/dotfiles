@@ -296,6 +296,7 @@ class InstallScriptTest(unittest.TestCase):
         commands = (
             "copilot2",
             "copilot-codespace-session",
+            "setup-copilot2-codespace",
             "bootstrap-copilot-mcp",
             "verify-codespace-copilot-env",
         )
