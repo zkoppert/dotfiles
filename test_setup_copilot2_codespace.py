@@ -337,6 +337,7 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
         self.assertLess(calls.index(origin_guard), calls.index("git merge --ff-only origin/main"))
         self.assertIn("git merge-base --is-ancestor HEAD origin/main", calls)
         self.assertIn("git merge --ff-only origin/main", calls)
+        self.assertIn("bootstrap-copilot-mcp", calls)
         self.assertIn("verify-codespace-copilot-env", calls)
         self.assertIn(
             f"Deployed dotfiles commit {expected_commit}",

@@ -467,6 +467,7 @@ def refresh_default_codespace(gh: str) -> None:
         f"{refresh_git_shell(expected_commit)}"
         '"$dotfiles/install.sh"; '
         'export PATH="$HOME/.local/bin:$PATH"; '
+        "bootstrap-copilot-mcp; "
         "unset GH_TOKEN; "
         f"{verification_shell()}"
     )
