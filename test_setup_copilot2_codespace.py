@@ -330,6 +330,7 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
         self.assertIn("git status --porcelain", calls)
         origin_guard = 'test "$(git rev-parse origin/main)" = "$expected_commit"'
         self.assertIn(origin_guard, calls)
+        self.assertIn("git fetch origin main:refs/remotes/origin/main", calls)
         self.assertLess(calls.index(origin_guard), calls.index("git merge --ff-only origin/main"))
         self.assertIn("git merge-base --is-ancestor HEAD origin/main", calls)
         self.assertIn("git merge --ff-only origin/main", calls)
