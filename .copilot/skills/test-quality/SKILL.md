@@ -51,7 +51,7 @@ List every changed behavior before judging the tests:
 | --- | --- | --- | --- |
 | Example: default sort | integration test name | returned IDs are in updated order | explicit sort remains unchanged |
 
-The matrix must cover relevant cases:
+Classify each boundary or failure case with the evidence-weighted edge-case rubric in the global Copilot instructions. The matrix must cover accepted behavior, contracts, blocking safety cases, and fix-before-merge cases:
 
 - normal behavior;
 - empty, nil, or malformed input;
@@ -61,7 +61,7 @@ The matrix must cover relevant cases:
 - timeout, explicit error, partial success, and missing required fields;
 - retry, replay, or repeated execution.
 
-Do not invent irrelevant cases. Explain why an item does not apply.
+Do not add code or tests only to support speculative malformed states. A follow-up or no-comment case is not accepted behavior. Record why it is out of scope instead of expanding the implementation.
 
 ## Apply the no-op test
 
@@ -110,6 +110,7 @@ Include this section in the multi-model code-review synthesis:
 - **Behavior map:** <changed behaviors and matching tests>
 - **Observable assertions:** <why the tests fail for wrong behavior>
 - **Boundaries and failures:** <cases covered or why they do not apply>
+- **Deferred test cases:** <follow-up cases intentionally excluded from supported behavior, or N/A>
 - **Contract evidence:** <real payload/type/fixture or N/A>
 - **No-op or deliberate-fault check:** <what was changed and which test failed>
 - **Persistent coverage:** <committed regression tests or explicit justification>

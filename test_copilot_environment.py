@@ -223,6 +223,16 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 f"---\nname: {skill}\ndescription: Test skill\n---\n# {skill}\n",
                 encoding="utf-8",
             )
+        test_quality = skills_dir / "test-quality"
+        for child in test_quality.iterdir():
+            child.unlink()
+        test_quality.rmdir()
+        test_quality.symlink_to(
+            Path(__file__).resolve().parent
+            / ".copilot"
+            / "skills"
+            / "test-quality"
+        )
 
         remote_command = self.bin_dir / "copilot-codespace-session"
         remote_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -230,6 +240,12 @@ class CopilotEnvironmentTest(unittest.TestCase):
         remote_helper = self.home / ".local" / "bin" / "copilot-codespace-session"
         remote_helper.parent.mkdir(parents=True)
         remote_helper.symlink_to(remote_command)
+        instructions = self.home / ".copilot" / "copilot-instructions.md"
+        instructions.symlink_to(
+            Path(__file__).resolve().parent
+            / ".github"
+            / "copilot-instructions.md"
+        )
         gh_guard = Path(__file__).resolve().parent / "bin" / "gh-guard"
         (remote_helper.parent / "gh").symlink_to(gh_guard)
         pr_marker = Path(__file__).resolve().parent / "bin" / "pr-marker"
@@ -551,6 +567,28 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 else:
                     helper.unlink(missing_ok=True)
 
+    def test_verifier_requires_instructions_from_the_dotfiles_checkout(self) -> None:
+        env = self.prepare_complete_environment()
+        instructions = self.home / ".copilot" / "copilot-instructions.md"
+
+        instructions.unlink()
+        instructions.write_text("# stale instructions\n", encoding="utf-8")
+
+        result = subprocess.run(
+            [str(self.verifier)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "Copilot instructions do not resolve to the dotfiles checkout",
+            result.stdout,
+        )
+        self.assertNotIn("environment is ready", result.stdout)
+
     def test_verifier_rejects_skills_without_skill_files(self) -> None:
         env = self.prepare_complete_environment()
         skill = self.home / ".copilot" / "skills" / "gh-axi"
@@ -577,6 +615,32 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 if skill.is_symlink():
                     skill.unlink()
                     skill.mkdir()
+
+    def test_verifier_requires_test_quality_from_the_dotfiles_checkout(self) -> None:
+        env = self.prepare_complete_environment()
+        skill = self.home / ".copilot" / "skills" / "test-quality"
+
+        skill.unlink()
+        skill.mkdir()
+        (skill / "SKILL.md").write_text(
+            "---\nname: test-quality\n---\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [str(self.verifier)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "test-quality does not resolve to the dotfiles checkout",
+            result.stdout,
+        )
+        self.assertNotIn("environment is ready", result.stdout)
 
     def test_verifier_requires_the_exact_enabled_plugin(self) -> None:
         env = self.prepare_complete_environment()
