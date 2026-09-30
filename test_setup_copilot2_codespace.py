@@ -330,7 +330,7 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
         self.assertIn("git status --porcelain", calls)
         origin_guard = 'test "$(git rev-parse origin/main)" = "$expected_commit"'
         self.assertIn(origin_guard, calls)
-        self.assertIn("git fetch origin main:refs/remotes/origin/main", calls)
+        self.assertIn("git fetch origin +main:refs/remotes/origin/main", calls)
         self.assertLess(calls.index(origin_guard), calls.index("git merge --ff-only origin/main"))
         self.assertIn("git merge-base --is-ancestor HEAD origin/main", calls)
         self.assertIn("git merge --ff-only origin/main", calls)
@@ -427,6 +427,63 @@ class SetupCopilot2CodespaceTest(unittest.TestCase):
             subprocess.run(
                 ["git", "rev-parse", "origin/main"],
                 cwd=checkout,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip(),
+            expected_commit,
+        )
+
+    def test_local_commit_check_refreshes_a_rewritten_main_before_refusing(self) -> None:
+        expected_commit = self.prepare_refresh_checkout()
+        remote = self.root / "origin.git"
+        advancer = self.root / "force-push"
+        subprocess.run(["git", "clone", "-q", str(remote), str(advancer)], check=True)
+        subprocess.run(["git", "config", "user.name", "Fixture"], cwd=advancer, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "fixture@example.com"],
+            cwd=advancer,
+            check=True,
+        )
+        empty_tree = subprocess.run(
+            ["git", "mktree"],
+            cwd=advancer,
+            input="",
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        rewritten_commit = subprocess.run(
+            ["git", "commit-tree", empty_tree, "-m", "rewritten main"],
+            cwd=advancer,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "push", "-q", "--force", "origin", f"{rewritten_commit}:main"],
+            cwd=advancer,
+            check=True,
+        )
+
+        module = runpy.run_path(str(self.script))
+        with self.assertRaises(module["SetupError"]):
+            module["checked_out_main_commit"](self.repo)
+
+        self.assertEqual(
+            subprocess.run(
+                ["git", "rev-parse", "origin/main"],
+                cwd=self.repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip(),
+            rewritten_commit,
+        )
+        self.assertEqual(
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self.repo,
                 capture_output=True,
                 text=True,
                 check=True,
