@@ -222,6 +222,18 @@ def main() -> int:
     if missing_skills:
         failures.append(f"missing skills: {', '.join(missing_skills)}")
 
+    test_quality = skills_dir / "test-quality"
+    expected_test_quality = (
+        Path(__file__).resolve().parent.parent
+        / ".copilot"
+        / "skills"
+        / "test-quality"
+    )
+    if not test_quality.is_symlink() or test_quality.resolve() != expected_test_quality:
+        failures.append(
+            f"test-quality does not resolve to the dotfiles checkout: {test_quality}"
+        )
+
     if "copilot" in missing_tools:
         failures.append("cannot list Copilot plugins")
     else:
