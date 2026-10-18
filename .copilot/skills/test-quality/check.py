@@ -67,6 +67,7 @@ PLACEHOLDER_WAIVER_RE = re.compile(
 )
 ASSERTION_RE = re.compile(
     r"\b(assert|expect|refute|should|pytest\.raises|assert_raises|raise_error)\b"
+    r"|\b(?:assert|refute)_\w+"
     r"|assert(?:_eq|_ne)?!\s*\(|\.to(Have|Equal|Be|Match|Contain)",
     re.IGNORECASE,
 )

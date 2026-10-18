@@ -235,6 +235,30 @@ class TestAnalysis(unittest.TestCase):
                 check.UNITTEST_ASSERTION_RE.search("self.assertEqual(value(), 1)")
             )
 
+    def test_minitest_and_rails_assertion_helpers_are_recognized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(tmp)
+            repo.write("app/controllers/home_controller.rb", "class HomeController; end\n")
+            repo.write(
+                "test/integration/home_controller_test.rb",
+                'test "redirects home" do\n'
+                '  get "/"\n'
+                '  assert_redirected_to "/feed"\n'
+                '  assert_select ".flash"\n'
+                '  refute_select "meta"\n'
+                "end\n",
+            )
+            repo.commit("rails source and test")
+
+            result = check.analyze(cwd=repo.root, base_ref="main")
+
+            self.assertEqual(result.status, "passed")
+            self.assertNotIn(
+                "test-change-without-assertion",
+                {item.rule for item in result.warnings},
+            )
+            self.assertIsNone(check.ASSERTION_RE.search("# assertion later"))
+
     def test_docs_only_is_not_applicable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(tmp)
