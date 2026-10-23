@@ -5,10 +5,17 @@
 set -euo pipefail
 
 # Brew prepends /opt/homebrew/bin in interactive shells; replicate here
-# so `gh`, `copilot`, and `python3` are on PATH when launchd invokes
-# us directly.
+# so `gh`, `copilot`, and `uv` are on PATH when launchd invokes us directly.
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
-exec /usr/bin/env python3 \
+# Homebrew Python intentionally has no project-local YAML dependencies, while
+# macOS system Python is too old for this tool's supported runtime. Let uv own
+# a cached, isolated environment so launchd always gets the same interpreter
+# and exact dependency versions without mutating global site-packages.
+exec /opt/homebrew/bin/uv run --no-project \
+  --python /opt/homebrew/bin/python3 \
+  --with 'PyYAML==6.0.3' \
+  --with 'ruamel.yaml==0.18.16' \
+  -- \
   "$HOME/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py" \
   "$@"
