@@ -85,6 +85,8 @@ For context on this mindset, see [Kamil Gwozdz, "Reasons why your prompts suck (
 - **Always assign me (`zkoppert`) as the assignee** when opening PRs; this helps me track work in progress and follow up
 - Always check a PR's status (open/merged/closed) before pushing commits to it
 - PR descriptions should be kept up to date with the actual changes and the strongest current evidence. Remove temporary harness caveats, workarounds, and uncertainty once later validation or CI supersedes them.
+- **Translate domain language in the opening**: Do not assume that reviewers understand a specialized noun phrase, even when each word is familiar. First describe the concrete system flow in plain language. Then define the term, state what readers could easily mistake it for, and connect it to the decision or user outcome. Do not merely replace one technical term with another.
+- **Explain telemetry boundaries**: For measurement changes, state exactly what value I collect, what content I do not collect, and whether collection adds requests or work. Connect the measurement to the product or engineering decision it will support.
 - **Write PR descriptions in first person** - use "I" or "we" as the subject, not "This PR" or "This change." Active voice, first person: "I added retry logic" not "This PR adds retry logic." This matches the active voice rule in the Writing Style section.
 - PR descriptions should always include a **Testing** section. Do not list linting results in the Testing section; linting is a given, not something to highlight. Focus on meaningful tests: unit tests, integration tests, manual verification, etc.
 - When reviewing PRs, focus on critical issues (bugs, security, logic errors) not style nitpicks
@@ -334,6 +336,7 @@ When creating or modifying GitHub Actions workflows:
 ### Language Patterns
 - **Active voice** - "We developed this" not "This was developed." This includes avoiding **agentic passive voice** - when the actor in a sentence is a model, it's still passive. Say `I made an error in the writeup` not `Claude made an error in my writeup.` The human is the subject; the tool is the tool.
 - **Plain language** - write so the reader doesn't need a dictionary nearby. Avoid jargon when possible. Explain acronyms on first use (e.g., "Open Source Program Office (OSPO)"). Prefer "scroll through the sections to find what alerted you" over "locate the relevant SLO group."
+- **Define specialized terms through the actual flow** - explain what the system does before naming the concept. Define the term in one direct sentence, add a concrete example when useful, and state what the term does not mean when confusion is likely. Preserve exact identifiers only after the reader understands the concept.
 - **Narrative over mechanical** - describe what happened and why, not just what changed. "After using it during an incident, I realized..." beats "The following changes were made."
 - **Concise and direct** - say it in fewer words. Cut filler phrases, redundant explanations, and anything the reader can already see. If a table or link already has the info, don't repeat it in prose.
 - **Grounded claims** - cite specific data or sources when making assertions
