@@ -59,7 +59,8 @@ Suggested filenames inside that directory:
 ## Step 2: bring up fresh, complete environments
 
 Invoke `validate-pr-with-codespace` and follow its current lifecycle and bringup
-instructions. In particular:
+instructions. For a Proxima New Review Lab deployment, also load `proxima-review-lab`
+and follow its serialized deployment and duplicate-command safeguards. In particular:
 
 - Create a fresh Codespace on the exact feature ref. Do not reuse an unrelated or
   previously shut down Codespace.
