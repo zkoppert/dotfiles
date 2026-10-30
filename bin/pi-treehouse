@@ -1,0 +1,93 @@
+#!/bin/bash
+# Start new Pi work in a leased Treehouse worktree by default.
+set -euo pipefail
+
+real_pi="${PI_REAL_PI:-/opt/homebrew/bin/pi}"
+treehouse_bin="$HOME/.local/bin/treehouse"
+pi_args=("$@")
+
+if [ ! -x "$real_pi" ]; then
+  echo "pi-treehouse wrapper: real Pi not found at $real_pi" >&2
+  exit 127
+fi
+if [ "${PI_TREEHOUSE_BYPASS:-0}" = "1" ]; then
+  exec "$real_pi" "$@"
+fi
+
+# Administrative and session-resume operations must retain their caller's cwd
+# and lookup semantics. Use PI_TREEHOUSE_BYPASS=1 for any other intentional
+# main-checkout invocation.
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help|-v|--version|--continue|-c|--resume|--resume=*|-r|-r=*|--session|--session=*|--session-id|--session-id=*|--fork|--fork=*|--session-dir|--session-dir=*|--export|--export=*)
+      exec "$real_pi" "$@"
+      ;;
+  esac
+done
+case "${1:-}" in
+  install|remove|uninstall|update|list|config|auth|mcp)
+    exec "$real_pi" "$@"
+    ;;
+esac
+
+if [ ! -x "$treehouse_bin" ]; then
+  echo "pi-treehouse wrapper: treehouse is required but missing at $treehouse_bin" >&2
+  exit 1
+fi
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+if [ -z "$repo_root" ]; then
+  exec "$real_pi" "$@"
+fi
+
+# Do not nest Treehouse when Pi is already launched from a managed slot.
+if status_json=$(cd "$repo_root" && "$treehouse_bin" status --json 2>/dev/null); then
+  if TREEHOUSE_STATUS_JSON="$status_json" REPO_ROOT="$repo_root" python3 - <<'PY'
+import json, os, pathlib
+root = pathlib.Path(os.environ["REPO_ROOT"]).resolve()
+try:
+    rows = json.loads(os.environ["TREEHOUSE_STATUS_JSON"])
+except json.JSONDecodeError:
+    raise SystemExit(1)
+raise SystemExit(0 if any(pathlib.Path(row.get("path", "")).resolve() == root for row in rows) else 1)
+PY
+  then
+    exec "$real_pi" "$@"
+  fi
+fi
+
+holder="pi:${USER:-user}:$$:$(date +%Y%m%d-%H%M%S)"
+echo "🌳 Acquiring an isolated Treehouse worktree for Pi..." >&2
+allocation=$(cd "$repo_root" && "$treehouse_bin" get --lease --lease-holder "$holder" --json)
+
+parsed=$(TREEHOUSE_ALLOCATION="$allocation" python3 - <<'PY'
+import json, os, shlex
+row = json.loads(os.environ["TREEHOUSE_ALLOCATION"])
+for key in ("path", "lease_id", "lease_holder"):
+    value = row.get(key)
+    if not isinstance(value, str) or not value:
+        raise SystemExit(f"Treehouse allocation omitted {key}")
+print(" ".join(shlex.quote(row[key]) for key in ("path", "lease_id", "lease_holder")))
+PY
+)
+eval "set -- $parsed"
+worktree_path=$1
+lease_id=$2
+lease_holder=$3
+
+cat >&2 <<EOF
+🌳 Pi worktree: $worktree_path
+🌳 Lease holder: $lease_holder
+🌳 This lease is retained after Pi exits so its session can be resumed safely.
+🌳 Return it when finished with:
+   treehouse return --if-lease-id '$lease_id' --if-lease-holder '$lease_holder' '$worktree_path'
+EOF
+
+cd "$worktree_path"
+set +e
+"$real_pi" "${pi_args[@]}"
+status=$?
+set -e
+
+echo "🌳 Pi exited; Treehouse lease retained at $worktree_path" >&2
+exit "$status"

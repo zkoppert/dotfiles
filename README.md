@@ -30,6 +30,24 @@ For existing catalog tools, see [the update instructions](#how-do-i-update-catal
 
 Open a new shell after installation to load the `~/.local/bin` PATH change.
 
+## How do I start a named local Copilot session?
+
+On macOS, the installer adds a `copilot` alias to Zsh. Open a new iTerm tab, enter a Git checkout, and run `copilot`. The launcher asks for a session name and uses that name for Copilot and the terminal title. Copilot's automatic title updates are disabled for that session.
+
+You can supply `copilot --name "Review checkout"` to skip the prompt. Repository subdirectories and linked worktrees are supported. Use `copilot -C PATH` to select a checkout.
+
+Resume options (`--resume`, `--continue`, `--session-id`, and `--connect`) require a checkout but skip naming and leave title management unchanged. Because `--session-id` can also create a session, supply `--name` yourself when you use it for a new session.
+
+Help, version, administrative subcommands, prompt mode, protocol servers, and invocations without terminal input pass through unchanged. Scripts still resolve the original executable because the alias exists only in interactive Zsh. Use `command copilot` to bypass the alias. The installer preserves an existing custom `copilot` definition. The `copilot2` launcher is unchanged.
+
+## How does Pi use Treehouse?
+
+The installer links `bin/pi-treehouse` to `~/.local/bin/pi` and adds an interactive Zsh alias so new Pi coding sessions started inside Git repositories acquire a durable [Treehouse](https://github.com/kunchenguid/treehouse) lease first. Pi runs from the isolated worktree instead of the main checkout. The wrapper prints the exact path, lease ID, holder, and guarded `treehouse return` command. It retains the lease after Pi exits so the Pi session can be resumed safely; return it explicitly when the work is finished.
+
+Pi help/version, package/configuration commands, and session resume/fork/export options bypass acquisition to preserve their normal lookup behavior. Invocations outside Git repositories also pass through. Set `PI_TREEHOUSE_BYPASS=1` only for an intentional main-checkout run. Starting Pi from an existing managed Treehouse slot does not acquire a nested worktree.
+
+Treehouse must be installed at `~/.local/bin/treehouse`. The wrapper fails closed when a repository session needs isolation and Treehouse is unavailable.
+
 ## How do I run Copilot in a durable Codespace session?
 
 Install dotfiles on the laptop and [configure the Codespace](#how-do-i-configure-copilot-tools-in-a-codespace). The laptop needs Python 3.9 or later, OpenSSH, and an authenticated GitHub CLI. Then run:

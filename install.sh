@@ -196,6 +196,30 @@ if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
   done
 fi
 
+# Route new Pi coding sessions through Treehouse-managed worktrees. Pi's
+# administrative and session-resume commands bypass acquisition in the wrapper
+# so their lookup semantics remain unchanged.
+if [ -x "$DOTFILES_DIR/bin/pi-treehouse" ]; then
+  mkdir -p "$HOME/.local/bin"
+  PI_TARGET="$HOME/.local/bin/pi"
+  if [ -L "$PI_TARGET" ] || [ ! -e "$PI_TARGET" ]; then
+    ln -sfn "$DOTFILES_DIR/bin/pi-treehouse" "$PI_TARGET"
+    echo "✓ Linked Pi Treehouse wrapper → ~/.local/bin/pi"
+  else
+    echo "⚠ $PI_TARGET exists and is not a symlink - skipping Pi Treehouse wrapper"
+  fi
+  PI_ALIAS='alias pi='\''"$HOME/.local/bin/pi"'\''  # dotfiles: treehouse-isolated pi'
+  if [ -f "$HOME/.zshrc" ] && grep -q "dotfiles: treehouse-isolated pi" "$HOME/.zshrc"; then
+    echo "✓ Pi Treehouse alias already in ~/.zshrc"
+  else
+    printf '\n%s\n' "$PI_ALIAS" >> "$HOME/.zshrc"
+    echo "✓ Added Pi Treehouse alias to ~/.zshrc"
+  fi
+  if [ ! -x "$HOME/.local/bin/treehouse" ]; then
+    echo "⚠ Treehouse is not installed at ~/.local/bin/treehouse; new Pi coding sessions will fail closed"
+  fi
+fi
+
 # Install the official stack extension used to split oversized PRs.
 if command -v gh >/dev/null 2>&1; then
   if gh stack --help >/dev/null 2>&1; then
@@ -300,6 +324,7 @@ fi
 
 # Install durable Codespace Copilot commands.
 for copilot_command in \
+  copilot-launch \
   copilot2 \
   copilot-codespace-session \
   setup-copilot2-codespace \
@@ -321,6 +346,17 @@ done
 
 # Add the local-only review environment shortcut on macOS.
 if [ "$(uname)" = "Darwin" ]; then
+  if [ -x "$DOTFILES_DIR/bin/copilot-launch" ]; then
+    COPILOT_ALIAS='alias copilot='\''"$HOME/.local/bin/copilot-launch"'\''  # dotfiles: named copilot'
+    if [ -f "$HOME/.zshrc" ] && grep -q "dotfiles: named copilot" "$HOME/.zshrc"; then
+      echo "✓ Named Copilot alias already in ~/.zshrc"
+    elif [ -f "$HOME/.zshrc" ] && grep -Eq '^[[:space:]]*(alias[[:space:]]+copilot=|copilot[[:space:]]*\(\)|function[[:space:]]+copilot([[:space:]]|\(|$))' "$HOME/.zshrc"; then
+      echo "⚠ ~/.zshrc already defines copilot - skipping named Copilot alias"
+    else
+      printf '\n%s\n' "$COPILOT_ALIAS" >> "$HOME/.zshrc"
+      echo "✓ Added named Copilot alias to ~/.zshrc (open a new shell to apply)"
+    fi
+  fi
   DEPLOY_ALIAS="alias deploy='gh review-lab deploy'  # dotfiles: review lab"
   for shell_rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
     rc_short="${shell_rc/#$HOME/~}"
