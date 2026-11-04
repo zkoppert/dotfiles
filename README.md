@@ -87,6 +87,7 @@ From the dotfiles checkout, validate and install:
 ```bash
 # Validate contracts before installing a copied runtime release.
 python3 -m pytest scripts/test_backlog_autopilot.py
+node --test scripts/test_backlog_autopilot_extension.cjs
 python3 scripts/backlog_autopilot.py install
 python3 scripts/backlog_autopilot.py dry-run
 plutil -lint "$HOME/Library/LaunchAgents/com.zkoppert.backlog-autopilot.plist"
@@ -103,7 +104,9 @@ python3 "$HOME/.local/share/backlog-autopilot/current/backlog_autopilot.py" stat
 python3 "$HOME/.local/share/backlog-autopilot/current/backlog_autopilot.py" run
 ```
 
-The worker retains a lock across its Pi child process. An overlapping invocation fails instead of starting another backlog pass. Interrupted runs retain their sessions, worktrees, and receipts. Run `run` to resume, or leave recovery for the next scheduled pass. Scheduled failures consume that week's slot to avoid minute-by-minute retries. Inspect `launchd.log` and the latest run directory before retrying.
+The worker retains a lock across its Pi child process. An overlapping manual invocation fails; scheduled ticks defer quietly. Interrupted runs retain their sessions, worktrees, and receipts. Run `run` to resume, or leave recovery for the next scheduled pass. Recovery preserves invalid analysis receipts and regenerates the affected batch. Clean coordinator worktrees return to Treehouse after completion; dirty or unmerged work stays intact.
+
+Scheduled failures consume that week's slot to avoid minute-by-minute retries. Repeated startup errors notify once for each weekly slot and error. Resume can start an overdue pass on the next timer tick. Inspect `launchd.log` and the latest run directory before retrying. Evidence and release archives have no automatic retention policy; review them before manual cleanup.
 
 There is no runtime or spending cap. The worker records recoverable blockers and moves to independent issues. Draft PRs remain unresolved until the fixes land and current evidence confirms resolution. A completed pass means every matching snapshot issue has an outcome, not that every issue is resolved. New issues wait for the next snapshot.
 
