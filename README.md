@@ -48,6 +48,73 @@ Pi help/version, package/configuration commands, and session resume/fork/export 
 
 Treehouse must be installed at `~/.local/bin/treehouse`. The wrapper fails closed when a repository session needs isolation and Treehouse is unavailable.
 
+## How do I schedule a Pi backlog worker?
+
+The local worker analyzes all open tracking issues before it works on titles containing the exact substring `[Sentry]`. It saves issue snapshots, context notes, sessions, and outcomes outside Git checkouts.
+
+The schedule is Friday at 18:00 in `America/Los_Angeles`, independent of the Mac's time zone. A minute timer checks whether work is due. Missed weeks collapse into one catch-up pass. The Mac must be running and connected; the job does not wake a powered-off Mac.
+
+Keep private repository names in a local mode-0600 JSON file. Create the configuration with your actual repository values:
+
+```bash
+# Keep configuration and evidence private to your local account.
+mkdir -p "$HOME/.config/backlog-autopilot"
+chmod 700 "$HOME/.config/backlog-autopilot"
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+home = Path.home()
+config = {
+    "repository": "OWNER/TRACKER",
+    "allowed_repositories": ["OWNER/TRACKER", "OWNER/APPLICATION"],
+    "checkout": str(home / "repos/TRACKER"),
+    "agent_dir": str(home / ".pi/agent"),
+    "state_dir": str(home / ".local/share/backlog-autopilot"),
+    "model": "PROVIDER/MODEL",
+    "assignee": "YOUR-LOGIN",
+}
+path = home / ".config/backlog-autopilot/config.json"
+path.touch(mode=0o600, exist_ok=False)
+path.write_text(json.dumps(config, indent=2) + "\n")
+PY
+```
+
+Use Python 3.9 or later, Node.js, authenticated `gh-axi`, Pi, Treehouse, and the operator's validation skills. Configure the `pi` executable path if it differs from `/opt/homebrew/bin/pi`. The extension uses `python3`, unless configuration sets `python`. Optional `source_checkout` identifies the worker's source repository for candidate improvements.
+
+From the dotfiles checkout, validate and install:
+
+```bash
+# Validate contracts before installing a copied runtime release.
+python3 -m pytest scripts/test_backlog_autopilot.py
+python3 scripts/backlog_autopilot.py install
+python3 scripts/backlog_autopilot.py dry-run
+plutil -lint "$HOME/Library/LaunchAgents/com.zkoppert.backlog-autopilot.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.zkoppert.backlog-autopilot.plist"
+```
+
+Installation does not start remediation or consume the next Friday run. The dry run fetches real issues and comments without launching models or changing GitHub. It writes evidence under the private state directory.
+
+Run `/reload` in Pi to load `/autopilot status`, `/autopilot pause`, and `/autopilot resume`. Pause takes effect between items, not during active tool calls. The CLI provides the same controls:
+
+```bash
+# Inspect or resume saved progress without changing the Friday schedule.
+python3 "$HOME/.local/share/backlog-autopilot/current/backlog_autopilot.py" status
+python3 "$HOME/.local/share/backlog-autopilot/current/backlog_autopilot.py" run
+```
+
+The worker retains a lock across its Pi child process. An overlapping invocation fails instead of starting another backlog pass. Interrupted runs retain their sessions, worktrees, and receipts. Run `run` to resume, or leave recovery for the next scheduled pass. Scheduled failures consume that week's slot to avoid minute-by-minute retries. Inspect `launchd.log` and the latest run directory before retrying.
+
+There is no runtime or spending cap. The worker records recoverable blockers and moves to independent issues. Draft PRs remain unresolved until the fixes land and current evidence confirms resolution. A completed pass means every matching snapshot issue has an outcome, not that every issue is resolved. New issues wait for the next snapshot.
+
+The policy permits fully certified draft PRs and evidence-based stale-issue closure. Existing review, Codespace tests, demo, style, and `pr-marker` gates remain mandatory. A missing gate blocks publication. Merge approval remains human.
+
+This worker uses the existing Pi profile and account credentials. Neither its prompt policy nor Treehouse provides a security sandbox. Use a dedicated account or isolated environment when issue sources are not trusted. Do not copy credentials into configuration or snapshots.
+
+Worker children set `BACKLOG_AUTOPILOT_CHILD=1` to prevent nested control commands. They also set `PI_CRON_DISABLED=1` to disable the existing in-session scheduler. These variables are coordination guards, not security boundaries.
+
+Candidate self-improvements must have persistent tests and independent review. The worker cannot activate candidates through its control interface. Review candidates before running `install` again. Installation retains prior releases; it does not change the weekly schedule state.
+
 ## How do I run Copilot in a durable Codespace session?
 
 Install dotfiles on the laptop and [configure the Codespace](#how-do-i-configure-copilot-tools-in-a-codespace). The laptop needs Python 3.9 or later, OpenSSH, and an authenticated GitHub CLI. Then run:
