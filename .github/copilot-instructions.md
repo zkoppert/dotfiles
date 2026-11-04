@@ -240,6 +240,7 @@ For recurring reports, retrospectives, handoffs, and performance feedback:
 - **Python** is the preferred scripting language for automation, data processing, and tooling
 - Use `argparse` for CLI argument parsing in Python scripts
 - Include proper error handling and logging; don't silently swallow errors
+- **Prefer affirmative logic**: Use an affirmative predicate when it preserves the same semantics. Prefer `value.present?` over `!value.nil?`, and prefer named positive predicates over negated absence checks or double negatives. Keep the explicit negative form when the language lacks an equivalent predicate or the affirmative form would change behavior.
 - **Comments explain why, not what** - only comment non-obvious design decisions (e.g., why one method was chosen over another, a constraint that isn't visible in the code). If the method name or variable name already communicates the intent, delete the comment. First drafts tend to over-comment; strip redundant comments before committing.
 - Prefer ecosystem tools (`pip install`, `npm init`, etc.) over manual configuration
 - Run `make lint` and `make test` before committing in repos that have a Makefile
