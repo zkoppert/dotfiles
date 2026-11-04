@@ -557,7 +557,7 @@ else:
         run = {"lease": allocation}
         rows = [{**allocation, "status": "leased", "processes": []}]
         with patch.object(
-            worker, "command", side_effect=[json.dumps(rows), "", "returned"]
+            worker, "command", side_effect=[json.dumps(rows), "", "", "returned"]
         ) as command:
             worker.release_coordinator(self.config, run)
         self.assertEqual(
@@ -633,6 +633,124 @@ else:
             worker.verify_pull_requests(self.config, receipt)
         self.assertEqual(command.call_args.args[0], ["pr-marker", "check"])
         self.assertEqual(command.call_args.kwargs["cwd"], "/worktree")
+
+    def test_lease_identity_is_saved_before_verification_can_fail(self):
+        run = {"id": "persistence"}
+        run_path = self.root / "run.json"
+        allocation = {"path": "/worktree", "lease_id": "new", "lease_holder": "holder"}
+        with patch.object(
+            worker, "command", side_effect=["[]", json.dumps(allocation), "[]"]
+        ):
+            with self.assertRaisesRegex(ValueError, "could not be verified"):
+                worker.lease(self.config, run, run_path)
+        self.assertEqual(worker.read_json(run_path)["lease"], allocation)
+
+    def test_unpushed_coordinator_commit_prevents_destructive_return(self):
+        allocation = {
+            "path": "/worktree",
+            "lease_id": "lease",
+            "lease_holder": "holder",
+        }
+        run = {"lease": allocation}
+        rows = [{**allocation, "status": "leased", "processes": []}]
+        with patch.object(
+            worker, "command", side_effect=[json.dumps(rows), "", "unpublished-commit"]
+        ) as command:
+            worker.release_coordinator(self.config, run)
+        self.assertEqual(command.call_count, 3)
+        self.assertEqual(
+            command.call_args.args[0], ["git", "rev-list", "HEAD", "--not", "--remotes"]
+        )
+        self.assertEqual(run["lease"], allocation)
+        self.assertNotIn("returned_lease", run)
+
+    def test_replacement_coordinator_archives_old_cwd_session_without_rewriting_history(
+        self,
+    ):
+        stage = self.root / "stage"
+        stage.mkdir()
+        old = self.root / "old-coordinator"
+        new = self.root / "new-coordinator"
+        new.mkdir()
+        header = {
+            "type": "session",
+            "version": 3,
+            "id": "9fc71603-2180-4b6b-b9cf-7957390daf63",
+            "timestamp": "2026-11-03T00:00:00.000Z",
+            "cwd": str(old),
+        }
+        original = json.dumps(header) + "\n"
+        (stage / "session.jsonl").write_text(original)
+        session, previous = worker.prepare_session(stage, new)
+        self.assertFalse(session.exists())
+        self.assertEqual(len(previous), 1)
+        self.assertEqual(Path(previous[0]).read_text(), original)
+        (stage / "session.jsonl").write_text(
+            json.dumps({**header, "cwd": str(new)}) + "\n"
+        )
+        same, history = worker.prepare_session(stage, new)
+        self.assertEqual(same, session)
+        self.assertEqual(history, previous)
+        self.assertTrue(same.exists())
+
+    def test_prior_attempt_closed_without_receipt_resumes_read_only_reconciliation(
+        self,
+    ):
+        directory = self.saved_run()
+        stage = directory / "items/1"
+        worker.atomic_json(stage / "task.json", {"number": 1})
+        result = {
+            "number": 1,
+            "outcome": "resolved",
+            "summary": "Verified prior closure from session and comment",
+            "evidence": ["sentry.json"],
+        }
+        with patch.object(worker, "lease", return_value=self.root), patch.object(
+            worker, "api", return_value=issue(state="closed")
+        ), patch.object(
+            worker,
+            "pages",
+            return_value=[{"id": 80, "body": "Verified closure evidence"}],
+        ), patch.object(
+            worker,
+            "run_pi",
+            side_effect=lambda *a, **k: worker.atomic_json(
+                stage / "receipt.json", result
+            ),
+        ) as model, patch.object(
+            worker, "notify"
+        ):
+            worker.execute(
+                self.config, self.state, self.state_path, 1, MODULE_PATH.parent
+            )
+        self.assertTrue(model.call_args.kwargs["analysis"])
+        self.assertTrue(worker.read_json(stage / "task.json")["reconciliation_only"])
+        self.assertEqual(worker.read_json(directory / "run.json")["items"]["1"], result)
+
+    def test_child_failure_after_receipt_does_not_discard_verified_outcome(self):
+        fake = self.root / "receipt-then-failure"
+        fake.write_text(
+            "#!"
+            + sys.executable
+            + "\nimport pathlib,sys\nstage=pathlib.Path(sys.argv[sys.argv.index('--session')+1]).parent\n(stage/'receipt.json').write_text('{}')\nsys.exit(7)\n"
+        )
+        fake.chmod(0o700)
+        config = {**self.config, "pi": str(fake)}
+        stage = self.root / "child"
+        with worker.exclusive_lock(Path(self.config["state_dir"])) as fd:
+            worker.run_pi(
+                config,
+                stage,
+                self.root,
+                "Write receipt",
+                fd,
+                MODULE_PATH.with_name("backlog_autopilot_policy.md"),
+            )
+        self.assertEqual(worker.read_json(stage / "receipt.json"), {})
+        with self.assertRaises(ValueError):
+            worker.validate_outcome(
+                worker.read_json(stage / "receipt.json"), 1, issue()
+            )
 
     def test_bad_analysis_prevents_any_remediation(self):
         snapshot_dir = Path(self.config["state_dir"]) / "runs/test/snapshot"

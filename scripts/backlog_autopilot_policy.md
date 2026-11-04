@@ -16,6 +16,8 @@ Read the task file, its complete issue snapshot, and the complete context notes.
 
 Identify duplicate symptoms, shared infrastructure failures, existing fixes, dependencies, and ownership boundaries. Verify hypotheses against source and current telemetry. Keep evidence paths and query times.
 
+If `reconciliation_only` is true, use saved sessions, local evidence, and fresh task comments to reconstruct the previous attempt. Do not change GitHub or source. Record blocked when closure evidence is insufficient.
+
 Check linked pull requests and existing review discussions before writing code. Reuse an existing worker branch or PR when appropriate. Do not overwrite another contributor's work. A human assignment or active fix requires coordination; record blocked when ownership is unclear.
 
 Reconcile prior mutations before retrying. Find existing PRs by head branch and linked issue. Check for an existing notification before posting another. Never force-push. Preserve every dirty or unmerged worktree.

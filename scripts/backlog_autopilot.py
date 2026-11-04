@@ -262,7 +262,7 @@ def notify_error_once(message, directory):
     notify(message)
 
 
-def lease(config, run):
+def lease(config, run, run_path=None):
     checkout = config["checkout"]
     rows = json.loads(command(["treehouse", "status", "--json"], cwd=checkout))
     if "lease" in run:
@@ -291,6 +291,8 @@ def lease(config, run):
             cwd=checkout,
         )
     )
+    if run_path is not None:
+        atomic_json(run_path, run)
     allocation = run["lease"]
     rows = json.loads(command(["treehouse", "status", "--json"], cwd=checkout))
     if any(
@@ -324,6 +326,10 @@ def release_coordinator(config, run):
             return
         if command(["git", "status", "--porcelain"], cwd=allocation["path"]).strip():
             return
+        if command(
+            ["git", "rev-list", "HEAD", "--not", "--remotes"], cwd=allocation["path"]
+        ).strip():
+            return
         command(
             [
                 "treehouse",
@@ -341,8 +347,29 @@ def release_coordinator(config, run):
         LOG.exception("Coordinator lease retained; safe return did not succeed")
 
 
+def prepare_session(directory, workdir):
+    session = directory / "session.jsonl"
+    if session.exists():
+        with session.open() as stream:
+            header = json.loads(stream.readline())
+        if (
+            not isinstance(header, dict)
+            or header.get("type") != "session"
+            or not isinstance(header.get("cwd"), str)
+        ):
+            raise ValueError("Invalid Pi session header")
+        if Path(header["cwd"]).resolve() != workdir.resolve():
+            session.rename(directory / ("prior-session-" + uuid4().hex + ".jsonl"))
+    return session, sorted(
+        str(path) for path in directory.glob("prior-session-*.jsonl")
+    )
+
+
 def run_pi(config, directory, workdir, prompt, lock_fd, policy, analysis=False):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    session, previous = prepare_session(directory, workdir)
+    if previous:
+        prompt += f" Prior sessions from another coordinator are preserved as read-only context: {json.dumps(previous)}. Use only the current verified working directory."
     atomic_json(
         directory / "invocation.json",
         {"cwd": str(workdir), "prompt": prompt, "started_at": now().isoformat()},
@@ -355,7 +382,7 @@ def run_pi(config, directory, workdir, prompt, lock_fd, policy, analysis=False):
         "--thinking",
         "high",
         "--session",
-        str(directory / "session.jsonl"),
+        str(session),
         "--append-system-prompt",
         str(policy),
         "--no-approve",
@@ -391,7 +418,12 @@ def run_pi(config, directory, workdir, prompt, lock_fd, policy, analysis=False):
             process.wait()
             raise
     if code:
-        raise RuntimeError(f"Pi exited {code}; inspect {directory / 'output.log'}")
+        if not (directory / "receipt.json").exists():
+            raise RuntimeError(f"Pi exited {code}; inspect {directory / 'output.log'}")
+        LOG.warning(
+            "Pi exited %s after writing a receipt; validating the receipt before classifying work",
+            code,
+        )
 
 
 def validate_outcome(receipt, number, fresh):
@@ -461,7 +493,7 @@ def execute(config, state, state_path, lock_fd, runtime):
         else {"id": state["active_run"], "started_at": now().isoformat(), "items": {}}
     )
     run["pid"] = os.getpid()
-    workdir = lease(config, run)
+    workdir = lease(config, run, run_path)
     atomic_json(run_path, run)
     snapshot_dir = directory / "snapshot"
     manifest_path = snapshot_dir / "manifest.json"
@@ -517,7 +549,7 @@ def execute(config, state, state_path, lock_fd, runtime):
                 result = read_json(receipt_path)
                 validate_outcome(result, number, fresh)
                 verify_pull_requests(config, result)
-            elif not eligible(fresh):
+            elif not eligible(fresh) and not (stage / "task.json").exists():
                 result = {
                     "number": number,
                     "outcome": "skipped",
@@ -537,13 +569,24 @@ def execute(config, state, state_path, lock_fd, runtime):
                     "fresh_issue": fresh,
                     "receipt": str(stage / "receipt.json"),
                     "source_checkout": config.get("source_checkout"),
+                    "reconciliation_only": not eligible(fresh),
+                    "fresh_comments": (
+                        pages(endpoint + "/comments") if not eligible(fresh) else None
+                    ),
                 }
                 atomic_json(stage / "task.json", task)
                 run["current_issue"] = number
                 atomic_json(run_path, run)
                 prompt = f"Work the single backlog item described in {stage / 'task.json'}. Follow the attached worker policy. Finish with its receipt."
-                if not (stage / "receipt.json").exists():
-                    run_pi(config, stage, workdir, prompt, lock_fd, policy)
+                run_pi(
+                    config,
+                    stage,
+                    workdir,
+                    prompt,
+                    lock_fd,
+                    policy,
+                    analysis=task["reconciliation_only"],
+                )
                 result = read_json(stage / "receipt.json")
                 validate_outcome(result, number, api(endpoint))
                 verify_pull_requests(config, result)
