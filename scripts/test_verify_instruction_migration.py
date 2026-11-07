@@ -62,7 +62,7 @@ class InstructionMigrationTest(unittest.TestCase):
 
         errors = validate(self.root)
 
-        self.assertTrue(any("Pull Requests appears 0 times" in error for error in errors))
+        self.assertTrue(any("Pull Requests has 0 structural matches" in error for error in errors))
 
     def test_missing_global_route_is_rejected(self) -> None:
         global_path = self.root / ".github/copilot-instructions.md"
@@ -79,6 +79,39 @@ class InstructionMigrationTest(unittest.TestCase):
 
         self.assertTrue(
             any("does not match directory" in error for error in validate(self.root))
+        )
+
+    def test_missing_skill_trigger_term_is_rejected(self) -> None:
+        skill = self.root / ".copilot/skills/engineering-practices/SKILL.md"
+        skill.write_text(skill.read_text().replace("architecture, system design", "system design", 1))
+
+        self.assertIn(
+            "skill description for engineering-practices lacks trigger term 'architecture'",
+            validate(self.root),
+        )
+
+    def test_reordered_destination_blocks_are_rejected(self) -> None:
+        skill = self.root / ".copilot/skills/engineering-practices/SKILL.md"
+        text = skill.read_text()
+        blocks = dict(parse_h2_blocks(text))
+        original = blocks["Code Style & Languages"] + blocks["Platform & System Design"]
+        reordered = blocks["Platform & System Design"] + blocks["Code Style & Languages"]
+        skill.write_text(text.replace(original, reordered, 1))
+
+        self.assertIn(
+            "baseline block order changed in .copilot/skills/engineering-practices/SKILL.md",
+            validate(self.root),
+        )
+
+    def test_duplicate_block_in_another_skill_is_rejected(self) -> None:
+        source = self.root / ".copilot/skills/pull-request-workflow/SKILL.md"
+        duplicate = dict(parse_h2_blocks(source.read_text()))["Pull Requests"]
+        destination = self.root / ".copilot/skills/spreadsheet-report-generation/SKILL.md"
+        destination.write_text(destination.read_text() + duplicate)
+
+        self.assertIn(
+            "Pull Requests has 2 structural matches across runtime instructions, expected 1",
+            validate(self.root),
         )
 
     def test_changed_pre_action_routing_is_rejected(self) -> None:
@@ -119,6 +152,19 @@ class InstructionMigrationTest(unittest.TestCase):
             validate(self.root),
         )
 
+    def test_fenced_migrated_section_is_rejected(self) -> None:
+        skill = self.root / ".copilot/skills/pull-request-workflow/SKILL.md"
+        text = skill.read_text()
+        skill.write_text(text.replace("## Pull Requests\n", "```markdown\n## Pull Requests\n", 1) + "```\n")
+
+        self.assertTrue(
+            any("Pull Requests has 0 structural matches" in error for error in validate(self.root))
+        )
+
+    def test_update_baseline_requires_explicit_acknowledgement(self) -> None:
+        with self.assertRaisesRegex(ValueError, "explicit guidance-change acknowledgement"):
+            update_baseline(self.root, self.manifest_path)
+
     def test_update_baseline_accepts_intentional_guidance_edit(self) -> None:
         skill = self.root / ".copilot/skills/pull-request-workflow/SKILL.md"
         skill.write_text(
@@ -129,7 +175,9 @@ class InstructionMigrationTest(unittest.TestCase):
             )
         )
 
-        update_baseline(self.root, self.manifest_path)
+        changed = update_baseline(self.root, self.manifest_path, acknowledged=True)
+
+        self.assertIn("baseline:Pull Requests", changed)
 
         self.assertEqual(validate(self.root), [])
         baseline = self.root / self.load_manifest()["baseline"]["path"]

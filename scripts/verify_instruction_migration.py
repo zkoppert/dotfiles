@@ -86,9 +86,21 @@ def destination_blocks(root: Path, relative_path: str) -> list[tuple[str, str]]:
     return parse_h2_blocks((root / relative_path).read_text(encoding="utf-8"))
 
 
-def update_baseline(root: Path, manifest_path: Path) -> None:
-    """Rebuild reviewed hashes after an intentional guidance edit."""
+def migrated_content(content: str) -> str:
+    """Remove the non-guidance marker that follows a migrated block."""
+    if content.endswith(MIGRATION_BOUNDARY):
+        return content[: -len(MIGRATION_BOUNDARY)]
+    return content
+
+
+def update_baseline(root: Path, manifest_path: Path, *, acknowledged: bool = False) -> list[str]:
+    """Rebuild reviewed hashes after an acknowledged guidance edit."""
+    if not acknowledged:
+        raise ValueError("rebaselining requires explicit guidance-change acknowledgement")
     manifest = load_manifest(manifest_path)
+    baseline_path = root / manifest["baseline"]["path"]
+    previous_blocks = dict(parse_h2_blocks(baseline_path.read_text(encoding="utf-8")))
+    changed: list[str] = []
     cache: dict[str, dict[str, str]] = {}
 
     def blocks_for(relative_path: str) -> dict[str, str]:
@@ -107,9 +119,10 @@ def update_baseline(root: Path, manifest_path: Path) -> None:
         content = blocks_for(entry["destination"]).get(identifier)
         if content is None:
             raise ValueError(f"cannot rebaseline missing block {identifier!r}")
-        if content.endswith(MIGRATION_BOUNDARY):
-            content = content[: -len(MIGRATION_BOUNDARY)]
+        content = migrated_content(content)
         content_parts.append(content)
+        if previous_blocks.get(identifier) != content:
+            changed.append(f"baseline:{identifier}")
         entry["sha256"] = sha256(content)
         entry["source_start_line"] = line
         line_count = content.count("\n")
@@ -117,7 +130,6 @@ def update_baseline(root: Path, manifest_path: Path) -> None:
         line += line_count
 
     baseline_text = "".join(content_parts)
-    baseline_path = root / manifest["baseline"]["path"]
     baseline_path.write_text(baseline_text, encoding="utf-8")
     manifest["baseline"]["sha256"] = sha256(baseline_text)
 
@@ -125,9 +137,13 @@ def update_baseline(root: Path, manifest_path: Path) -> None:
         content = blocks_for(contract["destination"]).get(contract["id"])
         if content is None:
             raise ValueError(f"cannot rebaseline missing runtime contract {contract['id']!r}")
-        contract["sha256"] = sha256(content)
+        new_hash = sha256(content)
+        if contract["sha256"] != new_hash:
+            changed.append(f"runtime:{contract['id']}")
+        contract["sha256"] = new_hash
 
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return changed
 
 
 def validate(root: Path, manifest_path: Optional[Path] = None) -> list[str]:
@@ -168,7 +184,19 @@ def validate(root: Path, manifest_path: Optional[Path] = None) -> list[str]:
     runtime_paths = {root / entry["destination"] for entry in entries}
     runtime_paths.update(root.glob(".copilot/skills/*/SKILL.md"))
     runtime_paths.add(root / ".github/copilot-instructions.md")
-    runtime_text = {path: path.read_text(encoding="utf-8") for path in runtime_paths if path.exists()}
+    runtime_blocks: dict[Path, list[tuple[str, str]]] = {}
+    for path in sorted(runtime_paths):
+        if not path.is_file():
+            continue
+        try:
+            blocks = parse_h2_blocks(path.read_text(encoding="utf-8"))
+        except ValueError as error:
+            errors.append(f"runtime instructions cannot be parsed in {path.relative_to(root)}: {error}")
+            continue
+        names = [name for name, _ in blocks]
+        if len(names) != len(set(names)):
+            errors.append(f"runtime instructions have duplicate H2 identifiers: {path.relative_to(root)}")
+        runtime_blocks[path] = blocks
 
     destination_positions: dict[Path, list[tuple[int, int, str]]] = {}
     for order, entry in enumerate(entries):
@@ -182,15 +210,28 @@ def validate(root: Path, manifest_path: Optional[Path] = None) -> list[str]:
         if not destination.is_file():
             errors.append(f"destination is missing: {entry['destination']}")
             continue
-        destination_text = destination.read_text(encoding="utf-8")
-        count = destination_text.count(content)
-        if count != 1:
-            errors.append(f"{identifier} appears {count} times in {entry['destination']}, expected 1")
-        all_count = sum(text.count(content) for text in runtime_text.values())
+        destination_matches = [
+            index
+            for index, (name, candidate) in enumerate(runtime_blocks.get(destination, []))
+            if name == identifier and migrated_content(candidate) == content
+        ]
+        if len(destination_matches) != 1:
+            errors.append(
+                f"{identifier} has {len(destination_matches)} structural matches in "
+                f"{entry['destination']}, expected 1"
+            )
+        all_count = sum(
+            1
+            for blocks in runtime_blocks.values()
+            for name, candidate in blocks
+            if name == identifier and migrated_content(candidate) == content
+        )
         if all_count != 1:
-            errors.append(f"{identifier} appears {all_count} times across runtime instructions, expected 1")
-        position = destination_text.find(content)
-        destination_positions.setdefault(destination, []).append((order, position, identifier))
+            errors.append(f"{identifier} has {all_count} structural matches across runtime instructions, expected 1")
+        if destination_matches:
+            destination_positions.setdefault(destination, []).append(
+                (order, destination_matches[0], identifier)
+            )
 
     for destination, positions in destination_positions.items():
         expected = [identifier for _, _, identifier in sorted(positions)]
@@ -275,6 +316,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="rebuild baseline and contract hashes after an intentional reviewed guidance edit",
     )
+    parser.add_argument(
+        "--acknowledge-guidance-changes",
+        action="store_true",
+        help="confirm that the rebaseline diff was reviewed for removed or weakened guidance",
+    )
     return parser
 
 
@@ -284,10 +330,15 @@ def main() -> int:
     manifest_path = args.manifest or root / "tests/fixtures/instruction-migration/manifest.json"
     if args.update_baseline:
         try:
-            update_baseline(root, manifest_path)
+            changed = update_baseline(
+                root,
+                manifest_path,
+                acknowledged=args.acknowledge_guidance_changes,
+            )
         except ValueError as error:
             print(f"ERROR: {error}", file=sys.stderr)
             return 1
+        print("Updated guidance contracts: " + (", ".join(changed) if changed else "none"))
     errors = validate(root, manifest_path)
     if args.source:
         errors.extend(verify_source(load_manifest(manifest_path), args.source))
@@ -296,7 +347,8 @@ def main() -> int:
             print(f"ERROR: {error}", file=sys.stderr)
         print(
             "After an intentional guidance edit, review the diff and run "
-            "scripts/verify_instruction_migration.py --update-baseline.",
+            "scripts/verify_instruction_migration.py --update-baseline "
+            "--acknowledge-guidance-changes.",
             file=sys.stderr,
         )
         return 1

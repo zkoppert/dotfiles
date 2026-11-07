@@ -32,7 +32,7 @@ python3 scripts/verify_instruction_migration.py
 The check compares each original section with its runtime owner. It also validates skill metadata, routing entries, compatibility headings, and the migration baseline. After an intentional guidance edit, review the content diff and refresh the hashes:
 
 ```bash
-python3 scripts/verify_instruction_migration.py --update-baseline
+python3 scripts/verify_instruction_migration.py --update-baseline --acknowledge-guidance-changes
 ```
 
 ## How do I install it?
