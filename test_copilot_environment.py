@@ -596,6 +596,18 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 )
                 self.assertNotIn("environment is ready", result.stdout)
 
+    def test_verifier_requires_every_globally_routed_skill(self) -> None:
+        required_skills = runpy.run_path(str(self.verifier))["REQUIRED_SKILLS"]
+        manifest_path = (
+            Path(__file__).with_name("tests")
+            / "fixtures"
+            / "instruction-migration"
+            / "manifest.json"
+        )
+        routed_skills = set(json.loads(manifest_path.read_text())["routed_skills"])
+
+        self.assertEqual(set(), routed_skills - required_skills)
+
     def test_verifier_rejects_skills_without_skill_files(self) -> None:
         env = self.prepare_complete_environment()
         skill = self.home / ".copilot" / "skills" / "gh-axi"

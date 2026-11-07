@@ -2,10 +2,7 @@
   "schema_version": 1,
   "baseline": {
     "path": "tests/fixtures/instruction-migration/global-instructions-2026-11-06.txt",
-    "sha256": "2e7026f8d4a847e899746ea4eae61a2771c2ef77c06935b95d7ba67e0734ced7",
-    "source_path": "/Users/zkoppert/repos/dotfiles/.github/copilot-instructions.md",
-    "source_head": "277b03bbb9a359a4155a1c5608b2998555bfac71",
-    "source_status": " M .github/copilot-instructions.md"
+    "sha256": "2e7026f8d4a847e899746ea4eae61a2771c2ef77c06935b95d7ba67e0734ced7"
   },
   "blocks": [
     {
@@ -186,7 +183,10 @@
       "plan review",
       "code review",
       "self-review",
-      "multi-model"
+      "multi-model",
+      "recurring report",
+      "handoff",
+      "performance feedback"
     ],
     "pull-request-workflow": [
       "pull request",
@@ -201,7 +201,9 @@
     "actions-security": [
       "GitHub Actions",
       "workflow",
-      "composite actions"
+      "composite actions",
+      "activity data",
+      "report"
     ],
     "open-source-actions-maintenance": [
       "contributors",
@@ -215,24 +217,11 @@
       "generated reports"
     ]
   },
-  "moved_heading_stubs": [
-    "Pull Requests",
-    "Code Review Workflow",
-    "Code Style & Languages",
-    "Platform & System Design",
-    "GitHub CLI & API",
-    "GitHub Actions Best Practices",
-    "Excel & Report Generation",
-    "File & Project Organization",
-    "My Open Source GitHub Actions: Shared Patterns"
-  ],
-  "allowed_duplicates": [],
-  "substitutions": [],
   "runtime_contracts": [
     {
       "id": "Pre-action skill routing",
       "destination": ".github/copilot-instructions.md",
-      "sha256": "383ae3b61cd9d8c8f2f1842517decc0eed715f94728652e06effa54750802745"
+      "sha256": "52c1b8a9d6fbbb9717cdb0d98cec9dea4930d559889f3adb991a0ecc74a7eb01"
     },
     {
       "id": "Pull Requests",

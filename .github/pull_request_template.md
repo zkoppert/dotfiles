@@ -16,7 +16,7 @@
 
 ## Impact
 
-<!-- Follow "Quantify impact in every PR" in .github/copilot-instructions.md under Pull Requests. -->
+<!-- Follow "Quantify impact in every PR" in .copilot/skills/pull-request-workflow/SKILL.md. -->
 
 ## Rollout
 

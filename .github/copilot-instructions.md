@@ -26,12 +26,15 @@ Load each applicable skill before the first relevant command, edit, review, or e
 - Before any GitHub operation, read `gh-axi` first and `github-operations` second. `gh-axi` controls command choice.
 - Before any workflow or action-metadata change, read `actions-security` in full.
 - Before work in the named open-source Action repositories, read `open-source-actions-maintenance` in full.
+- Before recurring reports, retrospectives, handoffs, or performance feedback, read `code-review-workflow` in full.
+- Before filtering activity data for a report, also read `actions-security` in full.
 - Before spreadsheet or generated-report work, read `spreadsheet-report-generation` in full.
 - Pass applicable review rules to subagents. Do not assume that a subagent loaded the same skills.
 
 ### Safety rules retained globally
 
 - Never push, create or edit a PR, approve a PR, change review readiness, or resolve human feedback without the approval required by the global workflow.
+- Create PRs as drafts unless I explicitly request another state.
 - Every plan, code, and PR-description review requires at least three distinct non-Gemini models.
 - Verify every review finding before reporting it.
 - Show drafted PR review comments before posting them.

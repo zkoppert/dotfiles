@@ -1,6 +1,6 @@
 ---
 name: actions-security
-description: This skill should be used WHENEVER authoring, editing, or reviewing GitHub Actions workflow files (.github/workflows/*.yml or *.yaml, composite actions, reusable workflows). It encodes GitHub's internal secure-Actions authoring rules (script-injection hardening, SHA pinning, least-privilege tokens, runner safety, secret handling) and runs a local zizmor + actionlint harness. Also triggered when the user asks to "harden this workflow", "check this action for security issues", "review my workflow", "run zizmor", or "is this Action injection-safe".
+description: This skill should be used WHENEVER authoring, editing, or reviewing GitHub Actions workflow files (.github/workflows/*.yml or *.yaml, composite actions, reusable workflows), or filtering activity data for a report. It encodes secure Actions authoring rules, report filtering, and a local zizmor + actionlint harness. Also triggered by workflow hardening, action security review, zizmor, or injection-safety requests.
 ---
 
 # Actions Security: harden GitHub Actions workflows before they ship

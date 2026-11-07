@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 RUNTIME_BASENAMES = {"AGENTS.md", "CLAUDE.md", "SKILL.md", "copilot-instructions.md"}
+MIGRATION_BOUNDARY = "<!-- This boundary keeps the migrated baseline block byte-verifiable. -->\n"
 
 
 def sha256(text: str) -> str:
@@ -57,7 +58,7 @@ def parse_h2_blocks(text: str) -> list[tuple[str, str]]:
 
 def parse_frontmatter(path: Path) -> dict[str, str]:
     """Read the simple scalar fields used by Agent Skills frontmatter."""
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
         raise ValueError("missing opening frontmatter delimiter")
     try:
@@ -77,7 +78,56 @@ def parse_frontmatter(path: Path) -> dict[str, str]:
 
 def load_manifest(path: Path) -> dict[str, Any]:
     """Load a migration manifest."""
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def destination_blocks(root: Path, relative_path: str) -> list[tuple[str, str]]:
+    """Read one runtime destination as Markdown blocks."""
+    return parse_h2_blocks((root / relative_path).read_text(encoding="utf-8"))
+
+
+def update_baseline(root: Path, manifest_path: Path) -> None:
+    """Rebuild reviewed hashes after an intentional guidance edit."""
+    manifest = load_manifest(manifest_path)
+    cache: dict[str, dict[str, str]] = {}
+
+    def blocks_for(relative_path: str) -> dict[str, str]:
+        if relative_path not in cache:
+            parsed = destination_blocks(root, relative_path)
+            names = [name for name, _ in parsed]
+            if len(names) != len(set(names)):
+                raise ValueError(f"duplicate H2 block identifiers in {relative_path}")
+            cache[relative_path] = dict(parsed)
+        return cache[relative_path]
+
+    content_parts: list[str] = []
+    line = 1
+    for entry in manifest["blocks"]:
+        identifier = entry["id"]
+        content = blocks_for(entry["destination"]).get(identifier)
+        if content is None:
+            raise ValueError(f"cannot rebaseline missing block {identifier!r}")
+        if content.endswith(MIGRATION_BOUNDARY):
+            content = content[: -len(MIGRATION_BOUNDARY)]
+        content_parts.append(content)
+        entry["sha256"] = sha256(content)
+        entry["source_start_line"] = line
+        line_count = content.count("\n")
+        entry["source_end_line"] = line + line_count - 1 if content.endswith("\n") else line + line_count
+        line += line_count
+
+    baseline_text = "".join(content_parts)
+    baseline_path = root / manifest["baseline"]["path"]
+    baseline_path.write_text(baseline_text, encoding="utf-8")
+    manifest["baseline"]["sha256"] = sha256(baseline_text)
+
+    for contract in manifest.get("runtime_contracts", []):
+        content = blocks_for(contract["destination"]).get(contract["id"])
+        if content is None:
+            raise ValueError(f"cannot rebaseline missing runtime contract {contract['id']!r}")
+        contract["sha256"] = sha256(content)
+
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
 def validate(root: Path, manifest_path: Optional[Path] = None) -> list[str]:
@@ -94,7 +144,7 @@ def validate(root: Path, manifest_path: Optional[Path] = None) -> list[str]:
     if relative_baseline.parts[0] in {".github", ".copilot", ".agents"}:
         errors.append(f"baseline is inside a runtime discovery path: {relative_baseline}")
 
-    baseline_text = baseline_path.read_text()
+    baseline_text = baseline_path.read_text(encoding="utf-8")
     if sha256(baseline_text) != baseline_config["sha256"]:
         errors.append("baseline SHA-256 does not match the manifest")
 
@@ -118,7 +168,7 @@ def validate(root: Path, manifest_path: Optional[Path] = None) -> list[str]:
     runtime_paths = {root / entry["destination"] for entry in entries}
     runtime_paths.update(root.glob(".copilot/skills/*/SKILL.md"))
     runtime_paths.add(root / ".github/copilot-instructions.md")
-    runtime_text = {path: path.read_text() for path in runtime_paths if path.exists()}
+    runtime_text = {path: path.read_text(encoding="utf-8") for path in runtime_paths if path.exists()}
 
     destination_positions: dict[Path, list[tuple[int, int, str]]] = {}
     for order, entry in enumerate(entries):
@@ -132,7 +182,7 @@ def validate(root: Path, manifest_path: Optional[Path] = None) -> list[str]:
         if not destination.is_file():
             errors.append(f"destination is missing: {entry['destination']}")
             continue
-        destination_text = destination.read_text()
+        destination_text = destination.read_text(encoding="utf-8")
         count = destination_text.count(content)
         if count != 1:
             errors.append(f"{identifier} appears {count} times in {entry['destination']}, expected 1")
@@ -148,7 +198,7 @@ def validate(root: Path, manifest_path: Optional[Path] = None) -> list[str]:
         if expected != actual:
             errors.append(f"baseline block order changed in {destination.relative_to(root)}")
 
-    global_text = (root / ".github/copilot-instructions.md").read_text()
+    global_text = (root / ".github/copilot-instructions.md").read_text(encoding="utf-8")
     external_skills = set(manifest.get("external_skills", []))
     requirements = manifest.get("skill_requirements", {})
     repo_skill_names: set[str] = set()
@@ -182,23 +232,26 @@ def validate(root: Path, manifest_path: Optional[Path] = None) -> list[str]:
         if name not in repo_skill_names and name not in external_skills:
             errors.append(f"routed skill is not discoverable from this repository: {name}")
 
-    try:
-        global_blocks = dict(parse_h2_blocks(global_text))
-    except ValueError as error:
-        errors.append(f"global instructions cannot be parsed: {error}")
-        global_blocks = {}
+    contract_cache: dict[str, dict[str, str]] = {}
     for contract in manifest.get("runtime_contracts", []):
+        relative_path = contract["destination"]
+        if relative_path not in contract_cache:
+            try:
+                parsed = destination_blocks(root, relative_path)
+            except ValueError as error:
+                errors.append(f"runtime contracts cannot be parsed in {relative_path}: {error}")
+                contract_cache[relative_path] = {}
+            else:
+                names = [name for name, _ in parsed]
+                if len(names) != len(set(names)):
+                    errors.append(f"runtime destination has duplicate H2 identifiers: {relative_path}")
+                contract_cache[relative_path] = dict(parsed)
         identifier = contract["id"]
-        content = global_blocks.get(identifier)
+        content = contract_cache[relative_path].get(identifier)
         if content is None:
             errors.append(f"runtime contract is missing: {identifier}")
         elif sha256(content) != contract["sha256"]:
             errors.append(f"runtime contract changed: {identifier}")
-
-    if manifest.get("substitutions"):
-        errors.append("substitutions are unsupported until exact replacement validation is implemented")
-    if manifest.get("allowed_duplicates"):
-        errors.append("allowed duplicates are unsupported until reason validation is implemented")
 
     return errors
 
@@ -207,7 +260,7 @@ def verify_source(manifest: dict[str, Any], source: Path) -> list[str]:
     """Verify that the external source did not change after capture."""
     if not source.is_file():
         return [f"source file is missing: {source}"]
-    actual = sha256(source.read_text())
+    actual = sha256(source.read_text(encoding="utf-8"))
     expected = manifest["baseline"]["sha256"]
     return [] if actual == expected else [f"source SHA-256 changed: expected {expected}, got {actual}"]
 
@@ -217,6 +270,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--source", type=Path, help="also verify the original working-copy source")
+    parser.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="rebuild baseline and contract hashes after an intentional reviewed guidance edit",
+    )
     return parser
 
 
@@ -224,12 +282,23 @@ def main() -> int:
     args = build_parser().parse_args()
     root = args.root.resolve()
     manifest_path = args.manifest or root / "tests/fixtures/instruction-migration/manifest.json"
+    if args.update_baseline:
+        try:
+            update_baseline(root, manifest_path)
+        except ValueError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
     errors = validate(root, manifest_path)
     if args.source:
         errors.extend(verify_source(load_manifest(manifest_path), args.source))
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
+        print(
+            "After an intentional guidance edit, review the diff and run "
+            "scripts/verify_instruction_migration.py --update-baseline.",
+            file=sys.stderr,
+        )
         return 1
     print("Instruction migration preserves every baseline block and routed destination.")
     return 0

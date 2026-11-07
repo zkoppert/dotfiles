@@ -1,6 +1,6 @@
 ---
 name: code-review-workflow
-description: Use before any plan review, code review, self-review, security review, pull request description review, or multi-model review panel.
+description: Use before any plan review, code review, self-review, security review, pull request description review, multi-model review panel, recurring report, retrospective, handoff, or performance feedback.
 ---
 
 # Code review workflow

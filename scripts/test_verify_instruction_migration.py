@@ -9,7 +9,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.verify_instruction_migration import parse_h2_blocks, validate, verify_source
+from scripts.verify_instruction_migration import (
+    parse_h2_blocks,
+    update_baseline,
+    validate,
+    verify_source,
+)
 
 
 class InstructionMigrationTest(unittest.TestCase):
@@ -102,6 +107,35 @@ class InstructionMigrationTest(unittest.TestCase):
         )
 
         self.assertIn("runtime contract changed: Pull Requests", validate(self.root))
+
+    def test_duplicate_runtime_contract_heading_is_rejected(self) -> None:
+        global_path = self.root / ".github/copilot-instructions.md"
+        text = global_path.read_text()
+        pull_requests = dict(parse_h2_blocks(text))["Pull Requests"]
+        global_path.write_text(text + "\n" + pull_requests)
+
+        self.assertIn(
+            "runtime destination has duplicate H2 identifiers: .github/copilot-instructions.md",
+            validate(self.root),
+        )
+
+    def test_update_baseline_accepts_intentional_guidance_edit(self) -> None:
+        skill = self.root / ".copilot/skills/pull-request-workflow/SKILL.md"
+        skill.write_text(
+            skill.read_text().replace(
+                "Always create PRs as draft",
+                "Always open PRs as draft",
+                1,
+            )
+        )
+
+        update_baseline(self.root, self.manifest_path)
+
+        self.assertEqual(validate(self.root), [])
+        baseline = self.root / self.load_manifest()["baseline"]["path"]
+        baseline_text = baseline.read_text()
+        self.assertIn("Always open PRs as draft", baseline_text)
+        self.assertNotIn("migrated baseline block byte-verifiable", baseline_text)
 
     def test_fake_h2_inside_fence_does_not_split_blocks(self) -> None:
         blocks = parse_h2_blocks(
