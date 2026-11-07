@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from verify_instruction_migration import parse_h2_blocks, validate, verify_source
+from scripts.verify_instruction_migration import parse_h2_blocks, validate, verify_source
 
 
 class InstructionMigrationTest(unittest.TestCase):
@@ -76,15 +76,32 @@ class InstructionMigrationTest(unittest.TestCase):
             any("does not match directory" in error for error in validate(self.root))
         )
 
-    def test_incomplete_routing_evidence_is_rejected(self) -> None:
-        evidence_path = self.root / "tests/fixtures/instruction-migration/routing-evidence.json"
-        evidence = json.loads(evidence_path.read_text())
-        evidence["cases"][0]["loaded_before_action"] = []
-        evidence_path.write_text(json.dumps(evidence))
-
-        self.assertTrue(
-            any("lacks required skills" in error for error in validate(self.root))
+    def test_changed_pre_action_routing_is_rejected(self) -> None:
+        global_path = self.root / ".github/copilot-instructions.md"
+        global_path.write_text(
+            global_path.read_text().replace(
+                "If a required skill cannot load, stop and tell me.",
+                "Continue when a required skill cannot load.",
+                1,
+            )
         )
+
+        self.assertIn(
+            "runtime contract changed: Pre-action skill routing",
+            validate(self.root),
+        )
+
+    def test_changed_compatibility_stub_is_rejected(self) -> None:
+        global_path = self.root / ".github/copilot-instructions.md"
+        global_path.write_text(
+            global_path.read_text().replace(
+                "Load that skill before any PR operation or PR-bound draft.",
+                "Load that skill when convenient.",
+                1,
+            )
+        )
+
+        self.assertIn("runtime contract changed: Pull Requests", validate(self.root))
 
     def test_fake_h2_inside_fence_does_not_split_blocks(self) -> None:
         blocks = parse_h2_blocks(

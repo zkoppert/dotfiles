@@ -4,7 +4,17 @@
 from pathlib import Path
 from unittest import TestCase
 
-from scaffold import _matching_image_pairs
+from scaffold import TEMPLATE, _matching_image_pairs
+
+
+class TemplateTest(TestCase):
+    """Keep generated guidance pointed at its runtime owner."""
+
+    def test_impact_guidance_points_to_pull_request_skill(self) -> None:
+        rendered = TEMPLATE.format(branch="feature", rel="artifacts")
+
+        self.assertIn("~/.copilot/skills/pull-request-workflow/SKILL.md", rendered)
+        self.assertNotIn("under Pull Requests in ~/.copilot/copilot-instructions.md", rendered)
 
 
 class MatchingImagePairsTest(TestCase):

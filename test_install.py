@@ -209,6 +209,29 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(pi_instructions.resolve(), installed_source.resolve())
         self.assertFalse((self.home / "tests" / "fixtures" / "instruction-migration").exists())
 
+    def test_existing_instruction_and_skill_files_are_preserved(self) -> None:
+        source_skill = Path(__file__).with_name(".copilot") / "skills" / "actions-security"
+        shutil.copytree(source_skill, self.repo / ".copilot" / "skills" / "actions-security")
+        source_instructions = Path(__file__).with_name(".github") / "copilot-instructions.md"
+        (self.repo / ".github").mkdir()
+        shutil.copy2(source_instructions, self.repo / ".github" / "copilot-instructions.md")
+        sentinels = {
+            self.home / ".copilot" / "copilot-instructions.md": self.home / ".copilot" / "copilot-instructions.md",
+            self.home / ".pi" / "agent" / "AGENTS.md": self.home / ".pi" / "agent" / "AGENTS.md",
+            self.home / ".copilot" / "skills" / "actions-security" / "SKILL.md": self.home / ".copilot" / "skills" / "actions-security",
+            self.home / ".agents" / "skills" / "actions-security" / "SKILL.md": self.home / ".agents" / "skills" / "actions-security",
+        }
+        for path in sentinels:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("keep me\n", encoding="utf-8")
+
+        result = self.run_installer()
+
+        for path, warning_target in sentinels.items():
+            self.assertFalse(path.is_symlink())
+            self.assertEqual(path.read_text(encoding="utf-8"), "keep me\n")
+            self.assertIn(f"{warning_target} exists and is not a symlink", result.stdout)
+
     def test_review_lab_alias_is_added_once_on_macos(self) -> None:
         self.run_installer()
         self.run_installer()

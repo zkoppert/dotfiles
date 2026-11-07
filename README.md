@@ -29,7 +29,7 @@ Run the preservation check after changing global instructions or moving guidance
 python3 scripts/verify_instruction_migration.py
 ```
 
-The check compares each original section with its runtime owner. It also validates skill metadata, routing entries, compatibility headings, and the immutable migration baseline.
+The check compares each original section with its runtime owner. It also validates skill metadata, routing entries, compatibility headings, and the immutable migration baseline. A later guidance edit must update the baseline and manifest explicitly in the same reviewed change.
 
 ## How do I install it?
 

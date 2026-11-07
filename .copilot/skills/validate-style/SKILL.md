@@ -126,7 +126,7 @@ The linter only catches mechanical, regex-detectable rules. It does **not** chec
 - BLUF structure for asks vs. problem-first for PR descriptions
 - The "verify before flagging" review principle
 
-Those still require human or agent judgment. After running the linter, re-read the text through the lens of the full **Writing Style** and **Pull Requests** sections of `~/.copilot/copilot-instructions.md`.
+Those still require human or agent judgment. After running the linter, re-read the text through the global **Writing Style** rules and `~/.copilot/skills/pull-request-workflow/SKILL.md` when the draft is PR-bound.
 
 ## Source of the rules
 

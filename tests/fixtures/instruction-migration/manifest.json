@@ -227,5 +227,57 @@
     "My Open Source GitHub Actions: Shared Patterns"
   ],
   "allowed_duplicates": [],
-  "substitutions": []
+  "substitutions": [],
+  "runtime_contracts": [
+    {
+      "id": "Pre-action skill routing",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "383ae3b61cd9d8c8f2f1842517decc0eed715f94728652e06effa54750802745"
+    },
+    {
+      "id": "Pull Requests",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "e5f3a827206bb59a18f1d1296c5d10f590f86e9499a554f53d20f3670b23774d"
+    },
+    {
+      "id": "Code Review Workflow",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "09c40247b43ebaa8e5dbb1273bde73e1cfef33c573e604d8565870323ad1081b"
+    },
+    {
+      "id": "Code Style & Languages",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "223432d5f19683dc0e4b64b3220a35e30b99f2ebf99fc0b4826c4774ff6398c7"
+    },
+    {
+      "id": "Platform & System Design",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "cbf2bd2aa9936c23d34c39b1d9758e4d039af3376bfdfa45e456168f12753a26"
+    },
+    {
+      "id": "GitHub CLI & API",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "93dd2cad13f325d380ee9a7cbfb8ec5cd2f581b68f3fa75ab66041fa9d7b9fec"
+    },
+    {
+      "id": "GitHub Actions Best Practices",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "74b65a6bb03f4497374eb378657ff7f1a715ffc7a21989fa57a09aa02ff807b4"
+    },
+    {
+      "id": "Excel & Report Generation",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "4027f11c90985a98809fde8625f6e7794705888061ed960493819d1e3f6b53c9"
+    },
+    {
+      "id": "File & Project Organization",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "2cbbd50c84439ced2ba2f31716ec3a0a3021c6b7263f8e9270d183c91d84b7d7"
+    },
+    {
+      "id": "My Open Source GitHub Actions: Shared Patterns",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "7e06a27712565f916fbbe615c91279cead2e695afef4b8deec8132c08ad006c5"
+    }
+  ]
 }

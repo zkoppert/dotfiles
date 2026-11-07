@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import stat
 import subprocess
 import tempfile
@@ -196,27 +197,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
         self.assertFalse((self.home / ".copilot" / "mcp-config.json").exists())
 
     def prepare_complete_environment(self) -> dict[str, str]:
-        required_skills = {
-            "actions-security",
-            "cleanup-worktrees",
-            "feature-flag-rollout",
-            "gh-axi",
-            "graphql-availability-investigator",
-            "memory-sweep",
-            "milestone-release-tracking",
-            "nux-fr-handoff",
-            "pr-body-render-check",
-            "prod-explain",
-            "record-demo",
-            "remediate-accessibility-audit",
-            "session-portability",
-            "test-quality",
-            "triage-dependabot",
-            "triage-notifications",
-            "ui-screenshot-presentation",
-            "validate-pr-with-codespace",
-            "validate-style",
-        }
+        required_skills = runpy.run_path(str(self.verifier))["REQUIRED_SKILLS"]
         skills_dir = self.home / ".copilot" / "skills"
         for skill in required_skills:
             (skills_dir / skill).mkdir(parents=True)

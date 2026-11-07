@@ -9,7 +9,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 RUNTIME_BASENAMES = {"AGENTS.md", "CLAUDE.md", "SKILL.md", "copilot-instructions.md"}
@@ -80,7 +80,7 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def validate(root: Path, manifest_path: Path | None = None) -> list[str]:
+def validate(root: Path, manifest_path: Optional[Path] = None) -> list[str]:
     """Return every preservation or reachability error."""
     errors: list[str] = []
     manifest_path = manifest_path or root / "tests/fixtures/instruction-migration/manifest.json"
@@ -182,20 +182,18 @@ def validate(root: Path, manifest_path: Path | None = None) -> list[str]:
         if name not in repo_skill_names and name not in external_skills:
             errors.append(f"routed skill is not discoverable from this repository: {name}")
 
-    for heading in manifest["moved_heading_stubs"]:
-        marker = f"## {heading}\n"
-        if marker not in global_text:
-            errors.append(f"global compatibility heading is missing: {heading}")
-
-    evidence_path = root / "tests/fixtures/instruction-migration/routing-evidence.json"
-    if not evidence_path.is_file():
-        errors.append("representative routing evidence is missing")
-    else:
-        evidence = json.loads(evidence_path.read_text())
-        for case in evidence.get("cases", []):
-            missing = sorted(set(case.get("required", [])) - set(case.get("loaded_before_action", [])))
-            if missing:
-                errors.append(f"routing evidence for {case.get('task')!r} lacks required skills: {missing}")
+    try:
+        global_blocks = dict(parse_h2_blocks(global_text))
+    except ValueError as error:
+        errors.append(f"global instructions cannot be parsed: {error}")
+        global_blocks = {}
+    for contract in manifest.get("runtime_contracts", []):
+        identifier = contract["id"]
+        content = global_blocks.get(identifier)
+        if content is None:
+            errors.append(f"runtime contract is missing: {identifier}")
+        elif sha256(content) != contract["sha256"]:
+            errors.append(f"runtime contract changed: {identifier}")
 
     if manifest.get("substitutions"):
         errors.append("substitutions are unsupported until exact replacement validation is implemented")

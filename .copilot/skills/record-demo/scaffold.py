@@ -94,7 +94,7 @@ TEMPLATE = """# Demo: {branch}
 
 ## Impact
 
-<!-- Follow "Quantify impact in every PR" under Pull Requests in ~/.copilot/copilot-instructions.md. -->
+<!-- Follow "Quantify impact in every PR" in ~/.copilot/skills/pull-request-workflow/SKILL.md. -->
 """
 
 
