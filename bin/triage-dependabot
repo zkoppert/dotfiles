@@ -8,11 +8,28 @@ set -euo pipefail
 # so `gh`, `copilot`, and `uv` are on PATH when launchd invokes us directly.
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
+find_gh() {
+  local candidate
+  for candidate in \
+    "${TRIAGE_DEPENDABOT_GH:-}" \
+    /opt/homebrew/bin/gh \
+    /usr/local/bin/gh \
+    "$(command -v gh 2>/dev/null || true)"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      echo "$candidate"
+      return
+    fi
+  done
+  echo "triage-dependabot: GitHub CLI is required for CFS package resolution" >&2
+  exit 1
+}
+
 # Homebrew Python intentionally has no project-local YAML dependencies, while
 # macOS system Python is too old for this tool's supported runtime. Let uv own
 # a cached, isolated environment so launchd always gets the same interpreter
 # and exact dependency versions without mutating global site-packages.
-exec /opt/homebrew/bin/uv run --no-project \
+GH="$(find_gh)"
+exec "$GH" cfs -- /opt/homebrew/bin/uv run --no-project \
   --python /opt/homebrew/bin/python3 \
   --with 'PyYAML==6.0.3' \
   --with 'ruamel.yaml==0.18.16' \

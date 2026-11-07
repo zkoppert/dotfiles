@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Block accidental Python package resolution outside GitHub CFS."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+CFS_INDEX = "https://pkgs.dev.azure.com/github-cfs/GitHubCFS/_packaging/github-cfs-pypi/pypi/simple/"
+GUARDED_COMMANDS = {"pip", "pip3", "pip-compile", "pip-sync", "uv", "uvx"}
+PIP_SAFE_COMMANDS = {
+    "cache",
+    "check",
+    "completion",
+    "config",
+    "debug",
+    "freeze",
+    "hash",
+    "help",
+    "inspect",
+    "show",
+    "uninstall",
+}
+PIP_LEADING_OPTIONS = {
+    "--disable-pip-version-check",
+    "--help",
+    "--no-color",
+    "--quiet",
+    "--verbose",
+    "--version",
+    "-V",
+    "-h",
+    "-q",
+    "-v",
+}
+UV_SAFE_PIP_COMMANDS = {"check", "freeze", "list", "show"}
+
+
+def cfs_environment_is_valid(command: str) -> bool:
+    """Validate the feed variables that gh cfs supplies."""
+    if command.startswith("pip"):
+        return (
+            os.environ.get("PIP_CONFIG_FILE") == "/dev/null"
+            and os.environ.get("PIP_INDEX_URL") == CFS_INDEX
+            and not os.environ.get("PIP_EXTRA_INDEX_URL")
+        )
+    return (
+        os.environ.get("UV_DEFAULT_INDEX") == CFS_INDEX
+        and not os.environ.get("UV_EXTRA_INDEX_URL")
+        and not os.environ.get("UV_INDEX_URL")
+        and not os.environ.get("UV_INDEX")
+    )
+
+
+def pip_command_is_local(arguments: list[str]) -> bool:
+    """Allow only pip invocations that do not resolve or download packages."""
+    if not arguments:
+        return True
+    remaining = list(arguments)
+    while remaining and (
+        remaining[0] in PIP_LEADING_OPTIONS
+        or (remaining[0].startswith("-") and set(remaining[0][1:]) == {"v"})
+    ):
+        option = remaining.pop(0)
+        if option in {"--help", "--version", "-V", "-h"}:
+            return not remaining
+    if not remaining:
+        return True
+    command = remaining[0]
+    command_arguments = remaining[1:]
+    if command_arguments in (["--help"], ["-h"]):
+        return True
+    return command in PIP_SAFE_COMMANDS
+
+
+def uv_command_is_local(arguments: list[str]) -> bool:
+    """Allow only uv invocations that do not resolve or download packages."""
+    if not arguments:
+        return True
+    if arguments[0] in {"--help", "--version", "-h", "-V"}:
+        return len(arguments) == 1
+    if arguments[0] in {"cache", "help"}:
+        return True
+    if arguments[0] == "version":
+        return len(arguments) == 1
+    if arguments[0] == "pip" and len(arguments) > 1:
+        return arguments[1] in UV_SAFE_PIP_COMMANDS and "--outdated" not in arguments
+    return False
+
+
+def command_is_local(command: str, arguments: list[str]) -> bool:
+    """Return whether an invocation is on the narrow local-only allowlist."""
+    if command in {"pip-compile", "pip-sync", "uvx"}:
+        return False
+    if command.startswith("pip"):
+        return pip_command_is_local(arguments)
+    return uv_command_is_local(arguments)
+
+
+def find_downstream(command: str, guard_path: Path) -> Path | None:
+    """Find the next executable whose canonical path is not this guard."""
+    seen: set[Path] = set()
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = Path(directory or ".") / command
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if resolved in seen or resolved == guard_path:
+            continue
+        seen.add(resolved)
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def main() -> int:
+    """Enforce CFS routing, then replace this process with the real command."""
+    command = Path(sys.argv[0]).name
+    if command not in GUARDED_COMMANDS:
+        print(f"cfs-package-guard: unsupported invocation name: {command}", file=sys.stderr)
+        return 64
+
+    arguments = sys.argv[1:]
+    local_only = command_is_local(command, arguments)
+    if not local_only:
+        if not cfs_environment_is_valid(command):
+            rendered = " ".join([command, *arguments])
+            print(
+                f"cfs-package-guard: blocked unwrapped package resolution: {rendered}\n"
+                f"Run it through CFS: gh cfs -- {rendered}",
+                file=sys.stderr,
+            )
+            return 65
+    if local_only and command.startswith("pip"):
+        os.environ["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+
+    guard_path = Path(__file__).resolve()
+    downstream = find_downstream(command, guard_path)
+    if downstream is None:
+        print(f"cfs-package-guard: no downstream {command} executable found", file=sys.stderr)
+        return 127
+
+    os.execv(str(downstream), [command, *arguments])
+    return 127
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

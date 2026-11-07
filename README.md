@@ -30,6 +30,12 @@ For existing catalog tools, see [the update instructions](#how-do-i-update-catal
 
 Open a new shell after installation to load the `~/.local/bin` PATH change.
 
+## How are Python package downloads guarded?
+
+On macOS, the installer puts guarded `pip`, pip-tools, `uv`, and `uvx` shims before normal package tools on interactive shell `PATH`. Package-resolving commands fail unless GitHub Central Feed Services (CFS) supplies its feed environment. Use `gh cfs -- <command>` for package downloads.
+
+The guard prevents common accidental bypasses. It is not egress enforcement. After CFS configures a command, explicit source options, project settings, requirements directives, and direct URLs can still select another source. It also does not intercept absolute paths, virtual-environment executables, `python -m pip`, or LaunchAgents. Persistent automation must call CFS explicitly.
+
 ## How do I start a named local Copilot session?
 
 On macOS, the installer adds a `copilot` alias to Zsh. Open a new iTerm tab, enter a Git checkout, and run `copilot`. The launcher asks for a session name and uses that name for Copilot and the terminal title. Copilot's automatic title updates are disabled for that session.
