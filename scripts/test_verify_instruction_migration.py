@@ -192,6 +192,20 @@ class InstructionMigrationTest(unittest.TestCase):
 
         self.assertEqual([name for name, _ in blocks], ["preamble", "Real"])
 
+    def test_shorter_fence_does_not_close_longer_fence(self) -> None:
+        blocks = parse_h2_blocks(
+            "# Header\n\n## Real\n\n````markdown\n```\n## Example\n```\n````\n"
+        )
+
+        self.assertEqual([name for name, _ in blocks], ["preamble", "Real"])
+
+    def test_closing_fence_rejects_info_string(self) -> None:
+        blocks = parse_h2_blocks(
+            "# Header\n\n## Real\n\n```markdown\n```not-a-close\n## Example\n```\n"
+        )
+
+        self.assertEqual([name for name, _ in blocks], ["preamble", "Real"])
+
     def test_changed_external_source_is_rejected(self) -> None:
         source = self.root / "source.md"
         source.write_text("changed\n")

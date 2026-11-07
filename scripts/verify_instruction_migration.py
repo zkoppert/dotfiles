@@ -27,22 +27,31 @@ def parse_h2_blocks(text: str) -> list[tuple[str, str]]:
     starts: list[tuple[int, str]] = []
     in_fence = False
     fence_marker = ""
+    fence_length = 0
     offset = 0
     for line in lines:
-        stripped = line.lstrip()
-        fence = re.match(r"(`{3,}|~{3,})", stripped)
-        if fence:
-            marker = fence.group(1)[0]
-            if not in_fence:
-                in_fence = True
-                fence_marker = marker
-            elif marker == fence_marker:
-                in_fence = False
-                fence_marker = ""
-        if not in_fence:
-            heading = re.match(r"^## ([^\n]+)\n?$", line)
-            if heading:
-                starts.append((offset, heading.group(1)))
+        raw_line = line.rstrip("\r\n")
+        if in_fence:
+            closing = re.fullmatch(r" {0,3}(`{3,}|~{3,})[ \t]*", raw_line)
+            if closing:
+                fence = closing.group(1)
+                if fence[0] == fence_marker and len(fence) >= fence_length:
+                    in_fence = False
+                    fence_marker = ""
+                    fence_length = 0
+        else:
+            opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", raw_line)
+            if opening:
+                fence = opening.group(1)
+                info = opening.group(2)
+                if fence[0] == "~" or "`" not in info:
+                    in_fence = True
+                    fence_marker = fence[0]
+                    fence_length = len(fence)
+            else:
+                heading = re.match(r"^## ([^\n]+)\n?$", line)
+                if heading:
+                    starts.append((offset, heading.group(1)))
         offset += len(line)
     if in_fence:
         raise ValueError("baseline contains an unclosed fenced code block")
