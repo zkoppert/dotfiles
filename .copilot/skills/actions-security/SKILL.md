@@ -93,3 +93,13 @@ suppressing them; only add a `# zizmor: ignore[rule]` comment as a documented la
 Run the harness, then walk each `run:` block and each `pull_request_target`/`workflow_run`
 trigger by hand to confirm no untrusted field reaches a shell. Report only verified issues,
 and prefer a `suggestion` block showing the `env:`-binding fix.
+
+## GitHub Actions Best Practices
+When creating or modifying GitHub Actions workflows:
+1. Always use the **latest release** of each action
+2. Pin actions to their **full commit SHA** (not tags) with a comment showing the **full version tag**: `uses: actions/checkout@<sha> # v6.0.2` (not just `# v6`)
+3. Validate workflow syntax before committing
+4. Use **dedicated tokens/secrets** for each workflow; do not reuse tokens across different workflows
+5. When filtering activity data for reports, exclude Dependabot PRs from summaries (they add noise)
+
+<!-- This boundary keeps the migrated baseline block byte-verifiable. -->

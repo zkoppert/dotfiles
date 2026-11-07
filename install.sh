@@ -6,26 +6,34 @@ set -e
 
 DOTFILES_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Symlink copilot instructions for Copilot CLI
+# Symlink global instructions for Copilot CLI and Pi.
 if [ -f "$DOTFILES_DIR/.github/copilot-instructions.md" ]; then
-  mkdir -p "$HOME/.copilot"
-  ln -sf "$DOTFILES_DIR/.github/copilot-instructions.md" "$HOME/.copilot/copilot-instructions.md"
-  echo "✓ Linked copilot-instructions.md → ~/.copilot/copilot-instructions.md"
-fi
-
-# Symlink user-scope Copilot CLI skills so they auto-load on every session.
-if [ -d "$DOTFILES_DIR/.copilot/skills" ]; then
-  mkdir -p "$HOME/.copilot/skills"
-  for skill_path in "$DOTFILES_DIR/.copilot/skills/"*/; do
-    [ -d "$skill_path" ] || continue
-    skill_name="$(basename "$skill_path")"
-    target="$HOME/.copilot/skills/$skill_name"
+  instructions_source="$DOTFILES_DIR/.github/copilot-instructions.md"
+  mkdir -p "$HOME/.copilot" "$HOME/.pi/agent"
+  for target in "$HOME/.copilot/copilot-instructions.md" "$HOME/.pi/agent/AGENTS.md"; do
     if [ -L "$target" ] || [ ! -e "$target" ]; then
-      ln -sfn "$skill_path" "$target"
-      echo "✓ Linked skill $skill_name → $target"
+      ln -sfn "$instructions_source" "$target"
+      echo "✓ Linked global instructions → $target"
     else
       echo "⚠ $target exists and is not a symlink - skipping"
     fi
+  done
+fi
+
+# Link local skills into the Copilot and Agent Skills discovery roots.
+if [ -d "$DOTFILES_DIR/.copilot/skills" ]; then
+  mkdir -p "$HOME/.copilot/skills" "$HOME/.agents/skills"
+  for skill_path in "$DOTFILES_DIR/.copilot/skills/"*/; do
+    [ -d "$skill_path" ] || continue
+    skill_name="$(basename "$skill_path")"
+    for target in "$HOME/.copilot/skills/$skill_name" "$HOME/.agents/skills/$skill_name"; do
+      if [ -L "$target" ] || [ ! -e "$target" ]; then
+        ln -sfn "$skill_path" "$target"
+        echo "✓ Linked skill $skill_name → $target"
+      else
+        echo "⚠ $target exists and is not a symlink - skipping"
+      fi
+    done
   done
 fi
 

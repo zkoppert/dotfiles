@@ -17,6 +17,20 @@ My personal configuration for macOS and GitHub Codespaces.
 
 `record-demo` still owns pre-PR before/after evidence and the required `demo` marker. `ui-screenshot-presentation` defines how to present authentic UI captures in PR descriptions. `validate-pr-with-codespace` validates an already-open PR and does not satisfy the demo marker. The `gho11y` plugin covers observability, while accessibility findings use `remediate-accessibility-audit`. `session-portability` handles general development handoffs, while specialized handoff skills keep their narrower workflows.
 
+## How are global instructions organized?
+
+The global file keeps rules that apply to every session. Task-specific guidance lives in skills that load before the related action.
+
+`install.sh` links the same global file for Copilot and Pi. It also links local skills into both clients' standard discovery roots. Existing non-symlink files remain unchanged.
+
+Run the preservation check after changing global instructions or moving guidance:
+
+```bash
+python3 scripts/verify_instruction_migration.py
+```
+
+The check compares each original section with its runtime owner. It also validates skill metadata, routing entries, compatibility headings, and the immutable migration baseline.
+
 ## How do I install it?
 
 The public repository does not contain the private catalog identifier. Configure `COPILOT_SKILL_CATALOG_REPO` as a user-level Codespaces secret or export it locally before running the installer:

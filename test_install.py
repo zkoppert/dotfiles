@@ -177,6 +177,38 @@ class InstallScriptTest(unittest.TestCase):
             )
             self.assertEqual(result.stdout, version + "\n", name)
 
+    def test_local_instruction_skills_are_linked_in_isolated_home(self) -> None:
+        source_skills = Path(__file__).with_name(".copilot") / "skills"
+        shutil.copytree(source_skills, self.repo / ".copilot" / "skills")
+        source_instructions = Path(__file__).with_name(".github") / "copilot-instructions.md"
+        (self.repo / ".github").mkdir()
+        shutil.copy2(source_instructions, self.repo / ".github" / "copilot-instructions.md")
+
+        self.run_installer()
+
+        expected = {
+            "actions-security",
+            "code-review-workflow",
+            "engineering-practices",
+            "github-operations",
+            "open-source-actions-maintenance",
+            "pull-request-workflow",
+            "spreadsheet-report-generation",
+        }
+        for root in (self.home / ".copilot" / "skills", self.home / ".agents" / "skills"):
+            for name in expected:
+                link = root / name
+                self.assertTrue(link.is_symlink(), f"{root}: {name}")
+                self.assertEqual(link.resolve(), (self.repo / ".copilot" / "skills" / name).resolve())
+        copilot_instructions = self.home / ".copilot" / "copilot-instructions.md"
+        pi_instructions = self.home / ".pi" / "agent" / "AGENTS.md"
+        self.assertTrue(copilot_instructions.is_symlink())
+        self.assertTrue(pi_instructions.is_symlink())
+        installed_source = self.repo / ".github" / "copilot-instructions.md"
+        self.assertEqual(copilot_instructions.resolve(), installed_source.resolve())
+        self.assertEqual(pi_instructions.resolve(), installed_source.resolve())
+        self.assertFalse((self.home / "tests" / "fixtures" / "instruction-migration").exists())
+
     def test_review_lab_alias_is_added_once_on_macos(self) -> None:
         self.run_installer()
         self.run_installer()

@@ -16,6 +16,27 @@ These preferences apply across all repositories and sessions.
 - **Never name internal repos, issues, or PRs in public contexts** - when writing PR descriptions, issue comments, discussion posts, or documentation in public repositories, do not reference internal/private repository names, issue numbers, or PR links. Anonymize them instead (e.g., "a private UI monorepo" or "an internal service repo"). Public repos include any repo visible to people outside the organization.
 - **Deploy to review lab at most once without approval** - after initiating a review-lab deployment for a PR or branch, do not submit another deployment request, including a retry or a different review-lab target, unless I explicitly approve it in the current conversation. Check the existing request and escalate a stuck deployment instead.
 
+## Pre-action skill routing
+
+Load each applicable skill before the first relevant command, edit, review, or external write. Global rules override skill content when they conflict. If a required skill cannot load, stop and tell me.
+
+- Before any file mutation or code, test, configuration, architecture, or system-design review, read `engineering-practices` in full.
+- Before any plan, code, security, self, or PR-description review, read `code-review-workflow` in full.
+- Before any PR operation or PR-bound draft, read `pull-request-workflow` in full.
+- Before any GitHub operation, read `gh-axi` first and `github-operations` second. `gh-axi` controls command choice.
+- Before any workflow or action-metadata change, read `actions-security` in full.
+- Before work in the named open-source Action repositories, read `open-source-actions-maintenance` in full.
+- Before spreadsheet or generated-report work, read `spreadsheet-report-generation` in full.
+- Pass applicable review rules to subagents. Do not assume that a subagent loaded the same skills.
+
+### Safety rules retained globally
+
+- Never push, create or edit a PR, approve a PR, change review readiness, or resolve human feedback without the approval required by the global workflow.
+- Every plan, code, and PR-description review requires at least three distinct non-Gemini models.
+- Verify every review finding before reporting it.
+- Show drafted PR review comments before posting them.
+- Run final validation after the last mutation before reporting completion.
+
 ## Copilot Skills
 
 Skills under `~/.copilot/skills/` are auto-loaded in every session and are available regardless of which repository I'm working in. **Always check whether a relevant skill exists before doing the work manually**, and **always run the skill when its trigger conditions apply**. Don't wait to be reminded. Each skill's `SKILL.md` is the source of truth for its behavior; this section only records global routing and cross-skill boundaries.
@@ -80,228 +101,28 @@ Before claiming work is done, build a way to *see* the output yourself. Don't ma
 For context on this mindset, see [Kamil Gwozdz, "Reasons why your prompts suck (part 1)"](https://kamilgwozdz.substack.com/p/reasons-why-your-prompts-suck-part).
 
 ## Pull Requests
-- **Keep large internal PRs reviewable**: For `github/github` and `github/github-ui`, never create or push a PR with more than 800 added lines. Count all additions, including tests, generated files, lockfiles, and snapshots. Check the full PR diff before draft creation and before every later push. Split the work before review additions cross the limit. Use `npx -y gh-axi stack init`, `npx -y gh-axi stack add`, and `npx -y gh-axi stack submit --open` to create stacked PRs when one reviewable unit cannot stay within the limit. Use `ZACK_CONFIRMED_LARGE_PR=1` only after Zack explicitly approves the exception in the current conversation.
-- **Check CONTRIBUTING.md before opening PRs**: Before opening a PR or draft PR, search the target repository for a `CONTRIBUTING.md` (or `contributing.md`, `.github/CONTRIBUTING.md`) and follow any guidance there (e.g., commit signing, branch naming, PR format, required checks). This applies to every repo, not just ours.
-- **Always create PRs as draft** unless I explicitly say otherwise
-- **Never convert a ready PR back to draft** unless I explicitly ask for that exact transition in the current conversation. A manual ready-for-review transition is explicit approval and must be preserved, even when an earlier instruction said to keep the PR as a draft.
-- **Always assign me (`zkoppert`) as the assignee** when opening PRs; this helps me track work in progress and follow up
-- Always check a PR's status (open/merged/closed) before pushing commits to it
-- PR descriptions should be kept up to date with the actual changes and the strongest current evidence. Remove temporary harness caveats, workarounds, and uncertainty once later validation or CI supersedes them.
-- **Prefer the shortest complete PR description**: Use a short numbered context when it clearly shows the prior limitation, failure mode, change, outcome, and non-goals. Keep the approach to one or two high-level paragraphs: "I implemented X on Y. Reviewers or responders can now see Z." Do not turn the body into an implementation, review, or validation audit log.
-- **Translate domain language in the opening**: Do not assume that reviewers understand a specialized noun phrase, even when each word is familiar. First describe the concrete system flow in plain language. Then define the term, state what readers could easily mistake it for, and connect it to the decision or user outcome. Do not merely replace one technical term with another.
-- **Explain telemetry boundaries**: For measurement changes, state exactly what value I collect, what content I do not collect, and whether collection adds requests or work. Connect the measurement to the product or engineering decision it will support.
-- **Write PR descriptions in first person** - use "I" or "we" as the subject, not "This PR" or "This change." Active voice, first person: "I added retry logic" not "This PR adds retry logic." This matches the active voice rule in the Writing Style section.
-- PR descriptions should always include a **Testing** section. Do not list linting results in the Testing section; linting is a given, not something to highlight. Focus on meaningful tests: unit tests, integration tests, manual verification, etc.
-- When reviewing PRs, focus on critical issues (bugs, security, logic errors) not style nitpicks
-- **Verify before flagging**: When reviewing code, always check source material (config files, upstream docs, official examples) before recommending changes. Do not flag something as a bug or missing requirement based on assumptions alone.
-- **Additive tone in reviews**: Frame feedback as additive rather than corrective. Say "we've also got" instead of "but we've got". Use "I believe" to soften assertions about behavior you haven't directly verified (e.g., "I believe it passes because" not "It only passes because").
-- **Tone down superlatives**: Use "a good move" over "the right move"; softer assertions feel less prescriptive.
-- **Avoid generic praise**: Don't say "looks solid"; say "looks great" and be specific about what was added or changed (e.g., "looks great, the retry logic you added handles the edge case cleanly").
-- **Be precise with references**: When referring to something (code, suggestions, links), make it obvious what "this" refers to, e.g., "this suggestion above" not just "this".
-- **Always confirm before approving PRs** unless explicitly told to approve. Asking to see the approval message is not the same as giving the go-ahead.
-- **Request Copilot review after draft creation**: Immediately after opening a draft PR, add Copilot as a requested reviewer through GitHub's reviewer request mechanism. Never request a Copilot review by posting `@copilot review` or mentioning Copilot in a comment.
-- **Check existing review feedback before commenting**: When reviewing a PR, always read through existing review comments and threads first. Do not post a concern that has already been raised by another reviewer; it creates noise and makes it harder for the author to track actionable feedback.
-- **Post review-thread replies immediately, never as pending review comments**: Before replying to any PR review thread, query the current user's reviews and confirm no `PENDING` review exists. Never use GraphQL `addPullRequestReviewThreadReply`, because it can attach the reply to a pending review. Post the reply through the REST review-comment reply endpoint only after confirming there is no pending review. Read the reply back and verify its `pull_request_review_id` does not reference a review whose state is `PENDING`. If a pending review already exists, stop and inspect it rather than adding another comment or submitting it.
-- **Handle Copilot review feedback autonomously**: Verify each Copilot comment before acting. For accurate feedback, prepare and commit the fix locally, then complete the post-PR fix revalidation gate before pushing, replying, or resolving the thread. Do not act on inaccurate feedback.
-- **Hold human review feedback for my approval**: Verify each human comment and prepare and validate the fix locally, but never reply, resolve the thread, or push the fix commit until I explicitly approve those actions.
-- **Revalidate every post-PR fix before pushing**: Any commit created after the draft PR opens invalidates the earlier certification, regardless of whether the fix came from Copilot, a human reviewer, CI, or self-review. Before pushing the fix, run `test-quality`, run a fresh multi-model code-review convergence loop whose reviewers did not author or fix the code, run the full Codespace test suite and CI-equivalent checks through `pr-marker run-tests`, and rewrite the HEAD-pinned `code-review` and `tests` markers for the exact fix commit. Never push a post-PR code change while either marker is stale.
-- **Multi-model review at three gates**: Complete the multi-model Code Review Workflow (below) three times across my staged change workflow: against the **plan** (before drafting code), against the **code** diff (before drafting the PR), and against the **PR description** (before opening the PR). Record each synthesis with `pr-marker write <plan|code-review|pr-review> -` so the `gh pr create` gate can see it. Address verified findings at each gate, when they are cheapest to fix. See "My Standard Change Workflow" above.
-- **Self-review before marking ready**: After all CI checks pass on a PR you authored (see the Harnesses section), run the multi-model Code Review Workflow again as a final self-review before telling me the PR is ready. Catch your own issues before reviewers have to.
-- **Use the repo's PR template**: Before opening a PR, check for a pull request template (e.g., `.github/pull_request_template.md` or `.github/PULL_REQUEST_TEMPLATE.md`) and use it fully without leaving sections blank. If none exists, use `## Why`, `## What changed`, `## Testing`, and `## Rollout`, then prompt me to add a template.
-- **Before/after comparison in PR descriptions**: Include a table or screenshots only when they explain the outcome more clearly than concise prose or a short numbered context. Do not force a table for a simple backend or telemetry change. For visual changes, use matching screenshots. Prefer reviewer-relevant contrasts over incidental implementation measurements.
-- **Quantify impact in every PR** - include at least one reader-relevant number: latency change, number of users affected, percentage of requests covered, time saved, error rate reduction, or another measure that helps reviewers judge impact. Do not use byte counts, lines changed, assertion counts, or similar implementation trivia merely to satisfy this rule. Even rough product or operational estimates ("saves ~20 min/week", "covers 7 of 7 SLOs") are better than no number. If impact is genuinely unknown, say so explicitly rather than inventing a metric.
-- **Keep implementation bookkeeping out of PR descriptions** - omit details such as removed test invariants, internal string sizes, and temporary tool workarounds from every section, including Testing. State unresolved validation limits directly, without the workaround history. Put the user-visible outcome and decision rationale first.
-- **Document material tradeoffs and alternatives** - include only choices that help reviewers evaluate the design, risk, or scope. A simple change can explain the chosen approach in one direct sentence. Do not add an alternatives section as boilerplate.
-- **Make non-visual work understandable** - use a table, diagram, terminal output, or metric comparison when it materially improves review. Prefer a short problem/change/outcome explanation when a visual aid would repeat the prose.
-- **Include monitoring context in code PRs** - when a PR changes production behavior, include a link to the relevant Datadog dashboard, Splunk query, or SLO widget. Add a "What to watch after merge" note with the specific metric or alert that would surface a regression. Don't limit monitoring details to dedicated monitoring repos.
+
+The detailed rules moved to `pull-request-workflow`. Load that skill before any PR operation or PR-bound draft. The global safety rules above still apply.
 
 ## Code Review Workflow
-When asked to review a PR (or conduct a self-review), follow this workflow automatically:
 
-### Multi-model review
-- Launch **at least 3 code review agents in parallel** using different models (e.g., Claude Opus, Claude Sonnet, GPT) to get diverse perspectives
-- **Never use Gemini models** for plan reviews, code reviews, PR-description reviews, or any other multi-model panel. Choose Claude, GPT, or another available non-Gemini model instead.
-- Keep all three reviewers and give at least one an explicit adversarial focus: challenge assumptions, trace failure paths, and try to disprove the proposed behavior. Use a model outside the host model's lineage when one is available.
-- For coordinated changes across multiple PRs or repositories, retrieve and review the actual sibling diffs. Check the seams between them only when sibling changes exist; never rely on descriptions as a substitute for code.
-- Include a simplification pass that asks what code, configuration, or abstraction can be removed without losing required behavior.
-- Synthesize findings across all models. Surface a finding once you independently verify it, even if only one model raised it; multiple models flagging an issue is a strong signal but still requires verification before reporting. Do not downgrade or drop a verified finding solely because it is pre-existing or sits outside the diff; label it instead (see "What to focus on")
-- Present a unified, deduplicated report using the **Output format** below: lead with a merge decision, group findings by blocking impact, and name what looks right
-
-#### Convergence loop (code gate only)
-Run the **code diff** gate as a convergence loop, not a single pass. Follow-up observations do not reset convergence:
-- After addressing a batch of verified blocking or fix-before-merge findings, re-run the full multi-model panel on the updated diff.
-- A clean round has no new verified **Blocking** or **fix-before-merge** findings. A verified follow-up can remain when its current value does not justify added scope.
-- Every initial review and re-review must use newly launched, session-free reviewers. Do not resume a reviewer's prior conversation, reuse a fixing agent as a reviewer, or let a reviewer certify code written to satisfy its own recommendation. Give the new panel the updated diff and relevant requirements, but treat prior findings, fix summaries, and tests from the fix turn as claims that require independent verification.
-- **Cap at 5 rounds.** Stop when a round is clean. If the fifth round still surfaces a verified blocking finding, fix it, say the cap was reached, and let me decide whether to continue.
-- Record the final clean round with `pr-marker write code-review --models a,b,c --convergence-rounds N -`. Both `pr-marker` and `gh-guard` reject a code-review marker without valid final-clean-round metadata.
-- The **plan** and **PR-description** gates stay single-pass unless I ask otherwise.
-
-### Verification standard
-- **Every finding must be verified before reporting it.** Do not report potential issues based on assumptions alone.
-- Verify by reading the actual source files, checking call sites, tracing data flow, or running tests/experiments
-- Clearly label findings with verification status: **Verified** (confirmed by reading code or testing), **Observation** (plausible but depends on context outside the diff), or **Unverified** (could not confirm; include reasoning)
-- When a finding involves runtime behavior, write or run a test to confirm it rather than speculating
-
-### Review passes: scope, reuse, and reliability
-Before drilling into line-level correctness, judge the shape of the change. These are first-class findings, not nitpicks.
-- **Smallest safe change (MVP scope)** - ask what business problem this solves *now* and what the smallest safe version is. Flag scope that solves a larger imagined problem: speculative extension points, config knobs nothing uses yet, generalization added ahead of a second caller. Recommend what could be follow-up once the pattern proves itself.
-- **Evidence-weighted edge cases** - do not turn every reachable corner case into required scope. Before requesting code or tests, assess reachability, observed frequency, failure impact, recovery options, and added implementation cost. Use available traffic, logs, incidents, support reports, contracts, or comparable production evidence. Record the source and measurement window when data exists. Verification proves that a case is real; it does not prove that fixing it now is valuable.
-- **Edge-case disposition** - use these outcomes consistently:
-  - **Blocking:** security, authorization, privacy, secret exposure, data corruption, destructive actions, irreversible migrations, external contract breaks, broad outages, or failures that defeat rollback. Severe impact overrides low frequency and implementation cost.
-  - **Fix before merge:** a reachable case has concrete traffic, incident, support, or contract evidence, and the focused fix has proportionate complexity.
-  - **Follow-up:** a reachable, recoverable case has low observed frequency, uncertain value, or a fix that adds meaningful branches, abstractions, fixtures, or maintenance.
-  - **No comment:** the case is unreachable, speculative, or low-value, with no blocking safety or contract impact.
-- **Missing evidence** - do not assume a recoverable edge case is common because production data is unavailable. Label the evidence gap. Use impact, reachability, contracts, reversibility, and detection speed to choose a disposition.
-- **Reuse existing primitives** - before accepting a new helper, service, dependency, queue, table, or abstraction, check whether an existing helper, policy, schema, job, pattern, or owner already covers it. Duplicating or bypassing an existing primitive creates drift; name the primitive the change should reuse. Generalizes the library-migration redundancy check below.
-- **Over-optimization and premature abstraction** - flag caching without evidence of a bottleneck, batching without need, complex config, or abstractions built for imagined future cases. Optimize only what a measurement shows is the bottleneck.
-- **Reliability and operations** - for changes to production behavior, check retries, timeouts, consistency on retry/replay, migrations, partial-failure handling, deploy order, the rollback path, and whether the failure mode would surprise on-call. Tie this to the "Include monitoring context in code PRs" rule. Use "consistency", never `idempotency`.
-- **Performance footprint** - judge the change's overall cost, not just its correctness: added database queries or N+1s, extra allocations or memory growth, larger response or client-bundle size, new synchronous or blocking calls, and added latency across the whole request, render, or job. For a change on a request path or inside a large loop, estimate the added cost (queries, calls, bytes) and say whether it warrants a measurement or a benchmark before shipping. This is the holistic companion to the narrower "New hot-path cost" check below and to "Design for 10x".
-- **New hot-path cost** - when the diff adds per-request work on a hot path (a new feature-flag or config lookup, an extra query, a cache or network call, an N+1), confirm it reuses the batching, caching, or preloading the surrounding path already relies on. Such a regression is invisible to functional tests, so it has to be caught in review; for example, a feature-flag read added to a private application's controller action but not to that action's feature preloader costs a separate cache call every request. Name the batch or cache to reuse.
-
-### What to focus on
-- **Correctness over style** - only report bugs, logic errors, security issues, race conditions, type mismatches, and missing high-value or blocking edge cases. Do not flag subjective style, formatting, naming conventions, or personal preferences. This suppression does not extend to codified conventions documented in these instructions (such as the comment-minimalism rule below); enforce those as first-class findings, not nitpicks.
-- **Comment minimalism (codified, not a nitpick)** - flag comments that restate what the code or the method/variable name already says, or that explain "what" instead of "why". This enforces the "Comments explain why, not what" rule from Code Style, so surface redundant or over-verbose comments for removal even though generic comment style is otherwise suppressed. Apply it when authoring too: strip redundant comments before committing.
-- **Unreachable code and error-path analysis** - do a focused pass to verify that every code path is actually reachable, especially fallback/else branches. Check that commands which can exit non-zero (e.g., `grep` with no matches, failed pipes under `set -eo pipefail`, empty globs) don't silently abort before reaching intended fallback logic. Trace each branch, not just the happy path, to confirm it can actually execute.
-- **Security-focused review** - do a dedicated pass specifically for security concerns. In particular, check for: script injection via unsanitized interpolation (e.g., `${{ }}` in GitHub Actions expanding attacker-controlled input before bash runs), command injection through variable expansion, secrets leaked into logs, and unsafe handling of user-controlled or PR-controlled data. Flag any path where external input flows into command execution without proper sanitization.
-- **Check whether the author has addressed existing review feedback** - read through all review threads and comments before reporting. Note unresolved threads.
-- **Check for unintended behavioral changes** - compare new code against the existing patterns in the same file or module
-- **Removed safety nets** - when a refactor deletes a defensive guard (a `None`/empty check, validation, `try/except`, `if not connection:` fallback, or an explicit `raise`), do not assume the new library or path replaces it. Ask explicitly: what happens now on that failure case? Flag any removed guard whose failure mode is no longer handled, naming the old check and the new unguarded path.
-- **Library-migration redundancy** - when a PR swaps libraries, check whether scaffolding the old library needed is now dead weight the new one provides natively: custom retry/backoff, timeout wrappers, session monkey-patching, manual JWT/token construction, pagination helpers. Flag custom code that duplicates a built-in default and recommend dropping it.
-- **Redundant round-trips** - flag values decomposed and then immediately recomposed (e.g. `owner, name = x.split("/")` followed by `get_repo(f"{owner}/{name}")`) when the split can drop or mangle data the recompose assumes intact (`split("/")` vs `split("/", 1)`, lost trailing slashes). Skip it when the transform is purely cosmetic; report it as a low-priority simplification when collapsing removes a real failure surface.
-- **Check docstring/comment accuracy** - verify that docstrings, comments, and commit messages accurately describe what the code actually does. Flag cases where stated behavior differs from implemented behavior. Also verify type hints and function signatures match how the function is actually called (e.g., a parameter typed `str` but always passed an `int`).
-- **Test quality pass** - run the `test-quality` skill before synthesizing the code review. Map each accepted changed behavior to a specific test and observable assertion. Check boundaries and failures that the evidence-weighted edge-case rubric classifies as blocking or fix-before-merge. Flag tests that only assert mock calls, constructed arguments, non-null/type checks, or framework behavior instead of the owning abstraction's result. Coverage is a clue, not proof that these scenarios are specified.
-- **Persistent test coverage gaps** - when the diff adds accepted behavior, a contract, or a blocking safety path, check whether a committed regression test exists. Do not require code or tests for speculative behavior that the evidence-weighted rubric classifies as follow-up or no comment. Preserve existing feature-flag-off and failure-path regression tests during refactors unless the protected behavior was intentionally removed.
-- **Dependency hygiene** - when a PR adds, removes, or swaps a library, verify the dependency manifests and lockfiles agree with actual imports. Flag dependencies left in `pyproject.toml`/`requirements.txt`/lockfile that are no longer imported anywhere, and a dependency someone proposes removing that is in fact still imported (name the file and line). Surface the "is this still needed?" question with the answer, not just silence.
-- **Surface high-value pre-existing issues** - tight scoping to the diff is the default, but do not silently drop a verified latent bug, dead code path, or comment/code mismatch you find in a file the PR touches just because the PR did not introduce it. Report it labeled **pre-existing**, with a recommendation to fix-while-here or file a follow-up issue (see "Capture side quests as issues").
-- **Idiomatic language check (self-review only)** - when conducting a self-review, do a pass for language idiom violations that would signal unfamiliarity to a reviewer. Examples: `filter` vs `select` in Ruby, `list()` vs list comprehension in Python, `.forEach` vs `.map` in JS when the return value matters. This is not about style nitpicking; it's about using the language the way its community expects. Only flag during self-review, not when reviewing others' PRs.
-- **React composition check** - when reviewing React code, flag components that build a large derived data shape and then walk it with conditionals. The canonical smell: a `.map()` containing a multi-branch `if`/`switch` with type casts handling 3 or more variants inline. Suggest extraction into per-variant components; this improves testability (each component is independently unit-testable) and readability (the container reads like a table of contents). When the extracted components also co-locate their data subscriptions via hooks, siblings avoid unnecessary re-renders.
-
-### Visible reasoning bar
-A diff can look finished before the author has shown why it is safe. This matters most for agent-assisted changes. After reading the diff and surrounding code, check whether the PR (body, comments, tests) makes enough reasoning visible to review without reconstructing the author's thinking:
-- Why does this change exist now?
-- Why this approach instead of the obvious alternatives?
-- What validation is trusted, and what did it prove?
-- What is least certain or intentionally left as follow-up?
-
-Missing reasoning is not automatically blocking; it becomes blocking when a reviewer cannot judge correctness, safety, rollback, or scope without guessing. Ask for the smallest useful explanation, not a transcript dump: prefer "I can't tell whether this handles the empty-result case because the PR only says tests pass; add the case you validated or a focused test" over "add more context".
-
-### Comment quality bar
-Only raise a comment that clears at least one of these bars:
-- The change can ship wrong behavior, break an important path, or make rollback hard.
-- It introduces a credible security, privacy, or data-integrity risk.
-- It duplicates or bypasses an existing primitive in a way that creates drift.
-- It adds scope, abstraction, dependency, or optimization the business problem doesn't need.
-- It makes future maintenance materially harder without a clear tradeoff.
-- The tests miss a blocking or fix-before-merge case tied to accepted behavior.
-
-For an edge-case comment, include the disposition, evidence source and window, expected impact, and complexity tradeoff. Do not request code when the evidence supports follow-up or no comment.
-
-Do not leave bare "consider..." comments: if the issue is real, say what can fail and what simpler or safer shape fixes it. Reinforces "one point per comment" below.
-
-### Tone and voice
-- All review feedback must match the tone and voice described in the **Writing Style** section of these instructions
-- Use additive, curious framing, not corrective or prescriptive
-- For **first-time contributors**, lead with what was done well, be warm and specific about how to fix issues, and provide step-by-step guidance rather than terse criticism
-- For established contributors or teammates, be concise and direct
-
-### Drafting comments
-- If findings warrant PR comments, draft them in my voice and **show me the draft before posting**
-- When specific code changes are needed, use GitHub suggestion blocks
-- One actionable point per comment; do not bundle multiple concerns
-
-### Output format
-Lead with a merge decision, group findings by blocking impact, and name what's right. Keep each finding's evidence tag (Verified / Observation / Unverified from the Verification standard) so the format adds a verdict without dropping the evidence bar. Decide each concern's disposition first: blocking issues go under **Blocking**; fix-before-merge and follow-up items go under **Non-blocking** (name which it is); concerns you decide to ignore don't get a comment at all.
-
-```markdown
-**Decision:** Needs changes before merge.  (or: Approve, or: Approve with follow-ups)
-
-**Blocking**
-1. `path/file.py:123` [Verified] - Authorization runs after the lookup, so a 404-vs-403 split leaks which private IDs exist. Move the permission check before the lookup, or reuse `ExistingPolicy.check`.
-
-**Non-blocking**
-1. `path/other.py:45` [Observation] - This helper duplicates `normalize_account_id`; reusing it reduces drift, but it can be follow-up if the behavior is intentionally different.
-
-**What looks right**
-The change keeps the data model unchanged and avoids a worker for a synchronous path, which is a reasonable MVP scope.
-```
-
-For a small review, a short paragraph with one or two findings beats a padded template. When composing from the code-review or security-review agents, re-rank findings by real impact and drop low-signal items; don't forward raw tool output.
-
-### Durable context loop
-When a review surfaces a repeated miss or hidden knowledge a future reviewer would have to rediscover, recommend the smallest durable artifact that prevents the same miss: a focused test, a short instruction in the repo's `.github/copilot-instructions.md` or `AGENTS.md`, adoption of an existing helper, a short decision note, or a lint/CI check when the failure is mechanical and likely to repeat (matches "Guardrails over guidelines"). Don't turn every finding into process; only do this when the miss is likely to recur. If it's a convention worth remembering across sessions, prompt me to store it as a memory.
-
-### Evidence synthesis
-For recurring reports, retrospectives, handoffs, and performance feedback:
-- Collect source evidence before interpreting it, then extract themes before reading editorial configuration that could bias the synthesis.
-- Tag claims with provenance and flag any conclusion supported by only one source.
-- Pause at an evidence gate before drafting high-stakes or sensitive output. Confirm that the evidence is sufficient, current, and relevant.
-- Structure findings as what happened, why it matters, and the impact.
-- Resolve uncertainty when the source can answer it. Disclose the few remaining low-confidence claims directly without weakening ownership of the output.
-- Preserve progress, source references, and recovery state so an interrupted session can resume without reconstructing the evidence set.
+The detailed workflow moved to `code-review-workflow`. Load that skill before any review and pass applicable requirements to review agents.
 
 ## Code Style & Languages
-- **Python** is the preferred scripting language for automation, data processing, and tooling
-- Use `argparse` for CLI argument parsing in Python scripts
-- Include proper error handling and logging; don't silently swallow errors
-- **Prefer affirmative logic**: Use an affirmative predicate when it preserves the same semantics. Prefer `value.present?` over `!value.nil?`, and prefer named positive predicates over negated absence checks or double negatives. Keep the explicit negative form when the language lacks an equivalent predicate or the affirmative form would change behavior.
-- **Comments explain why, not what** - only comment non-obvious design decisions (e.g., why one method was chosen over another, a constraint that isn't visible in the code). If the method name or variable name already communicates the intent, delete the comment. First drafts tend to over-comment; strip redundant comments before committing.
-- Prefer ecosystem tools (`pip install`, `npm init`, etc.) over manual configuration
-- Run `make lint` and `make test` before committing in repos that have a Makefile
-- Write unit tests for new functionality
-- **Test file naming, one per source module, no catch-alls**: When a repo follows a per-module test convention (e.g., `test_<module>.py` for each `<module>.py`), put new tests for a module in that module's existing test file (creating it if missing). Never create catch-all aggregator files like `test_coverage_additions.py`, `test_extra.py`, `test_misc.py`, or `test_new_stuff.py` - they hide what is being tested and break the source-to-test mapping a maintainer relies on. If a test exercises multiple modules, file it under the module whose behavior is most central to the assertion. Before adding a new `test_*.py` file, confirm there is no existing per-module test file that would be a better home.
-- Document changes to environment variables in the `README.md` file
-- **Linting philosophy**: When linting errors arise, **always fix the code to pass the linter** - do not suppress, ignore, or disable lint rules. Only disable a rule as a last resort if fixing the code is truly impossible or would make it significantly worse, and explain why in a comment. This applies to all linters (flake8, pylint, mypy, markdownlint, eslint, etc.).
-- **Cross-reference existing patterns**: When adding new code to a file that already has similar blocks (e.g., a new job in a workflow, a new route in a router, a new test in a suite), explicitly compare the new code against the existing code for naming conventions, formatting, and runtime behavior before committing. Don't pattern-match on the name you're defining; check how existing code actually references the same concept.
 
-### React & TypeScript Component Patterns
-
-When writing or reviewing React components, follow these composition principles. AI agents tend to produce monolithic components with big conditionals, one render function that switches on data type, full of `if`/`else` chains and type casts. That pattern works but creates comprehension debt: adding one row type means reading the whole feature.
-
-- **One component per concern, in its own file.** If a component renders different things based on a type discriminator (e.g., event type, action type, row variant), extract each case into a standalone component. Each should be small enough to read in one scroll.
-- **Prefer components that fetch their own data from hooks** in variant-driven UIs (lists of heterogeneous items, sidebars with mixed row types). Each component reads what it needs from tanstack-query or a shared hook rather than receiving rich objects via prop drilling. This keeps components self-contained and avoids unnecessary re-renders of siblings when one subscription updates. Pure presentational components that receive already-loaded data are still fine for leaf UI.
-- **Pass only primitives as props** (IDs, counts, enum values) when the child will fetch its own rich data. Props are for identity and configuration. If the parent already has the data and the child is purely presentational, passing the object directly is acceptable.
-- **Return null when there's nothing to show.** If a component's data means it shouldn't render, let it decide that internally (`if (!hasData) return null`). Don't push visibility logic into the parent.
-- **Container components read like a table of contents.** The parent composes children in a list; it should be obvious what the feature does by scanning the container without reading child implementations:
-  ```tsx
-  function SidebarActivity() {
-    return (
-      <>
-        <CommitsRow />
-        <ApprovedRow />
-        <ReviewCommentsRow />
-        <LabelsRow />
-      </>
-    )
-  }
-  ```
-- **When to flag in reviews**: see the "React composition check" bullet in the Code Review Workflow above. This is a composability and testability concern, not a style nitpick.
+The detailed rules moved to `engineering-practices`. Load that skill before implementation or review.
 
 ## Platform & System Design
-- **Design for safe contribution** - When creating new modules or features, always ask: "Could a PM or junior contributor add to this safely without understanding the whole system?" If no, the abstraction is wrong. Prefer designs where the blast radius of a bad change is small by default.
-- **Explicit domain boundaries** - When adding new functionality, identify and document which module owns which concern. Don't let unrelated capabilities leak across module boundaries (e.g., notification logic shouldn't touch payment logic). Flag boundary violations in reviews.
-- **Design for 10x** - When adding API calls, pagination, or data processing, always ask what happens if the input is 10x larger than today. Add rate limiting, backoff, batching, or other safeguards when measurements show a likely limit or when failure impact is blocking. Do not add speculative safeguards that create more complexity than the observed risk justifies.
-- **Semantic observability** - When adding error handling, include enough context to diagnose *who* is affected and *what change* caused it, not just the raw error. Log the feature, the actor, and the deployment version. Raw stack traces are the equivalent of useless dashboards.
-- **Self-healing and automatic rollback** - When designing CI/CD workflows or deployment pipelines, always include an automatic rollback path. Feature flags should be the default mechanism for shipping new behavior, so a bad change can be disabled without a redeploy.
-- **Guardrails over guidelines** - Where possible, encode pattern consistency as a lint rule or CI check rather than relying on human review to catch deviations. If a requirement matters, it should be a gate, not a suggestion.
-- **Assume imperfect changes** - Design systems so that a single bad commit, a hallucinated function call, or an incorrect configuration value can't cascade into a system-wide failure. Use input validation at boundaries, not just at the entry point. Treat every module boundary as a trust boundary.
-- **Conflict detection over conflict prevention** - Instead of relying on contributors to avoid conflicts (e.g., DB migrations, config changes), build detection into the pipeline. Conflicting migrations should be blocked automatically. Overlapping feature flags should raise a warning.
+
+The detailed rules moved to `engineering-practices`. Load that skill before architecture or system-design work.
 
 ## GitHub CLI & API
-- Use `--json` flag with `gh` for structured output that can be parsed programmatically
-- When searching across an org, use `gh search prs`, `gh search issues`, etc. with `--owner` filter
-- Always disable pagers: `git --no-pager`, `gh --no-pager`, or pipe to `cat`
-- **Gists**: I use gists frequently for drafts, sharing, and iteration. **Always create gists as private/secret by default** unless I explicitly ask for a public gist. When editing gists programmatically, use `gh api` to fetch raw file content instead of `gh gist view --raw` (which prepends the description and causes duplication on re-upload)
-- **Verify edits to external content**: After modifying any external content (gists, PR descriptions, issue bodies, discussion posts, wiki pages), always fetch the result back and verify the edit applied correctly; check that the content wasn't truncated, corrupted, or partially applied. Do not assume a successful API response means the content is correct. Read it back and confirm.
-- **No hard-wrapped prose in GitHub-bound markdown**: Never hard-wrap paragraphs at 80 characters in files destined for `gh pr edit --body-file`, `gh issue create --body-file`, or `gh gist create`. GitHub renders each literal newline as a visible line break. Use single-line paragraphs; let the renderer wrap. Lists, tables, code blocks, and headers are fine on their own lines.
-- **Trace the code path before writing rationale**: Before describing *why* a design works in PR descriptions, review comments, or issue replies, trace the actual runtime path in source code. Don't infer behavior from method names or documentation alone; read the implementation. Wrong rationale (even on correct code) erodes reviewer trust and creates confusion when the code is revisited later.
+
+The detailed rules moved to `github-operations`. Load `gh-axi` first and `github-operations` second for every GitHub operation.
 
 ## GitHub Actions Best Practices
-When creating or modifying GitHub Actions workflows:
-1. Always use the **latest release** of each action
-2. Pin actions to their **full commit SHA** (not tags) with a comment showing the **full version tag**: `uses: actions/checkout@<sha> # v6.0.2` (not just `# v6`)
-3. Validate workflow syntax before committing
-4. Use **dedicated tokens/secrets** for each workflow; do not reuse tokens across different workflows
-5. When filtering activity data for reports, exclude Dependabot PRs from summaries (they add noise)
+
+The detailed rules moved to `actions-security`. Load that skill before changing or reviewing workflow files or action metadata.
 
 ## Git & Version Control
 - Commit messages should be clear and descriptive with a summary line and body when needed
@@ -311,10 +132,8 @@ When creating or modifying GitHub Actions workflows:
 - Don't commit secrets, credentials, or tokens into source code
 
 ## Excel & Report Generation
-- Use **openpyxl** for Excel file creation in Python
-- Excel can only support one hyperlink per cell; use a separate References sheet for multiple links
-- For display in cells, use clean text (e.g., `github#418801`) without raw URLs
-- Match existing format/templates when extending reports; don't invent new layouts without asking
+
+The detailed rules moved to `spreadsheet-report-generation`. Load that skill for spreadsheet or generated-report work.
 
 ## Writing Style
 
@@ -450,10 +269,8 @@ Concrete good/bad pairs for the situations I correct most often. Match the patte
 - Why: reports measured latency and links to the monitoring plan. Follow the impact rule in [Pull Requests](#pull-requests).
 
 ## File & Project Organization
-- Store automation scripts in a `scripts/` directory
-- Use YAML config files for parameterized values (team rosters, schedules, etc.) rather than hardcoding
-- Keep generated output separate from source (e.g., `january-2026/`, `february-2026/` directories)
-- Add a `.gitignore` for common artifacts (`__pycache__/`, `*.pyc`, `.DS_Store`)
+
+The detailed rules moved to `engineering-practices`. Load that skill before changing project structure.
 
 ## macOS Environment
 - I run macOS; use macOS-compatible commands (e.g., `open` not `xdg-open`, `pbcopy` for clipboard)
@@ -464,78 +281,4 @@ Concrete good/bad pairs for the situations I correct most often. Match the patte
 
 ## My Open Source GitHub Actions: Shared Patterns
 
-The following conventions apply to my suite of GitHub Actions in the `github-community-projects` org: **contributors**, **evergreen**, **issue-metrics**, **stale-repos**, **cleanowners**, **measure-innersource**, **pr-conflict-detector**, and **ospo-reusable-workflows**. These repos share a consistent architecture; follow these patterns when working in any of them.
-
-### Project Structure
-- **Flat module layout** - all Python source files live at the repo root (no `src/` directory)
-- Common module split: `{main}.py`, `auth.py`, `env.py`, `markdown_writer.py` (or `markdown.py`)
-- Test files: `test_*.py` at root, one per source module, never catch-all aggregator files like `test_coverage_additions.py`
-- Linter configs live in `.github/linters/` (not repo root)
-- Action definition: `action.yml` (Docker-based action)
-
-### Python Conventions
-- **Python 3.11+** with modern type hints (`str | None`, not `Optional[str]`)
-- **Max line length: 150 characters** (configured in `.flake8`)
-- Environment variables managed through a centralized `env.py` module with `get_env_vars()` function
-- Helper functions: `get_bool_env_var()`, `get_int_env_var()` for typed env var access
-- **python-dotenv** for `.env` file support
-- **github3-py** (v4.0.1) as the primary GitHub API client library
-- Dual auth pattern: GitHub App credentials take priority over PAT (`auth.py`)
-- GitHub Enterprise support via `GH_ENTERPRISE_URL` env var
-- Docstrings with Args/Returns/Raises format
-
-### Linting & Formatting Stack
-All repos use the same 5-tool linting chain run via `make lint`:
-1. **flake8** - strict errors (E9, F63, F7, F82), then warnings with exit-zero; config at `.github/linters/.flake8`
-2. **isort** - import sorting; config at `.github/linters/.isort.cfg`
-3. **pylint** - minimum score 9.0; config at `.github/linters/.python-lint`
-4. **mypy** - type checking; config at `.github/linters/.mypy.ini`
-5. **black** - code formatting (no custom config)
-
-### Testing
-- **pytest** with **pytest-cov** - minimum 80% code coverage (`--cov-fail-under=80`)
-- `.coveragerc` omits test files from coverage
-- Heavy use of `unittest.mock` (`MagicMock`, `@patch`) for GitHub API mocking
-- CI tests against Python 3.11 and 3.12 matrix (some repos also 3.13)
-- Run via `make test`
-
-### Makefile Targets
-Every repo has the same three core targets:
-```
-make lint    # Run all 5 linters in sequence
-make test    # pytest with coverage
-make clean   # Remove __pycache__ and .pyc files
-```
-
-### Dockerfile Patterns
-- Base image: `python:3.14-slim` pinned by SHA digest
-- `pip install --no-cache-dir --no-deps` for reproducible builds
-- `apt-get install git` with cache cleanup
-- `HEALTHCHECK` for container scanner compliance
-- `ENTRYPOINT ["python3", "-u"]` with `CMD ["/action/workspace/{main}.py"]`
-- Checkov/Trivy skip annotations documented inline
-- OCI-compliant labels (maintainer, description, documentation URL)
-
-### CI/CD Workflow Patterns
-Standard workflow set across all repos:
-- **python-ci.yml** - lint + test on push/PR to main (Python version matrix)
-- **docker-ci.yml** - build Docker image (linux/amd64)
-- **super-linter.yaml** - GitHub Super-Linter for markdown, YAML, shell
-- **release.yml** - automated semantic versioning releases to GHCR
-- **scorecard.yml** - OpenSSF security scorecard
-- **stale.yaml** - auto-close stale issues/PRs
-- **auto-labeler.yml** - PR label automation
-- All actions pinned to SHA with version comments
-- Default permissions: read-only (`persist-credentials: false`)
-
-### Dependencies (shared across repos)
-**Production**: `github3-py`, `python-dotenv`, `requests`, `cryptography` (for GitHub App JWT)
-**Test**: `pytest`, `pytest-cov`, `black`, `flake8`, `pylint`, `mypy`, `isort`, `types-requests`
-
-### Key Design Principles
-- **Fail-fast validation**: `get_env_vars()` validates all required config upfront
-- **Graceful degradation**: API failures log warnings and continue, don't crash
-- **Dual output**: Most actions produce both Markdown (for GitHub issue/summary) and JSON
-- **GitHub Actions Step Summary**: Reports auto-injected into workflow summary
-- **65,535 char limit**: Markdown reports handle GitHub's issue body size limit
-- **Conventional commits**: PR titles use conventional commit prefixes for changelog generation
+The detailed rules moved to `open-source-actions-maintenance`. Load that skill for the named repositories and shared architecture.
