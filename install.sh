@@ -9,8 +9,13 @@ DOTFILES_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Symlink global instructions for Copilot CLI and Pi.
 if [ -f "$DOTFILES_DIR/.github/copilot-instructions.md" ]; then
   instructions_source="$DOTFILES_DIR/.github/copilot-instructions.md"
-  mkdir -p "$HOME/.copilot" "$HOME/.pi/agent"
-  for target in "$HOME/.copilot/copilot-instructions.md" "$HOME/.pi/agent/AGENTS.md"; do
+  pi_agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+  case "$pi_agent_dir" in
+    "~") pi_agent_dir="$HOME" ;;
+    "~/"*) pi_agent_dir="$HOME/${pi_agent_dir#\~/}" ;;
+  esac
+  mkdir -p "$HOME/.copilot" "$pi_agent_dir"
+  for target in "$HOME/.copilot/copilot-instructions.md" "$pi_agent_dir/AGENTS.md"; do
     if [ -L "$target" ] || [ ! -e "$target" ]; then
       ln -sfn "$instructions_source" "$target"
       echo "✓ Linked global instructions → $target"

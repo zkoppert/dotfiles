@@ -94,6 +94,7 @@ class InstallScriptTest(unittest.TestCase):
         copilot.chmod(0o755)
 
         self.env = dict(os.environ)
+        self.env.pop("PI_CODING_AGENT_DIR", None)
         self.env["HOME"] = str(self.home)
         self.env["PATH"] = f"{self.fake_bin}{os.pathsep}{self.env['PATH']}"
         self.env["GIT_CONFIG_GLOBAL"] = str(self.home / ".gitconfig")
@@ -221,6 +222,55 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(copilot_instructions.resolve(), installed_source.resolve())
         self.assertEqual(pi_instructions.resolve(), installed_source.resolve())
         self.assertFalse((self.home / "tests" / "fixtures" / "instruction-migration").exists())
+
+    def test_instruction_links_follow_the_active_pi_agent_directory(self) -> None:
+        instructions = self.repo / ".github" / "copilot-instructions.md"
+        instructions.parent.mkdir()
+        instructions.write_text("# Shared guidance\n", encoding="utf-8")
+        default = self.home / ".pi" / "agent" / "AGENTS.md"
+        for setting, directory in (
+            (None, default.parent),
+            ("", default.parent),
+            (str(self.home / "absolute agent"), self.home / "absolute agent"),
+            ("~/custom agent", self.home / "custom agent"),
+            ("relative agent", self.repo / "relative agent"),
+            ("~", self.home),
+        ):
+            with self.subTest(setting=setting):
+                default.unlink(missing_ok=True)
+                if setting is None:
+                    self.env.pop("PI_CODING_AGENT_DIR", None)
+                else:
+                    self.env["PI_CODING_AGENT_DIR"] = setting
+
+                self.run_installer()
+
+                for target in (
+                    self.home / ".copilot" / "copilot-instructions.md",
+                    directory / "AGENTS.md",
+                ):
+                    self.assertTrue(target.is_symlink())
+                    self.assertEqual(target.resolve(), instructions.resolve())
+                    self.assertEqual(target.read_bytes(), b"# Shared guidance\n")
+                if directory != default.parent:
+                    self.assertFalse(default.exists())
+
+    def test_custom_pi_instruction_files_are_preserved(self) -> None:
+        instructions = self.repo / ".github" / "copilot-instructions.md"
+        instructions.parent.mkdir()
+        instructions.write_text("# Shared guidance\n", encoding="utf-8")
+        self.env["PI_CODING_AGENT_DIR"] = "~/custom agent"
+        target = self.home / "custom agent" / "AGENTS.md"
+        target.parent.mkdir()
+        target.write_text("Keep my guidance.\n", encoding="utf-8")
+
+        for _ in range(2):
+            result = self.run_installer()
+
+            self.assertFalse(target.is_symlink())
+            self.assertEqual(target.read_bytes(), b"Keep my guidance.\n")
+            self.assertIn(f"{target} exists and is not a symlink", result.stdout)
+            self.assertFalse((self.home / ".pi" / "agent" / "AGENTS.md").exists())
 
     def test_existing_instruction_and_skill_files_are_preserved(self) -> None:
         source_skill = Path(__file__).with_name(".copilot") / "skills" / "actions-security"

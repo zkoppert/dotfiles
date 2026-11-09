@@ -810,11 +810,15 @@ class CopilotEnvironmentTest(unittest.TestCase):
         self.assertIn(f"Pi instructions do not resolve to the dotfiles checkout: {active / 'AGENTS.md'}", missing.stdout)
 
         (active / "AGENTS.md").symlink_to(source)
-        complete = subprocess.run(
-            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
-        )
+        for setting in (str(active), "~/custom-agent", "custom-agent"):
+            with self.subTest(setting=setting):
+                env["PI_CODING_AGENT_DIR"] = setting
+                complete = subprocess.run(
+                    [str(self.verifier)], cwd=self.home, env=env, capture_output=True, text=True, check=False,
+                )
 
-        self.assertEqual(complete.returncode, 0, complete.stdout + complete.stderr)
+                self.assertEqual(complete.returncode, 0, complete.stdout + complete.stderr)
+        env["PI_CODING_AGENT_DIR"] = "~/custom-agent"
         for relative_path in ("AGENTS.override.md", "skills/gh-axi/SKILL.md"):
             with self.subTest(path=relative_path):
                 shadow = active / relative_path

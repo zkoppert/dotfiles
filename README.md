@@ -23,7 +23,7 @@ The global file keeps rules that apply to every session. Task-specific guidance 
 
 `install.sh` links the same global file for Copilot and Pi. It links local skills into `~/.copilot/skills` and `~/.agents/skills`, then mirrors installed catalog skills into `~/.agents/skills`. Existing non-symlink files remain unchanged.
 
-`verify-codespace-copilot-env` requires repository skills to resolve to this checkout and Pi catalog mirrors to resolve to their Copilot source. It checks Pi's first available context file, including `AGENTS.override.md`, against the shared instructions. `PI_CODING_AGENT_DIR` selects Pi's agent directory; the default is `~/.pi/agent`.
+`verify-codespace-copilot-env` requires repository skills to resolve to this checkout and Pi catalog mirrors to resolve to their Copilot source. It checks Pi's first available context file, including `AGENTS.override.md`, against the shared instructions. Both the installer and verifier honor `PI_CODING_AGENT_DIR`; the default is `~/.pi/agent`. Absolute, relative, and home-relative directory paths are supported.
 
 Pi loads `<agent-directory>/skills` before `~/.agents/skills`. Native entries can replace managed skills with the same declared name. The verifier therefore requires the native root to be absent or empty, even when its skills are unrelated. Keep user skills in `~/.agents/skills` instead. Neither the installer nor the verifier moves or deletes existing native skills or context overrides.
 
@@ -35,7 +35,9 @@ Run the preservation check after changing global instructions or moving guidance
 python3 scripts/verify_instruction_migration.py
 ```
 
-The check compares each original section with its runtime owner. It also validates skill metadata, routing entries, compatibility headings, and the migration baseline. After an intentional guidance edit, review the content diff and refresh the hashes:
+The check compares each original section with its runtime owner. It also validates skill metadata, routing entries, compatibility headings, and the migration baseline. Frontmatter supports flat, single-line scalar fields, including plain or quoted strings and boolean invocation flags. The check rejects unsupported YAML forms, including inline comments, nested mappings, and multiline values, rather than guessing their meaning.
+
+After an intentional guidance edit, review the content diff and refresh the hashes:
 
 ```bash
 python3 scripts/verify_instruction_migration.py --update-baseline --acknowledge-guidance-changes

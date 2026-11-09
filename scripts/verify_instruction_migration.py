@@ -69,8 +69,8 @@ def parse_h2_blocks(text: str, *, require_h2: bool = True) -> list[tuple[str, st
     return blocks
 
 
-def parse_frontmatter(path: Path) -> dict[str, str]:
-    """Read the simple scalar fields used by Agent Skills frontmatter."""
+def parse_frontmatter(path: Path) -> dict[str, Any]:
+    """Read a strict subset of scalar Agent Skills frontmatter."""
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
         raise ValueError("missing opening frontmatter delimiter")
@@ -78,14 +78,39 @@ def parse_frontmatter(path: Path) -> dict[str, str]:
         frontmatter, _ = text[4:].split("\n---\n", 1)
     except ValueError as error:
         raise ValueError("missing closing frontmatter delimiter") from error
-    values: dict[str, str] = {}
-    for line in frontmatter.splitlines():
-        if not line.strip():
+    values: dict[str, Any] = {}
+    for line in frontmatter.split("\n"):
+        if not line.replace("\t", " ").isprintable():
+            raise ValueError("unsupported frontmatter control character")
+        if not line.strip(" \t") or line.lstrip(" \t").startswith("#"):
             continue
-        if ":" not in line:
-            raise ValueError(f"unsupported frontmatter line: {line}")
-        key, value = line.split(":", 1)
-        values[key.strip()] = value.strip()
+        entry = re.fullmatch(r"([a-z][a-z0-9-]*):(?:[ \t]+(.*))?", line)
+        if entry is None:
+            raise ValueError("unsupported frontmatter mapping entry")
+        key, raw_value = entry.groups()
+        if key in values:
+            raise ValueError(f"duplicate frontmatter key: {key}")
+        scalar = (raw_value or "").strip(" \t")
+        if scalar in {"true", "True", "TRUE"}:
+            value: Any = True
+        elif scalar in {"false", "False", "FALSE"}:
+            value = False
+        elif scalar in {"", "~", "null", "Null", "NULL"}:
+            value = None
+        elif scalar.startswith('"'):
+            try:
+                value = json.loads(scalar)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"unsupported frontmatter scalar for {key}") from error
+        elif re.fullmatch(r"'(?:[^']|'')*'", scalar):
+            value = scalar[1:-1].replace("''", "'")
+        elif re.match(r"[A-Za-z_]", scalar) and not re.search(r":(?:[ \t]|$)|(?:^|[ \t])#", scalar):
+            value = scalar
+        else:
+            raise ValueError(f"unsupported frontmatter scalar for {key}")
+        if isinstance(value, str) and not value.isprintable():
+            raise ValueError(f"unsupported frontmatter scalar for {key}")
+        values[key] = value
     return values
 
 
@@ -304,20 +329,27 @@ def _validate_content(root: Path, manifest: dict[str, Any], baseline_text: str) 
             continue
         name = fields.get("name", "")
         description = fields.get("description", "")
+        if not isinstance(name, str):
+            errors.append(f"invalid skill name: {name!r}")
+            continue
         if name != directory_name:
             errors.append(f"skill name {name!r} does not match directory {directory_name!r}")
         if not SKILL_NAME.fullmatch(name) or len(name) > 64:
             errors.append(f"invalid skill name: {name!r}")
-        if not description or len(description) > 1024:
-            errors.append(f"invalid skill description length for {name!r}")
-        if fields.get("disable-model-invocation", "").lower() == "true":
+        if not isinstance(description, str) or not description.strip() or len(description) > 1024:
+            errors.append(f"invalid skill description for {name!r}")
+        disabled = fields.get("disable-model-invocation", False)
+        if not isinstance(disabled, bool):
+            errors.append(f"invalid model invocation flag for {name!r}")
+        elif disabled:
             errors.append(f"routed skill disables model invocation: {name}")
         if name in repo_skill_names:
             errors.append(f"duplicate repository skill name: {name}")
         repo_skill_names.add(name)
-        for term in requirements.get(name, []):
-            if term.casefold() not in description.casefold():
-                errors.append(f"skill description for {name} lacks trigger term {term!r}")
+        if isinstance(description, str):
+            for term in requirements.get(name, []):
+                if term.casefold() not in description.casefold():
+                    errors.append(f"skill description for {name} lacks trigger term {term!r}")
 
     for name in manifest["routed_skills"]:
         if f"`{name}`" not in global_text:

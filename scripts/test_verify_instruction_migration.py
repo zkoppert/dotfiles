@@ -184,6 +184,138 @@ class InstructionMigrationTest(unittest.TestCase):
             any("does not match directory" in error for error in validate(self.root))
         )
 
+    def test_quoted_frontmatter_preserves_scalar_meaning(self) -> None:
+        skill = self.root / ".copilot/skills/engineering-practices/SKILL.md"
+        body = skill.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+        for name, description, disabled in (
+            (
+                '"\\u0065ngineering-practices"',
+                '"Use for authoring, reviewing code, configuration, \\u0061rchitecture: # literal text."',
+                "false",
+            ),
+            (
+                "'engineering-practices'",
+                "'Use for authoring, reviewing code, configuration, architecture, and Zack''s reports.'",
+                "False",
+            ),
+            (
+                "engineering-practices",
+                "Use for authoring, reviewing code, configuration, architecture.",
+                "FALSE",
+            ),
+        ):
+            with self.subTest(name=name, disabled=disabled):
+                skill.write_text(
+                    "---\n# Skill routing metadata\n"
+                    f"name: {name}\ndescription: {description}\ndisable-model-invocation: {disabled}\n---\n{body}",
+                    encoding="utf-8",
+                )
+
+                self.assertEqual(validate(self.root), [])
+
+    def test_comments_cannot_supply_triggers_or_hide_disabled_invocation(self) -> None:
+        skill = self.root / ".copilot/skills/engineering-practices/SKILL.md"
+        body = skill.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+        before = self.migration_state()
+        for field, scalar in (
+            ("description", "# authoring reviewing code configuration architecture"),
+            ("disable-model-invocation", "true # rationale"),
+        ):
+            with self.subTest(field=field):
+                fields = {
+                    "name": "engineering-practices",
+                    "description": "Use for authoring, reviewing code, configuration, architecture.",
+                    "disable-model-invocation": "false",
+                }
+                fields[field] = scalar
+                header = "\n".join(f"{key}: {value}" for key, value in fields.items())
+                skill.write_text(f"---\n{header}\n---\n{body}", encoding="utf-8")
+
+                self.assertIn(
+                    f".copilot/skills/engineering-practices/SKILL.md: unsupported frontmatter scalar for {field}",
+                    validate(self.root),
+                )
+                result = self.run_rebaseline()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertEqual(self.migration_state(), before)
+
+    def test_frontmatter_requires_string_names_and_descriptions(self) -> None:
+        skill = self.root / ".copilot/skills/scalar-fixture/SKILL.md"
+        skill.parent.mkdir()
+        for field, scalar, expected in (
+            ("name", "true", "invalid skill name: True"),
+            ("name", "null", "invalid skill name: None"),
+            ("name", "42", ".copilot/skills/scalar-fixture/SKILL.md: unsupported frontmatter scalar for name"),
+            ("description", "true", "invalid skill description for 'scalar-fixture'"),
+            ("description", "FALSE", "invalid skill description for 'scalar-fixture'"),
+            ("description", "null", "invalid skill description for 'scalar-fixture'"),
+            ("description", "~", "invalid skill description for 'scalar-fixture'"),
+            ("description", "''", "invalid skill description for 'scalar-fixture'"),
+            ("description", '"   "', "invalid skill description for 'scalar-fixture'"),
+            ("description", "42", ".copilot/skills/scalar-fixture/SKILL.md: unsupported frontmatter scalar for description"),
+            ("description", "[valid, words]", ".copilot/skills/scalar-fixture/SKILL.md: unsupported frontmatter scalar for description"),
+            ("description", "{value: words}", ".copilot/skills/scalar-fixture/SKILL.md: unsupported frontmatter scalar for description"),
+        ):
+            with self.subTest(field=field, scalar=scalar):
+                fields = {"name": "scalar-fixture", "description": "Use for scalar fixtures."}
+                fields[field] = scalar
+                header = "\n".join(f"{key}: {value}" for key, value in fields.items())
+                skill.write_text(f"---\n{header}\n---\n# Scalar fixture\n", encoding="utf-8")
+
+                self.assertIn(expected, validate(self.root))
+
+    def test_frontmatter_requires_boolean_invocation_flags(self) -> None:
+        skill = self.root / ".copilot/skills/scalar-fixture/SKILL.md"
+        skill.parent.mkdir()
+        for scalar, expected in (
+            ("false", None),
+            ("False", None),
+            ("FALSE", None),
+            ("true", "routed skill disables model invocation: scalar-fixture"),
+            ("True", "routed skill disables model invocation: scalar-fixture"),
+            ("TRUE", "routed skill disables model invocation: scalar-fixture"),
+            ('"true"', "invalid model invocation flag for 'scalar-fixture'"),
+            ("'false'", "invalid model invocation flag for 'scalar-fixture'"),
+            ("null", "invalid model invocation flag for 'scalar-fixture'"),
+            ("yes", "invalid model invocation flag for 'scalar-fixture'"),
+            ("0", ".copilot/skills/scalar-fixture/SKILL.md: unsupported frontmatter scalar for disable-model-invocation"),
+        ):
+            with self.subTest(scalar=scalar):
+                skill.write_text(
+                    "---\nname: scalar-fixture\ndescription: Use for scalar fixtures.\n"
+                    f"disable-model-invocation: {scalar}\n---\n# Scalar fixture\n",
+                    encoding="utf-8",
+                )
+
+                errors = validate(self.root)
+
+                if expected is None:
+                    self.assertEqual(errors, [])
+                else:
+                    self.assertIn(expected, errors)
+
+    def test_frontmatter_rejects_duplicate_keys_and_unsupported_forms(self) -> None:
+        skill = self.root / ".copilot/skills/scalar-fixture/SKILL.md"
+        skill.parent.mkdir()
+        base = "name: scalar-fixture\ndescription: Use for scalar fixtures.\n"
+        for header, expected in (
+            (base + "name: scalar-fixture\n", "duplicate frontmatter key: name"),
+            (base + "description: Use for scalar fixtures.\n", "duplicate frontmatter key: description"),
+            (base + "disable-model-invocation: true\ndisable-model-invocation: false\n", "duplicate frontmatter key: disable-model-invocation"),
+            (base + "metadata:\n  name: ignored\n", "unsupported frontmatter mapping entry"),
+            (base + "<<: *defaults\n", "unsupported frontmatter mapping entry"),
+            ('"name": scalar-fixture\ndescription: Valid text\n', "unsupported frontmatter mapping entry"),
+            ("name: scalar-fixture\ndescription: |\n  Valid text\n", "unsupported frontmatter scalar for description"),
+            ("name: scalar-fixture\ndescription: &label Valid text\n", "unsupported frontmatter scalar for description"),
+            ("name: scalar-fixture\ndescription: !!str Valid text\n", "unsupported frontmatter scalar for description"),
+            ("name: scalar-fixture\ndescription: Valid text\x00\n", "unsupported frontmatter control character"),
+        ):
+            with self.subTest(header=header):
+                skill.write_text(f"---\n{header}---\n# Scalar fixture\n", encoding="utf-8")
+
+                self.assertIn(f".copilot/skills/scalar-fixture/SKILL.md: {expected}", validate(self.root))
+
     def test_missing_skill_trigger_term_is_rejected(self) -> None:
         skill = self.root / ".copilot/skills/engineering-practices/SKILL.md"
         skill.write_text(skill.read_text().replace("architecture, system design", "system design", 1))
