@@ -38,6 +38,8 @@ the PR description. Two paths:
   `~/repos/dotfiles/bin/pr-marker`.
 - The `validate-pr-with-codespace` skill is available. Reuse its Codespace
   lifecycle and app-bringup playbook instead of inventing a second startup flow.
+- The `ui-screenshot-presentation` skill is available. Use it when presenting
+  captured UI in the PR description.
 
 ## Step 1: scaffold the artifact layout
 
@@ -125,6 +127,10 @@ Repeat for each meaningful view. Look at each screenshot before moving on, follo
 the "use vision for visual work" rule; do not assume the capture is correct. Reject
 screenshots with missing CSS, broken icons, placeholder error pages, loading
 spinners, dev overlays, or a different route/state than the matching image.
+
+After capture, load `ui-screenshot-presentation` before composing annotated figures
+or before/after artwork. Preserve each authentic capture and style only its
+surrounding presentation.
 
 ### Environment fingerprint
 

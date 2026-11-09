@@ -15,7 +15,7 @@ My personal configuration for macOS and GitHub Codespaces.
 | Additional private skills | Installs `gh-axi`, investigation, release, and production database helpers. |
 | `gho11y` plugin | Supports GitHub observability investigations and production-signal analysis. |
 
-`record-demo` still owns pre-PR before/after evidence and the required `demo` marker. `validate-pr-with-codespace` validates an already-open PR and does not satisfy that marker. The `gho11y` plugin covers observability, while accessibility findings use `remediate-accessibility-audit`. `session-portability` handles general development handoffs, while specialized handoff skills keep their narrower workflows.
+`record-demo` still owns pre-PR before/after evidence and the required `demo` marker. `ui-screenshot-presentation` defines how to present authentic UI captures in PR descriptions. `validate-pr-with-codespace` validates an already-open PR and does not satisfy the demo marker. The `gho11y` plugin covers observability, while accessibility findings use `remediate-accessibility-audit`. `session-portability` handles general development handoffs, while specialized handoff skills keep their narrower workflows.
 
 ## How do I install it?
 
