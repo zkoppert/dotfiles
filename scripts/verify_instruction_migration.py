@@ -21,7 +21,7 @@ def sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def parse_h2_blocks(text: str) -> list[tuple[str, str]]:
+def parse_h2_blocks(text: str, *, require_h2: bool = True) -> list[tuple[str, str]]:
     """Split Markdown at H2 headings outside fenced code blocks."""
     lines = text.splitlines(keepends=True)
     starts: list[tuple[int, str]] = []
@@ -56,7 +56,9 @@ def parse_h2_blocks(text: str) -> list[tuple[str, str]]:
     if in_fence:
         raise ValueError("baseline contains an unclosed fenced code block")
     if not starts:
-        raise ValueError("baseline contains no H2 headings")
+        if require_h2:
+            raise ValueError("baseline contains no H2 headings")
+        return []
 
     blocks = [("preamble", text[: starts[0][0]])]
     for index, (start, name) in enumerate(starts):
@@ -190,15 +192,20 @@ def validate(root: Path, manifest_path: Optional[Path] = None) -> list[str]:
         extra = sorted(set(entry_ids) - set(parsed))
         errors.append(f"manifest block coverage differs: missing={missing}, extra={extra}")
 
-    runtime_paths = {root / entry["destination"] for entry in entries}
-    runtime_paths.update(root.glob(".copilot/skills/*/SKILL.md"))
-    runtime_paths.add(root / ".github/copilot-instructions.md")
+    migration_paths = {root / entry["destination"] for entry in entries}
+    migration_paths.update(
+        root / contract["destination"] for contract in manifest.get("runtime_contracts", [])
+    )
+    migration_paths.add(root / ".github/copilot-instructions.md")
+    runtime_paths = migration_paths | set(root.glob(".copilot/skills/*/SKILL.md"))
     runtime_blocks: dict[Path, list[tuple[str, str]]] = {}
     for path in sorted(runtime_paths):
         if not path.is_file():
             continue
         try:
-            blocks = parse_h2_blocks(path.read_text(encoding="utf-8"))
+            blocks = parse_h2_blocks(
+                path.read_text(encoding="utf-8"), require_h2=path in migration_paths
+            )
         except ValueError as error:
             errors.append(f"runtime instructions cannot be parsed in {path.relative_to(root)}: {error}")
             continue

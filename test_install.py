@@ -18,6 +18,16 @@ class InstallScriptTest(unittest.TestCase):
     """Exercise install.sh in an isolated home directory."""
 
     RC_FILES = (".zshrc", ".bashrc", ".bash_profile")
+    CATALOG_SKILLS = (
+        "validate-pr-with-codespace",
+        "session-portability",
+        "cleanup-worktrees",
+        "remediate-accessibility-audit",
+        "graphql-availability-investigator",
+        "milestone-release-tracking",
+        "prod-explain",
+        "gh-axi",
+    )
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -51,7 +61,8 @@ class InstallScriptTest(unittest.TestCase):
             "  [ \"${FAKE_GH_FAIL:-0}\" = 1 ] && exit 1\n"
             "  skill_name=${4#skills/}\n"
             "  mkdir -p \"$HOME/.copilot/skills/$skill_name\"\n"
-            "  printf '# installed\\n' > \"$HOME/.copilot/skills/$skill_name/SKILL.md\"\n"
+            "  printf '%s\\n' '---' \"name: $skill_name\" 'description: Catalog fixture' "
+            "'---' \"# $skill_name\" > \"$HOME/.copilot/skills/$skill_name/SKILL.md\"\n"
             "fi\n",
             encoding="utf-8",
         )
@@ -177,29 +188,31 @@ class InstallScriptTest(unittest.TestCase):
             )
             self.assertEqual(result.stdout, version + "\n", name)
 
-    def test_local_instruction_skills_are_linked_in_isolated_home(self) -> None:
-        source_skills = Path(__file__).with_name(".copilot") / "skills"
-        shutil.copytree(source_skills, self.repo / ".copilot" / "skills")
-        source_instructions = Path(__file__).with_name(".github") / "copilot-instructions.md"
+    def test_routed_skills_are_discoverable_in_both_clients(self) -> None:
+        source_root = Path(__file__).parent
+        manifest = json.loads(
+            (source_root / "tests/fixtures/instruction-migration/manifest.json").read_text(encoding="utf-8")
+        )
+        for name in manifest["routed_skills"]:
+            if name not in manifest["external_skills"]:
+                shutil.copytree(
+                    source_root / ".copilot" / "skills" / name,
+                    self.repo / ".copilot" / "skills" / name,
+                )
+        source_instructions = source_root / ".github" / "copilot-instructions.md"
         (self.repo / ".github").mkdir()
         shutil.copy2(source_instructions, self.repo / ".github" / "copilot-instructions.md")
 
         self.run_installer()
 
-        expected = {
-            "actions-security",
-            "code-review-workflow",
-            "engineering-practices",
-            "github-operations",
-            "open-source-actions-maintenance",
-            "pull-request-workflow",
-            "spreadsheet-report-generation",
-        }
         for root in (self.home / ".copilot" / "skills", self.home / ".agents" / "skills"):
-            for name in expected:
-                link = root / name
-                self.assertTrue(link.is_symlink(), f"{root}: {name}")
-                self.assertEqual(link.resolve(), (self.repo / ".copilot" / "skills" / name).resolve())
+            for name in manifest["routed_skills"]:
+                with self.subTest(root=root, skill=name):
+                    installed = root / name
+                    owner = self.home if name in manifest["external_skills"] else self.repo
+                    expected = owner / ".copilot" / "skills" / name
+                    self.assertTrue((installed / "SKILL.md").is_file())
+                    self.assertEqual(installed.resolve(), expected.resolve())
         copilot_instructions = self.home / ".copilot" / "copilot-instructions.md"
         pi_instructions = self.home / ".pi" / "agent" / "AGENTS.md"
         self.assertTrue(copilot_instructions.is_symlink())
@@ -263,41 +276,25 @@ class InstallScriptTest(unittest.TestCase):
         self.run_installer()
         second_run = self.run_installer()
 
-        expected_skills = (
-            "validate-pr-with-codespace",
-            "session-portability",
-            "cleanup-worktrees",
-            "remediate-accessibility-audit",
-            "graphql-availability-investigator",
-            "milestone-release-tracking",
-            "prod-explain",
-            "gh-axi",
-        )
-        self.assertEqual(
-            {path.name for path in (self.home / ".copilot" / "skills").iterdir()},
-            set(expected_skills),
-        )
+        for root in (self.home / ".copilot" / "skills", self.home / ".agents" / "skills"):
+            self.assertEqual({path.name for path in root.iterdir()}, set(self.CATALOG_SKILLS))
+            for name in self.CATALOG_SKILLS:
+                self.assertEqual(
+                    (root / name / "SKILL.md").read_text(encoding="utf-8"),
+                    f"---\nname: {name}\ndescription: Catalog fixture\n---\n# {name}\n",
+                )
+                self.assertEqual(
+                    (root / name).resolve(),
+                    (self.home / ".copilot" / "skills" / name).resolve(),
+                )
         gh_calls = (self.home / "gh.log").read_text(encoding="utf-8").splitlines()
-        for skill_name in expected_skills:
+        for name in self.CATALOG_SKILLS:
             expected_call = (
-                f"skill install private/catalog skills/{skill_name} "
+                f"skill install private/catalog skills/{name} "
                 "--agent github-copilot --scope user"
             )
             self.assertEqual(gh_calls.count(expected_call), 1)
-            self.assertEqual(
-                (
-                    self.home
-                    / ".copilot"
-                    / "skills"
-                    / skill_name
-                    / "SKILL.md"
-                ).read_text(encoding="utf-8"),
-                "# installed\n",
-            )
-            self.assertIn(
-                f"Copilot skill {skill_name} is already installed",
-                second_run.stdout,
-            )
+            self.assertIn(f"Copilot skill {name} is already installed", second_run.stdout)
 
         copilot_calls = (
             self.home / "copilot.log"
@@ -310,6 +307,75 @@ class InstallScriptTest(unittest.TestCase):
             "Copilot plugin gho11y is already installed",
             second_run.stdout,
         )
+
+    def test_existing_catalog_skills_are_mirrored_without_catalog_configuration(self) -> None:
+        self.run_installer()
+        del self.env["COPILOT_SKILL_CATALOG_REPO"]
+        for name in self.CATALOG_SKILLS:
+            (self.home / ".agents" / "skills" / name).unlink()
+
+        result = self.run_installer()
+
+        self.assertIn("COPILOT_SKILL_CATALOG_REPO is not set", result.stdout)
+        for name in self.CATALOG_SKILLS:
+            mirror = self.home / ".agents" / "skills" / name
+            source = self.home / ".copilot" / "skills" / name
+            self.assertTrue(mirror.is_symlink())
+            self.assertEqual(mirror.resolve(), source.resolve())
+            self.assertTrue((mirror / "SKILL.md").is_file())
+
+    def test_catalog_mirrors_preserve_owned_files_and_directories(self) -> None:
+        target = self.home / ".agents" / "skills" / "gh-axi"
+        target.parent.mkdir(parents=True)
+        for kind in ("file", "directory"):
+            with self.subTest(kind=kind):
+                if kind == "directory":
+                    target.mkdir()
+                    sentinel = target / "SKILL.md"
+                else:
+                    sentinel = target
+                sentinel.write_text("keep me\n", encoding="utf-8")
+
+                result = self.run_installer()
+
+                self.assertFalse(target.is_symlink())
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep me\n")
+                self.assertIn(f"{target} exists and is not a symlink", result.stdout)
+                sentinel.unlink()
+                if kind == "directory":
+                    target.rmdir()
+
+    def test_catalog_mirrors_refresh_existing_and_broken_symlinks(self) -> None:
+        owned = self.root / "owned-skill"
+        owned.mkdir()
+        sentinel = owned / "SKILL.md"
+        sentinel.write_text("keep me\n", encoding="utf-8")
+        mirror_root = self.home / ".agents" / "skills"
+        mirror_root.mkdir(parents=True)
+        (mirror_root / "gh-axi").symlink_to(owned)
+        (mirror_root / "prod-explain").symlink_to(self.root / "missing-skill")
+
+        self.run_installer()
+
+        for name in ("gh-axi", "prod-explain"):
+            self.assertTrue((mirror_root / name).is_symlink())
+            self.assertEqual(
+                (mirror_root / name).resolve(),
+                (self.home / ".copilot" / "skills" / name).resolve(),
+            )
+            self.assertTrue((mirror_root / name / "SKILL.md").is_file())
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep me\n")
+
+    def test_catalog_mirrors_follow_content_and_asset_updates(self) -> None:
+        self.run_installer()
+        source = self.home / ".copilot" / "skills" / "gh-axi"
+        mirror = self.home / ".agents" / "skills" / "gh-axi"
+        content = "---\nname: gh-axi\ndescription: Updated fixture\n---\n# Updated skill\n"
+        (source / "SKILL.md").write_text(content, encoding="utf-8")
+        (source / "reference.txt").write_text("updated reference\n", encoding="utf-8")
+
+        self.assertEqual((mirror / "SKILL.md").read_text(encoding="utf-8"), content)
+        self.assertEqual((mirror / "reference.txt").read_text(encoding="utf-8"), "updated reference\n")
 
     def test_disabled_plugin_produces_an_enable_instruction(self) -> None:
         plugin_dir = self.home / ".copilot"
@@ -575,8 +641,16 @@ class InstallScriptTest(unittest.TestCase):
     def test_node_staging_is_cleaned_when_command_linking_fails(self) -> None:
         self.prepare_node_install()
         runtime = self.prepare_existing_node_runtime()
+        real_ln = shutil.which("ln")
+        if real_ln is None:
+            self.fail("ln is required to exercise install.sh")
         ln = self.fake_bin / "ln"
-        ln.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        ln.write_text(
+            "#!/bin/sh\n"
+            '[ "$3" = "$HOME/.local/bin/node" ] && exit 1\n'
+            f'exec {shlex.quote(real_ln)} "$@"\n',
+            encoding="utf-8",
+        )
         ln.chmod(0o755)
 
         with self.assertRaises(subprocess.CalledProcessError):
@@ -742,7 +816,7 @@ class InstallScriptTest(unittest.TestCase):
         go.chmod(0o755)
         self.env["COPILOT_1UP_MODULE"] = "private.example/one-up@v1.2.3"
         # A host-installed 1up would skip the installation this test exercises.
-        for name in ("dirname", "mkdir", "chmod", "python3"):
+        for name in ("dirname", "mkdir", "chmod", "ln", "python3"):
             command = shutil.which(name)
             self.assertIsNotNone(command, f"{name} is required to exercise install.sh")
             (self.fake_bin / name).symlink_to(command)
@@ -806,17 +880,25 @@ class InstallScriptTest(unittest.TestCase):
     def test_missing_catalog_commands_are_nonfatal(self) -> None:
         (self.fake_bin / "gh").unlink()
         (self.fake_bin / "copilot").unlink()
-        dirname = shutil.which("dirname")
-        if dirname is None:
-            self.fail("dirname is required to exercise install.sh")
-        (self.fake_bin / "dirname").symlink_to(dirname)
+        for name in ("dirname", "mkdir", "ln"):
+            command = shutil.which(name)
+            if command is None:
+                self.fail(f"{name} is required to exercise install.sh")
+            (self.fake_bin / name).symlink_to(command)
         self.env["PATH"] = str(self.fake_bin)
+        source = self.home / ".copilot" / "skills" / "gh-axi"
+        source.mkdir(parents=True)
+        content = "---\nname: gh-axi\ndescription: Existing fixture\n---\n# GitHub operations\n"
+        (source / "SKILL.md").write_text(content, encoding="utf-8")
 
         result = self.run_installer()
 
         self.assertIn("gh is missing", result.stdout)
         self.assertIn("copilot is missing", result.stdout)
         self.assertIn("Dotfiles install complete.", result.stdout)
+        mirror = self.home / ".agents" / "skills" / "gh-axi"
+        self.assertEqual(mirror.resolve(), source.resolve())
+        self.assertEqual((mirror / "SKILL.md").read_text(encoding="utf-8"), content)
 
     def test_catalog_install_failures_are_nonfatal(self) -> None:
         self.env["FAKE_GH_FAIL"] = "1"
@@ -826,10 +908,11 @@ class InstallScriptTest(unittest.TestCase):
 
         self.assertEqual(
             result.stdout.count("Failed to install Copilot skill"),
-            8,
+            len(self.CATALOG_SKILLS),
         )
         self.assertIn("Failed to install Copilot plugin gho11y", result.stdout)
         self.assertIn("Dotfiles install complete.", result.stdout)
+        self.assertFalse((self.home / ".agents" / "skills").exists())
 
     def test_existing_deploy_alias_is_preserved(self) -> None:
         definitions = (

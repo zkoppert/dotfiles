@@ -204,42 +204,44 @@ def main() -> int:
     if not remote_helper.is_file() or not os.access(remote_helper, os.X_OK):
         failures.append(f"remote helper is missing or not executable: {remote_helper}")
 
-    instructions = Path.home() / ".copilot" / "copilot-instructions.md"
-    expected_instructions = (
-        Path(__file__).resolve().parent.parent
-        / ".github"
-        / "copilot-instructions.md"
-    )
-    if not instructions.is_symlink() or instructions.resolve() != expected_instructions:
-        failures.append(
-            f"Copilot instructions do not resolve to the dotfiles checkout: {instructions}"
-        )
+    expected_instructions = dotfiles_root / ".github" / "copilot-instructions.md"
+    expected_test_quality = dotfiles_root / ".copilot" / "skills" / "test-quality"
+    for client, instructions, skills_dir in (
+        (
+            "Copilot",
+            Path.home() / ".copilot" / "copilot-instructions.md",
+            Path.home() / ".copilot" / "skills",
+        ),
+        (
+            "Pi",
+            Path.home() / ".pi" / "agent" / "AGENTS.md",
+            Path.home() / ".agents" / "skills",
+        ),
+    ):
+        if not instructions.is_symlink() or instructions.resolve() != expected_instructions:
+            failures.append(
+                f"{client} instructions do not resolve to the dotfiles checkout: {instructions}"
+            )
 
-    skills_dir = Path.home() / ".copilot" / "skills"
-    installed_skills = (
-        {
-            path.name
-            for path in skills_dir.iterdir()
-            if (path / "SKILL.md").is_file()
-        }
-        if skills_dir.is_dir()
-        else set()
-    )
-    missing_skills = sorted(REQUIRED_SKILLS - installed_skills)
-    if missing_skills:
-        failures.append(f"missing skills: {', '.join(missing_skills)}")
-
-    test_quality = skills_dir / "test-quality"
-    expected_test_quality = (
-        Path(__file__).resolve().parent.parent
-        / ".copilot"
-        / "skills"
-        / "test-quality"
-    )
-    if not test_quality.is_symlink() or test_quality.resolve() != expected_test_quality:
-        failures.append(
-            f"test-quality does not resolve to the dotfiles checkout: {test_quality}"
+        installed_skills = (
+            {
+                path.name
+                for path in skills_dir.iterdir()
+                if (path / "SKILL.md").is_file()
+            }
+            if skills_dir.is_dir()
+            else set()
         )
+        missing_skills = sorted(REQUIRED_SKILLS - installed_skills)
+        if missing_skills:
+            failures.append(f"{client} missing skills: {', '.join(missing_skills)}")
+
+        test_quality = skills_dir / "test-quality"
+        if not test_quality.is_symlink() or test_quality.resolve() != expected_test_quality:
+            failures.append(
+                f"{client} test-quality does not resolve to the dotfiles checkout: {test_quality}"
+            )
+        print(f"{client} installed skills: {len(installed_skills)}")
 
     if "copilot" in missing_tools:
         failures.append("cannot list Copilot plugins")
@@ -302,7 +304,6 @@ def main() -> int:
     if shutil.which("az") and not command_succeeds(["az", "account", "show"]):
         failures.append("Azure CLI is not authenticated")
 
-    print(f"Installed skills: {len(installed_skills)}")
     print(f"Configured MCP servers: {len(configured_servers)}")
     print("OAuth status: verify DataDog, Sentry, and Slack with /mcp")
     if failures:

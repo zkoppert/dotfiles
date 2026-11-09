@@ -98,6 +98,19 @@ print("enabled" if any(plugin.get("enabled") is True for plugin in matches) else
   fi
 fi
 
+for skill_name in $CATALOG_SKILLS; do
+  skill_path="$HOME/.copilot/skills/$skill_name"
+  [ -f "$skill_path/SKILL.md" ] || continue
+  mkdir -p "$HOME/.agents/skills"
+  target="$HOME/.agents/skills/$skill_name"
+  if [ -L "$target" ] || [ ! -e "$target" ]; then
+    ln -sfn "$skill_path" "$target"
+    echo "✓ Linked catalog skill $skill_name → $target"
+  else
+    echo "⚠ $target exists and is not a symlink - skipping"
+  fi
+done
+
 # Install Linux-only dependencies for the remote Copilot environment.
 if [ "$(uname)" = "Linux" ]; then
   node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"

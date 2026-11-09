@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-import runpy
 import stat
 import subprocess
 import tempfile
@@ -15,6 +14,34 @@ from pathlib import Path
 
 class CopilotEnvironmentTest(unittest.TestCase):
     """Exercise MCP bootstrap and environment verification safely."""
+
+    DISCOVERY_ROOTS = {"Copilot": ".copilot/skills", "Pi": ".agents/skills"}
+    EXPECTED_SKILLS = (
+        "actions-security",
+        "cleanup-worktrees",
+        "code-review-workflow",
+        "engineering-practices",
+        "feature-flag-rollout",
+        "gh-axi",
+        "github-operations",
+        "graphql-availability-investigator",
+        "memory-sweep",
+        "milestone-release-tracking",
+        "nux-fr-handoff",
+        "open-source-actions-maintenance",
+        "pr-body-render-check",
+        "prod-explain",
+        "pull-request-workflow",
+        "record-demo",
+        "remediate-accessibility-audit",
+        "session-portability",
+        "spreadsheet-report-generation",
+        "test-quality",
+        "triage-dependabot",
+        "triage-notifications",
+        "validate-pr-with-codespace",
+        "validate-style",
+    )
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -197,24 +224,20 @@ class CopilotEnvironmentTest(unittest.TestCase):
         self.assertFalse((self.home / ".copilot" / "mcp-config.json").exists())
 
     def prepare_complete_environment(self) -> dict[str, str]:
-        required_skills = runpy.run_path(str(self.verifier))["REQUIRED_SKILLS"]
-        skills_dir = self.home / ".copilot" / "skills"
-        for skill in required_skills:
-            (skills_dir / skill).mkdir(parents=True)
-            (skills_dir / skill / "SKILL.md").write_text(
-                f"---\nname: {skill}\ndescription: Test skill\n---\n# {skill}\n",
-                encoding="utf-8",
-            )
-        test_quality = skills_dir / "test-quality"
-        for child in test_quality.iterdir():
-            child.unlink()
-        test_quality.rmdir()
-        test_quality.symlink_to(
-            Path(__file__).resolve().parent
-            / ".copilot"
-            / "skills"
-            / "test-quality"
-        )
+        source_root = Path(__file__).resolve().parent
+        for relative_path in self.DISCOVERY_ROOTS.values():
+            skills_dir = self.home / relative_path
+            skills_dir.mkdir(parents=True)
+            for name in self.EXPECTED_SKILLS:
+                skill = skills_dir / name
+                if name == "test-quality":
+                    skill.symlink_to(source_root / ".copilot" / "skills" / name)
+                else:
+                    skill.mkdir()
+                    (skill / "SKILL.md").write_text(
+                        f"---\nname: {name}\ndescription: Test skill\n---\n# {name}\n",
+                        encoding="utf-8",
+                    )
 
         remote_command = self.bin_dir / "copilot-codespace-session"
         remote_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -222,12 +245,10 @@ class CopilotEnvironmentTest(unittest.TestCase):
         remote_helper = self.home / ".local" / "bin" / "copilot-codespace-session"
         remote_helper.parent.mkdir(parents=True)
         remote_helper.symlink_to(remote_command)
-        instructions = self.home / ".copilot" / "copilot-instructions.md"
-        instructions.symlink_to(
-            Path(__file__).resolve().parent
-            / ".github"
-            / "copilot-instructions.md"
-        )
+        for relative_path in (".copilot/copilot-instructions.md", ".pi/agent/AGENTS.md"):
+            instructions = self.home / relative_path
+            instructions.parent.mkdir(parents=True, exist_ok=True)
+            instructions.symlink_to(source_root / ".github" / "copilot-instructions.md")
         gh_guard = Path(__file__).resolve().parent / "bin" / "gh-guard"
         (remote_helper.parent / "gh").symlink_to(gh_guard)
         pr_marker = Path(__file__).resolve().parent / "bin" / "pr-marker"
@@ -354,6 +375,11 @@ class CopilotEnvironmentTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("environment is ready", result.stdout)
+                for client in self.DISCOVERY_ROOTS:
+                    self.assertIn(
+                        f"{client} installed skills: {len(self.EXPECTED_SKILLS)}",
+                        result.stdout,
+                    )
                 self.assertNotIn("not-printed", result.stdout)
                 self.assertNotIn("internal.example", result.stdout)
 
@@ -551,25 +577,33 @@ class CopilotEnvironmentTest(unittest.TestCase):
 
     def test_verifier_requires_instructions_from_the_dotfiles_checkout(self) -> None:
         env = self.prepare_complete_environment()
-        instructions = self.home / ".copilot" / "copilot-instructions.md"
+        for client, relative_path in (
+            ("Copilot", ".copilot/copilot-instructions.md"),
+            ("Pi", ".pi/agent/AGENTS.md"),
+        ):
+            with self.subTest(client=client):
+                instructions = self.home / relative_path
+                source = instructions.readlink()
+                instructions.unlink()
+                instructions.write_text("# stale instructions\n", encoding="utf-8")
+                try:
+                    result = subprocess.run(
+                        [str(self.verifier)],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
 
-        instructions.unlink()
-        instructions.write_text("# stale instructions\n", encoding="utf-8")
-
-        result = subprocess.run(
-            [str(self.verifier)],
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn(
-            "Copilot instructions do not resolve to the dotfiles checkout",
-            result.stdout,
-        )
-        self.assertNotIn("environment is ready", result.stdout)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(
+                        f"{client} instructions do not resolve to the dotfiles checkout",
+                        result.stdout,
+                    )
+                    self.assertNotIn("environment is ready", result.stdout)
+                finally:
+                    instructions.unlink()
+                    instructions.symlink_to(source)
 
     def test_verifier_requires_ui_screenshot_presentation(self) -> None:
         env = self.prepare_complete_environment()
@@ -597,69 +631,126 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 self.assertNotIn("environment is ready", result.stdout)
 
     def test_verifier_requires_every_globally_routed_skill(self) -> None:
-        required_skills = runpy.run_path(str(self.verifier))["REQUIRED_SKILLS"]
+        env = self.prepare_complete_environment()
         manifest_path = (
             Path(__file__).with_name("tests")
             / "fixtures"
             / "instruction-migration"
             / "manifest.json"
         )
-        routed_skills = set(json.loads(manifest_path.read_text())["routed_skills"])
+        routed_skills = json.loads(manifest_path.read_text(encoding="utf-8"))["routed_skills"]
+        for client, relative_path in self.DISCOVERY_ROOTS.items():
+            for name in routed_skills:
+                with self.subTest(client=client, skill=name):
+                    skill = self.home / relative_path / name
+                    saved = self.root / "removed-skill"
+                    skill.rename(saved)
+                    try:
+                        result = subprocess.run(
+                            [str(self.verifier)],
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
 
-        self.assertEqual(set(), routed_skills - required_skills)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn(f"{client} missing skills: {name}", result.stdout)
+                        self.assertNotIn("environment is ready", result.stdout)
+                    finally:
+                        saved.rename(skill)
+
+        restored = subprocess.run(
+            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+
+    def test_verifier_rejects_missing_discovery_roots(self) -> None:
+        env = self.prepare_complete_environment()
+        for client, relative_path in self.DISCOVERY_ROOTS.items():
+            with self.subTest(client=client):
+                skills = self.home / relative_path
+                saved = self.root / "removed-skills"
+                skills.rename(saved)
+                try:
+                    result = subprocess.run(
+                        [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(
+                        f"{client} missing skills: {', '.join(sorted(self.EXPECTED_SKILLS))}",
+                        result.stdout,
+                    )
+                    self.assertNotIn("environment is ready", result.stdout)
+                finally:
+                    saved.rename(skills)
 
     def test_verifier_rejects_skills_without_skill_files(self) -> None:
         env = self.prepare_complete_environment()
-        skill = self.home / ".copilot" / "skills" / "gh-axi"
-        (skill / "SKILL.md").unlink()
-        for condition in ("empty directory", "broken symlink", "directory artifact"):
-            with self.subTest(condition=condition):
-                if condition == "broken symlink":
-                    skill.rmdir()
-                    skill.symlink_to(self.root / "missing-skill")
-                elif condition == "directory artifact":
-                    (skill / "SKILL.md").mkdir()
+        for client, relative_path in self.DISCOVERY_ROOTS.items():
+            skill = self.home / relative_path / "gh-axi"
+            skill_file = skill / "SKILL.md"
+            original = skill_file.read_bytes()
+            for condition in ("empty directory", "broken symlink", "directory artifact"):
+                with self.subTest(client=client, condition=condition):
+                    skill_file.unlink()
+                    if condition == "broken symlink":
+                        skill.rmdir()
+                        skill.symlink_to(self.root / "missing-skill")
+                    elif condition == "directory artifact":
+                        skill_file.mkdir()
+                    try:
+                        result = subprocess.run(
+                            [str(self.verifier)],
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
 
-                result = subprocess.run(
-                    [str(self.verifier)],
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn("missing skills: gh-axi", result.stdout)
-                self.assertNotIn("environment is ready", result.stdout)
-                if skill.is_symlink():
-                    skill.unlink()
-                    skill.mkdir()
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn(f"{client} missing skills: gh-axi", result.stdout)
+                        self.assertNotIn("environment is ready", result.stdout)
+                    finally:
+                        if skill.is_symlink():
+                            skill.unlink()
+                            skill.mkdir()
+                        elif skill_file.is_dir():
+                            skill_file.rmdir()
+                        skill_file.write_bytes(original)
 
     def test_verifier_requires_test_quality_from_the_dotfiles_checkout(self) -> None:
         env = self.prepare_complete_environment()
-        skill = self.home / ".copilot" / "skills" / "test-quality"
+        for client, relative_path in self.DISCOVERY_ROOTS.items():
+            with self.subTest(client=client):
+                skill = self.home / relative_path / "test-quality"
+                source = skill.readlink()
+                skill.unlink()
+                skill.mkdir()
+                (skill / "SKILL.md").write_text(
+                    "---\nname: test-quality\ndescription: Stale copy\n---\n",
+                    encoding="utf-8",
+                )
+                try:
+                    result = subprocess.run(
+                        [str(self.verifier)],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
 
-        skill.unlink()
-        skill.mkdir()
-        (skill / "SKILL.md").write_text(
-            "---\nname: test-quality\n---\n",
-            encoding="utf-8",
-        )
-
-        result = subprocess.run(
-            [str(self.verifier)],
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn(
-            "test-quality does not resolve to the dotfiles checkout",
-            result.stdout,
-        )
-        self.assertNotIn("environment is ready", result.stdout)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(
+                        f"{client} test-quality does not resolve to the dotfiles checkout",
+                        result.stdout,
+                    )
+                    self.assertNotIn("environment is ready", result.stdout)
+                finally:
+                    (skill / "SKILL.md").unlink()
+                    skill.rmdir()
+                    skill.symlink_to(source)
 
     def test_verifier_requires_the_exact_enabled_plugin(self) -> None:
         env = self.prepare_complete_environment()

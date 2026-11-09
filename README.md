@@ -21,7 +21,7 @@ My personal configuration for macOS and GitHub Codespaces.
 
 The global file keeps rules that apply to every session. Task-specific guidance lives in skills that load before the related action.
 
-`install.sh` links the same global file for Copilot and Pi. It also links local skills into both clients' standard discovery roots. Existing non-symlink files remain unchanged.
+`install.sh` links the same global file for Copilot and Pi. It links local skills into `~/.copilot/skills` and `~/.agents/skills`, then mirrors installed catalog skills into `~/.agents/skills`. Existing non-symlink files remain unchanged. `verify-codespace-copilot-env` checks required skills and managed guidance links in both clients' discovery roots.
 
 Run the preservation check after changing global instructions or moving guidance:
 

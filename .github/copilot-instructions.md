@@ -35,6 +35,10 @@ Load each applicable skill before the first relevant command, edit, review, or e
 
 - Never push, create or edit a PR, approve a PR, change review readiness, or resolve human feedback without the approval required by the global workflow.
 - Create PRs as drafts unless I explicitly request another state.
+- Never convert a ready PR to draft without my explicit request for that transition. The request must be in the current conversation. Preserve manual ready-for-review transitions.
+- Never approve a PR without my explicit confirmation. Showing an approval draft isn't permission to approve.
+- Create gists as private/secret unless I explicitly request a public gist.
+- Use dedicated tokens or secrets for each workflow; never reuse them across workflows.
 - Every plan, code, and PR-description review requires at least three distinct non-Gemini models.
 - Verify every review finding before reporting it.
 - Show drafted PR review comments before posting them.

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import tempfile
@@ -49,6 +50,75 @@ class InstructionMigrationTest(unittest.TestCase):
 
     def test_current_migration_is_complete(self) -> None:
         self.assertEqual(validate(self.root), [])
+
+    def test_unrelated_h1_only_skill_is_accepted(self) -> None:
+        skill = self.root / ".copilot/skills/direct-instructions/SKILL.md"
+        skill.parent.mkdir()
+        skill.write_text(
+            "---\nname: direct-instructions\n"
+            "description: Use for direct instruction fixtures.\n---\n"
+            "# Direct instructions\n\nRead the input before editing.\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(validate(self.root), [])
+
+    def test_h1_only_baseline_is_rejected(self) -> None:
+        manifest = self.load_manifest()
+        baseline = self.root / manifest["baseline"]["path"]
+        content = "# Baseline\n\nRead the input before editing.\n"
+        baseline.write_text(content, encoding="utf-8")
+        manifest["baseline"]["sha256"] = hashlib.sha256(content.encode()).hexdigest()
+        self.save_manifest(manifest)
+
+        self.assertEqual(validate(self.root), ["baseline contains no H2 headings"])
+        with self.assertRaisesRegex(ValueError, "contains no H2 headings"):
+            update_baseline(self.root, self.manifest_path, acknowledged=True)
+
+    def test_h1_only_migration_destination_is_rejected(self) -> None:
+        destination = self.root / ".copilot/skills/pull-request-workflow/SKILL.md"
+        destination.write_text(
+            destination.read_text().replace("## Pull Requests", "# Pull Requests", 1)
+        )
+
+        self.assertIn(
+            "runtime instructions cannot be parsed in "
+            ".copilot/skills/pull-request-workflow/SKILL.md: baseline contains no H2 headings",
+            validate(self.root),
+        )
+        with self.assertRaisesRegex(ValueError, "contains no H2 headings"):
+            update_baseline(self.root, self.manifest_path, acknowledged=True)
+
+    def test_h1_only_runtime_contract_is_rejected(self) -> None:
+        relative_path = ".copilot/skills/direct-instructions/SKILL.md"
+        skill = self.root / relative_path
+        skill.parent.mkdir()
+        content = (
+            "---\nname: direct-instructions\n"
+            "description: Use for direct instruction fixtures.\n---\n"
+            "# Direct instructions\n\nRead the input before editing.\n"
+        )
+        skill.write_text(content, encoding="utf-8")
+        manifest = self.load_manifest()
+        manifest["runtime_contracts"].append(
+            {
+                "id": "Direct instructions",
+                "destination": relative_path,
+                "sha256": hashlib.sha256(content.encode()).hexdigest(),
+            }
+        )
+        self.save_manifest(manifest)
+
+        errors = validate(self.root)
+
+        self.assertIn(
+            f"runtime instructions cannot be parsed in {relative_path}: baseline contains no H2 headings",
+            errors,
+        )
+        self.assertIn(
+            f"runtime contracts cannot be parsed in {relative_path}: baseline contains no H2 headings",
+            errors,
+        )
 
     def test_changed_baseline_is_rejected(self) -> None:
         baseline = self.root / self.load_manifest()["baseline"]["path"]
@@ -128,6 +198,23 @@ class InstructionMigrationTest(unittest.TestCase):
             "runtime contract changed: Pre-action skill routing",
             validate(self.root),
         )
+
+    def test_changed_global_safety_contract_is_rejected(self) -> None:
+        global_path = self.root / ".github/copilot-instructions.md"
+        original = global_path.read_text(encoding="utf-8")
+        for rule in (
+            "Never convert a ready PR to draft without my explicit request for that transition.",
+            "Never approve a PR without my explicit confirmation.",
+            "Create gists as private/secret unless I explicitly request a public gist.",
+            "Use dedicated tokens or secrets for each workflow; never reuse them across workflows.",
+        ):
+            with self.subTest(rule=rule):
+                global_path.write_text(original.replace(rule, "", 1), encoding="utf-8")
+
+                self.assertIn(
+                    "runtime contract changed: Pre-action skill routing",
+                    validate(self.root),
+                )
 
     def test_changed_compatibility_stub_is_rejected(self) -> None:
         global_path = self.root / ".github/copilot-instructions.md"
