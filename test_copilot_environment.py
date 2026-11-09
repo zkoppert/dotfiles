@@ -213,6 +213,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
             "test-quality",
             "triage-dependabot",
             "triage-notifications",
+            "ui-screenshot-presentation",
             "validate-pr-with-codespace",
             "validate-style",
         }
@@ -588,6 +589,31 @@ class CopilotEnvironmentTest(unittest.TestCase):
             result.stdout,
         )
         self.assertNotIn("environment is ready", result.stdout)
+
+    def test_verifier_requires_ui_screenshot_presentation(self) -> None:
+        env = self.prepare_complete_environment()
+        skill = self.home / ".copilot" / "skills" / "ui-screenshot-presentation"
+        (skill / "SKILL.md").unlink()
+        skill.rmdir()
+        for condition in ("missing", "empty directory"):
+            with self.subTest(condition=condition):
+                if condition == "empty directory":
+                    skill.mkdir()
+
+                result = subprocess.run(
+                    [str(self.verifier)],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(
+                    "  - missing skills: ui-screenshot-presentation",
+                    result.stdout.splitlines(),
+                )
+                self.assertNotIn("environment is ready", result.stdout)
 
     def test_verifier_rejects_skills_without_skill_files(self) -> None:
         env = self.prepare_complete_environment()
