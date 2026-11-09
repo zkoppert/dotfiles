@@ -194,7 +194,7 @@ def create_session(
             "-e", f"PATH={os.environ.get('PATH', os.defpath)}", "-P", "-F",
             "#{session_id} #{pane_id} #{pane_pid}", "exec copilot --allow-all",
             ";", "set-option", "-s", "extended-keys", "on",
-            ";", "set-option", "-s", "extended-keys-format", "csi-u",
+            ";", "set-option", "-q", "-s", "extended-keys-format", "csi-u",
             ";", "set-option", "-as", "terminal-features", ",xterm*:extkeys",
             ";", "set-option", "-s", "set-clipboard", "on",
             ";", "set-option", "-t", f"={session}:", "mouse", "on",

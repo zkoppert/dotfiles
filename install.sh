@@ -167,6 +167,33 @@ if [ "$(uname)" = "Linux" ]; then
   fi
 fi
 
+# Block accidental interactive Python package resolution outside CFS on macOS.
+CFS_GUARD_SOURCE="$DOTFILES_DIR/bin/cfs-package-guard"
+if [ "$(uname)" = "Darwin" ] && [ -x "$CFS_GUARD_SOURCE" ]; then
+  CFS_GUARD_BIN="$HOME/.local/libexec/cfs-package-guard/bin"
+  mkdir -p "$CFS_GUARD_BIN"
+  for package_command in pip pip3 pip-compile pip-sync uv uvx; do
+    package_target="$CFS_GUARD_BIN/$package_command"
+    if [ -L "$package_target" ] || [ ! -e "$package_target" ]; then
+      ln -sfn "$CFS_GUARD_SOURCE" "$package_target"
+      echo "✓ Linked CFS package guard for $package_command → $package_target"
+    else
+      echo "⚠ $package_target exists and is not a symlink - skipping"
+    fi
+  done
+
+  CFS_PATH_LINE='export PATH="$HOME/.local/libexec/cfs-package-guard/bin:$PATH"  # dotfiles: CFS package guard'
+  for shell_rc in "$HOME/.zprofile" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bashrc"; do
+    rc_short="${shell_rc/#$HOME/~}"
+    if [ -f "$shell_rc" ] && grep -q "dotfiles: CFS package guard" "$shell_rc"; then
+      echo "✓ CFS package guard PATH already in $rc_short"
+    else
+      printf '\n%s\n' "$CFS_PATH_LINE" >> "$shell_rc"
+      echo "✓ Added CFS package guard PATH to $rc_short (open a new shell to apply)"
+    fi
+  done
+fi
+
 # Install gh guard wrapper as a PATH shim at ~/.local/bin/gh.
 # Guards both `gh pr ready` and `gh pr create` against accidental/unreviewed runs.
 if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
@@ -184,7 +211,7 @@ if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
   # over the real gh binary. Cover both zsh (macOS default) and bash (Codespaces,
   # Linux). brew shellenv (in .zprofile) prepends /opt/homebrew/bin, so we add
   # our own prepend AFTER brew runs.
-  PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\"  # dotfiles: gh wrapper"
+  PATH_LINE="export PATH=\"\$HOME/.local/libexec/cfs-package-guard/bin:\$HOME/.local/bin:\$PATH\"  # dotfiles: gh wrapper"
   for shell_rc in "$HOME/.zprofile" "$HOME/.profile" "$HOME/.bashrc"; do
     rc_short="${shell_rc/#$HOME/~}"
     if [ -f "$shell_rc" ] && grep -q "dotfiles: gh wrapper" "$shell_rc"; then

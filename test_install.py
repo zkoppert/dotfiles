@@ -186,6 +186,24 @@ class InstallScriptTest(unittest.TestCase):
             content = (self.home / rc_name).read_text(encoding="utf-8")
             self.assertEqual(content.count(alias_line), 1)
 
+    def test_cfs_package_guard_is_installed_once_on_macos(self) -> None:
+        source_guard = Path(__file__).with_name("bin") / "cfs-package-guard"
+        guard_dir = self.repo / "bin"
+        guard_dir.mkdir()
+        guard = guard_dir / "cfs-package-guard"
+        guard.write_bytes(source_guard.read_bytes())
+        guard.chmod(0o755)
+
+        self.run_installer()
+        self.run_installer()
+
+        installed_dir = self.home / ".local" / "libexec" / "cfs-package-guard" / "bin"
+        for command in ("pip", "pip3", "pip-compile", "pip-sync", "uv", "uvx"):
+            self.assertEqual(guard.resolve(), (installed_dir / command).resolve())
+        path_line = 'export PATH="$HOME/.local/libexec/cfs-package-guard/bin:$PATH"  # dotfiles: CFS package guard'
+        for rc_name in (".zprofile", ".zshrc", ".profile", ".bash_profile", ".bashrc"):
+            self.assertEqual(1, (self.home / rc_name).read_text(encoding="utf-8").count(path_line))
+
     def test_catalog_tools_are_installed_once(self) -> None:
         self.run_installer()
         second_run = self.run_installer()
