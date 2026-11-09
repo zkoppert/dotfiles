@@ -23,9 +23,9 @@ The global file keeps rules that apply to every session. Task-specific guidance 
 
 `install.sh` links the same global file for Copilot and Pi. It links local skills into `~/.copilot/skills` and `~/.agents/skills`, then mirrors installed catalog skills into `~/.agents/skills`. Existing non-symlink files remain unchanged.
 
-`verify-codespace-copilot-env` requires repository skills to resolve to this checkout and Pi catalog mirrors to resolve to their Copilot source. It checks Pi's first available context file, including `AGENTS.override.md`, against the shared instructions. Both the installer and verifier honor `PI_CODING_AGENT_DIR`; the default is `~/.pi/agent`. Absolute, relative, and home-relative directory paths are supported.
+`verify-codespace-copilot-env` requires repository skills to resolve to this checkout and Pi catalog mirrors to resolve to their Copilot source. It checks Pi's first available context file, including `AGENTS.override.md`, against the shared instructions. Both the installer and verifier honor `PI_CODING_AGENT_DIR`; the default is `~/.pi/agent`. The configured path must be absolute or start with `~/`.
 
-Pi loads `<agent-directory>/skills` before `~/.agents/skills`. Native entries can replace managed skills with the same declared name. The verifier therefore requires the native root to be absent or empty, even when its skills are unrelated. Keep user skills in `~/.agents/skills` instead. Neither the installer nor the verifier moves or deletes existing native skills or context overrides.
+Pi loads `<agent-directory>/skills` before `~/.agents/skills`. The verifier rejects a native skill only when its declared name collides with routed guidance. It preserves unrelated user skills and never moves or deletes native skills or context overrides.
 
 These checks cover installed user-level roots, not project, package, or command-line resource overrides.
 

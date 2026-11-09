@@ -723,65 +723,31 @@ class CopilotEnvironmentTest(unittest.TestCase):
                     else:
                         override.rmdir()
 
-    def test_verifier_rejects_native_pi_skill_files_without_mutation(self) -> None:
+    def test_verifier_rejects_native_pi_skill_name_collisions(self) -> None:
         env = self.prepare_complete_environment()
-        native = self.home / ".pi" / "agent" / "skills"
-        for name in ("engineering-practices", "gh-axi"):
-            for relative_path in (f"{name}/SKILL.md", "renamed/SKILL.md", "bundle/nested/SKILL.md", "other.md", "SKILL.md"):
-                with self.subTest(skill=name, path=relative_path):
-                    skill = native / relative_path
-                    skill.parent.mkdir(parents=True)
-                    content = f"---\nname: {name}\ndescription: Older native skill\n---\n# Old guidance\n".encode()
-                    skill.write_bytes(content)
-                    try:
-                        result = subprocess.run(
-                            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
-                        )
-
-                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                        self.assertIn(f"Pi native skill root must be empty to verify managed guidance: {native}", result.stdout)
-                        self.assertNotIn("environment is ready", result.stdout)
-                        self.assertEqual(skill.read_bytes(), content)
-                        self.assertFalse(native.is_symlink())
-                    finally:
-                        shutil.rmtree(native)
-
-    def test_verifier_rejects_native_pi_skill_symlinks_without_mutation(self) -> None:
-        env = self.prepare_complete_environment()
-        native = self.home / ".pi" / "agent" / "skills"
-        owned = self.root / "owned-native-skill"
-        owned.mkdir()
+        native = self.home / ".pi" / "agent" / "skills" / "renamed"
+        native.mkdir(parents=True)
+        skill = native / "SKILL.md"
         content = b"---\nname: gh-axi\ndescription: Older native skill\n---\n# Old guidance\n"
-        (owned / "SKILL.md").write_bytes(content)
-        for kind in ("root", "directory", "file", "shared root"):
-            with self.subTest(kind=kind):
-                if kind in ("root", "shared root"):
-                    link = native
-                    target = owned if kind == "root" else self.home / ".agents" / "skills"
-                else:
-                    native.mkdir()
-                    link = native / ("other.md" if kind == "file" else "renamed")
-                    target = owned / "SKILL.md" if kind == "file" else owned
-                link.symlink_to(target)
-                try:
-                    result = subprocess.run(
-                        [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
-                    )
+        skill.write_bytes(content)
 
-                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                    self.assertIn(f"Pi native skill root must be empty to verify managed guidance: {native}", result.stdout)
-                    self.assertNotIn("environment is ready", result.stdout)
-                    self.assertEqual(link.readlink(), target)
-                    self.assertEqual((owned / "SKILL.md").read_bytes(), content)
-                finally:
-                    link.unlink()
-                    if kind not in ("root", "shared root"):
-                        native.rmdir()
+        result = subprocess.run(
+            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+        )
 
-    def test_verifier_accepts_an_empty_native_pi_skill_root(self) -> None:
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"Pi native skill shadows routed guidance: {skill}", result.stdout)
+        self.assertNotIn("environment is ready", result.stdout)
+        self.assertEqual(skill.read_bytes(), content)
+
+    def test_verifier_accepts_unrelated_native_pi_skills(self) -> None:
         env = self.prepare_complete_environment()
-        native = self.home / ".pi" / "agent" / "skills"
-        native.mkdir()
+        native = self.home / ".pi" / "agent" / "skills" / "personal-helper"
+        native.mkdir(parents=True)
+        (native / "SKILL.md").write_text(
+            "---\nname: personal-helper\ndescription: Personal helper\n---\n# Helper\n",
+            encoding="utf-8",
+        )
 
         result = subprocess.run(
             [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
@@ -789,7 +755,6 @@ class CopilotEnvironmentTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("environment is ready", result.stdout)
-        self.assertEqual(list(native.iterdir()), [])
 
     def test_verifier_checks_the_configured_pi_agent_directory(self) -> None:
         env = self.prepare_complete_environment()
@@ -810,7 +775,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
         self.assertIn(f"Pi instructions do not resolve to the dotfiles checkout: {active / 'AGENTS.md'}", missing.stdout)
 
         (active / "AGENTS.md").symlink_to(source)
-        for setting in (str(active), "~/custom-agent", "custom-agent"):
+        for setting in (str(active), "~/custom-agent"):
             with self.subTest(setting=setting):
                 env["PI_CODING_AGENT_DIR"] = setting
                 complete = subprocess.run(
@@ -818,6 +783,13 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 )
 
                 self.assertEqual(complete.returncode, 0, complete.stdout + complete.stderr)
+        env["PI_CODING_AGENT_DIR"] = "relative-agent"
+        relative = subprocess.run(
+            [str(self.verifier)], cwd=self.home, env=env, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(relative.returncode, 1, relative.stdout + relative.stderr)
+        self.assertIn("PI_CODING_AGENT_DIR must be absolute or start with ~/", relative.stdout)
+
         env["PI_CODING_AGENT_DIR"] = "~/custom-agent"
         for relative_path in ("AGENTS.override.md", "skills/gh-axi/SKILL.md"):
             with self.subTest(path=relative_path):
@@ -927,6 +899,31 @@ class CopilotEnvironmentTest(unittest.TestCase):
                                 (skill / "SKILL.md").rmdir()
                             skill.rmdir()
                         saved.rename(skill)
+
+    def test_verifier_rejects_undiscoverable_skill_metadata(self) -> None:
+        env = self.prepare_complete_environment()
+        skill_file = self.home / ".copilot" / "skills" / "gh-axi" / "SKILL.md"
+        original = skill_file.read_text(encoding="utf-8")
+        cases = (
+            ("---\nname: old-gh-axi\ndescription: Fixture\n---\n# Skill\n", "declares the wrong skill name"),
+            ("---\nname: gh-axi\ndescription:\n---\n# Skill\n", "has no skill description"),
+            (
+                "---\nname: gh-axi\ndescription: Fixture\ndisable-model-invocation: true\n---\n# Skill\n",
+                "is unavailable for model invocation",
+            ),
+        )
+        for content, diagnostic in cases:
+            with self.subTest(diagnostic=diagnostic):
+                skill_file.write_text(content, encoding="utf-8")
+                try:
+                    result = subprocess.run(
+                        [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(f"Copilot gh-axi {diagnostic}", result.stdout)
+                    self.assertNotIn("environment is ready", result.stdout)
+                finally:
+                    skill_file.write_text(original, encoding="utf-8")
 
     def test_verifier_requires_managed_skills_from_their_sources(self) -> None:
         env = self.prepare_complete_environment()

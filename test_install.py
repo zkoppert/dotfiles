@@ -43,6 +43,10 @@ class InstallScriptTest(unittest.TestCase):
         self.installer = self.repo / "install.sh"
         self.installer.write_bytes(source.read_bytes())
         self.installer.chmod(0o755)
+        verifier_source = Path(__file__).with_name("scripts") / "verify_instruction_migration.py"
+        verifier_target = self.repo / "scripts" / "verify_instruction_migration.py"
+        verifier_target.parent.mkdir()
+        shutil.copy2(verifier_source, verifier_target)
 
         uname = self.fake_bin / "uname"
         uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
@@ -233,7 +237,6 @@ class InstallScriptTest(unittest.TestCase):
             ("", default.parent),
             (str(self.home / "absolute agent"), self.home / "absolute agent"),
             ("~/custom agent", self.home / "custom agent"),
-            ("relative agent", self.repo / "relative agent"),
             ("~", self.home),
         ):
             with self.subTest(setting=setting):
@@ -254,6 +257,25 @@ class InstallScriptTest(unittest.TestCase):
                     self.assertEqual(target.read_bytes(), b"# Shared guidance\n")
                 if directory != default.parent:
                     self.assertFalse(default.exists())
+
+    def test_relative_pi_agent_directory_is_rejected(self) -> None:
+        instructions = self.repo / ".github" / "copilot-instructions.md"
+        instructions.parent.mkdir()
+        instructions.write_text("# Shared guidance\n", encoding="utf-8")
+        self.env["PI_CODING_AGENT_DIR"] = "relative-agent"
+
+        result = subprocess.run(
+            [str(self.installer)],
+            cwd=self.repo,
+            env=self.env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("PI_CODING_AGENT_DIR must be absolute or start with ~/", result.stderr)
+        self.assertFalse((self.repo / "relative-agent").exists())
 
     def test_custom_pi_instruction_files_are_preserved(self) -> None:
         instructions = self.repo / ".github" / "copilot-instructions.md"
@@ -935,7 +957,7 @@ class InstallScriptTest(unittest.TestCase):
     def test_missing_catalog_commands_are_nonfatal(self) -> None:
         (self.fake_bin / "gh").unlink()
         (self.fake_bin / "copilot").unlink()
-        for name in ("dirname", "mkdir", "ln"):
+        for name in ("dirname", "mkdir", "ln", "python3"):
             command = shutil.which(name)
             if command is None:
                 self.fail(f"{name} is required to exercise install.sh")

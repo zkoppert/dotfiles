@@ -10,10 +10,6 @@
 
 <!-- How was this verified? Unit tests, integration tests, manual steps, before/after output. Do not list linting (that is a given). -->
 
-## Tradeoffs and alternatives considered
-
-<!-- What other approaches did you weigh? Why did you pick this one? Even one sentence is enough for small PRs. -->
-
 ## Impact
 
 <!-- Follow "Quantify impact in every PR" in .copilot/skills/pull-request-workflow/SKILL.md. -->

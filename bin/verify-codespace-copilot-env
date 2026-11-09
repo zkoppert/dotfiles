@@ -205,9 +205,18 @@ def main() -> int:
         failures.append(f"remote helper is missing or not executable: {remote_helper}")
 
     expected_instructions = dotfiles_root / ".github" / "copilot-instructions.md"
-    pi_agent_dir = Path(
-        os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi" / "agent"
-    ).expanduser()
+    configured_pi_agent_dir = os.environ.get("PI_CODING_AGENT_DIR")
+    if configured_pi_agent_dir and not (
+        configured_pi_agent_dir == "~"
+        or configured_pi_agent_dir.startswith("~/")
+        or Path(configured_pi_agent_dir).is_absolute()
+    ):
+        failures.append("PI_CODING_AGENT_DIR must be absolute or start with ~/")
+        pi_agent_dir = Path.home() / ".pi" / "agent"
+    else:
+        pi_agent_dir = Path(
+            configured_pi_agent_dir or Path.home() / ".pi" / "agent"
+        ).expanduser()
     pi_instructions = pi_agent_dir / "AGENTS.md"
     for filename in ("AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"):
         candidate = pi_agent_dir / filename
@@ -215,21 +224,29 @@ def main() -> int:
             pi_instructions = candidate
             break
 
-    native_skills = pi_agent_dir / "skills"
-    try:
-        if native_skills.is_dir() and any(native_skills.iterdir()):
-            failures.append(
-                f"Pi native skill root must be empty to verify managed guidance: {native_skills}; "
-                "use ~/.agents/skills for user skills"
-            )
-    except OSError:
-        failures.append(f"cannot inspect Pi native skill root: {native_skills}")
-
     repository_skills = {
         path.parent.name: path.parent
         for path in dotfiles_root.glob(".copilot/skills/*/SKILL.md")
     }
     required_skills = REQUIRED_SKILLS | repository_skills.keys()
+    parse_skill_frontmatter = runpy.run_path(
+        str(dotfiles_root / "scripts" / "verify_instruction_migration.py")
+    )["parse_frontmatter"]
+
+    native_skills = pi_agent_dir / "skills"
+    if native_skills.is_dir():
+        try:
+            for skill_file in native_skills.rglob("SKILL.md"):
+                try:
+                    declared_name = parse_skill_frontmatter(skill_file).get("name")
+                except (OSError, ValueError):
+                    continue
+                if declared_name in required_skills:
+                    failures.append(
+                        f"Pi native skill shadows routed guidance: {skill_file}"
+                    )
+        except OSError:
+            failures.append(f"cannot inspect Pi native skill root: {native_skills}")
     for client, instructions, skills_dir in (
         (
             "Copilot",
@@ -259,6 +276,21 @@ def main() -> int:
         missing_skills = sorted(required_skills - installed_skills)
         if missing_skills:
             failures.append(f"{client} missing skills: {', '.join(missing_skills)}")
+
+        for name in sorted(required_skills & installed_skills):
+            skill_file = skills_dir / name / "SKILL.md"
+            try:
+                metadata = parse_skill_frontmatter(skill_file)
+            except (OSError, ValueError) as error:
+                failures.append(f"{client} {name} has invalid skill metadata: {error}")
+                continue
+            description = metadata.get("description")
+            if metadata.get("name") != name:
+                failures.append(f"{client} {name} declares the wrong skill name")
+            if not isinstance(description, str) or not description.strip():
+                failures.append(f"{client} {name} has no skill description")
+            if metadata.get("disable-model-invocation", False) is not False:
+                failures.append(f"{client} {name} is unavailable for model invocation")
 
         for name in sorted(required_skills & installed_skills):
             if name in repository_skills:

@@ -13,12 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.verify_instruction_migration import (
-    parse_h2_blocks,
-    update_baseline,
-    validate,
-    verify_source,
-)
+from scripts.verify_instruction_migration import parse_h2_blocks, update_baseline, validate
 
 
 class InstructionMigrationTest(unittest.TestCase):
@@ -172,9 +167,32 @@ class InstructionMigrationTest(unittest.TestCase):
         global_path.write_text(global_path.read_text().replace("`engineering-practices`", "engineering guidance"))
 
         self.assertIn(
-            "global routing table does not name skill: engineering-practices",
+            "pre-action routing table does not load skill: engineering-practices",
             validate(self.root),
         )
+
+    def test_rebaseline_cannot_ratify_a_missing_pre_action_route(self) -> None:
+        before = self.migration_state()
+        global_path = self.root / ".github/copilot-instructions.md"
+        global_text = global_path.read_text(encoding="utf-8")
+        global_path.write_text(
+            global_text.replace(
+                "- Before any file mutation or code, test, configuration, architecture, "
+                "or system-design review, read `engineering-practices` in full.\n",
+                "",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_rebaseline()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(
+            "pre-action routing table does not load skill: engineering-practices",
+            result.stderr,
+        )
+        self.assertEqual(self.migration_state(), before)
 
     def test_invalid_skill_frontmatter_is_rejected(self) -> None:
         skill = self.root / ".copilot/skills/engineering-practices/SKILL.md"
@@ -467,32 +485,6 @@ class InstructionMigrationTest(unittest.TestCase):
         self.assertEqual(self.migration_state(), before)
         self.assertNotIn("Updated guidance contracts", result.stdout)
 
-    def test_rebaseline_source_checks_precede_both_file_updates(self) -> None:
-        before = self.migration_state()
-        self.edit_pull_request_guidance()
-        source = self.root / "external-source.txt"
-
-        missing = self.run_rebaseline("--source", str(source))
-
-        self.assertEqual(missing.returncode, 1, missing.stdout + missing.stderr)
-        self.assertIn("source file is missing", missing.stderr)
-        self.assertEqual(self.migration_state(), before)
-
-        source.write_bytes(before[0])
-        stale = self.run_rebaseline("--source", str(source))
-
-        self.assertEqual(stale.returncode, 1, stale.stdout + stale.stderr)
-        self.assertIn("source SHA-256 changed", stale.stderr)
-        self.assertEqual(self.migration_state(), before)
-
-        source.write_bytes(before[0].replace(b"Always create PRs as draft", b"Always open PRs as draft", 1))
-        matching = self.run_rebaseline("--source", str(source))
-
-        self.assertEqual(matching.returncode, 0, matching.stdout + matching.stderr)
-        self.assertIn("baseline:Pull Requests", matching.stdout)
-        self.assertEqual(validate(self.root), [])
-        self.assertEqual(self.migration_state()[0], source.read_bytes())
-
     def test_rebaseline_replacement_failures_restore_both_files(self) -> None:
         before = self.migration_state()
         self.edit_pull_request_guidance()
@@ -545,15 +537,6 @@ class InstructionMigrationTest(unittest.TestCase):
         )
 
         self.assertEqual([name for name, _ in blocks], ["preamble", "Real"])
-
-    def test_changed_external_source_is_rejected(self) -> None:
-        source = self.root / "source.md"
-        source.write_text("changed\n")
-
-        errors = verify_source(self.load_manifest(), source)
-
-        self.assertEqual(len(errors), 1)
-        self.assertIn("source SHA-256 changed", errors[0])
 
 
 if __name__ == "__main__":

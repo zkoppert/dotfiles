@@ -13,6 +13,11 @@ if [ -f "$DOTFILES_DIR/.github/copilot-instructions.md" ]; then
   case "$pi_agent_dir" in
     "~") pi_agent_dir="$HOME" ;;
     "~/"*) pi_agent_dir="$HOME/${pi_agent_dir#\~/}" ;;
+    /*) ;;
+    *)
+      echo "✗ PI_CODING_AGENT_DIR must be absolute or start with ~/" >&2
+      exit 1
+      ;;
   esac
   mkdir -p "$HOME/.copilot" "$pi_agent_dir"
   for target in "$HOME/.copilot/copilot-instructions.md" "$pi_agent_dir/AGENTS.md"; do
@@ -42,6 +47,27 @@ if [ -d "$DOTFILES_DIR/.copilot/skills" ]; then
   done
 fi
 
+skill_metadata_valid() {
+  python3 - "$DOTFILES_DIR/scripts/verify_instruction_migration.py" "$1" "$2" <<'PY'
+import runpy
+import sys
+from pathlib import Path
+
+parser_path, skill_path, expected_name = sys.argv[1:]
+try:
+    metadata = runpy.run_path(parser_path)["parse_frontmatter"](Path(skill_path))
+except (OSError, ValueError):
+    raise SystemExit(1)
+description = metadata.get("description")
+if metadata.get("name") != expected_name:
+    raise SystemExit(1)
+if not isinstance(description, str) or not description.strip():
+    raise SystemExit(1)
+if metadata.get("disable-model-invocation", False) is not False:
+    raise SystemExit(1)
+PY
+}
+
 # Install private catalog tools only when the source is supplied outside this
 # public repository.
 CATALOG_REPO="${COPILOT_SKILL_CATALOG_REPO:-}"
@@ -52,9 +78,10 @@ else
   if command -v gh >/dev/null 2>&1; then
     for skill_name in $CATALOG_SKILLS; do
       skill_target="$HOME/.copilot/skills/$skill_name/SKILL.md"
-      if [ -f "$skill_target" ]; then
+      if [ -f "$skill_target" ] && skill_metadata_valid "$skill_target" "$skill_name"; then
         echo "✓ Copilot skill $skill_name is already installed"
-      elif gh skill install "$CATALOG_REPO" "skills/$skill_name" --agent github-copilot --scope user </dev/null; then
+      elif gh skill install "$CATALOG_REPO" "skills/$skill_name" --agent github-copilot --scope user </dev/null &&
+        skill_metadata_valid "$skill_target" "$skill_name"; then
         echo "✓ Installed Copilot skill $skill_name"
       else
         echo "⚠ Failed to install Copilot skill $skill_name - continuing dotfiles setup"
@@ -105,7 +132,10 @@ fi
 
 for skill_name in $CATALOG_SKILLS; do
   skill_path="$HOME/.copilot/skills/$skill_name"
-  [ -f "$skill_path/SKILL.md" ] || continue
+  if ! [ -f "$skill_path/SKILL.md" ] || ! skill_metadata_valid "$skill_path/SKILL.md" "$skill_name"; then
+    echo "⚠ Catalog skill $skill_name has invalid metadata - skipping Pi mirror"
+    continue
+  fi
   mkdir -p "$HOME/.agents/skills"
   target="$HOME/.agents/skills/$skill_name"
   if [ -L "$target" ] || [ ! -e "$target" ]; then

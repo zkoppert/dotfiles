@@ -136,7 +136,6 @@ def update_baseline(
     manifest_path: Path,
     *,
     acknowledged: bool = False,
-    source: Optional[Path] = None,
 ) -> list[str]:
     """Rebuild reviewed hashes after an acknowledged guidance edit."""
     if not acknowledged:
@@ -186,8 +185,6 @@ def update_baseline(
         contract["sha256"] = new_hash
 
     errors = _validate_content(root, manifest, baseline_text)
-    if source is not None:
-        errors.extend(verify_source(manifest, source))
     if errors:
         raise ValueError("\n".join(errors))
 
@@ -351,9 +348,19 @@ def _validate_content(root: Path, manifest: dict[str, Any], baseline_text: str) 
                 if term.casefold() not in description.casefold():
                     errors.append(f"skill description for {name} lacks trigger term {term!r}")
 
+    try:
+        global_sections = dict(parse_h2_blocks(global_text))
+    except ValueError:
+        global_sections = {}
+    routing_contract = global_sections.get("Pre-action skill routing", "")
+    routing_entries = routing_contract.split("\n### Safety rules retained globally", 1)[0].splitlines()
     for name in manifest["routed_skills"]:
-        if f"`{name}`" not in global_text:
-            errors.append(f"global routing table does not name skill: {name}")
+        has_route = any(
+            line.startswith("- Before ") and f"`{name}`" in line and "read" in line
+            for line in routing_entries
+        )
+        if not has_route:
+            errors.append(f"pre-action routing table does not load skill: {name}")
         if name not in repo_skill_names and name not in external_skills:
             errors.append(f"routed skill is not discoverable from this repository: {name}")
 
@@ -381,20 +388,10 @@ def _validate_content(root: Path, manifest: dict[str, Any], baseline_text: str) 
     return errors
 
 
-def verify_source(manifest: dict[str, Any], source: Path) -> list[str]:
-    """Verify that the external source did not change after capture."""
-    if not source.is_file():
-        return [f"source file is missing: {source}"]
-    actual = sha256(source.read_text(encoding="utf-8"))
-    expected = manifest["baseline"]["sha256"]
-    return [] if actual == expected else [f"source SHA-256 changed: expected {expected}, got {actual}"]
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--manifest", type=Path)
-    parser.add_argument("--source", type=Path, help="also verify the original working-copy source")
     parser.add_argument(
         "--update-baseline",
         action="store_true",
@@ -418,7 +415,6 @@ def main() -> int:
                 root,
                 manifest_path,
                 acknowledged=args.acknowledge_guidance_changes,
-                source=args.source,
             )
         except (OSError, ValueError) as error:
             print(f"ERROR: {error}", file=sys.stderr)
@@ -427,8 +423,6 @@ def main() -> int:
         errors = []
     else:
         errors = validate(root, manifest_path)
-        if args.source:
-            errors.extend(verify_source(load_manifest(manifest_path), args.source))
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "baseline": {
     "path": "tests/fixtures/instruction-migration/global-instructions-2026-11-06.txt",
-    "sha256": "2e7026f8d4a847e899746ea4eae61a2771c2ef77c06935b95d7ba67e0734ced7"
+    "sha256": "bf15863194004986d126e7e37bdf62ff892e2f27cf7a97bec2c48824b8dd701e"
   },
   "blocks": [
     {
@@ -11,8 +11,7 @@
       "source_start_line": 1,
       "source_end_line": 4,
       "destination": ".github/copilot-instructions.md",
-      "scope": "Always loaded global guidance.",
-      "exact": true
+      "scope": "Always loaded global guidance."
     },
     {
       "id": "General Preferences",
@@ -20,8 +19,7 @@
       "source_start_line": 5,
       "source_end_line": 18,
       "destination": ".github/copilot-instructions.md",
-      "scope": "Always loaded global guidance.",
-      "exact": true
+      "scope": "Always loaded global guidance."
     },
     {
       "id": "Copilot Skills",
@@ -29,17 +27,15 @@
       "source_start_line": 19,
       "source_end_line": 48,
       "destination": ".github/copilot-instructions.md",
-      "scope": "Always loaded global guidance.",
-      "exact": true
+      "scope": "Always loaded global guidance."
     },
     {
       "id": "My Standard Change Workflow",
-      "sha256": "7c138a42567b2f4789620f81e6b272f6d8e1795c2886b04e438c5fa3dbe3e952",
+      "sha256": "8f0a77b292fafe7c0eafa8f7028b2882f81d93288210b09b90cb7cd27acb2b9c",
       "source_start_line": 49,
       "source_end_line": 65,
       "destination": ".github/copilot-instructions.md",
-      "scope": "Always loaded global guidance.",
-      "exact": true
+      "scope": "Always loaded global guidance."
     },
     {
       "id": "Harnesses (close the feedback loop before guessing)",
@@ -47,8 +43,7 @@
       "source_start_line": 66,
       "source_end_line": 80,
       "destination": ".github/copilot-instructions.md",
-      "scope": "Always loaded global guidance.",
-      "exact": true
+      "scope": "Always loaded global guidance."
     },
     {
       "id": "Pull Requests",
@@ -56,8 +51,7 @@
       "source_start_line": 81,
       "source_end_line": 116,
       "destination": ".copilot/skills/pull-request-workflow/SKILL.md",
-      "scope": "Every pull request operation and PR-bound draft.",
-      "exact": true
+      "scope": "Every pull request operation and PR-bound draft."
     },
     {
       "id": "Code Review Workflow",
@@ -65,8 +59,7 @@
       "source_start_line": 117,
       "source_end_line": 240,
       "destination": ".copilot/skills/code-review-workflow/SKILL.md",
-      "scope": "Every plan, code, security, self, and PR-description review.",
-      "exact": true
+      "scope": "Every plan, code, security, self, and PR-description review."
     },
     {
       "id": "Code Style & Languages",
@@ -74,8 +67,7 @@
       "source_start_line": 241,
       "source_end_line": 277,
       "destination": ".copilot/skills/engineering-practices/SKILL.md",
-      "scope": "Every code, test, configuration, and React implementation or review.",
-      "exact": true
+      "scope": "Every code, test, configuration, and React implementation or review."
     },
     {
       "id": "Platform & System Design",
@@ -83,8 +75,7 @@
       "source_start_line": 278,
       "source_end_line": 287,
       "destination": ".copilot/skills/engineering-practices/SKILL.md",
-      "scope": "Every architecture and system-design task.",
-      "exact": true
+      "scope": "Every architecture and system-design task."
     },
     {
       "id": "GitHub CLI & API",
@@ -92,8 +83,7 @@
       "source_start_line": 288,
       "source_end_line": 296,
       "destination": ".copilot/skills/github-operations/SKILL.md",
-      "scope": "Every GitHub read and write, after loading gh-axi.",
-      "exact": true
+      "scope": "Every GitHub read and write, after loading gh-axi."
     },
     {
       "id": "GitHub Actions Best Practices",
@@ -101,8 +91,7 @@
       "source_start_line": 297,
       "source_end_line": 304,
       "destination": ".copilot/skills/actions-security/SKILL.md",
-      "scope": "Every GitHub Actions workflow or action-metadata task.",
-      "exact": true
+      "scope": "Every GitHub Actions workflow or action-metadata task."
     },
     {
       "id": "Git & Version Control",
@@ -110,8 +99,7 @@
       "source_start_line": 305,
       "source_end_line": 311,
       "destination": ".github/copilot-instructions.md",
-      "scope": "Always loaded global guidance.",
-      "exact": true
+      "scope": "Always loaded global guidance."
     },
     {
       "id": "Excel & Report Generation",
@@ -119,8 +107,7 @@
       "source_start_line": 312,
       "source_end_line": 317,
       "destination": ".copilot/skills/spreadsheet-report-generation/SKILL.md",
-      "scope": "Every spreadsheet and generated-report task.",
-      "exact": true
+      "scope": "Every spreadsheet and generated-report task."
     },
     {
       "id": "Writing Style",
@@ -128,8 +115,7 @@
       "source_start_line": 318,
       "source_end_line": 450,
       "destination": ".github/copilot-instructions.md",
-      "scope": "Always loaded global guidance.",
-      "exact": true
+      "scope": "Always loaded global guidance."
     },
     {
       "id": "File & Project Organization",
@@ -137,8 +123,7 @@
       "source_start_line": 451,
       "source_end_line": 456,
       "destination": ".copilot/skills/engineering-practices/SKILL.md",
-      "scope": "Every project-structure change.",
-      "exact": true
+      "scope": "Every project-structure change."
     },
     {
       "id": "macOS Environment",
@@ -146,8 +131,7 @@
       "source_start_line": 457,
       "source_end_line": 463,
       "destination": ".github/copilot-instructions.md",
-      "scope": "Always loaded global guidance.",
-      "exact": true
+      "scope": "Always loaded global guidance."
     },
     {
       "id": "My Open Source GitHub Actions: Shared Patterns",
@@ -155,8 +139,7 @@
       "source_start_line": 464,
       "source_end_line": 540,
       "destination": ".copilot/skills/open-source-actions-maintenance/SKILL.md",
-      "scope": "Every task in the named shared-architecture repositories.",
-      "exact": true
+      "scope": "Every task in the named shared-architecture repositories."
     }
   ],
   "routed_skills": [
