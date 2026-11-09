@@ -1,6 +1,6 @@
 ---
 name: ui-screenshot-presentation
-description: Apply these instructions when creating UI screenshots, before/after comparisons, or annotated UI explanations for pull request descriptions. Preserve the authentic UI and style only the surrounding presentation. Also use when a user asks to annotate, present, or compare captured UI.
+description: Apply these instructions when creating UI screenshots, before/after comparisons, or annotated UI explanations for pull request descriptions. Preserve the authentic UI and style only the surrounding presentation.
 ---
 
 # Present UI screenshots in pull request descriptions
