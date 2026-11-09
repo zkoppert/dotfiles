@@ -205,6 +205,26 @@ def main() -> int:
         failures.append(f"remote helper is missing or not executable: {remote_helper}")
 
     expected_instructions = dotfiles_root / ".github" / "copilot-instructions.md"
+    pi_agent_dir = Path(
+        os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi" / "agent"
+    ).expanduser()
+    pi_instructions = pi_agent_dir / "AGENTS.md"
+    for filename in ("AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"):
+        candidate = pi_agent_dir / filename
+        if candidate.is_file():
+            pi_instructions = candidate
+            break
+
+    native_skills = pi_agent_dir / "skills"
+    try:
+        if native_skills.is_dir() and any(native_skills.iterdir()):
+            failures.append(
+                f"Pi native skill root must be empty to verify managed guidance: {native_skills}; "
+                "use ~/.agents/skills for user skills"
+            )
+    except OSError:
+        failures.append(f"cannot inspect Pi native skill root: {native_skills}")
+
     repository_skills = {
         path.parent.name: path.parent
         for path in dotfiles_root.glob(".copilot/skills/*/SKILL.md")
@@ -218,7 +238,7 @@ def main() -> int:
         ),
         (
             "Pi",
-            Path.home() / ".pi" / "agent" / "AGENTS.md",
+            pi_instructions,
             Path.home() / ".agents" / "skills",
         ),
     ):

@@ -21,7 +21,13 @@ My personal configuration for macOS and GitHub Codespaces.
 
 The global file keeps rules that apply to every session. Task-specific guidance lives in skills that load before the related action.
 
-`install.sh` links the same global file for Copilot and Pi. It links local skills into `~/.copilot/skills` and `~/.agents/skills`, then mirrors installed catalog skills into `~/.agents/skills`. Existing non-symlink files remain unchanged. `verify-codespace-copilot-env` checks required skills and managed guidance links in both clients' discovery roots.
+`install.sh` links the same global file for Copilot and Pi. It links local skills into `~/.copilot/skills` and `~/.agents/skills`, then mirrors installed catalog skills into `~/.agents/skills`. Existing non-symlink files remain unchanged.
+
+`verify-codespace-copilot-env` requires repository skills to resolve to this checkout and Pi catalog mirrors to resolve to their Copilot source. It checks Pi's first available context file, including `AGENTS.override.md`, against the shared instructions. `PI_CODING_AGENT_DIR` selects Pi's agent directory; the default is `~/.pi/agent`.
+
+Pi loads `<agent-directory>/skills` before `~/.agents/skills`. Native entries can replace managed skills with the same declared name. The verifier therefore requires the native root to be absent or empty, even when its skills are unrelated. Keep user skills in `~/.agents/skills` instead. Neither the installer nor the verifier moves or deletes existing native skills or context overrides.
+
+These checks cover installed user-level roots, not project, package, or command-line resource overrides.
 
 Run the preservation check after changing global instructions or moving guidance:
 

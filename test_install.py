@@ -234,15 +234,20 @@ class InstallScriptTest(unittest.TestCase):
             self.home / ".copilot" / "skills" / "actions-security" / "SKILL.md": self.home / ".copilot" / "skills" / "actions-security",
             self.home / ".agents" / "skills" / "actions-security" / "SKILL.md": self.home / ".agents" / "skills" / "actions-security",
         }
-        for path in sentinels:
+        pi_shadows = (
+            self.home / ".pi" / "agent" / "AGENTS.override.md",
+            self.home / ".pi" / "agent" / "skills" / "actions-security" / "SKILL.md",
+        )
+        for path in (*sentinels, *pi_shadows):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("keep me\n", encoding="utf-8")
 
         result = self.run_installer()
 
-        for path, warning_target in sentinels.items():
+        for path in (*sentinels, *pi_shadows):
             self.assertFalse(path.is_symlink())
             self.assertEqual(path.read_text(encoding="utf-8"), "keep me\n")
+        for warning_target in sentinels.values():
             self.assertIn(f"{warning_target} exists and is not a symlink", result.stdout)
 
     def test_review_lab_alias_is_added_once_on_macos(self) -> None:
