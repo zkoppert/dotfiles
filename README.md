@@ -34,7 +34,7 @@ Open a new shell after installation to load the `~/.local/bin` PATH change.
 
 On macOS, the installer puts guarded `pip`, pip-tools, `uv`, and `uvx` shims before normal package tools on interactive shell `PATH`. Package-resolving commands fail unless GitHub Central Feed Services (CFS) supplies its feed environment. Use `gh cfs -- <command>` for package downloads.
 
-The guard prevents common accidental bypasses. It is not egress enforcement. After CFS configures a command, explicit source options, project settings, requirements directives, and direct URLs can still select another source. It also does not intercept absolute paths, virtual-environment executables, `python -m pip`, or LaunchAgents. Persistent automation must call CFS explicitly.
+The guard prevents common accidental bypasses. It is not egress enforcement. After CFS configures a command, explicit source options, project settings, requirements directives, and direct URLs can still select another source. The conservative allowlist requires CFS for status commands such as `pip list` and `uv pip list`. It also does not intercept absolute paths, virtual-environment executables, `python -m pip`, or LaunchAgents. Persistent automation must call CFS explicitly.
 
 ## How do I start a named local Copilot session?
 

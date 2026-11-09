@@ -34,7 +34,7 @@ PIP_LEADING_OPTIONS = {
     "-q",
     "-v",
 }
-UV_SAFE_PIP_COMMANDS = {"check", "freeze", "list", "show"}
+UV_SAFE_PIP_COMMANDS = {"check", "freeze", "show"}
 
 
 def cfs_environment_is_valid(command: str) -> bool:
@@ -85,7 +85,7 @@ def uv_command_is_local(arguments: list[str]) -> bool:
     if arguments[0] == "version":
         return len(arguments) == 1
     if arguments[0] == "pip" and len(arguments) > 1:
-        return arguments[1] in UV_SAFE_PIP_COMMANDS and "--outdated" not in arguments
+        return arguments[1] in UV_SAFE_PIP_COMMANDS
     return False
 
 

@@ -138,6 +138,9 @@ class CfsPackageGuardTest(unittest.TestCase):
             ("pip", "install", "--log", "--help", "example"),
             ("pip", "unknown"),
             ("uv", "version", "--bump", "patch"),
+            ("uv", "pip", "list"),
+            ("uv", "pip", "list", "-o"),
+            ("uv", "pip", "list", "-vo"),
             ("uv", "unknown"),
         ):
             with self.subTest(arguments=arguments):
