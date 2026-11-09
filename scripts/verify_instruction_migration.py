@@ -7,7 +7,9 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -104,7 +106,13 @@ def migrated_content(content: str) -> str:
     return content
 
 
-def update_baseline(root: Path, manifest_path: Path, *, acknowledged: bool = False) -> list[str]:
+def update_baseline(
+    root: Path,
+    manifest_path: Path,
+    *,
+    acknowledged: bool = False,
+    source: Optional[Path] = None,
+) -> list[str]:
     """Rebuild reviewed hashes after an acknowledged guidance edit."""
     if not acknowledged:
         raise ValueError("rebaselining requires explicit guidance-change acknowledgement")
@@ -141,7 +149,6 @@ def update_baseline(root: Path, manifest_path: Path, *, acknowledged: bool = Fal
         line += line_count
 
     baseline_text = "".join(content_parts)
-    baseline_path.write_text(baseline_text, encoding="utf-8")
     manifest["baseline"]["sha256"] = sha256(baseline_text)
 
     for contract in manifest.get("runtime_contracts", []):
@@ -153,15 +160,45 @@ def update_baseline(root: Path, manifest_path: Path, *, acknowledged: bool = Fal
             changed.append(f"runtime:{contract['id']}")
         contract["sha256"] = new_hash
 
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    errors = _validate_content(root, manifest, baseline_text)
+    if source is not None:
+        errors.extend(verify_source(manifest, source))
+    if errors:
+        raise ValueError("\n".join(errors))
+
+    updates = (
+        (baseline_path, baseline_text),
+        (manifest_path, json.dumps(manifest, indent=2) + "\n"),
+    )
+    with tempfile.TemporaryDirectory(prefix=".instruction-migration-", dir=manifest_path.parent) as temporary:
+        staged: list[tuple[Path, Path, Path]] = []
+        for index, (destination, content) in enumerate(updates):
+            backup = Path(temporary) / f"{index}.original"
+            candidate = Path(temporary) / f"{index}.new"
+            shutil.copy2(destination, backup)
+            candidate.write_text(content, encoding="utf-8")
+            shutil.copymode(destination, candidate)
+            staged.append((destination, candidate, backup))
+        try:
+            for destination, candidate, _ in staged:
+                candidate.replace(destination)
+        except BaseException:
+            for destination, _, backup in staged:
+                backup.replace(destination)
+            raise
     return changed
 
 
 def validate(root: Path, manifest_path: Optional[Path] = None) -> list[str]:
     """Return every preservation or reachability error."""
-    errors: list[str] = []
     manifest_path = manifest_path or root / "tests/fixtures/instruction-migration/manifest.json"
     manifest = load_manifest(manifest_path)
+    baseline_text = (root / manifest["baseline"]["path"]).read_text(encoding="utf-8")
+    return _validate_content(root, manifest, baseline_text)
+
+
+def _validate_content(root: Path, manifest: dict[str, Any], baseline_text: str) -> list[str]:
+    errors: list[str] = []
     baseline_config = manifest["baseline"]
     baseline_path = root / baseline_config["path"]
 
@@ -171,7 +208,6 @@ def validate(root: Path, manifest_path: Optional[Path] = None) -> list[str]:
     if relative_baseline.parts[0] in {".github", ".copilot", ".agents"}:
         errors.append(f"baseline is inside a runtime discovery path: {relative_baseline}")
 
-    baseline_text = baseline_path.read_text(encoding="utf-8")
     if sha256(baseline_text) != baseline_config["sha256"]:
         errors.append("baseline SHA-256 does not match the manifest")
 
@@ -350,14 +386,17 @@ def main() -> int:
                 root,
                 manifest_path,
                 acknowledged=args.acknowledge_guidance_changes,
+                source=args.source,
             )
-        except ValueError as error:
+        except (OSError, ValueError) as error:
             print(f"ERROR: {error}", file=sys.stderr)
             return 1
         print("Updated guidance contracts: " + (", ".join(changed) if changed else "none"))
-    errors = validate(root, manifest_path)
-    if args.source:
-        errors.extend(verify_source(load_manifest(manifest_path), args.source))
+        errors = []
+    else:
+        errors = validate(root, manifest_path)
+        if args.source:
+            errors.extend(verify_source(load_manifest(manifest_path), args.source))
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)

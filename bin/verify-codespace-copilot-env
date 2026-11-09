@@ -205,7 +205,11 @@ def main() -> int:
         failures.append(f"remote helper is missing or not executable: {remote_helper}")
 
     expected_instructions = dotfiles_root / ".github" / "copilot-instructions.md"
-    expected_test_quality = dotfiles_root / ".copilot" / "skills" / "test-quality"
+    repository_skills = {
+        path.parent.name: path.parent
+        for path in dotfiles_root.glob(".copilot/skills/*/SKILL.md")
+    }
+    required_skills = REQUIRED_SKILLS | repository_skills.keys()
     for client, instructions, skills_dir in (
         (
             "Copilot",
@@ -232,15 +236,22 @@ def main() -> int:
             if skills_dir.is_dir()
             else set()
         )
-        missing_skills = sorted(REQUIRED_SKILLS - installed_skills)
+        missing_skills = sorted(required_skills - installed_skills)
         if missing_skills:
             failures.append(f"{client} missing skills: {', '.join(missing_skills)}")
 
-        test_quality = skills_dir / "test-quality"
-        if not test_quality.is_symlink() or test_quality.resolve() != expected_test_quality:
-            failures.append(
-                f"{client} test-quality does not resolve to the dotfiles checkout: {test_quality}"
-            )
+        for name in sorted(required_skills & installed_skills):
+            if name in repository_skills:
+                source = repository_skills[name]
+                owner = "the dotfiles checkout"
+            elif client == "Pi":
+                source = Path.home() / ".copilot" / "skills" / name
+                owner = "the Copilot source"
+            else:
+                continue
+            skill = skills_dir / name
+            if skill.resolve() != source.resolve():
+                failures.append(f"{client} {name} does not resolve to {owner}: {skill}")
         print(f"{client} installed skills: {len(installed_skills)}")
 
     if "copilot" in missing_tools:

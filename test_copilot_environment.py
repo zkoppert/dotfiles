@@ -16,32 +16,37 @@ class CopilotEnvironmentTest(unittest.TestCase):
     """Exercise MCP bootstrap and environment verification safely."""
 
     DISCOVERY_ROOTS = {"Copilot": ".copilot/skills", "Pi": ".agents/skills"}
-    EXPECTED_SKILLS = (
+    REPOSITORY_SKILLS = (
         "actions-security",
-        "cleanup-worktrees",
         "code-review-workflow",
         "engineering-practices",
         "feature-flag-rollout",
-        "gh-axi",
         "github-operations",
-        "graphql-availability-investigator",
         "memory-sweep",
-        "milestone-release-tracking",
         "nux-fr-handoff",
         "open-source-actions-maintenance",
         "pr-body-render-check",
-        "prod-explain",
+        "proxima-review-lab",
         "pull-request-workflow",
         "record-demo",
-        "remediate-accessibility-audit",
-        "session-portability",
         "spreadsheet-report-generation",
         "test-quality",
+        "treehouse-workflow",
         "triage-dependabot",
         "triage-notifications",
-        "validate-pr-with-codespace",
         "validate-style",
     )
+    CATALOG_SKILLS = (
+        "cleanup-worktrees",
+        "gh-axi",
+        "graphql-availability-investigator",
+        "milestone-release-tracking",
+        "prod-explain",
+        "remediate-accessibility-audit",
+        "session-portability",
+        "validate-pr-with-codespace",
+    )
+    EXPECTED_SKILLS = REPOSITORY_SKILLS + CATALOG_SKILLS
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -225,13 +230,15 @@ class CopilotEnvironmentTest(unittest.TestCase):
 
     def prepare_complete_environment(self) -> dict[str, str]:
         source_root = Path(__file__).resolve().parent
-        for relative_path in self.DISCOVERY_ROOTS.values():
+        for client, relative_path in self.DISCOVERY_ROOTS.items():
             skills_dir = self.home / relative_path
             skills_dir.mkdir(parents=True)
             for name in self.EXPECTED_SKILLS:
                 skill = skills_dir / name
-                if name == "test-quality":
+                if name in self.REPOSITORY_SKILLS:
                     skill.symlink_to(source_root / ".copilot" / "skills" / name)
+                elif client == "Pi":
+                    skill.symlink_to(self.home / ".copilot" / "skills" / name)
                 else:
                     skill.mkdir()
                     (skill / "SKILL.md").write_text(
@@ -690,16 +697,16 @@ class CopilotEnvironmentTest(unittest.TestCase):
         env = self.prepare_complete_environment()
         for client, relative_path in self.DISCOVERY_ROOTS.items():
             skill = self.home / relative_path / "gh-axi"
-            skill_file = skill / "SKILL.md"
-            original = skill_file.read_bytes()
             for condition in ("empty directory", "broken symlink", "directory artifact"):
                 with self.subTest(client=client, condition=condition):
-                    skill_file.unlink()
+                    saved = self.root / "removed-skill"
+                    skill.rename(saved)
                     if condition == "broken symlink":
-                        skill.rmdir()
                         skill.symlink_to(self.root / "missing-skill")
-                    elif condition == "directory artifact":
-                        skill_file.mkdir()
+                    else:
+                        skill.mkdir()
+                        if condition == "directory artifact":
+                            (skill / "SKILL.md").mkdir()
                     try:
                         result = subprocess.run(
                             [str(self.verifier)],
@@ -715,42 +722,86 @@ class CopilotEnvironmentTest(unittest.TestCase):
                     finally:
                         if skill.is_symlink():
                             skill.unlink()
-                            skill.mkdir()
-                        elif skill_file.is_dir():
-                            skill_file.rmdir()
-                        skill_file.write_bytes(original)
+                        else:
+                            if (skill / "SKILL.md").is_dir():
+                                (skill / "SKILL.md").rmdir()
+                            skill.rmdir()
+                        saved.rename(skill)
 
-    def test_verifier_requires_test_quality_from_the_dotfiles_checkout(self) -> None:
+    def test_verifier_requires_managed_skills_from_their_sources(self) -> None:
         env = self.prepare_complete_environment()
-        for client, relative_path in self.DISCOVERY_ROOTS.items():
-            with self.subTest(client=client):
-                skill = self.home / relative_path / "test-quality"
-                source = skill.readlink()
-                skill.unlink()
-                skill.mkdir()
-                (skill / "SKILL.md").write_text(
-                    "---\nname: test-quality\ndescription: Stale copy\n---\n",
-                    encoding="utf-8",
-                )
-                try:
-                    result = subprocess.run(
-                        [str(self.verifier)],
-                        env=env,
-                        capture_output=True,
-                        text=True,
-                        check=False,
+        targets = [
+            (client, relative_path, name, "the dotfiles checkout")
+            for client, relative_path in self.DISCOVERY_ROOTS.items()
+            for name in self.REPOSITORY_SKILLS
+        ] + [
+            ("Pi", self.DISCOVERY_ROOTS["Pi"], name, "the Copilot source")
+            for name in self.CATALOG_SKILLS
+        ]
+        for client, relative_path, name, owner in targets:
+            for kind in ("directory copy", "unrelated symlink"):
+                with self.subTest(client=client, skill=name, kind=kind):
+                    skill = self.home / relative_path / name
+                    saved = self.root / "removed-skill"
+                    skill.rename(saved)
+                    replacement = skill if kind == "directory copy" else self.root / "stale-skill"
+                    replacement.mkdir()
+                    (replacement / "SKILL.md").write_text(
+                        f"---\nname: {name}\ndescription: Stale copy\n---\n# Old guidance\n",
+                        encoding="utf-8",
                     )
+                    if kind == "unrelated symlink":
+                        skill.symlink_to(replacement)
+                    try:
+                        result = subprocess.run(
+                            [str(self.verifier)],
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
 
-                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                    self.assertIn(
-                        f"{client} test-quality does not resolve to the dotfiles checkout",
-                        result.stdout,
-                    )
-                    self.assertNotIn("environment is ready", result.stdout)
-                finally:
-                    (skill / "SKILL.md").unlink()
-                    skill.rmdir()
-                    skill.symlink_to(source)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn(f"{client} {name} does not resolve to {owner}", result.stdout)
+                        self.assertNotIn("environment is ready", result.stdout)
+                    finally:
+                        if skill.is_symlink():
+                            skill.unlink()
+                        (replacement / "SKILL.md").unlink()
+                        replacement.rmdir()
+                        saved.rename(skill)
+
+        restored = subprocess.run(
+            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+
+    def test_verifier_accepts_catalog_sources_installed_through_symlinks(self) -> None:
+        env = self.prepare_complete_environment()
+        skill = self.home / ".copilot" / "skills" / "gh-axi"
+        source = self.root / "catalog-source"
+        skill.rename(source)
+        skill.symlink_to(source)
+
+        result = subprocess.run(
+            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("environment is ready", result.stdout)
+
+    def test_verifier_accepts_a_shared_skill_root(self) -> None:
+        env = self.prepare_complete_environment()
+        pi_skills = self.home / ".agents" / "skills"
+        pi_skills.rename(self.root / "pi-skill-links")
+        pi_skills.symlink_to(self.home / ".copilot" / "skills")
+
+        result = subprocess.run(
+            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("environment is ready", result.stdout)
 
     def test_verifier_requires_the_exact_enabled_plugin(self) -> None:
         env = self.prepare_complete_environment()

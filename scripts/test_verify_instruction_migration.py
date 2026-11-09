@@ -6,9 +6,12 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.verify_instruction_migration import (
     parse_h2_blocks,
@@ -48,6 +51,30 @@ class InstructionMigrationTest(unittest.TestCase):
     def save_manifest(self, manifest: dict) -> None:
         self.manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
+    def migration_state(self) -> tuple[bytes, bytes]:
+        baseline = self.root / self.load_manifest()["baseline"]["path"]
+        return baseline.read_bytes(), self.manifest_path.read_bytes()
+
+    def edit_pull_request_guidance(self) -> None:
+        skill = self.root / ".copilot/skills/pull-request-workflow/SKILL.md"
+        skill.write_text(
+            skill.read_text().replace("Always create PRs as draft", "Always open PRs as draft", 1)
+        )
+
+    def run_rebaseline(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).with_name("verify_instruction_migration.py")),
+                "--root", str(self.root),
+                "--update-baseline", "--acknowledge-guidance-changes",
+                *arguments,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
     def test_current_migration_is_complete(self) -> None:
         self.assertEqual(validate(self.root), [])
 
@@ -61,7 +88,13 @@ class InstructionMigrationTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+        before = self.migration_state()
         self.assertEqual(validate(self.root), [])
+
+        result = self.run_rebaseline()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.migration_state(), before)
 
     def test_h1_only_baseline_is_rejected(self) -> None:
         manifest = self.load_manifest()
@@ -249,18 +282,13 @@ class InstructionMigrationTest(unittest.TestCase):
         )
 
     def test_update_baseline_requires_explicit_acknowledgement(self) -> None:
+        before = self.migration_state()
         with self.assertRaisesRegex(ValueError, "explicit guidance-change acknowledgement"):
             update_baseline(self.root, self.manifest_path)
+        self.assertEqual(self.migration_state(), before)
 
     def test_update_baseline_accepts_intentional_guidance_edit(self) -> None:
-        skill = self.root / ".copilot/skills/pull-request-workflow/SKILL.md"
-        skill.write_text(
-            skill.read_text().replace(
-                "Always create PRs as draft",
-                "Always open PRs as draft",
-                1,
-            )
-        )
+        self.edit_pull_request_guidance()
 
         changed = update_baseline(self.root, self.manifest_path, acknowledged=True)
 
@@ -271,6 +299,99 @@ class InstructionMigrationTest(unittest.TestCase):
         baseline_text = baseline.read_text()
         self.assertIn("Always open PRs as draft", baseline_text)
         self.assertNotIn("migrated baseline block byte-verifiable", baseline_text)
+
+    def test_missing_contract_preserves_baseline_and_retry_reports_the_edit(self) -> None:
+        before = self.migration_state()
+        self.edit_pull_request_guidance()
+        global_path = self.root / ".github/copilot-instructions.md"
+        original = global_path.read_text(encoding="utf-8")
+        global_path.write_text(original.replace("## Pull Requests\n", "## Missing contract\n", 1))
+
+        result = self.run_rebaseline()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("cannot rebaseline missing runtime contract 'Pull Requests'", result.stderr)
+        self.assertEqual(self.migration_state(), before)
+        self.assertNotIn("Updated guidance contracts", result.stdout)
+
+        global_path.write_text(original, encoding="utf-8")
+        retried = self.run_rebaseline()
+
+        self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+        self.assertIn("baseline:Pull Requests", retried.stdout)
+        self.assertEqual(validate(self.root), [])
+        self.assertIn(b"Always open PRs as draft", self.migration_state()[0])
+
+    def test_rebaseline_validation_failure_preserves_both_files(self) -> None:
+        before = self.migration_state()
+        self.edit_pull_request_guidance()
+        skill = self.root / ".copilot/skills/engineering-practices/SKILL.md"
+        skill.write_text(skill.read_text().replace("name: engineering-practices", "name: wrong-name", 1))
+
+        result = self.run_rebaseline()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("does not match directory", result.stderr)
+        self.assertEqual(self.migration_state(), before)
+        self.assertNotIn("Updated guidance contracts", result.stdout)
+
+    def test_rebaseline_source_checks_precede_both_file_updates(self) -> None:
+        before = self.migration_state()
+        self.edit_pull_request_guidance()
+        source = self.root / "external-source.txt"
+
+        missing = self.run_rebaseline("--source", str(source))
+
+        self.assertEqual(missing.returncode, 1, missing.stdout + missing.stderr)
+        self.assertIn("source file is missing", missing.stderr)
+        self.assertEqual(self.migration_state(), before)
+
+        source.write_bytes(before[0])
+        stale = self.run_rebaseline("--source", str(source))
+
+        self.assertEqual(stale.returncode, 1, stale.stdout + stale.stderr)
+        self.assertIn("source SHA-256 changed", stale.stderr)
+        self.assertEqual(self.migration_state(), before)
+
+        source.write_bytes(before[0].replace(b"Always create PRs as draft", b"Always open PRs as draft", 1))
+        matching = self.run_rebaseline("--source", str(source))
+
+        self.assertEqual(matching.returncode, 0, matching.stdout + matching.stderr)
+        self.assertIn("baseline:Pull Requests", matching.stdout)
+        self.assertEqual(validate(self.root), [])
+        self.assertEqual(self.migration_state()[0], source.read_bytes())
+
+    def test_rebaseline_replacement_failures_restore_both_files(self) -> None:
+        before = self.migration_state()
+        self.edit_pull_request_guidance()
+        baseline = self.root / self.load_manifest()["baseline"]["path"]
+        replace = Path.replace
+        for failed_path in (baseline, self.manifest_path):
+            for interrupted in (False, True):
+                with self.subTest(path=failed_path, interrupted=interrupted):
+                    injected = False
+
+                    def fail_once(path: Path, destination: Path) -> Path:
+                        nonlocal injected
+                        if destination == failed_path and not injected:
+                            injected = True
+                            if interrupted:
+                                replace(path, destination)
+                                raise KeyboardInterrupt()
+                            raise OSError("fixture replacement failed")
+                        return replace(path, destination)
+
+                    with patch("scripts.verify_instruction_migration.Path.replace", new=fail_once):
+                        with self.assertRaises(KeyboardInterrupt if interrupted else OSError):
+                            update_baseline(self.root, self.manifest_path, acknowledged=True)
+
+                    self.assertEqual(self.migration_state(), before)
+                    self.assertEqual(list(self.manifest_path.parent.glob(".instruction-migration-*")), [])
+
+        changed = update_baseline(self.root, self.manifest_path, acknowledged=True)
+
+        self.assertIn("baseline:Pull Requests", changed)
+        self.assertEqual(validate(self.root), [])
 
     def test_fake_h2_inside_fence_does_not_split_blocks(self) -> None:
         blocks = parse_h2_blocks(
