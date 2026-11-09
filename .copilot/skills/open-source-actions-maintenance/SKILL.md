@@ -1,11 +1,11 @@
 ---
 name: open-source-actions-maintenance
-description: Use for maintenance in contributors, evergreen, issue-metrics, stale-repos, cleanowners, measure-innersource, pr-conflict-detector, or ospo-reusable-workflows, and when applying their shared architecture elsewhere.
+description: Use for maintenance in contributors, evergreen, issue-metrics, stale-repos, cleanowners, measure-innersource, pr-conflict-detector, or ospo-reusable-workflows.
 ---
 
 # Open source Actions maintenance
 
-Read and follow this skill for the named GitHub Actions repositories and their shared architecture. Load `actions-security` before changing workflow files.
+Read and follow this skill for the named GitHub Actions repositories. Load `actions-security` before changing workflow files.
 
 ## My Open Source GitHub Actions: Shared Patterns
 

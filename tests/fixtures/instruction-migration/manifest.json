@@ -191,8 +191,7 @@
     "open-source-actions-maintenance": [
       "contributors",
       "evergreen",
-      "issue-metrics",
-      "shared architecture"
+      "issue-metrics"
     ],
     "spreadsheet-report-generation": [
       "Excel",
