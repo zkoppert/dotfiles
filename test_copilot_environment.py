@@ -352,6 +352,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
             '  printf \'%s\\n\' "$FAKE_NODE_VERSION"\n'
             '  exit "$FAKE_NODE_EXIT"\n'
             'fi\n'
+            ': > "$HOME/node-sdk-used"\n'
             'if [ -n "$REAL_NODE" ]; then exec "$REAL_NODE" "$@"; fi\n'
             '[ "$1" = --input-type=module ] || exit 2\n'
             'if [ "$#" -eq 4 ]; then\n'
@@ -655,10 +656,10 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn(
-                    f"Node.js 22.19.0 or later is required (found {version})",
-                    result.stdout,
-                )
+                error = f"Node.js 22.19.0 or later is required (found {version})"
+                self.assertIn(f"cannot validate installed skill metadata: {error}", result.stdout)
+                self.assertIn(f"cannot verify Pi effective skills: {error}", result.stdout)
+                self.assertFalse((self.home / "node-sdk-used").exists())
                 self.assertNotIn("environment is ready", result.stdout)
                 self.assertNotIn("Traceback", result.stderr)
 
@@ -678,8 +679,10 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn("cannot verify Node.js version", result.stdout)
-                self.assertIn("install Node.js 22.19.0 or later", result.stdout)
+                error = "cannot verify Node.js version; install Node.js 22.19.0 or later"
+                self.assertIn(f"cannot validate installed skill metadata: {error}", result.stdout)
+                self.assertIn(f"cannot verify Pi effective skills: {error}", result.stdout)
+                self.assertFalse((self.home / "node-sdk-used").exists())
                 self.assertNotIn("environment is ready", result.stdout)
                 self.assertNotIn("Traceback", result.stderr)
 

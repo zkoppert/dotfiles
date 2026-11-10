@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -97,6 +98,52 @@ class SkillMetadataTest(unittest.TestCase):
         self.assertNotIn("fixture-secret", result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(path.read_text(encoding="utf-8"), content)
+
+    def test_cli_checks_node_runtime_before_loading_sdk(self) -> None:
+        path = self.write_skill("valid", "---\nname: gh-axi\ndescription: Valid\n---\n")
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        real_node = shutil.which("node")
+        assert real_node is not None
+        node = bin_dir / "node"
+        node.write_text(
+            "#!/bin/sh\n"
+            'if [ "$*" = --version ]; then\n'
+            '  printf \'%s\\n\' "$FAKE_NODE_VERSION"\n'
+            '  exit "$FAKE_NODE_STATUS"\n'
+            'fi\n'
+            ': > "$SDK_ATTEMPTED"\n'
+            f'exec {shlex.quote(real_node)} "$@"\n',
+            encoding="utf-8",
+        )
+        node.chmod(0o755)
+        attempted = self.root / "sdk-attempted"
+        env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "SDK_ATTEMPTED": str(attempted)}
+        for version, status, expected_error in (
+            ("v22.18.12", "0", "Node.js 22.19.0 or later is required (found v22.18.12)"),
+            ("invalid", "0", "cannot verify Node.js version"),
+            ("v22.19.0-rc.1", "0", "cannot verify Node.js version"),
+            ("v22.19.0", "1", "cannot verify Node.js version"),
+            ("v22.19.0", "0", None),
+        ):
+            with self.subTest(version=version, status=status):
+                attempted.unlink(missing_ok=True)
+                env.update(FAKE_NODE_VERSION=version, FAKE_NODE_STATUS=status)
+
+                result = subprocess.run(
+                    [sys.executable, str(Path(__file__).with_name("skill_metadata.py")), str(path), "gh-axi"],
+                    env=env, capture_output=True, text=True, check=False,
+                )
+
+                if expected_error is None:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(result.stderr, "")
+                    self.assertTrue(attempted.exists())
+                else:
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(expected_error, result.stderr)
+                    self.assertFalse(attempted.exists())
+                self.assertNotIn("Traceback", result.stderr)
 
     def test_suite_fails_when_required_tools_are_unavailable(self) -> None:
         empty_bin = self.root / "empty-bin"

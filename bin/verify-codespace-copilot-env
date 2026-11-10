@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import runpy
 import shutil
 import subprocess
@@ -236,26 +235,6 @@ def main() -> int:
         )
     if active_gh and not command_succeeds(["gh", "stack", "--help"]):
         failures.append("missing GitHub extension: github/gh-stack")
-
-    if "node" not in missing_tools:
-        try:
-            node_version = subprocess.run(
-                ["node", "--version"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
-            version_match = re.fullmatch(r"v([0-9]+)\.([0-9]+)\.([0-9]+)", node_version)
-            if version_match is None:
-                raise ValueError("invalid Node.js version")
-            if tuple(map(int, version_match.groups())) < (22, 19, 0):
-                failures.append(
-                    f"Node.js 22.19.0 or later is required (found {node_version})"
-                )
-        except (OSError, subprocess.CalledProcessError, ValueError):
-            failures.append(
-                "cannot verify Node.js version; install Node.js 22.19.0 or later"
-            )
 
     remote_helper = Path.home() / ".local" / "bin" / "copilot-codespace-session"
     if not remote_helper.is_file() or not os.access(remote_helper, os.X_OK):

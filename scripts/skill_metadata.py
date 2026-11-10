@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,22 @@ def pi_sdk_path() -> Path:
     executable = shutil.which("pi")
     if executable is None:
         raise ValueError("Pi executable is missing from PATH")
+    try:
+        node_version = subprocess.run(
+            ["node", "--version"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        version_match = re.fullmatch(r"v([0-9]+)\.([0-9]+)\.([0-9]+)", node_version)
+        if version_match is None:
+            raise ValueError("invalid Node.js version")
+    except (OSError, subprocess.CalledProcessError, ValueError) as error:
+        raise ValueError(
+            "cannot verify Node.js version; install Node.js 22.19.0 or later"
+        ) from error
+    if tuple(map(int, version_match.groups())) < (22, 19, 0):
+        raise ValueError(f"Node.js 22.19.0 or later is required (found {node_version})")
     wrapper = Path(__file__).resolve().parents[1] / "bin" / "pi-treehouse"
     if Path(executable).resolve() == wrapper:
         executable = os.environ.get("PI_REAL_PI") or next(

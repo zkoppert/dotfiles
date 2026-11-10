@@ -63,6 +63,10 @@ class InstallScriptTest(unittest.TestCase):
         node = self.fake_bin / "node"
         node.write_text(
             "#!/bin/sh\n"
+            'if [ "$*" = --version ]; then\n'
+            '  printf \'%s\\n\' "$FAKE_CURRENT_NODE_VERSION"\n'
+            '  exit "$FAKE_CURRENT_NODE_EXIT"\n'
+            'fi\n'
             'if [ -n "$REAL_NODE" ]; then exec "$REAL_NODE" "$@"; fi\n'
             '[ "$1" = --input-type=module ] || exit 2\n'
             f"exec {shlex.quote(sys.executable)} -c 'import json, sys; "
@@ -135,6 +139,8 @@ class InstallScriptTest(unittest.TestCase):
         self.env["GIT_CONFIG_GLOBAL"] = str(self.home / ".gitconfig")
         self.env["GIT_CONFIG_SYSTEM"] = os.devnull
         self.env["COPILOT_SKILL_CATALOG_REPO"] = "private/catalog"
+        self.env["FAKE_CURRENT_NODE_VERSION"] = "v22.19.0"
+        self.env["FAKE_CURRENT_NODE_EXIT"] = "0"
         self.env["FAKE_COPILOT_LIST_STATUS"] = "0"
         self.env.pop("FAKE_COPILOT_PLUGINS_JSON", None)
 
@@ -470,6 +476,30 @@ class InstallScriptTest(unittest.TestCase):
             "Copilot plugin gho11y is already installed",
             second_run.stdout,
         )
+
+    def test_macos_catalog_validation_requires_supported_node(self) -> None:
+        self.use_real_pi_sdk()
+        for version, supported in (("v22.18.0", False), ("v22.18.12", False), ("v22.19.0", True)):
+            with self.subTest(version=version):
+                self.env["FAKE_CURRENT_NODE_VERSION"] = version
+
+                result = self.run_installer()
+
+                if supported:
+                    self.assertEqual(result.stderr, "")
+                else:
+                    self.assertIn(f"Node.js 22.19.0 or later is required (found {version})", result.stderr)
+                for name in self.CATALOG_SKILLS:
+                    source = self.home / ".copilot" / "skills" / name
+                    mirror = self.home / ".agents" / "skills" / name
+                    self.assertTrue((source / "SKILL.md").is_file())
+                    if supported:
+                        self.assertTrue(mirror.is_symlink())
+                        self.assertEqual(mirror.resolve(), source.resolve())
+                    else:
+                        self.assertFalse(mirror.exists())
+                self.assertFalse((self.home / ".local" / "share" / "node-v22").exists())
+                self.assertFalse((self.home / ".local" / "bin" / "node").exists())
 
     def test_nested_catalog_metadata_is_preserved_on_reinstall(self) -> None:
         self.use_real_pi_sdk()
