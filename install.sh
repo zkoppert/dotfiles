@@ -47,6 +47,85 @@ if [ -d "$DOTFILES_DIR/.copilot/skills" ]; then
   done
 fi
 
+# Install Linux-only dependencies for the remote Copilot environment.
+if [ "$(uname)" = "Linux" ]; then
+  if ! node_version="$(node --version 2>/dev/null)" ||
+    [[ ! "$node_version" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] ||
+    (( 10#${BASH_REMATCH[1]} < 22 || (10#${BASH_REMATCH[1]} == 22 && 10#${BASH_REMATCH[2]} < 19) )); then
+    case "$(uname -m)" in
+      x86_64) node_arch="x64" ;;
+      aarch64 | arm64) node_arch="arm64" ;;
+      *) node_arch="" ;;
+    esac
+    if [ -n "$node_arch" ] &&
+      command -v curl >/dev/null 2>&1 &&
+      command -v python3 >/dev/null 2>&1 &&
+      command -v tar >/dev/null 2>&1; then
+      if node_version="$(
+        set -o pipefail
+        curl -fsSL https://nodejs.org/dist/index.json |
+          python3 -c 'import json, re, sys; print(next(item["version"] for item in json.load(sys.stdin) if re.fullmatch(r"v22\.[0-9]+\.[0-9]+", item["version"]) and tuple(map(int, item["version"][1:].split("."))) >= (22, 19, 0)))'
+      )"; then
+        node_dir="$HOME/.local/share/node-v22"
+        mkdir -p "$node_dir" "$HOME/.local/bin"
+        node_stage="$(mktemp -d "$HOME/.local/share/.node-v22.XXXXXX")"
+        node_archive="$node_stage/archive.tar.xz"
+        cleanup_node_install() {
+          if { [ -e "$node_stage/previous" ] || [ -L "$node_stage/previous" ]; } &&
+            [ ! -e "$node_dir" ] && [ ! -L "$node_dir" ]; then
+            mv "$node_stage/previous" "$node_dir" || return 1
+          fi
+          rm -rf "$node_stage"
+        }
+        trap cleanup_node_install EXIT
+        mkdir "$node_stage/runtime"
+        if curl -fsSL "https://nodejs.org/dist/$node_version/node-$node_version-linux-$node_arch.tar.xz" -o "$node_archive" &&
+          tar -xJf "$node_archive" --strip-components=1 -C "$node_stage/runtime" &&
+          mv "$node_dir" "$node_stage/previous" &&
+          mv "$node_stage/runtime" "$node_dir"; then
+          for node_command in node npm npx corepack; do
+            node_target="$HOME/.local/bin/$node_command"
+            if [ -L "$node_target" ] || [ ! -e "$node_target" ]; then
+              ln -sfn "$node_dir/bin/$node_command" "$node_target"
+            else
+              echo "⚠ $node_target exists and is not a symlink - skipping"
+            fi
+          done
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "✓ Installed Node.js $node_version → ~/.local/share/node-v22"
+        else
+          echo "⚠ Failed to install Node.js 22.19.0 or later - continuing dotfiles setup"
+        fi
+        cleanup_node_install
+        trap - EXIT
+      else
+        echo "⚠ Cannot look up Node.js 22.19.0 or later. Check access to https://nodejs.org/dist/index.json and rerun ./install.sh. Continuing dotfiles setup."
+      fi
+    else
+      echo "⚠ Node.js 22.19.0 or later is required and this system has no supported automatic installer"
+    fi
+  fi
+
+  if ! command -v 1up >/dev/null 2>&1; then
+    one_up_target="$HOME/.local/bin/1up"
+    ONE_UP_MODULE="${COPILOT_1UP_MODULE:-}"
+    if [ -e "$one_up_target" ] || [ -L "$one_up_target" ]; then
+      echo "⚠ $one_up_target exists - skipping 1up install"
+    elif [ -n "$ONE_UP_MODULE" ] && command -v go >/dev/null 2>&1; then
+      mkdir -p "$HOME/.local/bin"
+      one_up_path="${ONE_UP_MODULE%@*}"
+      one_up_owner="${one_up_path%/*}"
+      if GOBIN="$HOME/.local/bin" GOPRIVATE="$one_up_owner/*" go install "$ONE_UP_MODULE"; then
+        echo "✓ Installed 1up → ~/.local/bin/1up"
+      else
+        echo "⚠ Failed to install 1up - continuing dotfiles setup"
+      fi
+    else
+      echo "⚠ 1up is missing - set COPILOT_1UP_MODULE to its versioned Go module"
+    fi
+  fi
+fi
+
 skill_metadata_valid() {
   python3 "$DOTFILES_DIR/scripts/skill_metadata.py" "$1" "$2"
 }
@@ -128,83 +207,6 @@ for skill_name in $CATALOG_SKILLS; do
     echo "⚠ $target exists and is not a symlink - skipping"
   fi
 done
-
-# Install Linux-only dependencies for the remote Copilot environment.
-if [ "$(uname)" = "Linux" ]; then
-  node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
-  if [ -z "$node_major" ] || [ "$node_major" -lt 22 ]; then
-    case "$(uname -m)" in
-      x86_64) node_arch="x64" ;;
-      aarch64 | arm64) node_arch="arm64" ;;
-      *) node_arch="" ;;
-    esac
-    if [ -n "$node_arch" ] &&
-      command -v curl >/dev/null 2>&1 &&
-      command -v python3 >/dev/null 2>&1 &&
-      command -v tar >/dev/null 2>&1; then
-      if node_version="$(
-        set -o pipefail
-        curl -fsSL https://nodejs.org/dist/index.json |
-          python3 -c 'import json, sys; print(next(item["version"] for item in json.load(sys.stdin) if item["version"].startswith("v22.")))'
-      )"; then
-        node_dir="$HOME/.local/share/node-v22"
-        mkdir -p "$node_dir" "$HOME/.local/bin"
-        node_stage="$(mktemp -d "$HOME/.local/share/.node-v22.XXXXXX")"
-        node_archive="$node_stage/archive.tar.xz"
-        cleanup_node_install() {
-          if { [ -e "$node_stage/previous" ] || [ -L "$node_stage/previous" ]; } &&
-            [ ! -e "$node_dir" ] && [ ! -L "$node_dir" ]; then
-            mv "$node_stage/previous" "$node_dir" || return 1
-          fi
-          rm -rf "$node_stage"
-        }
-        trap cleanup_node_install EXIT
-        mkdir "$node_stage/runtime"
-        if curl -fsSL "https://nodejs.org/dist/$node_version/node-$node_version-linux-$node_arch.tar.xz" -o "$node_archive" &&
-          tar -xJf "$node_archive" --strip-components=1 -C "$node_stage/runtime" &&
-          mv "$node_dir" "$node_stage/previous" &&
-          mv "$node_stage/runtime" "$node_dir"; then
-          for node_command in node npm npx corepack; do
-            node_target="$HOME/.local/bin/$node_command"
-            if [ -L "$node_target" ] || [ ! -e "$node_target" ]; then
-              ln -sfn "$node_dir/bin/$node_command" "$node_target"
-            else
-              echo "⚠ $node_target exists and is not a symlink - skipping"
-            fi
-          done
-          echo "✓ Installed Node.js $node_version → ~/.local/share/node-v22"
-        else
-          echo "⚠ Failed to install Node.js 22 - continuing dotfiles setup"
-        fi
-        cleanup_node_install
-        trap - EXIT
-      else
-        echo "⚠ Cannot look up Node.js 22. Check access to https://nodejs.org/dist/index.json and rerun ./install.sh. Continuing dotfiles setup."
-      fi
-    else
-      echo "⚠ Node.js 22 is required and this system has no supported automatic installer"
-    fi
-  fi
-
-  if ! command -v 1up >/dev/null 2>&1; then
-    one_up_target="$HOME/.local/bin/1up"
-    ONE_UP_MODULE="${COPILOT_1UP_MODULE:-}"
-    if [ -e "$one_up_target" ] || [ -L "$one_up_target" ]; then
-      echo "⚠ $one_up_target exists - skipping 1up install"
-    elif [ -n "$ONE_UP_MODULE" ] && command -v go >/dev/null 2>&1; then
-      mkdir -p "$HOME/.local/bin"
-      one_up_path="${ONE_UP_MODULE%@*}"
-      one_up_owner="${one_up_path%/*}"
-      if GOBIN="$HOME/.local/bin" GOPRIVATE="$one_up_owner/*" go install "$ONE_UP_MODULE"; then
-        echo "✓ Installed 1up → ~/.local/bin/1up"
-      else
-        echo "⚠ Failed to install 1up - continuing dotfiles setup"
-      fi
-    else
-      echo "⚠ 1up is missing - set COPILOT_1UP_MODULE to its versioned Go module"
-    fi
-  fi
-fi
 
 # Block accidental interactive Python package resolution outside CFS on macOS.
 CFS_GUARD_SOURCE="$DOTFILES_DIR/bin/cfs-package-guard"

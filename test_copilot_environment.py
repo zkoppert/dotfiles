@@ -387,7 +387,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 "COPILOT_SKILL_CATALOG_REPO": "private/catalog",
                 "COPILOT_MCP_SPLUNK_BEARER_TOKEN": "not-printed",
                 "COPILOT_MCP_SPLUNK_HOST": "internal.example",
-                "FAKE_NODE_VERSION": "v22.0.0",
+                "FAKE_NODE_VERSION": "v22.19.0",
                 "FAKE_NODE_EXIT": "0",
                 "FAKE_PI_SKILLS_JSON": json.dumps([
                     {
@@ -503,7 +503,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
 
     def test_verifier_reports_complete_environment(self) -> None:
         env = self.prepare_complete_environment()
-        for version in ("v22.0.0", "v23.0.0", "v24.1.0"):
+        for version in ("v22.19.0", "v22.19.1", "v22.20.0", "v23.0.0", "v24.1.0"):
             with self.subTest(version=version):
                 env["FAKE_NODE_VERSION"] = version
 
@@ -642,7 +642,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
 
     def test_verifier_rejects_unsupported_node_versions(self) -> None:
         env = self.prepare_complete_environment()
-        for version in ("v20.19.0", "v21.7.3"):
+        for version in ("v20.19.0", "v21.7.3", "v22.0.0", "v22.18.0", "v22.18.12"):
             with self.subTest(version=version):
                 env["FAKE_NODE_VERSION"] = version
 
@@ -656,7 +656,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn(
-                    f"Node.js 22 or later is required (found {version})",
+                    f"Node.js 22.19.0 or later is required (found {version})",
                     result.stdout,
                 )
                 self.assertNotIn("environment is ready", result.stdout)
@@ -664,7 +664,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
 
     def test_verifier_reports_unverifiable_node_versions(self) -> None:
         env = self.prepare_complete_environment()
-        for version, status in (("", 0), ("invalid", 0), ("v22.0.0", 1)):
+        for version, status in (("", 0), ("invalid", 0), ("v22.19.0-rc.1", 0), ("v22.19.0", 1)):
             with self.subTest(version=version, status=status):
                 env["FAKE_NODE_VERSION"] = version
                 env["FAKE_NODE_EXIT"] = str(status)
@@ -679,7 +679,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("cannot verify Node.js version", result.stdout)
-                self.assertIn("install Node.js 22 or later", result.stdout)
+                self.assertIn("install Node.js 22.19.0 or later", result.stdout)
                 self.assertNotIn("environment is ready", result.stdout)
                 self.assertNotIn("Traceback", result.stderr)
 

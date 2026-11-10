@@ -168,7 +168,12 @@ class InstallScriptTest(unittest.TestCase):
                 "  printf 'Linux\\n'\n"
                 "fi\n"
             ),
-            "node": "#!/bin/sh\nprintf '20\\n'\n",
+            "node": (
+                "#!/bin/sh\n"
+                '[ "$*" = --version ] || exit 90\n'
+                'printf \'%s\\n\' "$FAKE_CURRENT_NODE_VERSION"\n'
+                'exit "$FAKE_CURRENT_NODE_EXIT"\n'
+            ),
             "1up": "#!/bin/sh\nexit 0\n",
             "curl": (
                 "#!/bin/sh\n"
@@ -179,7 +184,7 @@ class InstallScriptTest(unittest.TestCase):
                 '    printf \'%s\\n\' "$FAKE_NODE_INDEX"\n'
                 '    exit "$FAKE_NODE_INDEX_EXIT"\n'
                 "    ;;\n"
-                "  https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz)\n"
+                "  https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-x64.tar.xz)\n"
                 '    [ "$3" = -o ] && [ "$#" -eq 4 ] || exit 2\n'
                 '    printf \'%s\\n\' "$4" > "$HOME/node-archive-path"\n'
                 '    cp "$FAKE_NODE_ARCHIVE" "$4" || exit "$?"\n'
@@ -195,8 +200,10 @@ class InstallScriptTest(unittest.TestCase):
             command.chmod(0o755)
         self.env.update(
             {
+                "FAKE_CURRENT_NODE_VERSION": "v22.18.12",
+                "FAKE_CURRENT_NODE_EXIT": "0",
                 "FAKE_NODE_INDEX": json.dumps(
-                    [{"version": "v24.0.0"}, {"version": "v22.0.0"}]
+                    [{"version": "v24.0.0"}, {"version": "v22.19.0"}]
                 ),
                 "FAKE_NODE_INDEX_EXIT": "0",
                 "TMPDIR": str(self.root),
@@ -206,11 +213,18 @@ class InstallScriptTest(unittest.TestCase):
         (runtime / "bin").mkdir(parents=True)
         for name in ("node", "npm", "npx", "corepack"):
             command = runtime / "bin" / name
-            command.write_text("#!/bin/sh\nprintf 'v22.0.0\\n'\n", encoding="utf-8")
+            command.write_text(
+                "#!/bin/sh\n"
+                'if [ "$*" = --version ]; then printf \'v22.19.0\\n\'; exit 0; fi\n'
+                '[ "$1" = --input-type=module ] || exit 2\n'
+                f"exec {shlex.quote(sys.executable)} -c 'import json, sys; "
+                "print(json.dumps({path: [] for path in json.load(sys.stdin)}))'\n",
+                encoding="utf-8",
+            )
             command.chmod(0o755)
         archive_path = self.root / "node-release.tar.xz"
         with tarfile.open(archive_path, "w:xz") as archive:
-            archive.add(runtime, arcname="node-v22.0.0-linux-x64")
+            archive.add(runtime, arcname="node-v22.19.0-linux-x64")
         self.env["FAKE_NODE_ARCHIVE"] = str(archive_path)
 
     def prepare_existing_node_runtime(self) -> Path:
@@ -780,7 +794,8 @@ class InstallScriptTest(unittest.TestCase):
 
         result = self.run_installer()
 
-        self.assertIn("Installed Node.js v22.0.0", result.stdout)
+        self.assertIn("Installed Node.js v22.19.0", result.stdout)
+        self.assertTrue((self.home / ".agents" / "skills" / "gh-axi" / "SKILL.md").is_file())
         for name in ("node", "npm", "npx", "corepack"):
             target = self.home / ".local" / "bin" / name
             self.assertTrue(target.is_symlink())
@@ -796,9 +811,54 @@ class InstallScriptTest(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(version.stdout, "v22.0.0\n")
+        self.assertEqual(version.stdout, "v22.19.0\n")
         downloaded_archive = Path((self.home / "node-archive-path").read_text().strip())
         self.assertFalse(downloaded_archive.exists())
+
+    def test_node_versions_below_the_sdk_floor_are_upgraded(self) -> None:
+        self.prepare_node_install()
+        for version, exit_status in (
+            ("", "127"),
+            ("invalid", "0"),
+            ("v20.19.0", "0"),
+            ("v22.0.0", "0"),
+            ("v22.18.0", "0"),
+            ("v22.18.12", "0"),
+            ("v22.19.0-rc.1", "0"),
+            ("v22.19.0", "1"),
+        ):
+            with self.subTest(version=version, exit_status=exit_status):
+                self.env["FAKE_CURRENT_NODE_VERSION"] = version
+                self.env["FAKE_CURRENT_NODE_EXIT"] = exit_status
+
+                result = self.run_installer()
+
+                self.assertIn("Installed Node.js v22.19.0", result.stdout)
+                self.assert_node_commands_version("v22.19.0")
+
+    def test_supported_node_versions_do_not_trigger_downloads(self) -> None:
+        self.prepare_node_install()
+        original = (self.fake_bin / "node").read_bytes()
+        for version in ("v22.19.0", "v22.19.1", "v22.20.0", "v23.0.0", "v24.1.0"):
+            with self.subTest(version=version):
+                self.env["FAKE_CURRENT_NODE_VERSION"] = version
+
+                self.run_installer()
+
+                self.assertFalse((self.home / "curl.log").exists())
+                self.assertFalse((self.home / ".local" / "share" / "node-v22").exists())
+                self.assertEqual((self.fake_bin / "node").read_bytes(), original)
+
+    def test_node_release_selection_excludes_older_node_22_releases(self) -> None:
+        self.prepare_node_install()
+        self.env["FAKE_NODE_INDEX"] = json.dumps([
+            {"version": "v22.18.12"}, {"version": "v22.19.0"},
+        ])
+
+        result = self.run_installer()
+
+        self.assertIn("Installed Node.js v22.19.0", result.stdout)
+        self.assert_node_commands_version("v22.19.0")
 
     def test_node_update_replaces_the_existing_runtime_after_extraction(self) -> None:
         self.prepare_node_install()
@@ -808,8 +868,8 @@ class InstallScriptTest(unittest.TestCase):
         for _ in range(2):
             result = self.run_installer()
 
-            self.assertIn("Installed Node.js v22.0.0", result.stdout)
-            self.assert_node_commands_version("v22.0.0")
+            self.assertIn("Installed Node.js v22.19.0", result.stdout)
+            self.assert_node_commands_version("v22.19.0")
             self.assertFalse((runtime / "obsolete.txt").exists())
             self.assertEqual(set(runtime.parent.iterdir()), {runtime})
 
@@ -819,15 +879,15 @@ class InstallScriptTest(unittest.TestCase):
         self.assert_node_commands_version("v20.19.0")
         (self.root / "node-runtime" / "new-only.txt").write_text("new runtime\n", encoding="utf-8")
         with tarfile.open(self.env["FAKE_NODE_ARCHIVE"], "w:xz") as archive:
-            archive.add(self.root / "node-runtime", arcname="node-v22.0.0-linux-x64")
-            broken_link = tarfile.TarInfo("node-v22.0.0-linux-x64/broken-link")
+            archive.add(self.root / "node-runtime", arcname="node-v22.19.0-linux-x64")
+            broken_link = tarfile.TarInfo("node-v22.19.0-linux-x64/broken-link")
             broken_link.type = tarfile.LNKTYPE
-            broken_link.linkname = "node-v22.0.0-linux-x64/missing-target"
+            broken_link.linkname = "node-v22.19.0-linux-x64/missing-target"
             archive.addfile(broken_link)
 
         result = self.run_installer()
 
-        self.assertIn("Failed to install Node.js 22", result.stdout)
+        self.assertIn("Failed to install Node.js 22.19.0 or later", result.stdout)
         self.assertIn("Dotfiles install complete.", result.stdout)
         self.assert_node_commands_version("v20.19.0")
         self.assertEqual((runtime / "obsolete.txt").read_text(), "previous runtime\n")
@@ -856,7 +916,7 @@ class InstallScriptTest(unittest.TestCase):
 
         result = self.run_installer()
 
-        self.assertIn("Failed to install Node.js 22", result.stdout)
+        self.assertIn("Failed to install Node.js 22.19.0 or later", result.stdout)
         self.assertIn("Dotfiles install complete.", result.stdout)
         self.assertTrue((self.home / "node-move-failed").exists())
         self.assert_node_commands_version("v20.19.0")
@@ -881,7 +941,7 @@ class InstallScriptTest(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             self.run_installer()
 
-        self.assert_node_commands_version("v22.0.0")
+        self.assert_node_commands_version("v22.19.0")
         self.assertEqual(set(runtime.parent.iterdir()), {runtime})
         downloaded_archive = Path((self.home / "node-archive-path").read_text().strip())
         self.assertFalse(downloaded_archive.exists())
@@ -890,12 +950,12 @@ class InstallScriptTest(unittest.TestCase):
         self.prepare_node_install()
         owned = self.root / "owned-file"
         owned.write_text("keep me\n", encoding="utf-8")
-        predictable = self.root / "node-v22.0.0-linux-x64.tar.xz"
+        predictable = self.root / "node-v22.19.0-linux-x64.tar.xz"
         predictable.symlink_to(owned)
 
         result = self.run_installer()
 
-        self.assertIn("Installed Node.js v22.0.0", result.stdout)
+        self.assertIn("Installed Node.js v22.19.0", result.stdout)
         self.assertEqual(owned.read_text(encoding="utf-8"), "keep me\n")
         self.assertTrue(predictable.is_symlink())
         self.assertEqual(predictable.readlink(), owned)
@@ -913,7 +973,7 @@ class InstallScriptTest(unittest.TestCase):
 
                 result = self.run_installer()
 
-                self.assertIn("Failed to install Node.js 22", result.stdout)
+                self.assertIn("Failed to install Node.js 22.19.0 or later", result.stdout)
                 self.assertIn("Dotfiles install complete.", result.stdout)
                 self.assertFalse((self.home / ".local" / "bin" / "node").exists())
                 downloaded_archive = Path((self.home / "node-archive-path").read_text().strip())
@@ -996,7 +1056,8 @@ class InstallScriptTest(unittest.TestCase):
             ("network failure", "", 6),
             ("invalid JSON", "{", 0),
             ("no Node.js 22 release", '[{"version":"v24.0.0"}]', 0),
-            ("failed transfer with valid JSON", '[{"version":"v22.0.0"}]', 18),
+            ("only unsupported Node.js 22 releases", '[{"version":"v22.18.12"}]', 0),
+            ("failed transfer with valid JSON", '[{"version":"v22.19.0"}]', 18),
         )
         for name, index, status in cases:
             with self.subTest(case=name):
@@ -1007,7 +1068,7 @@ class InstallScriptTest(unittest.TestCase):
 
                 result = self.run_installer()
 
-                self.assertIn("Cannot look up Node.js 22", result.stdout)
+                self.assertIn("Cannot look up Node.js 22.19.0 or later", result.stdout)
                 self.assertIn("rerun ./install.sh", result.stdout)
                 self.assertIn("Dotfiles install complete.", result.stdout)
                 self.assertTrue(target.is_symlink())
@@ -1027,7 +1088,7 @@ class InstallScriptTest(unittest.TestCase):
         npx.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         npx.chmod(0o755)
         node = self.fake_bin / "node"
-        node.write_text("#!/bin/sh\nprintf '22\\n'\n", encoding="utf-8")
+        node.write_text("#!/bin/sh\nprintf 'v22.19.0\\n'\n", encoding="utf-8")
         node.chmod(0o755)
         go = self.fake_bin / "go"
         go.write_text(

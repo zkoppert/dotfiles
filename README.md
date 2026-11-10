@@ -27,13 +27,13 @@ The global file keeps rules that apply to every session. Task-specific guidance 
 
 The verifier uses Pi's installed software development kit (SDK) to resolve user skills, installed packages, and settings filters. Each required skill must remain enabled and resolve to its managed source. Native discovery follows Pi's Markdown, symlink, ignore, directory-name fallback, and traversal rules. Unrelated user skills remain unchanged.
 
-SDK discovery and catalog metadata validation require a working Pi executable and compatible Node.js. Both support npm installations and Homebrew's `libexec/lib/node_modules` layout, including executables behind the Treehouse wrapper. The wrapper honors `PI_REAL_PI`; otherwise, it selects the next Pi executable on `PATH`.
+SDK discovery and catalog metadata validation require a working Pi executable and Node.js 22.19.0 or later. Both support npm installations and Homebrew's `libexec/lib/node_modules` layout, including executables behind the Treehouse wrapper. The wrapper honors `PI_REAL_PI`; otherwise, it selects the next Pi executable on `PATH`.
 
 The installer and environment verifier share the SDK-based metadata validator in `scripts/skill_metadata.py`. Valid nested metadata remains unchanged. Incorrect names, empty descriptions, malformed YAML, and disabled model invocation still fail validation. If the parser is unavailable, setup continues with warnings but cannot validate or mirror catalog skills.
 
 Discovery runs offline without loading extensions or installing packages. Project resources, extension-added skills, and command-line overrides remain outside this check.
 
-The `pr-marker-tests` continuous integration (CI) workflow installs Node.js 24 and Pi 1.3.0 before running the runtime suites. CI runs the metadata and Treehouse launcher suites alongside installer and environment tests. SDK integration tests fail when Pi or Node.js is unavailable instead of skipping.
+The `pr-marker-tests` continuous integration (CI) workflow installs Node.js 22.19.0 and Pi 1.3.0 to test the minimum supported runtime. CI runs the metadata and Treehouse launcher suites alongside installer and environment tests. SDK integration tests fail when Pi or Node.js is unavailable instead of skipping.
 
 Run the preservation check after changing global instructions or moving guidance:
 
@@ -187,7 +187,7 @@ export PATH="$HOME/.local/bin:$PATH"
 bootstrap-copilot-mcp
 ```
 
-On Linux x86_64 and ARM64, the installer adds Node.js 22 when Node.js is missing or older. Installation requires `curl`, Python 3, and `tar` with xz support. Azure MCP requires Node.js 22 or later. The installer preserves existing files that are not symlinks in `~/.local/bin`; resolve any reported command conflicts before continuing.
+On Linux x86_64 and ARM64, the installer adds a supported Node.js 22 release when Node.js is missing or older than 22.19.0. Node setup runs before SDK-backed catalog validation. Installation requires `curl`, Python 3, and `tar` with xz support. Pi `1.3.0` requires Node.js `22.19.0` or later. The installer preserves existing files that are not symlinks in `~/.local/bin`; resolve any reported command conflicts before continuing.
 
 The Linux installer places a missing `1up` in `~/.local/bin`. This step requires Go and access to the private module.
 
