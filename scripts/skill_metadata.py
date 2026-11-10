@@ -84,7 +84,7 @@ console.log(JSON.stringify(results));
     requested = {str(path): name for path, name in skills.items()}
     try:
         result = subprocess.run(
-            ["node", "--input-type=module", "-e", script, str(sdk.parent / "utils" / "frontmatter.js")],
+            ["node", "--input-type=module", "-e", script, str(sdk)],
             input=json.dumps(requested),
             env={**os.environ, "PI_OFFLINE": "1"},
             capture_output=True,

@@ -140,17 +140,11 @@ class InstallScriptTest(unittest.TestCase):
 
     def use_real_pi_sdk(self) -> None:
         if shutil.which("pi") is None or shutil.which("node") is None:
-            self.skipTest("Pi and Node.js are required for catalog metadata regressions")
+            self.fail("Pi and Node.js are required for catalog metadata regressions")
         sdk = pi_sdk_path()
         self.env["REAL_NODE"] = shutil.which("node")
         (self.pi_package / "dist" / "index.js").write_text(
-            f"export {{ DefaultResourceLoader, SettingsManager }} from {json.dumps(sdk.as_uri())};\n",
-            encoding="utf-8",
-        )
-        parser = self.pi_package / "dist" / "utils" / "frontmatter.js"
-        parser.parent.mkdir(exist_ok=True)
-        parser.write_text(
-            f"export {{ parseFrontmatter }} from {json.dumps((sdk.parent / 'utils' / 'frontmatter.js').as_uri())};\n",
+            f"export {{ DefaultResourceLoader, SettingsManager, parseFrontmatter }} from {json.dumps(sdk.as_uri())};\n",
             encoding="utf-8",
         )
 

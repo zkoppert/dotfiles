@@ -17,7 +17,7 @@ from scripts.skill_metadata import skill_metadata_errors
 class SkillMetadataTest(unittest.TestCase):
     def setUp(self) -> None:
         if shutil.which("pi") is None or shutil.which("node") is None:
-            self.skipTest("Pi and Node.js are required for client metadata parsing")
+            self.fail("Pi and Node.js are required for client metadata parsing")
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -97,6 +97,23 @@ class SkillMetadataTest(unittest.TestCase):
         self.assertNotIn("fixture-secret", result.stdout + result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(path.read_text(encoding="utf-8"), content)
+
+    def test_suite_fails_when_required_tools_are_unavailable(self) -> None:
+        empty_bin = self.root / "empty-bin"
+        empty_bin.mkdir()
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "unittest",
+                "scripts.test_skill_metadata.SkillMetadataTest.test_catalog_metadata_accepts_nested_maps_and_yaml_scalars",
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            env={**os.environ, "PATH": str(empty_bin)},
+            capture_output=True, text=True, check=False,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Pi and Node.js are required for client metadata parsing", result.stderr)
+        self.assertNotIn("skipped=", result.stderr)
 
     def test_unavailable_parser_does_not_accept_catalog_metadata(self) -> None:
         path = self.write_skill("valid", "---\nname: gh-axi\ndescription: Valid\n---\n")

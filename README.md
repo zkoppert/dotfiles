@@ -33,6 +33,8 @@ The installer and environment verifier share the SDK-based metadata validator in
 
 Discovery runs offline without loading extensions or installing packages. Project resources, extension-added skills, and command-line overrides remain outside this check.
 
+The `pr-marker-tests` continuous integration (CI) workflow installs Node.js 24 and Pi 1.3.0 before running the runtime suites. CI runs the metadata and Treehouse launcher suites alongside installer and environment tests. SDK integration tests fail when Pi or Node.js is unavailable instead of skipping.
+
 Run the preservation check after changing global instructions or moving guidance:
 
 ```bash
