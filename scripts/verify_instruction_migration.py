@@ -11,7 +11,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 RUNTIME_BASENAMES = {"AGENTS.md", "CLAUDE.md", "SKILL.md", "copilot-instructions.md"}
@@ -23,40 +23,51 @@ def sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def parse_h2_blocks(text: str, *, require_h2: bool = True) -> list[tuple[str, str]]:
-    """Split Markdown at H2 headings outside fenced code blocks."""
-    lines = text.splitlines(keepends=True)
-    starts: list[tuple[int, str]] = []
-    in_fence = False
+def active_markdown_lines(text: str) -> Iterator[tuple[int, str]]:
     fence_marker = ""
     fence_length = 0
+    in_comment = False
     offset = 0
-    for line in lines:
-        raw_line = line.rstrip("\r\n")
-        if in_fence:
-            closing = re.fullmatch(r" {0,3}(`{3,}|~{3,})[ \t]*", raw_line)
-            if closing:
-                fence = closing.group(1)
-                if fence[0] == fence_marker and len(fence) >= fence_length:
-                    in_fence = False
-                    fence_marker = ""
-                    fence_length = 0
-        else:
-            opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", raw_line)
-            if opening:
-                fence = opening.group(1)
-                info = opening.group(2)
-                if fence[0] == "~" or "`" not in info:
-                    in_fence = True
-                    fence_marker = fence[0]
-                    fence_length = len(fence)
-            else:
-                heading = re.match(r"^## ([^\n]+)\n?$", line)
-                if heading:
-                    starts.append((offset, heading.group(1)))
+    for line in text.splitlines(keepends=True):
+        start = offset
         offset += len(line)
-    if in_fence:
+        raw_line = line.rstrip("\r\n")
+        if fence_marker:
+            closing = re.fullmatch(r" {0,3}(`{3,}|~{3,})[ \t]*", raw_line)
+            if closing and closing[1][0] == fence_marker and len(closing[1]) >= fence_length:
+                fence_marker = ""
+            continue
+        if not in_comment:
+            opening = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", raw_line)
+            if opening and (opening[1][0] == "~" or "`" not in opening[2]):
+                fence_marker = opening[1][0]
+                fence_length = len(opening[1])
+                continue
+        visible = ""
+        while raw_line:
+            if in_comment:
+                _, end, raw_line = raw_line.partition("-->")
+                if not end:
+                    break
+                in_comment = False
+            else:
+                prefix, begin, raw_line = raw_line.partition("<!--")
+                visible += prefix
+                if not begin:
+                    break
+                in_comment = True
+        yield start, visible
+    if fence_marker:
         raise ValueError("baseline contains an unclosed fenced code block")
+
+
+def parse_h2_blocks(text: str, *, require_h2: bool = True) -> list[tuple[str, str]]:
+    """Split Markdown at active H2 headings without changing block bytes."""
+    starts = [
+        (offset, heading[1])
+        for offset, line in active_markdown_lines(text)
+        if (heading := re.fullmatch(r"## (.+)", line))
+    ]
     if not starts:
         if require_h2:
             raise ValueError("baseline contains no H2 headings")
@@ -67,6 +78,28 @@ def parse_h2_blocks(text: str, *, require_h2: bool = True) -> list[tuple[str, st
         end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
         blocks.append((name, text[start:end]))
     return blocks
+
+
+def parse_skill_routes(text: str) -> dict[str, list[list[str]]]:
+    routes: dict[str, list[list[str]]] = {}
+    for _, line in active_markdown_lines(text):
+        if line == "### Safety rules retained globally":
+            break
+        if not line.startswith("- Before "):
+            continue
+        normalized = " ".join(line.casefold().split())
+        route = re.fullmatch(r"- before (.+), (?:also )?(read .+)\.", normalized)
+        if route is None:
+            continue
+        trigger, instruction = route.groups()
+        single = re.fullmatch(r"read `([a-z0-9-]+)` in full", instruction)
+        ordered = re.fullmatch(
+            r"read `([a-z0-9-]+)` first and read `([a-z0-9-]+)` second", instruction
+        )
+        if single or ordered:
+            names = list((single or ordered).groups())
+            routes.setdefault(trigger, []).append(names)
+    return routes
 
 
 def parse_frontmatter(path: Path) -> dict[str, Any]:
@@ -353,16 +386,14 @@ def _validate_content(root: Path, manifest: dict[str, Any], baseline_text: str) 
     except ValueError:
         global_sections = {}
     routing_contract = global_sections.get("Pre-action skill routing", "")
-    routing_entries = routing_contract.split("\n### Safety rules retained globally", 1)[0].splitlines()
-    for name in manifest["routed_skills"]:
-        has_route = any(
-            line.startswith("- Before ") and f"`{name}`" in line and "read" in line
-            for line in routing_entries
-        )
-        if not has_route:
-            errors.append(f"pre-action routing table does not load skill: {name}")
-        if name not in repo_skill_names and name not in external_skills:
-            errors.append(f"routed skill is not discoverable from this repository: {name}")
+    routes = parse_skill_routes(routing_contract)
+    for trigger, names in manifest["pre_action_routes"].items():
+        normalized_trigger = " ".join(trigger.casefold().split())
+        if routes.get(normalized_trigger) != [names]:
+            errors.append(f"pre-action routing must read {', '.join(names)} before {trigger}")
+        for name in names:
+            if name not in repo_skill_names and name not in external_skills:
+                errors.append(f"routed skill is not discoverable from this repository: {name}")
 
     contract_cache: dict[str, dict[str, str]] = {}
     for contract in manifest.get("runtime_contracts", []):

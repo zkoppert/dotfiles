@@ -8,6 +8,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -193,12 +194,13 @@ class InstallScriptTest(unittest.TestCase):
             )
             self.assertEqual(result.stdout, version + "\n", name)
 
-    def test_routed_skills_are_discoverable_in_both_clients(self) -> None:
+    def install_routed_skills(self) -> set[str]:
         source_root = Path(__file__).parent
         manifest = json.loads(
             (source_root / "tests/fixtures/instruction-migration/manifest.json").read_text(encoding="utf-8")
         )
-        for name in manifest["routed_skills"]:
+        routed_skills = {name for names in manifest["pre_action_routes"].values() for name in names}
+        for name in routed_skills:
             if name not in manifest["external_skills"]:
                 shutil.copytree(
                     source_root / ".copilot" / "skills" / name,
@@ -209,12 +211,15 @@ class InstallScriptTest(unittest.TestCase):
         shutil.copy2(source_instructions, self.repo / ".github" / "copilot-instructions.md")
 
         self.run_installer()
+        return routed_skills
 
+    def test_routed_skills_are_discoverable_in_both_clients(self) -> None:
+        routed_skills = self.install_routed_skills()
         for root in (self.home / ".copilot" / "skills", self.home / ".agents" / "skills"):
-            for name in manifest["routed_skills"]:
+            for name in routed_skills:
                 with self.subTest(root=root, skill=name):
                     installed = root / name
-                    owner = self.home if name in manifest["external_skills"] else self.repo
+                    owner = self.home if name == "gh-axi" else self.repo
                     expected = owner / ".copilot" / "skills" / name
                     self.assertTrue((installed / "SKILL.md").is_file())
                     self.assertEqual(installed.resolve(), expected.resolve())
@@ -226,6 +231,29 @@ class InstallScriptTest(unittest.TestCase):
         self.assertEqual(copilot_instructions.resolve(), installed_source.resolve())
         self.assertEqual(pi_instructions.resolve(), installed_source.resolve())
         self.assertFalse((self.home / "tests" / "fixtures" / "instruction-migration").exists())
+
+    def test_installed_routes_reach_the_real_pi_sdk(self) -> None:
+        if shutil.which("pi") is None or shutil.which("node") is None:
+            self.skipTest("Pi and Node.js are required for installed skill discovery")
+        routed_skills = self.install_routed_skills()
+        verifier = Path(__file__).with_name("bin") / "verify-codespace-copilot-env"
+        program = (
+            "import json, runpy, sys; from pathlib import Path; "
+            "discover = runpy.run_path(sys.argv[1])['effective_pi_skills']; "
+            "print(json.dumps(discover(Path.home() / '.pi' / 'agent')))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", program, str(verifier)],
+            cwd=self.repo, env=self.env, capture_output=True, text=True, check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        winners = json.loads(result.stdout)
+        self.assertTrue(routed_skills <= winners.keys())
+        for name in routed_skills:
+            expected = (self.home if name == "gh-axi" else self.repo) / ".copilot" / "skills" / name / "SKILL.md"
+            self.assertEqual(Path(winners[name]["filePath"]).resolve(), expected.resolve())
+            self.assertFalse(winners[name]["disableModelInvocation"])
 
     def test_instruction_links_follow_the_active_pi_agent_directory(self) -> None:
         instructions = self.repo / ".github" / "copilot-instructions.md"

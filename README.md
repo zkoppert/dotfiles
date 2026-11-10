@@ -25,9 +25,11 @@ The global file keeps rules that apply to every session. Task-specific guidance 
 
 `verify-codespace-copilot-env` requires repository skills to resolve to this checkout and Pi catalog mirrors to resolve to their Copilot source. It checks Pi's first available context file, including `AGENTS.override.md`, against the shared instructions. Both the installer and verifier honor `PI_CODING_AGENT_DIR`; the default is `~/.pi/agent`. The configured path must be absolute or start with `~/`.
 
-Pi loads `<agent-directory>/skills` before `~/.agents/skills`. The verifier rejects a native skill only when its declared name collides with routed guidance. It preserves unrelated user skills and never moves or deletes native skills or context overrides.
+The verifier uses Pi's installed software development kit (SDK) to resolve user skills, installed packages, and settings filters. Each required skill must remain enabled and resolve to its managed source. Native discovery follows Pi's Markdown, symlink, ignore, directory-name fallback, and traversal rules. Unrelated user skills remain unchanged.
 
-These checks cover installed user-level roots, not project, package, or command-line resource overrides.
+SDK discovery requires a working Pi executable and compatible Node.js. It supports npm installations and Homebrew's `libexec/lib/node_modules` layout, including executables behind the Treehouse wrapper. The wrapper honors `PI_REAL_PI`; otherwise, it selects the next Pi executable on `PATH`.
+
+Discovery runs offline without loading extensions or installing packages. Project resources, extension-added skills, and command-line overrides remain outside this check.
 
 Run the preservation check after changing global instructions or moving guidance:
 
@@ -35,7 +37,7 @@ Run the preservation check after changing global instructions or moving guidance
 python3 scripts/verify_instruction_migration.py
 ```
 
-The check compares each original section with its runtime owner. It also validates skill metadata, routing entries, compatibility headings, and the migration baseline. Frontmatter supports flat, single-line scalar fields, including plain or quoted strings and boolean invocation flags. The check rejects unsupported YAML forms, including inline comments, nested mappings, and multiline values, rather than guessing their meaning.
+The check compares each original section with its runtime owner. It also validates skill metadata, routing entries, compatibility headings, and the migration baseline. The routing manifest binds each action trigger to an ordered list of explicitly read skills. Fenced examples and HTML comments cannot satisfy a route, including during acknowledged rebaselining. Frontmatter in managed skills supports flat, single-line scalar fields, including plain or quoted strings and boolean invocation flags. The preservation check rejects unsupported YAML forms rather than guessing their meaning. Pi discovery uses the SDK's own frontmatter parser instead.
 
 After an intentional guidance edit, review the content diff and refresh the hashes:
 

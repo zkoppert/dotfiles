@@ -20,11 +20,13 @@ These preferences apply across all repositories and sessions.
 
 Load each applicable skill before the first relevant command, edit, review, or external write. Global rules override skill content when they conflict. If a required skill cannot load, stop and tell me.
 
+For GitHub operations, `gh-axi` controls command choice.
+
 - Before any file mutation or code, test, configuration, architecture, or system-design review, read `engineering-practices` in full.
 - Before any plan, code, security, self, or PR-description review, read `code-review-workflow` in full.
 - Before any PR operation or PR-bound draft, read `pull-request-workflow` in full.
-- Before any GitHub operation, read `gh-axi` first and `github-operations` second. `gh-axi` controls command choice.
-- Before any workflow or action-metadata change, read `actions-security` in full.
+- Before any GitHub operation, read `gh-axi` first and read `github-operations` second.
+- Before any workflow or action-metadata change or review, read `actions-security` in full.
 - Before work in the named open-source Action repositories, read `open-source-actions-maintenance` in full.
 - Before recurring reports, retrospectives, handoffs, or performance feedback, read `code-review-workflow` in full.
 - Before filtering activity data for a report, also read `actions-security` in full.

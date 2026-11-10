@@ -19,6 +19,18 @@ from scripts.verify_instruction_migration import parse_h2_blocks, update_baselin
 class InstructionMigrationTest(unittest.TestCase):
     """Reject content loss and broken skill routing."""
 
+    APPROVED_ROUTES = {
+        "any file mutation or code, test, configuration, architecture, or system-design review": ["engineering-practices"],
+        "any plan, code, security, self, or PR-description review": ["code-review-workflow"],
+        "any PR operation or PR-bound draft": ["pull-request-workflow"],
+        "any GitHub operation": ["gh-axi", "github-operations"],
+        "any workflow or action-metadata change or review": ["actions-security"],
+        "work in the named open-source Action repositories": ["open-source-actions-maintenance"],
+        "recurring reports, retrospectives, handoffs, or performance feedback": ["code-review-workflow"],
+        "filtering activity data for a report": ["actions-security"],
+        "spreadsheet or generated-report work": ["spreadsheet-report-generation"],
+    }
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -167,7 +179,8 @@ class InstructionMigrationTest(unittest.TestCase):
         global_path.write_text(global_path.read_text().replace("`engineering-practices`", "engineering guidance"))
 
         self.assertIn(
-            "pre-action routing table does not load skill: engineering-practices",
+            "pre-action routing must read engineering-practices before any file mutation or code, "
+            "test, configuration, architecture, or system-design review",
             validate(self.root),
         )
 
@@ -189,10 +202,114 @@ class InstructionMigrationTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(
-            "pre-action routing table does not load skill: engineering-practices",
+            "pre-action routing must read engineering-practices before any file mutation or code, "
+            "test, configuration, architecture, or system-design review",
             result.stderr,
         )
         self.assertEqual(self.migration_state(), before)
+
+    def test_manifest_preserves_the_approved_action_contract(self) -> None:
+        self.assertEqual(self.load_manifest()["pre_action_routes"], self.APPROVED_ROUTES)
+
+    def test_rebaseline_cannot_swap_review_and_mutation_routes(self) -> None:
+        before = self.migration_state()
+        global_path = self.root / ".github/copilot-instructions.md"
+        global_path.write_text(
+            global_path.read_text().replace(
+                "review, read `engineering-practices` in full.",
+                "review, read `code-review-workflow` in full.",
+                1,
+            ).replace(
+                "PR-description review, read `code-review-workflow` in full.",
+                "PR-description review, read `engineering-practices` in full.",
+                1,
+            )
+        )
+
+        result = self.run_rebaseline()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("must read engineering-practices before any file mutation", result.stderr)
+        self.assertIn("must read code-review-workflow before any plan", result.stderr)
+        self.assertEqual(self.migration_state(), before)
+
+    def test_each_skill_requires_its_own_read_in_the_required_order(self) -> None:
+        before = self.migration_state()
+        global_path = self.root / ".github/copilot-instructions.md"
+        original = global_path.read_text()
+        for replacement in (
+            "read `gh-axi` first and use `github-operations` second",
+            "use `gh-axi` first and read `github-operations` second",
+            "read `github-operations` first and read `gh-axi` second",
+            "do not read `gh-axi` first and read `github-operations` second",
+        ):
+            with self.subTest(instruction=replacement):
+                global_path.write_text(original.replace(
+                    "read `gh-axi` first and read `github-operations` second", replacement, 1,
+                ))
+
+                result = self.run_rebaseline()
+
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("must read gh-axi, github-operations before any GitHub operation", result.stderr)
+                self.assertEqual(self.migration_state(), before)
+
+    def test_rebaseline_cannot_drop_workflow_reviews(self) -> None:
+        before = self.migration_state()
+        global_path = self.root / ".github/copilot-instructions.md"
+        global_path.write_text(global_path.read_text().replace(
+            "workflow or action-metadata change or review", "workflow or action-metadata change", 1,
+        ).replace("changing or reviewing workflow files", "changing workflow files", 1))
+
+        result = self.run_rebaseline()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("must read actions-security before any workflow or action-metadata change or review", result.stderr)
+        self.assertEqual(self.migration_state(), before)
+
+    def test_inactive_bullets_cannot_satisfy_any_action_contract(self) -> None:
+        before = self.migration_state()
+        global_path = self.root / ".github/copilot-instructions.md"
+        original = global_path.read_text()
+        for trigger, names in self.APPROVED_ROUTES.items():
+            instruction = (
+                f"read `{names[0]}` first and read `{names[1]}` second"
+                if len(names) == 2 else f"read `{names[0]}` in full"
+            )
+            if trigger == "filtering activity data for a report":
+                instruction = "also " + instruction
+            bullet = f"- Before {trigger}, {instruction}."
+            for opening, closing in (
+                ("```markdown\n", "\n```"),
+                ("~~~markdown\n", "\n~~~"),
+                ("````markdown\n```\n", "\n```\n````"),
+                ("<!--\n", "\n-->"),
+                ("<!-- ", " -->"),
+            ):
+                with self.subTest(trigger=trigger, opening=opening):
+                    global_path.write_text(original.replace(bullet, opening + bullet + closing, 1))
+
+                    errors = validate(self.root)
+                    result = self.run_rebaseline()
+
+                    diagnostic = f"pre-action routing must read {', '.join(names)} before {trigger}"
+                    self.assertIn(diagnostic, errors)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(diagnostic, result.stderr)
+                    self.assertEqual(self.migration_state(), before)
+
+    def test_rebaseline_accepts_equivalent_route_spacing_and_case(self) -> None:
+        global_path = self.root / ".github/copilot-instructions.md"
+        global_path.write_text(global_path.read_text().replace(
+            "any GitHub operation, read `gh-axi` first and read `github-operations` second",
+            "any  GITHUB  operation, READ `gh-axi` first  and  READ `github-operations` second",
+            1,
+        ))
+
+        result = self.run_rebaseline()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(validate(self.root), [])
 
     def test_invalid_skill_frontmatter_is_rejected(self) -> None:
         skill = self.root / ".copilot/skills/engineering-practices/SKILL.md"
@@ -523,6 +640,13 @@ class InstructionMigrationTest(unittest.TestCase):
         )
 
         self.assertEqual([name for name, _ in blocks], ["preamble", "Real"])
+
+    def test_commented_h2_and_fences_do_not_split_active_blocks(self) -> None:
+        blocks = parse_h2_blocks(
+            "# Header\n\n## Real\n\n<!--\n```\n## Example\n-->\n\n## Next\nText\n"
+        )
+
+        self.assertEqual([name for name, _ in blocks], ["preamble", "Real", "Next"])
 
     def test_shorter_fence_does_not_close_longer_fence(self) -> None:
         blocks = parse_h2_blocks(
