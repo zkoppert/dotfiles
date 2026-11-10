@@ -501,6 +501,40 @@ class InstallScriptTest(unittest.TestCase):
                 self.assertFalse((self.home / ".local" / "share" / "node-v22").exists())
                 self.assertFalse((self.home / ".local" / "bin" / "node").exists())
 
+    def test_unavailable_validation_preserves_existing_catalog_skills(self) -> None:
+        originals = {}
+        for name in self.CATALOG_SKILLS:
+            source = self.home / ".copilot" / "skills" / name
+            source.mkdir(parents=True)
+            originals[source / "SKILL.md"] = f"---\nname: {name}\ndescription: Existing catalog skill\n---\n# Retained {name}\n"
+            originals[source / "reference.txt"] = f"Keep the existing {name} reference.\n"
+            mirror = self.home / ".agents" / "skills" / name
+            mirror.parent.mkdir(parents=True, exist_ok=True)
+            mirror.symlink_to(source)
+        for path, content in originals.items():
+            path.write_text(content, encoding="utf-8")
+
+        for failure, version, error in (
+            ("runtime", "v22.18.12", "Node.js 22.19.0 or later is required"),
+            ("SDK", "v22.19.0", "cannot locate the installed Pi SDK"),
+        ):
+            self.env["FAKE_CURRENT_NODE_VERSION"] = version
+            if failure == "SDK":
+                (self.pi_package / "dist" / "index.js").unlink()
+            for attempt in range(2):
+                with self.subTest(failure=failure, attempt=attempt):
+                    result = self.run_installer()
+
+                    calls = [shlex.split(line) for line in (self.home / "gh.log").read_text(encoding="utf-8").splitlines()]
+                    self.assertFalse(any(call[:2] == ["skill", "install"] for call in calls), calls)
+                    self.assertIn(error, result.stderr)
+                    for path, content in originals.items():
+                        self.assertEqual(path.read_text(encoding="utf-8"), content)
+                    for name in self.CATALOG_SKILLS:
+                        self.assertIn(f"Cannot validate existing catalog skill {name}; skipping installation", result.stdout)
+                        mirror = self.home / ".agents" / "skills" / name
+                        self.assertEqual(mirror.readlink(), self.home / ".copilot" / "skills" / name)
+
     def test_nested_catalog_metadata_is_preserved_on_reinstall(self) -> None:
         self.use_real_pi_sdk()
         source = self.home / ".copilot" / "skills" / "gh-axi"
@@ -547,7 +581,7 @@ class InstallScriptTest(unittest.TestCase):
 
                 result = self.run_installer()
 
-                self.assertIn("Catalog skill gh-axi has invalid metadata", result.stdout)
+                self.assertIn("Cannot validate catalog skill gh-axi; skipping Pi mirror", result.stdout)
                 self.assertFalse(mirror.exists())
                 self.assertEqual(source.read_text(encoding="utf-8"), content)
         source.write_text(

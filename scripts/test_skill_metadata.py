@@ -140,7 +140,7 @@ class SkillMetadataTest(unittest.TestCase):
                     self.assertEqual(result.stderr, "")
                     self.assertTrue(attempted.exists())
                 else:
-                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                     self.assertIn(expected_error, result.stderr)
                     self.assertFalse(attempted.exists())
                 self.assertNotIn("Traceback", result.stderr)
@@ -172,7 +172,7 @@ class SkillMetadataTest(unittest.TestCase):
             capture_output=True, text=True, check=False,
         )
 
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("Pi executable is missing from PATH", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 

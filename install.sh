@@ -140,9 +140,16 @@ else
   if command -v gh >/dev/null 2>&1; then
     for skill_name in $CATALOG_SKILLS; do
       skill_target="$HOME/.copilot/skills/$skill_name/SKILL.md"
-      if [ -f "$skill_target" ] && skill_metadata_valid "$skill_target" "$skill_name"; then
-        echo "✓ Copilot skill $skill_name is already installed"
-      elif gh skill install "$CATALOG_REPO" "skills/$skill_name" --agent github-copilot --scope user </dev/null &&
+      if [ -f "$skill_target" ]; then
+        if skill_metadata_valid "$skill_target" "$skill_name"; then
+          echo "✓ Copilot skill $skill_name is already installed"
+          continue
+        elif [ "$?" -ne 1 ]; then
+          echo "⚠ Cannot validate existing catalog skill $skill_name; skipping installation"
+          continue
+        fi
+      fi
+      if gh skill install "$CATALOG_REPO" "skills/$skill_name" --agent github-copilot --scope user </dev/null &&
         skill_metadata_valid "$skill_target" "$skill_name"; then
         echo "✓ Installed Copilot skill $skill_name"
       else
@@ -195,7 +202,7 @@ fi
 for skill_name in $CATALOG_SKILLS; do
   skill_path="$HOME/.copilot/skills/$skill_name"
   if ! [ -f "$skill_path/SKILL.md" ] || ! skill_metadata_valid "$skill_path/SKILL.md" "$skill_name"; then
-    echo "⚠ Catalog skill $skill_name has invalid metadata - skipping Pi mirror"
+    echo "⚠ Cannot validate catalog skill $skill_name; skipping Pi mirror"
     continue
   fi
   mkdir -p "$HOME/.agents/skills"

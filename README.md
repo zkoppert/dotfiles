@@ -29,7 +29,9 @@ The verifier uses Pi's installed software development kit (SDK) to resolve user 
 
 SDK discovery and catalog metadata validation require a working Pi executable and Node.js 22.19.0 or later. Both support npm installations and Homebrew's `libexec/lib/node_modules` layout, including executables behind the Treehouse wrapper. The wrapper honors `PI_REAL_PI`; otherwise, it selects the next Pi executable on `PATH`.
 
-The installer and environment verifier share the SDK-based metadata validator in `scripts/skill_metadata.py`. Its SDK resolver rejects unsupported or unverifiable Node.js versions before metadata parsing or discovery on every platform. Node.js provisioning remains Linux-only. Valid nested metadata remains unchanged. Incorrect names, empty descriptions, malformed YAML, and disabled model invocation still fail validation. If the parser is unavailable, setup continues with warnings but cannot validate or mirror catalog skills.
+The installer and environment verifier share the SDK-based metadata validator in `scripts/skill_metadata.py`. Its SDK resolver rejects unsupported or unverifiable Node.js versions before metadata parsing or discovery on every platform. Node.js provisioning remains Linux-only. Valid nested metadata remains unchanged. Incorrect names, empty descriptions, malformed YAML, and disabled model invocation still fail validation. If validation is unavailable, setup warns, preserves existing catalog skills, and leaves their Pi mirrors unchanged.
+
+The metadata CLI returns `0` for valid metadata, `1` for invalid metadata, and `2` when validation is unavailable.
 
 Discovery runs offline without loading extensions or installing packages. Project resources, extension-added skills, and command-line overrides remain outside this check.
 
@@ -209,7 +211,7 @@ Never copy `~/.copilot/mcp-config.json`, its backup files, `mcp-oauth-config`, s
 
 ## How do I update catalog tools?
 
-The install-once checks do not update existing catalog tools. Update a skill by name, using the `CATALOG_SKILLS` list in [the installer](install.sh) for other names:
+The install-once checks leave valid catalog skills unchanged. Only confirmed metadata errors trigger automatic reinstallation. Update a skill by name, using the `CATALOG_SKILLS` list in [the installer](install.sh) for other names:
 
 ```bash
 gh skill update validate-pr-with-codespace

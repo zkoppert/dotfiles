@@ -133,7 +133,7 @@ def main() -> int:
         errors = skill_metadata_errors({args.path: args.name})[str(args.path)]
     except (OSError, ValueError) as error:
         print(f"Cannot validate skill metadata: {error}", file=sys.stderr)
-        return 1
+        return 2
     for error in errors:
         print(f"{args.name} {error}", file=sys.stderr)
     return int(bool(errors))
