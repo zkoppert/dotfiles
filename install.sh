@@ -48,24 +48,7 @@ if [ -d "$DOTFILES_DIR/.copilot/skills" ]; then
 fi
 
 skill_metadata_valid() {
-  python3 - "$DOTFILES_DIR/scripts/verify_instruction_migration.py" "$1" "$2" <<'PY'
-import runpy
-import sys
-from pathlib import Path
-
-parser_path, skill_path, expected_name = sys.argv[1:]
-try:
-    metadata = runpy.run_path(parser_path)["parse_frontmatter"](Path(skill_path))
-except (OSError, ValueError):
-    raise SystemExit(1)
-description = metadata.get("description")
-if metadata.get("name") != expected_name:
-    raise SystemExit(1)
-if not isinstance(description, str) or not description.strip():
-    raise SystemExit(1)
-if metadata.get("disable-model-invocation", False) is not False:
-    raise SystemExit(1)
-PY
+  python3 "$DOTFILES_DIR/scripts/skill_metadata.py" "$1" "$2"
 }
 
 # Install private catalog tools only when the source is supplied outside this

@@ -14,6 +14,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.skill_metadata import pi_sdk_path
+
 
 class InstallScriptTest(unittest.TestCase):
     """Exercise install.sh in an isolated home directory."""
@@ -44,10 +46,30 @@ class InstallScriptTest(unittest.TestCase):
         self.installer = self.repo / "install.sh"
         self.installer.write_bytes(source.read_bytes())
         self.installer.chmod(0o755)
-        verifier_source = Path(__file__).with_name("scripts") / "verify_instruction_migration.py"
-        verifier_target = self.repo / "scripts" / "verify_instruction_migration.py"
-        verifier_target.parent.mkdir()
-        shutil.copy2(verifier_source, verifier_target)
+        metadata_source = Path(__file__).with_name("scripts") / "skill_metadata.py"
+        metadata_target = self.repo / "scripts" / "skill_metadata.py"
+        metadata_target.parent.mkdir()
+        shutil.copy2(metadata_source, metadata_target)
+        self.pi_package = self.root / "npm" / "lib" / "node_modules" / "@earendil-works" / "pi-coding-agent"
+        (self.pi_package / "dist" / "bundle").mkdir(parents=True)
+        (self.pi_package / "package.json").write_text(json.dumps({
+            "name": "@earendil-works/pi-coding-agent", "type": "module", "main": "./dist/index.js",
+        }), encoding="utf-8")
+        (self.pi_package / "dist" / "index.js").write_text("export {};\n", encoding="utf-8")
+        cli = self.pi_package / "dist" / "bundle" / "cli.js"
+        cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        cli.chmod(0o755)
+        (self.fake_bin / "pi").symlink_to(cli)
+        node = self.fake_bin / "node"
+        node.write_text(
+            "#!/bin/sh\n"
+            'if [ -n "$REAL_NODE" ]; then exec "$REAL_NODE" "$@"; fi\n'
+            '[ "$1" = --input-type=module ] || exit 2\n'
+            f"exec {shlex.quote(sys.executable)} -c 'import json, sys; "
+            "print(json.dumps({path: [] for path in json.load(sys.stdin)}))'\n",
+            encoding="utf-8",
+        )
+        node.chmod(0o755)
 
         uname = self.fake_bin / "uname"
         uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
@@ -66,8 +88,15 @@ class InstallScriptTest(unittest.TestCase):
             "  [ \"${FAKE_GH_FAIL:-0}\" = 1 ] && exit 1\n"
             "  skill_name=${4#skills/}\n"
             "  mkdir -p \"$HOME/.copilot/skills/$skill_name\"\n"
-            "  printf '%s\\n' '---' \"name: $skill_name\" 'description: Catalog fixture' "
-            "'---' \"# $skill_name\" > \"$HOME/.copilot/skills/$skill_name/SKILL.md\"\n"
+            '  if [ "$skill_name" = gh-axi ] && [ -n "${FAKE_CATALOG_CONTENT+x}" ]; then\n'
+            '    printf \'%s\' "$FAKE_CATALOG_CONTENT" > "$HOME/.copilot/skills/$skill_name/SKILL.md"\n'
+            '    exit 0\n'
+            '  fi\n'
+            "  printf '%s\\n' '---' 'description: Catalog fixture' 'metadata:' "
+            '"  github-path: skills/$skill_name" '
+            "'  github-ref: refs/heads/main' '  github-repo: https://example.invalid/catalog' "
+            "'  hermes:' '    tags: [git, automation]' "
+            '"name: $skill_name" \'---\' "# $skill_name" > "$HOME/.copilot/skills/$skill_name/SKILL.md"\n'
             "fi\n",
             encoding="utf-8",
         )
@@ -99,7 +128,8 @@ class InstallScriptTest(unittest.TestCase):
         copilot.chmod(0o755)
 
         self.env = dict(os.environ)
-        self.env.pop("PI_CODING_AGENT_DIR", None)
+        for name in ("PI_CODING_AGENT_DIR", "PI_REAL_PI", "REAL_NODE", "FAKE_CATALOG_CONTENT"):
+            self.env.pop(name, None)
         self.env["HOME"] = str(self.home)
         self.env["PATH"] = f"{self.fake_bin}{os.pathsep}{self.env['PATH']}"
         self.env["GIT_CONFIG_GLOBAL"] = str(self.home / ".gitconfig")
@@ -107,6 +137,22 @@ class InstallScriptTest(unittest.TestCase):
         self.env["COPILOT_SKILL_CATALOG_REPO"] = "private/catalog"
         self.env["FAKE_COPILOT_LIST_STATUS"] = "0"
         self.env.pop("FAKE_COPILOT_PLUGINS_JSON", None)
+
+    def use_real_pi_sdk(self) -> None:
+        if shutil.which("pi") is None or shutil.which("node") is None:
+            self.skipTest("Pi and Node.js are required for catalog metadata regressions")
+        sdk = pi_sdk_path()
+        self.env["REAL_NODE"] = shutil.which("node")
+        (self.pi_package / "dist" / "index.js").write_text(
+            f"export {{ DefaultResourceLoader, SettingsManager }} from {json.dumps(sdk.as_uri())};\n",
+            encoding="utf-8",
+        )
+        parser = self.pi_package / "dist" / "utils" / "frontmatter.js"
+        parser.parent.mkdir(exist_ok=True)
+        parser.write_text(
+            f"export {{ parseFrontmatter }} from {json.dumps((sdk.parent / 'utils' / 'frontmatter.js').as_uri())};\n",
+            encoding="utf-8",
+        )
 
     def run_installer(self) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -233,8 +279,7 @@ class InstallScriptTest(unittest.TestCase):
         self.assertFalse((self.home / "tests" / "fixtures" / "instruction-migration").exists())
 
     def test_installed_routes_reach_the_real_pi_sdk(self) -> None:
-        if shutil.which("pi") is None or shutil.which("node") is None:
-            self.skipTest("Pi and Node.js are required for installed skill discovery")
+        self.use_real_pi_sdk()
         routed_skills = self.install_routed_skills()
         verifier = Path(__file__).with_name("bin") / "verify-codespace-copilot-env"
         program = (
@@ -386,7 +431,12 @@ class InstallScriptTest(unittest.TestCase):
             for name in self.CATALOG_SKILLS:
                 self.assertEqual(
                     (root / name / "SKILL.md").read_text(encoding="utf-8"),
-                    f"---\nname: {name}\ndescription: Catalog fixture\n---\n# {name}\n",
+                    "---\ndescription: Catalog fixture\nmetadata:\n"
+                    f"  github-path: skills/{name}\n"
+                    "  github-ref: refs/heads/main\n"
+                    "  github-repo: https://example.invalid/catalog\n"
+                    "  hermes:\n    tags: [git, automation]\n"
+                    f"name: {name}\n---\n# {name}\n",
                 )
                 self.assertEqual(
                     (root / name).resolve(),
@@ -412,6 +462,82 @@ class InstallScriptTest(unittest.TestCase):
             "Copilot plugin gho11y is already installed",
             second_run.stdout,
         )
+
+    def test_nested_catalog_metadata_is_preserved_on_reinstall(self) -> None:
+        self.use_real_pi_sdk()
+        source = self.home / ".copilot" / "skills" / "gh-axi"
+        source.mkdir(parents=True)
+        content = (
+            "---\ndescription: >-\n  Existing catalog guidance.\n"
+            "metadata:\n  github-path: skills/gh-axi\n  hermes:\n    tags: [github, git]\n"
+            "name: gh-axi\n---\n# GitHub operations\n"
+        )
+        (source / "SKILL.md").write_text(content, encoding="utf-8")
+        asset = source / "reference.txt"
+        asset.write_text("Keep this asset.\n", encoding="utf-8")
+
+        self.run_installer()
+        repeated = self.run_installer()
+
+        self.assertIn("Copilot skill gh-axi is already installed", repeated.stdout)
+        self.assertEqual((source / "SKILL.md").read_text(encoding="utf-8"), content)
+        self.assertEqual(asset.read_text(encoding="utf-8"), "Keep this asset.\n")
+        calls = (self.home / "gh.log").read_text(encoding="utf-8").splitlines()
+        for name in self.CATALOG_SKILLS:
+            expected_calls = 0 if name == "gh-axi" else 1
+            self.assertEqual(calls.count(
+                f"skill install private/catalog skills/{name} --agent github-copilot --scope user"
+            ), expected_calls)
+            self.assertEqual(
+                (self.home / ".agents" / "skills" / name).resolve(),
+                (self.home / ".copilot" / "skills" / name).resolve(),
+            )
+
+    def test_invalid_catalog_metadata_is_not_mirrored_without_catalog_configuration(self) -> None:
+        self.use_real_pi_sdk()
+        del self.env["COPILOT_SKILL_CATALOG_REPO"]
+        source = self.home / ".copilot" / "skills" / "gh-axi" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        mirror = self.home / ".agents" / "skills" / "gh-axi"
+        for content in (
+            "---\nmetadata:\n  name: gh-axi\ndescription: Nested name only\n---\n# Skill\n",
+            "---\nname: gh-axi\ndescription: Disabled\ndisable-model-invocation: true\n---\n# Skill\n",
+            "---\nname: gh-axi\ndescription: [invalid\n---\n# Skill\n",
+        ):
+            with self.subTest(content=content):
+                source.write_text(content, encoding="utf-8")
+
+                result = self.run_installer()
+
+                self.assertIn("Catalog skill gh-axi has invalid metadata", result.stdout)
+                self.assertFalse(mirror.exists())
+                self.assertEqual(source.read_text(encoding="utf-8"), content)
+        source.write_text(
+            "---\nname: gh-axi\ndescription: Valid\nmetadata:\n  tags: [git]\n---\n# Skill\n", encoding="utf-8",
+        )
+
+        self.run_installer()
+
+        self.assertEqual(mirror.resolve(), source.parent.resolve())
+        self.assertFalse((self.home / "copilot.log").exists())
+
+    def test_invalid_catalog_install_is_rejected_then_repaired(self) -> None:
+        self.use_real_pi_sdk()
+        self.env["FAKE_CATALOG_CONTENT"] = "---\nname: gh-axi\ndescription: Disabled\ndisable-model-invocation: true\n---\n"
+        mirror = self.home / ".agents" / "skills" / "gh-axi"
+
+        failed = self.run_installer()
+
+        self.assertIn("Failed to install Copilot skill gh-axi", failed.stdout)
+        self.assertFalse(mirror.exists())
+        self.assertTrue((self.home / ".agents" / "skills" / "cleanup-worktrees" / "SKILL.md").is_file())
+        del self.env["FAKE_CATALOG_CONTENT"]
+
+        repaired = self.run_installer()
+
+        self.assertIn("Installed Copilot skill gh-axi", repaired.stdout)
+        self.assertTrue((mirror / "SKILL.md").is_file())
+        self.assertEqual(mirror.resolve(), (self.home / ".copilot" / "skills" / "gh-axi").resolve())
 
     def test_existing_catalog_skills_are_mirrored_without_catalog_configuration(self) -> None:
         self.run_installer()

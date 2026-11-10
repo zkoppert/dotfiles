@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import runpy
+import shlex
 import shutil
 import stat
 import sys
@@ -246,7 +247,12 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 else:
                     skill.mkdir()
                     (skill / "SKILL.md").write_text(
-                        f"---\nname: {name}\ndescription: Test skill\n---\n# {name}\n",
+                        "---\ndescription: Test skill\nmetadata:\n"
+                        f"  github-path: skills/{name}\n"
+                        "  github-ref: refs/heads/main\n"
+                        "  github-repo: https://example.invalid/catalog\n"
+                        "  hermes:\n    tags: [git, automation]\n"
+                        f"name: {name}\n---\n# {name}\n",
                         encoding="utf-8",
                     )
 
@@ -348,6 +354,10 @@ class CopilotEnvironmentTest(unittest.TestCase):
             'fi\n'
             'if [ -n "$REAL_NODE" ]; then exec "$REAL_NODE" "$@"; fi\n'
             '[ "$1" = --input-type=module ] || exit 2\n'
+            'if [ "$#" -eq 4 ]; then\n'
+            f"  exec {shlex.quote(sys.executable)} -c 'import json, sys; "
+            "print(json.dumps({path: [] for path in json.load(sys.stdin)}))'\n"
+            'fi\n'
             'printf \'%s\\n\' "$FAKE_PI_SKILLS_JSON"\n'
             'exit "${FAKE_PI_STATUS:-0}"\n',
             encoding="utf-8",
@@ -402,6 +412,12 @@ class CopilotEnvironmentTest(unittest.TestCase):
         env["REAL_NODE"] = shutil.which("node")
         (self.pi_package / "dist" / "index.js").write_text(
             f"export {{ DefaultResourceLoader, SettingsManager }} from {json.dumps(sdk.as_uri())};\n",
+            encoding="utf-8",
+        )
+        parser = self.pi_package / "dist" / "utils" / "frontmatter.js"
+        parser.parent.mkdir(exist_ok=True)
+        parser.write_text(
+            f"export {{ parseFrontmatter }} from {json.dumps((sdk.parent / 'utils' / 'frontmatter.js').as_uri())};\n",
             encoding="utf-8",
         )
 
@@ -1184,11 +1200,29 @@ class CopilotEnvironmentTest(unittest.TestCase):
                             skill.rmdir()
                         saved.rename(skill)
 
+    def test_verifier_accepts_nested_catalog_metadata_in_both_clients(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        originals = {
+            name: (self.home / ".copilot" / "skills" / name / "SKILL.md").read_bytes()
+            for name in self.CATALOG_SKILLS
+        }
+
+        result = subprocess.run([str(self.verifier)], env=env, capture_output=True, text=True, check=False)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("environment is ready", result.stdout)
+        for name, content in originals.items():
+            for root in self.DISCOVERY_ROOTS.values():
+                self.assertEqual((self.home / root / name / "SKILL.md").read_bytes(), content)
+
     def test_verifier_rejects_undiscoverable_skill_metadata(self) -> None:
         env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
         skill_file = self.home / ".copilot" / "skills" / "gh-axi" / "SKILL.md"
         original = skill_file.read_text(encoding="utf-8")
         cases = (
+            ("---\nname: gh-axi\nmetadata: [invalid\n---\n", "has invalid skill metadata"),
             ("---\nname: old-gh-axi\ndescription: Fixture\n---\n# Skill\n", "declares the wrong skill name"),
             ("---\nname: gh-axi\ndescription:\n---\n# Skill\n", "has no skill description"),
             (

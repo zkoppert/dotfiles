@@ -58,6 +58,11 @@ REQUIRED_ENVIRONMENT = {
     "COPILOT_MCP_SPLUNK_BEARER_TOKEN",
     "COPILOT_MCP_SPLUNK_HOST",
 }
+SKILL_METADATA = runpy.run_path(
+    str(Path(__file__).resolve().parents[1] / "scripts" / "skill_metadata.py")
+)
+pi_sdk_path = SKILL_METADATA["pi_sdk_path"]
+skill_metadata_errors = SKILL_METADATA["skill_metadata_errors"]
 
 
 def command_succeeds(command: list[str]) -> bool:
@@ -74,46 +79,6 @@ def command_succeeds(command: list[str]) -> bool:
         )
     except FileNotFoundError:
         return False
-
-
-def pi_sdk_path() -> Path:
-    executable = shutil.which("pi")
-    if executable is None:
-        raise ValueError("Pi executable is missing from PATH")
-    wrapper = Path(__file__).resolve().with_name("pi-treehouse")
-    if Path(executable).resolve() == wrapper:
-        executable = os.environ.get("PI_REAL_PI") or next(
-            (
-                candidate
-                for directory in os.get_exec_path()
-                if (candidate := shutil.which("pi", path=directory or os.curdir))
-                and Path(candidate).resolve() != wrapper
-            ),
-            None,
-        )
-    if (
-        executable is None
-        or not Path(executable).is_file()
-        or not os.access(executable, os.X_OK)
-        or Path(executable).resolve() == wrapper
-    ):
-        raise ValueError("Pi executable behind the Treehouse wrapper is unavailable")
-    executable_path = Path(executable).resolve()
-    prefix = executable_path.parent.parent
-    package_name = "@earendil-works/pi-coding-agent"
-    for root in (
-        prefix,
-        prefix.parent,
-        prefix / "libexec" / "lib" / "node_modules" / package_name,
-        prefix / "lib" / "node_modules" / package_name,
-    ):
-        manifest = root / "package.json"
-        sdk = root / "dist" / "index.js"
-        if manifest.is_file() and sdk.is_file():
-            metadata = json.loads(manifest.read_text(encoding="utf-8"))
-            if isinstance(metadata, dict) and metadata.get("name") == package_name:
-                return sdk
-    raise ValueError(f"cannot locate the installed Pi SDK for {executable_path}")
 
 
 def effective_pi_skills(agent_dir: Path) -> dict[str, dict]:
@@ -321,9 +286,7 @@ def main() -> int:
         for path in dotfiles_root.glob(".copilot/skills/*/SKILL.md")
     }
     required_skills = REQUIRED_SKILLS | repository_skills.keys()
-    parse_skill_frontmatter = runpy.run_path(
-        str(dotfiles_root / "scripts" / "verify_instruction_migration.py")
-    )["parse_frontmatter"]
+    installed_skill_files: dict[Path, tuple[str, str]] = {}
 
     for client, instructions, skills_dir in (
         (
@@ -356,21 +319,7 @@ def main() -> int:
             failures.append(f"{client} missing skills: {', '.join(missing_skills)}")
 
         for name in sorted(required_skills & installed_skills):
-            skill_file = skills_dir / name / "SKILL.md"
-            try:
-                metadata = parse_skill_frontmatter(skill_file)
-            except (OSError, ValueError) as error:
-                failures.append(f"{client} {name} has invalid skill metadata: {error}")
-                continue
-            description = metadata.get("description")
-            if metadata.get("name") != name:
-                failures.append(f"{client} {name} declares the wrong skill name")
-            if not isinstance(description, str) or not description.strip():
-                failures.append(f"{client} {name} has no skill description")
-            if metadata.get("disable-model-invocation", False) is not False:
-                failures.append(f"{client} {name} is unavailable for model invocation")
-
-        for name in sorted(required_skills & installed_skills):
+            installed_skill_files[skills_dir / name / "SKILL.md"] = (client, name)
             if name in repository_skills:
                 source = repository_skills[name]
                 owner = "the dotfiles checkout"
@@ -383,6 +332,16 @@ def main() -> int:
             if skill.resolve() != source.resolve():
                 failures.append(f"{client} {name} does not resolve to {owner}: {skill}")
         print(f"{client} installed skills: {len(installed_skills)}")
+
+    try:
+        metadata_errors = skill_metadata_errors({
+            path: name for path, (_, name) in installed_skill_files.items()
+        })
+    except (OSError, ValueError) as error:
+        failures.append(f"cannot validate installed skill metadata: {error}")
+    else:
+        for path, (client, name) in installed_skill_files.items():
+            failures.extend(f"{client} {name} {error}" for error in metadata_errors[str(path)])
 
     try:
         pi_skills = effective_pi_skills(pi_agent_dir)
