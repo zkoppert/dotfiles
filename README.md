@@ -21,9 +21,9 @@ My personal configuration for macOS and GitHub Codespaces.
 
 The global file keeps rules that apply to every session. Task-specific guidance lives in skills that load before the related action.
 
-`install.sh` links the same global file for Copilot and Pi. It links local skills into `~/.copilot/skills` and `~/.agents/skills`, then mirrors installed catalog skills into `~/.agents/skills`. Existing non-symlink files remain unchanged.
+`install.sh` links the same global file for Copilot and Pi. It links local skills into `~/.copilot/skills` and `~/.agents/skills`, then mirrors installed catalog skills into `~/.agents/skills`. The linking steps preserve existing non-symlink paths.
 
-`verify-codespace-copilot-env` requires repository skills to resolve to this checkout and Pi catalog mirrors to resolve to their Copilot source. It checks Pi's first available context file, including `AGENTS.override.md`, against the shared instructions. Both the installer and verifier honor `PI_CODING_AGENT_DIR`; the default is `~/.pi/agent`. The configured path must be absolute or start with `~/`.
+`verify-codespace-copilot-env` requires repository skills to resolve to this checkout and Pi catalog mirrors to resolve to their Copilot source. It checks Pi's first available context file, including `AGENTS.override.md`, against the shared instructions. Both the installer and verifier honor `PI_CODING_AGENT_DIR`; the default is `~/.pi/agent`. Use an absolute path, `~`, or a path starting with `~/`.
 
 The verifier uses Pi's installed software development kit (SDK) to resolve user skills, installed packages, and settings filters. Each required skill must remain enabled and resolve to its managed source. Native discovery follows Pi's Markdown, symlink, ignore, directory-name fallback, and traversal rules. Unrelated user skills remain unchanged.
 

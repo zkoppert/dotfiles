@@ -12,7 +12,7 @@ if [ -f "$DOTFILES_DIR/.github/copilot-instructions.md" ]; then
   pi_agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
   case "$pi_agent_dir" in
     "~") pi_agent_dir="$HOME" ;;
-    "~/"*) pi_agent_dir="$HOME/${pi_agent_dir#\~/}" ;;
+    \~/*) pi_agent_dir="$HOME/${pi_agent_dir#\~/}" ;;
     /*) ;;
     *)
       echo "✗ PI_CODING_AGENT_DIR must be absolute or start with ~/" >&2
@@ -230,7 +230,7 @@ if [ "$(uname)" = "Darwin" ] && [ -x "$CFS_GUARD_SOURCE" ]; then
     fi
   done
 
-  CFS_PATH_LINE='export PATH="$HOME/.local/libexec/cfs-package-guard/bin:$PATH"  # dotfiles: CFS package guard'
+  CFS_PATH_LINE="export PATH=\"\$HOME/.local/libexec/cfs-package-guard/bin:\$PATH\"  # dotfiles: CFS package guard"
   for shell_rc in "$HOME/.zprofile" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bashrc"; do
     rc_short="${shell_rc/#$HOME/~}"
     if [ -f "$shell_rc" ] && grep -q "dotfiles: CFS package guard" "$shell_rc"; then
@@ -283,7 +283,7 @@ if [ -x "$DOTFILES_DIR/bin/pi-treehouse" ]; then
   else
     echo "⚠ $PI_TARGET exists and is not a symlink - skipping Pi Treehouse wrapper"
   fi
-  PI_ALIAS='alias pi='\''"$HOME/.local/bin/pi"'\''  # dotfiles: treehouse-isolated pi'
+  PI_ALIAS="alias pi='\"\$HOME/.local/bin/pi\"'  # dotfiles: treehouse-isolated pi"
   if [ -f "$HOME/.zshrc" ] && grep -q "dotfiles: treehouse-isolated pi" "$HOME/.zshrc"; then
     echo "✓ Pi Treehouse alias already in ~/.zshrc"
   else
@@ -422,7 +422,7 @@ done
 # Add the local-only review environment shortcut on macOS.
 if [ "$(uname)" = "Darwin" ]; then
   if [ -x "$DOTFILES_DIR/bin/copilot-launch" ]; then
-    COPILOT_ALIAS='alias copilot='\''"$HOME/.local/bin/copilot-launch"'\''  # dotfiles: named copilot'
+    COPILOT_ALIAS="alias copilot='\"\$HOME/.local/bin/copilot-launch\"'  # dotfiles: named copilot"
     if [ -f "$HOME/.zshrc" ] && grep -q "dotfiles: named copilot" "$HOME/.zshrc"; then
       echo "✓ Named Copilot alias already in ~/.zshrc"
     elif [ -f "$HOME/.zshrc" ] && grep -Eq '^[[:space:]]*(alias[[:space:]]+copilot=|copilot[[:space:]]*\(\)|function[[:space:]]+copilot([[:space:]]|\(|$))' "$HOME/.zshrc"; then
