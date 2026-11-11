@@ -14,6 +14,10 @@
         <string>/Users/zkoppert/repos/dotfiles</string>
         <string>--branch</string>
         <string>main</string>
+        <string>--home</string>
+        <string>/Users/zkoppert</string>
+        <string>--pi-agent-dir</string>
+        <string>/Users/zkoppert/.pi/agent</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/zkoppert/repos/dotfiles</string>

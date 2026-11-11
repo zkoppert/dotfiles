@@ -160,7 +160,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--branch", required=True)
     parser.add_argument("--home", type=Path, default=Path.home())
     parser.add_argument("--pi-agent-dir", type=Path)
-    parser.add_argument("--check", action="store_true", help="inspect local state without fetching or writing")
+    parser.add_argument("--check", action="store_true", help="inspect local state without updating Git or creating links")
     args = parser.parse_args(argv)
     code = 0
     try:

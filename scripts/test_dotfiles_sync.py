@@ -32,11 +32,14 @@ class DotfilesSyncTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.home = self.root / "home"
         self.home.mkdir()
-        self.enterContext(patch.dict(os.environ, {
+        environment = patch.dict(os.environ, {
             "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
             "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
-        }))
+            "PI_CODING_AGENT_DIR": "",
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
         self.remote = self.root / "remote.git"
         self.seed = self.root / "seed"
         self.repo = self.root / "checkout"
@@ -123,6 +126,7 @@ class DotfilesSyncTests(unittest.TestCase):
         self.publish()
         self.git(self.repo, "config", "pull.rebase", "true")
         self.git(self.repo, "config", "rebase.autoStash", "true")
+        self.git(self.repo, "config", "merge.autoStash", "true")
         head = self.git(self.repo, "rev-parse", "HEAD")
         with self.assertRaises(sync.SyncError):
             self.run_sync()
@@ -288,8 +292,15 @@ class DotfilesSyncTests(unittest.TestCase):
         self.assertEqual(plist["StartCalendarInterval"], {"Hour": 9, "Minute": 0})
         self.assertIs(plist["RunAtLoad"], True)
         self.assertEqual(plist["WorkingDirectory"], "/Users/zkoppert/repos/dotfiles")
-        self.assertIn("scripts.dotfiles_sync", plist["ProgramArguments"])
-        self.assertIn("-B", plist["ProgramArguments"])
+        arguments = plist["ProgramArguments"]
+        self.assertIn("scripts.dotfiles_sync", arguments)
+        for flag, expected in (
+            ("--repository", plist["WorkingDirectory"]),
+            ("--home", plist["EnvironmentVariables"]["HOME"]),
+            ("--pi-agent-dir", "/Users/zkoppert/.pi/agent"),
+        ):
+            self.assertEqual(arguments[arguments.index(flag) + 1], expected)
+        self.assertIn("-B", arguments)
         self.assertIn("/opt/homebrew/bin", plist["EnvironmentVariables"]["PATH"])
         self.assertNotIn("-c", plist["ProgramArguments"])
 
