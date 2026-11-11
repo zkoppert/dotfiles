@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zkoppert.dotfiles-sync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/python3</string>
+        <string>-B</string>
+        <string>-m</string>
+        <string>scripts.dotfiles_sync</string>
+        <string>--repository</string>
+        <string>/Users/zkoppert/repos/dotfiles</string>
+        <string>--branch</string>
+        <string>main</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/zkoppert/repos/dotfiles</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>9</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/zkoppert/Library/Logs/dotfiles-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/zkoppert/Library/Logs/dotfiles-sync.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/zkoppert</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/Users/zkoppert/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
