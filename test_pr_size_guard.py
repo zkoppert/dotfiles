@@ -187,6 +187,23 @@ class PrSizeGuardTest(unittest.TestCase):
         self.assertIn("801 added lines", blocked.stderr)
         self.assertIn("gh-axi stack", blocked.stderr)
 
+    def test_relaxed_profile_does_not_skip_the_existing_size_limit(self) -> None:
+        self.commit_added_lines(801)
+        remote_url = self.run_command(["git", "remote", "get-url", "origin"]).stdout.strip()
+        repository = remote_url.split(":", 1)[1].removesuffix(".git")
+        config = Path(self.env["HOME"]) / ".config/repo-guards/config.yaml"
+        config.parent.mkdir(parents=True)
+        config.write_text(f"version: 1\nrepositories:\n  {repository}: relaxed\n", encoding="utf-8")
+        config.chmod(0o600)
+        result = subprocess.run(
+            [str(self.gh_guard), "pr", "create", "--draft", "--title", "Example"],
+            cwd=self.repo, env={**self.env, "ZACK_CONFIRMED_PR_CREATE": "1"},
+            capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("801 added lines", result.stderr)
+        self.assertNotIn("quality profile relaxed", result.stderr)
+
     def test_explicit_override_allows_oversized_diff(self) -> None:
         source = self.commit_added_lines(801)
 

@@ -160,9 +160,9 @@ def implicit_gh_target() -> str:
                 "repo",
                 "view",
                 "--json",
-                "nameWithOwner,parent",
+                "url,parent",
                 "--jq",
-                ".parent.nameWithOwner // .nameWithOwner",
+                ".parent.url // .url",
             ],
             capture_output=True,
             text=True,
@@ -310,6 +310,8 @@ def check_push(remote_url: str, updates: str) -> int:
     branches = []
     for line in updates.splitlines():
         fields = line.split()
+        if not fields:
+            continue
         if len(fields) != 4:
             print("repo-guards: invalid push ref updates", file=sys.stderr)
             return 1

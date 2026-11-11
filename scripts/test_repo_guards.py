@@ -58,10 +58,12 @@ class RepoGuardsTest(unittest.TestCase):
             '#!/bin/sh\ncase "$*" in\n'
             ' "repo view --json nameWithOwner --jq .nameWithOwner") echo example/personal ;;\n'
             ' "repo view --json parent --jq "*) exit 0 ;;\n'
-            ' "repo view --json nameWithOwner,parent --jq "*)\n'
+            ' "repo view --json url,parent --jq "*)\n'
             "   target=$(git config --get remote.origin.gh-resolved || true)\n"
             '   [ "$target" = base ] && target=""\n'
-            '   printf "%s\\n" "${TEST_PR_BASE:-${target:-example/personal}}" ;;\n'
+            "   target=${TEST_PR_BASE:-${target:-example/personal}}\n"
+            '   case "$target" in *://*) printf "%s\\n" "$target" ;;\n'
+            '   *) printf "https://github.com/%s\\n" "$target" ;; esac ;;\n'
             ' "api repos/"*" --jq .visibility") echo public ;;\n'
             ' "pr create"*) echo PUBLISHED ;;\n'
             " *) exit 2 ;;\nesac\n"
@@ -184,6 +186,27 @@ class RepoGuardsTest(unittest.TestCase):
         self.env["TEST_PR_BASE"] = "not-a-repository"
         self.assertEqual(self.gh_profile(), "strict")
 
+    def test_implicit_pr_target_preserves_enterprise_host(self):
+        self.assign(
+            extra="  code.example.test/example/personal: relaxed\n  example/parent: relaxed\n"
+        )
+        self.run_cmd(
+            [
+                "git",
+                "remote",
+                "set-url",
+                "origin",
+                "https://code.example.test/example/personal.git",
+            ]
+        )
+        self.env["TEST_PR_BASE"] = "https://code.example.test/example/parent"
+        output = self.run_cmd(
+            [sys.executable, CLI, "gh-context", "--", "pr", "create"]
+        ).stdout
+        profile, repository, _ = output.split("\t")
+        self.assertEqual(profile, "strict")
+        self.assertEqual(repository, "code.example.test/example/parent")
+
     def test_multiple_remotes_use_strictest_and_local_gate_is_not_identity(self):
         self.assign()
         self.run_cmd(["git", "remote", "add", "pipeline", "/tmp/gate.git"])
@@ -268,10 +291,67 @@ class RepoGuardsTest(unittest.TestCase):
         )
         self.assertIn("requires --draft", refused.stderr)
         self.run_cmd([GUARD, "pr", "create", "--draft", "--title", "Example"])
+        self.assign("strict")
+        self.assertIn(
+            "needs models",
+            self.run_cmd([sys.executable, MARKER, "check"], check=False).stderr,
+        )
+        refused = self.run_cmd(
+            [GUARD, "pr", "create", "--draft", "--title", "Example"], check=False
+        )
+        self.assertIn("FEW-MODELS", refused.stderr)
+        self.assertNotIn("PUBLISHED", refused.stdout)
+        self.assign("standard")
         self.run_cmd(["git", "commit", "--allow-empty", "-m", "next"])
         self.assertIn(
             "stale", self.run_cmd([sys.executable, MARKER, "check"], check=False).stderr
         )
+
+    def test_standard_target_can_write_self_review_from_relaxed_checkout(self):
+        self.assign(extra="  example/library: standard\n")
+        review = "I reviewed the final target diff and its failure paths. " * 6
+        self.run_cmd(
+            [
+                sys.executable,
+                MARKER,
+                "write",
+                "code-review",
+                "--repo",
+                "example/library",
+                "-",
+            ],
+            input=review,
+        )
+        refused = self.run_cmd(
+            [
+                sys.executable,
+                MARKER,
+                "check",
+                "--gh-args",
+                "pr",
+                "create",
+                "--repo",
+                "example/library",
+            ],
+            check=False,
+        )
+        self.assertIn("tests", refused.stderr)
+        self.assertNotIn("code-review", refused.stderr)
+        self.run_cmd([sys.executable, MARKER, "run-tests", "--cmd", "true"])
+        self.env["ZACK_CONFIRMED_PR_CREATE"] = "1"
+        published = self.run_cmd(
+            [
+                GUARD,
+                "pr",
+                "create",
+                "--draft",
+                "--repo",
+                "example/library",
+                "--title",
+                "Example",
+            ]
+        )
+        self.assertEqual(published.stdout.strip(), "PUBLISHED")
 
     def test_relaxed_pr_keeps_body_lint_and_ready_confirmation(self):
         self.assign()
@@ -405,6 +485,19 @@ class RepoGuardsTest(unittest.TestCase):
         )
         refused = self.run_cmd(["git", "push", "origin", "HEAD:feature"], check=False)
         self.assertIn("default branch is unavailable", refused.stderr)
+
+    def test_up_to_date_network_push_is_a_successful_no_op(self):
+        self.setup_remote()
+        self.assign()
+        self.run_cmd(["git", "push", "origin", "main"])
+        self.config.unlink()
+        result = self.run_cmd(["git", "push", "origin", "main"])
+        self.assertIn("Everything up-to-date", result.stderr)
+        for updates in ("", "\n"):
+            self.run_cmd(
+                [sys.executable, CLI, "check-push", "github.com:example/personal.git"],
+                input=updates,
+            )
 
     def test_push_respects_actual_default_and_repository_hook(self):
         self.setup_remote()

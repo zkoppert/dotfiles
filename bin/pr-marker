@@ -505,7 +505,7 @@ def policy_kind(kind: Kind, policy: Policy) -> Kind:
 
 def cmd_write(args: argparse.Namespace) -> int:
     """Write marker content from a file or stdin, refusing content below the floor."""
-    kind = policy_kind(_resolve_kind(args.kind), resolve_policy())
+    kind = policy_kind(_resolve_kind(args.kind), resolve_policy(getattr(args, "repo", None)))
     if kind.requires_result:
         print(
             f"pr-marker: the {kind.name} marker is machine-produced; write it with "
@@ -1800,6 +1800,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_write.add_argument(
         "file", nargs="?", default="-", help="file to read (default: stdin)"
     )
+    p_write.add_argument("--repo", help="additional PR target used to select marker requirements")
     p_write.add_argument(
         "--models",
         default=None,
@@ -1920,13 +1921,13 @@ def _reorder_write_argv(argv: list[str]) -> list[str]:
     i = 0
     while i < len(rest):
         arg = rest[i]
-        if arg in ("--models", "--convergence-rounds"):
+        if arg in ("--models", "--convergence-rounds", "--repo"):
             option_tokens.append(arg)
             if i + 1 < len(rest):
                 option_tokens.append(rest[i + 1])
                 i += 2
                 continue
-        elif arg.startswith("--models=") or arg.startswith("--convergence-rounds="):
+        elif arg.startswith(("--models=", "--convergence-rounds=", "--repo=")):
             option_tokens.append(arg)
         else:
             others.append(arg)

@@ -94,6 +94,8 @@ pr-marker write code-review review.md
 pr-marker run-tests --cmd 'python3 -m unittest discover'
 ```
 
+For a different PR target, add `--repo OWNER/REPOSITORY` to `pr-marker write`. The writer applies the stricter checkout or target profile.
+
 Standard PR creation requires `--draft`. Strict keeps its existing marker and native proof contracts. Relaxed marker checks are optional, not fabricated passes. Agents still need approval to push or create PRs. Explicitly requested checks still apply.
 
 The pre-push hook checks the actual network destination's live default branch. Missing default-branch evidence blocks branch pushes. Relaxed permits initial branch creation only after a successful lookup confirms no remote branches exist. Default-branch deletion and history rewriting remain blocked even for relaxed repositories. Feature-branch pushes retain existing size, privacy, and repository-hook checks. Marker certification stays at PR creation, not in the push hook. Tags and local pipeline transports retain their existing handling.
