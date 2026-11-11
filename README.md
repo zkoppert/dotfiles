@@ -51,6 +51,59 @@ After an intentional guidance edit, review the content diff and refresh the hash
 python3 scripts/verify_instruction_migration.py --update-baseline --acknowledge-guidance-changes
 ```
 
+## How do I choose repository safeguards?
+
+Small personal changes don't always need the same checks as production changes. `repo-guards` selects quality requirements from private, user-owned assignments.
+
+| Profile | Required evidence | Direct default-branch pushes |
+| --- | --- | --- |
+| `relaxed` | None | Allowed for ordinary fast-forward updates |
+| `standard` | HEAD-pinned self-review and successful local checks | Blocked |
+| `strict` | Current plan, code, demo, PR-description, and test markers | Blocked |
+
+Unlisted repositories stay strict. Invalid configuration also selects strict. The resolver never prints the assignment inventory.
+
+Create `~/.config/repo-guards/config.yaml` outside any Git checkout. Use this fictional example as a starting point:
+
+```bash
+mkdir -p "$HOME/.config/repo-guards"
+chmod 700 "$HOME/.config/repo-guards"
+# Keep real repository assignments outside this public repository.
+(umask 077; printf 'version: 1\nrepositories:\n  example/personal: relaxed\n  example/library: standard\n' > "$HOME/.config/repo-guards/config.yaml")
+```
+
+The supported YAML subset has `version: 1`, followed by `repositories:` and two-space-indented `repository: profile` entries. Blank lines and comments are allowed. Use unquoted scalar values, exact names, and one space after each colon. Other YAML features are rejected rather than interpreted.
+
+Keys accept `owner/repository` for GitHub.com or `host/owner/repository`. Names are case-insensitive; duplicate normalized identities invalidate the whole file. Wildcards and configurable defaults aren't supported. The file must have mode `0600`, belong to the current user, and be a regular file. Symlinks and files larger than 64 KiB are rejected.
+
+Inspect the current checkout or an additional target:
+
+```bash
+repo-guards show --json
+repo-guards show --repo example/library --json
+pr-marker status
+```
+
+Multiple repository identities use the strictest applicable profile. Worktrees share remote identity but keep separate marker evidence. `gh pr create` also checks explicit `--repo` selectors and `GH_REPO`. Explicit selectors take precedence over `GH_REPO`; `GH_HOST` qualifies unqualified selectors. Uncertain arguments cannot grant reduced safeguards.
+
+For standard work, record an actual self-review and local checks:
+
+```bash
+# Supply your review file, not placeholder evidence.
+pr-marker write code-review review.md
+pr-marker run-tests --cmd 'python3 -m unittest discover'
+```
+
+Standard PR creation requires `--draft`. Strict keeps its existing marker and native proof contracts. Relaxed marker checks are optional, not fabricated passes. Agents still need approval to push or create PRs. Explicitly requested checks still apply.
+
+The pre-push hook checks the actual network destination's live default branch. Missing default-branch evidence blocks branch pushes. Default-branch deletion and history rewriting remain blocked even for relaxed repositories. Feature-branch pushes retain existing size, privacy, and repository-hook checks. Marker certification stays at PR creation, not in the push hook. Tags and local pipeline transports retain their existing handling.
+
+Existing automation that pushes directly to a default branch needs an explicit relaxed assignment before installation. Review those assignments locally; don't publish the inventory. Native pipeline publication still requires its original strict proof and custody checks.
+
+Installation links the read-only resolver but never creates or changes assignments. Removing an assignment restores strict behavior. Copy private configuration separately between machines; the installer doesn't synchronize it.
+
+These tools prevent accidental shortcuts. They aren't a security boundary against edited policy files, bypassed Git hooks, or direct executable paths.
+
 ## How do I install it?
 
 The public repository does not contain the private catalog identifier. Configure `COPILOT_SKILL_CATALOG_REPO` as a user-level Codespaces secret or export it locally before running the installer:

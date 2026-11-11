@@ -2,7 +2,7 @@
   "schema_version": 2,
   "baseline": {
     "path": "tests/fixtures/instruction-migration/global-instructions-2026-11-06.txt",
-    "sha256": "521f28d0345adaf5ada80e7cf11b883fdbcfb4c028ddab7d175c4b90a72bbe46"
+    "sha256": "c297c21999994381c9352a6072149b362103b3c2341196ae1d431b84d01ff358"
   },
   "blocks": [
     {
@@ -23,7 +23,7 @@
     },
     {
       "id": "Copilot Skills",
-      "sha256": "db595a3054b61b98466966e7a7e558379196f66c6bb72a2ec04e3001f05cead2",
+      "sha256": "26f63a72ffafebc6332d004c4da5598ae7331bde8be3e8271633c02d0d2bc6f5",
       "source_start_line": 19,
       "source_end_line": 49,
       "destination": ".github/copilot-instructions.md",
@@ -31,7 +31,7 @@
     },
     {
       "id": "My Standard Change Workflow",
-      "sha256": "8f0a77b292fafe7c0eafa8f7028b2882f81d93288210b09b90cb7cd27acb2b9c",
+      "sha256": "0c69618e467af0c0fa25a90b662ca68cc1232d3b12cb3ccc23f4ae001781449e",
       "source_start_line": 50,
       "source_end_line": 66,
       "destination": ".github/copilot-instructions.md",
@@ -223,7 +223,7 @@
     {
       "id": "Pre-action skill routing",
       "destination": ".github/copilot-instructions.md",
-      "sha256": "bf6101480aa9eb74b6d8518c06a45f9174cc5ead222675f3064836f3f6f45f66"
+      "sha256": "c0b1378a10873afef9b4dafbce93a0f07480b8a93763449daf338982fdf0cdd0"
     },
     {
       "id": "Pull Requests",

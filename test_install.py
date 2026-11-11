@@ -838,6 +838,25 @@ class InstallScriptTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Personal pre-push guard is inactive", result.stderr)
 
+    def test_repository_guard_install_preserves_private_assignments_and_owned_command(self) -> None:
+        command = self.repo / "bin" / "repo-guards"
+        command.parent.mkdir()
+        shutil.copy2(Path(__file__).with_name("bin") / "repo-guards", command)
+        private = self.home / ".config/repo-guards/config.yaml"
+        private.parent.mkdir(parents=True)
+        private.write_text("version: 1\nrepositories:\n  example/personal: relaxed\n", encoding="utf-8")
+        private.chmod(0o600)
+        original = private.read_bytes()
+        self.assertEqual(self.run_installer().returncode, 0)
+        installed = self.home / ".local/bin/repo-guards"
+        self.assertEqual(installed.resolve(), command.resolve())
+        self.assertEqual(private.read_bytes(), original)
+        installed.unlink()
+        installed.write_text("user-owned command\n", encoding="utf-8")
+        self.assertEqual(self.run_installer().returncode, 0)
+        self.assertEqual(installed.read_text(encoding="utf-8"), "user-owned command\n")
+        self.assertEqual(private.read_bytes(), original)
+
     def test_stack_extension_is_installed_once(self) -> None:
         first_run = self.run_installer()
         second_run = self.run_installer()

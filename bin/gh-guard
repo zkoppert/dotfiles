@@ -53,10 +53,8 @@
 #     gitlink file at `<worktree>/.git`. Each marker must meet its byte floor
 #     so a bare `touch` does not satisfy it - actual review/demo content has to
 #     land there before the PR can be opened. Both conditions are required
-#     when invoked inside a git checkout. If the wrapper cannot resolve the
-#     current repo or branch (e.g., `gh pr create` invoked outside a checkout
-#     or on detached HEAD), the env var alone is accepted as a fallback
-#     because no marker path can be derived.
+#     for strict publication. If the wrapper cannot resolve the checkout or
+#     branch, strict publication is blocked because evidence cannot be checked.
 #
 # Known limitations (PATH-shim is a soft guard, not adversarial):
 #   - `gh api repos/.../pulls` and `gh api graphql` createPullRequest mutations
@@ -449,18 +447,11 @@ lint_pr_body_or_die() {
     # to block references to private/internal repos in the PR body.
     local visibility_flag=""
     local target_repo=""
-    # Try -R/--repo flag first
-    local prev=""
-    for arg in "$@"; do
-      case "$prev" in
-        -R|--repo) target_repo="$arg" ;;
-      esac
-      case "$arg" in
-        --repo=*) target_repo="${arg#--repo=}" ;;
-        -R=*) target_repo="${arg#-R=}" ;;
-      esac
-      prev="$arg"
-    done
+    local lint_context
+    lint_context="$(python3 "$SELF_REAL_PATH/repo-guards" gh-context -- "$@")"
+    target_repo="${lint_context#*$'\t'}"
+    target_repo="${target_repo%$'\t'*}"
+    target_repo="${target_repo#github.com/}"
     # Native targets come from the verified binding, not option-looking values.
     if [ "$native_publication" = "1" ]; then
       target_repo="$native_repository"
@@ -470,6 +461,9 @@ lint_pr_body_or_die() {
     if [ -n "$target_repo" ]; then
       local repo_vis=""
       local visibility_args=(api "repos/$target_repo" --jq .visibility)
+      if [[ "$target_repo" == */*/* ]]; then
+        visibility_args=(repo view --json visibility --jq '.visibility | ascii_downcase' -- "$target_repo")
+      fi
       if [ "$native_publication" = "1" ]; then
         visibility_args=(repo view --json visibility --jq '.visibility | ascii_downcase' -- "$target_repo")
       fi
@@ -524,6 +518,33 @@ if [ "$native_publication" = "1" ]; then
     exit 1
   fi
   exec "$REAL_GH" "$@"
+fi
+
+# Native proof above always takes precedence over user quality profiles.
+if [ "$is_pr_create" = "1" ]; then
+  policy_context="$(python3 "$SELF_REAL_PATH/repo-guards" gh-context -- "$@")"
+  quality_profile="${policy_context%%$'\t'*}"
+  case "$quality_profile" in
+    relaxed|standard)
+      lint_pr_body_or_die "gh pr create" "$@"
+      if [ "$quality_profile" = "standard" ] && [ "${policy_context##*$'\t'}" != "1" ]; then
+        echo 'gh-guard: standard requires --draft when creating a PR.' >&2
+        exit 1
+      fi
+      if ! "$SELF_REAL_PATH/pr-marker" check --gh-args "$@"; then
+        echo "gh-guard: $quality_profile marker requirements are not satisfied." >&2
+        exit 1
+      fi
+      if [ "${ZACK_CONFIRMED_PR_CREATE:-}" != "1" ]; then
+        echo 'gh-guard: PR creation still requires explicit approval and ZACK_CONFIRMED_PR_CREATE=1.' >&2
+        exit 1
+      fi
+      echo "gh-guard: quality profile $quality_profile" >&2
+      exec "$REAL_GH" "$@"
+      ;;
+    strict) ;;
+    *) echo 'gh-guard: invalid quality policy result.' >&2; exit 1 ;;
+  esac
 fi
 
 # Minimum accepted size (bytes) for each PR-readiness marker. These MUST match
@@ -735,9 +756,7 @@ if [ "$is_pr_create" = "1" ]; then
   # them. The lint runs for both TTY and non-TTY paths -- the rule is hard.
   lint_pr_body_or_die "gh pr create" "$@"
 
-  # Try to resolve the current repo and branch so we can check the per-branch
-  # review marker. If either lookup fails, the marker check is skipped and we
-  # fall back to the env var alone.
+  # Strict publication cannot substitute confirmation for missing evidence.
   repo_root=""
   branch=""
   git_dir=""
@@ -746,7 +765,7 @@ if [ "$is_pr_create" = "1" ]; then
     # Use symbolic-ref (not rev-parse --abbrev-ref) so the branch name matches
     # what bin/pr-marker resolves; the two must agree or a marker written by
     # pr-marker lands where the gate does not look. On a detached HEAD this
-    # exits non-zero and leaves branch empty, so in_repo stays 0 (env-var path).
+    # exits non-zero and leaves branch empty, which blocks strict publication.
     branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
     # --absolute-git-dir returns the per-worktree gitdir, so this works for
     # both plain checkouts (`<repo>/.git`) and worktrees (where `<repo>/.git`
@@ -780,6 +799,11 @@ if [ "$is_pr_create" = "1" ]; then
     eval_marker "full test suite"      "$marker_base/tests.md"       "$TESTS_MIN_BYTES"       1 0 1 0
   fi
 
+  if [ "$in_repo" != "1" ]; then
+    echo 'gh-guard: strict publication requires a checkout and attached branch for marker evidence.' >&2
+    exit 1
+  fi
+
   if [ -t 0 ] && [ -t 1 ]; then
     echo "About to run: gh $*" >&2
     if [ "$marker_all_ok" = "1" ]; then
@@ -797,22 +821,12 @@ if [ "$is_pr_create" = "1" ]; then
     esac
   else
     pass=0
-    if [ "$in_repo" = "1" ]; then
-      # Inside a resolvable repo: require ALL five markers and the env var.
-      if [ "$marker_all_ok" = "1" ] && [ "${ZACK_CONFIRMED_PR_CREATE:-}" = "1" ]; then
-        pass=1
-      fi
-    else
-      # Outside a resolvable repo (no checkout, detached HEAD): no marker path
-      # can be derived, so the env var alone is the only available signal.
-      if [ "${ZACK_CONFIRMED_PR_CREATE:-}" = "1" ]; then
-        pass=1
-      fi
+    if [ "$marker_all_ok" = "1" ] && [ "${ZACK_CONFIRMED_PR_CREATE:-}" = "1" ]; then
+      pass=1
     fi
 
     if [ "$pass" = "0" ]; then
-      if [ "$in_repo" = "1" ]; then
-        cat >&2 <<EOF
+      cat >&2 <<EOF
 gh-guard: \`gh pr create\` blocked.
 
 Reason: Zack's staged change workflow requires five artifacts before a PR is
@@ -867,22 +881,6 @@ Then set the explicit confirmation env var in the same invocation:
 Both all five markers AND the env var are required inside a git checkout.
 ZACK_CONFIRMED_PR_CREATE='${ZACK_CONFIRMED_PR_CREATE:-}'.
 EOF
-      else
-        cat >&2 <<EOF
-gh-guard: \`gh pr create\` blocked.
-
-Reason: Zack's staged change workflow requires plan review, code review,
-demo/before-after capture, PR-description review, and a full test-suite run
-before a PR is opened. This wrapper prevents skipping those steps from
-automation.
-
-You appear to be running outside a resolvable git checkout (no repo root or
-branch detectable; branch was '${branch:-}'). The marker-file checks are
-unavailable, so the only signal is the env var. Set it explicitly:
-
-  ZACK_CONFIRMED_PR_CREATE=1 gh pr create <args>
-EOF
-      fi
       exit 1
     fi
   fi

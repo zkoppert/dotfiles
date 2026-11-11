@@ -446,6 +446,18 @@ if [ "$(uname)" = "Darwin" ]; then
   done
 fi
 
+# Private assignments are user-managed and must never be copied into dotfiles.
+if [ -x "$DOTFILES_DIR/bin/repo-guards" ]; then
+  mkdir -p "$HOME/.local/bin"
+  target="$HOME/.local/bin/repo-guards"
+  if [ -L "$target" ] || [ ! -e "$target" ]; then
+    ln -sfn "$DOTFILES_DIR/bin/repo-guards" "$target"
+    echo "✓ Linked repository policy resolver → $target"
+  else
+    echo "⚠ $target exists and is not a symlink - skipping"
+  fi
+fi
+
 # Install pr-marker helper as a PATH shim at ~/.local/bin/pr-marker.
 # Writes the per-branch plan/code/demo/PR-description/tests markers that the
 # gh-guard `gh pr create` gate checks, keeping the path encoding in one place.

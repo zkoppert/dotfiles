@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import os
 import json
+import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -50,6 +52,16 @@ class PrSizeGuardTest(unittest.TestCase):
         )
         self.run_command(["git", "checkout", "-b", "feature"])
 
+        # Size tests use a fixed remote default; live discovery has its own integration suite.
+        real_git = shutil.which("git")
+        fake_git = self.fake_bin / "git"
+        fake_git.write_text(
+            '#!/bin/sh\nif [ "$1" = ls-remote ]; then\n'
+            '  printf "ref: refs/heads/main\\tHEAD\\n"\n  exit 0\nfi\n'
+            f'exec {shlex.quote(real_git)} "$@"\n',
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
         fake_gh = self.fake_bin / "gh"
         fake_gh.write_text(
             "#!/bin/sh\n"

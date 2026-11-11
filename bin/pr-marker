@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Read/write the per-branch PR-readiness marker files that gh-guard gates on.
 
-Zack's change workflow requires five review, demo, and check-run artifacts to
-exist before `gh pr create` is allowed to open a PR (enforced by the gh-guard
-PATH shim). The artifacts for a branch live together in a per-branch directory
+The strict workflow requires five review, demo, and check-run artifacts before
+`gh pr create` (enforced by gh-guard). Private repository profiles can reduce
+legacy requirements: standard uses pinned self-review/tests; relaxed needs no
+markers. Native publication proof always retains the strict protocol. The artifacts for a branch live together in a per-branch directory
 `<git-dir>/copilot-pr-review/<encoded-branch>/`, one file per kind.
 
 This helper is the single source of truth for the marker path encoding so that
@@ -109,10 +110,13 @@ import sys
 import tempfile
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from repo_guards import Policy, gh_context, resolve_policy
 
 
 @dataclass(frozen=True)
@@ -493,9 +497,15 @@ def strip_generated_headers(content: str) -> str:
     return "".join(kept)
 
 
+def policy_kind(kind: Kind, policy: Policy) -> Kind:
+    if policy.profile == "standard" and kind.name == "code-review":
+        return replace(kind, requires_models=False, requires_convergence=False, summary="self-review of the code diff")
+    return kind
+
+
 def cmd_write(args: argparse.Namespace) -> int:
     """Write marker content from a file or stdin, refusing content below the floor."""
-    kind = _resolve_kind(args.kind)
+    kind = policy_kind(_resolve_kind(args.kind), resolve_policy())
     if kind.requires_result:
         print(
             f"pr-marker: the {kind.name} marker is machine-produced; write it with "
@@ -1694,8 +1704,14 @@ def cmd_status(_args: argparse.Namespace) -> int:
     print(f"branch: {branch}")
     print(f"marker dir: {branch_dir(branch)}")
     print()
+    policy = resolve_policy()
+    print(f"profile: {policy.profile} ({policy.reason})")
     all_ok = True
-    for kind in KINDS.values():
+    for original in KINDS.values():
+        kind = policy_kind(original, policy)
+        if kind.name not in policy.markers:
+            print(f"  [ OPTIONAL] {kind.name}")
+            continue
         ok, detail, size, path = marker_status(kind, branch)
         all_ok = all_ok and ok
         mark = "ok " if ok else detail.upper()
@@ -1741,9 +1757,13 @@ def cmd_check(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    policy = gh_context(args.gh_args)[0] if args.gh_args is not None else resolve_policy()
+    if not policy.markers:
+        return 0
     branch = current_branch()
     failures = []
-    for kind in KINDS.values():
+    for name in policy.markers:
+        kind = policy_kind(KINDS[name], policy)
         ok, detail, _size, path = marker_status(kind, branch)
         if not ok:
             failures.append((detail, kind, path))
@@ -1821,6 +1841,10 @@ def build_parser() -> argparse.ArgumentParser:
         nargs=argparse.REMAINDER,
         metavar="GH_ARGV",
         help="check the native-located handoff against actual gh argv; imports no caller proof",
+    )
+    p_check.add_argument(
+        "--gh-args", nargs=argparse.REMAINDER,
+        help="resolve policy from actual gh pr create arguments",
     )
     p_check.set_defaults(func=cmd_check)
 

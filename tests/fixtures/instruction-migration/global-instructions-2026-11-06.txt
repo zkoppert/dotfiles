@@ -40,7 +40,7 @@ Global routing exceptions and cross-skill boundaries:
 
 - **`gh-guard`** (`~/repos/dotfiles/bin/gh-guard`, linked at `~/.local/bin/gh`) guards three operations:
   - `gh pr ready` requires explicit confirmation before marking a draft ready. `gh pr ready --undo` separately requires an explicit request in the current conversation and `ZACK_CONFIRMED_PR_DRAFT=1` for non-interactive use.
-  - `gh pr create` requires all five passing `pr-marker` artifacts plus `ZACK_CONFIRMED_PR_CREATE=1`. It also lints the PR body.
+  - `gh pr create` requires the profile's `pr-marker` artifacts plus `ZACK_CONFIRMED_PR_CREATE=1`. It also lints the PR body.
   - `gh pr edit` lints body changes; edits to other PR fields pass through.
 
 - **`pr-marker`** (`~/repos/dotfiles/bin/pr-marker`, linked at `~/.local/bin/pr-marker`) is the source of truth for marker paths, formats, and validation. Use `pr-marker status` to inspect the five markers and `pr-marker check` to require them. The `plan`, `code-review`, and `pr-review` markers require at least three models; `code-review` also records the final clean convergence round. The `code-review` and machine-produced `tests` markers are HEAD-pinned. `pr-marker run-tests` requires a clean repository, runs the test-quality preflight and every supplied command, and supports only the documented `--no-test-change-reason` and `--narrow` exceptions.
@@ -49,7 +49,7 @@ If a new skill is added under `~/.copilot/skills/<name>/`, read its `SKILL.md` t
 
 ## My Standard Change Workflow
 
-Every non-trivial change follows these staged steps. The gates (`gh-guard` + `pr-marker`) and skills exist to make this the path of least resistance, not to add friction. `pr-marker status` shows which markers are still outstanding at any point.
+Every non-trivial change under the strict repository quality profile follows these staged steps. The gates (`gh-guard` + `pr-marker`) and skills exist to make this the path of least resistance, not to add friction. `pr-marker status` shows which markers are still outstanding at any point.
 
 1. **Plan.** Write the plan for the change.
 2. **Multi-model review the plan.** Run the multi-model Code Review Workflow (below) against the plan, address findings, and record the synthesis: `<plan review> | pr-marker write plan --models a,b,c -`.

@@ -2,6 +2,32 @@
 
 These preferences apply across all repositories and sessions.
 
+## Repository quality policy
+
+Before repository work, run `repo-guards show --json` from the checkout. Use strict safeguards if the command is unavailable.
+
+Private assignments live in `~/.config/repo-guards/config.yaml`, outside Git. Never publish the assignments or copy them into repository files.
+
+| Profile | Tests before delivery | Review | Delivery |
+| --- | --- | --- | --- |
+| `relaxed` | Optional | Optional | Direct default-branch push or draft PR |
+| `standard` | Local tests | HEAD-pinned self-review | Draft PR |
+| `strict` | Full Codespace checks | Current three-model workflow | Draft PR with all five markers |
+
+These profiles replace mandatory quality steps in the standard workflow, Harnesses, review skills, and wrapper guidance below. Other rules still apply.
+
+For relaxed work, don't require tests, reviews, Codespaces, demos, or markers unless I explicitly request them. Report skipped checks accurately.
+
+For standard work, use `pr-marker write code-review` for self-review evidence. Use `pr-marker run-tests` for local checks. Capture visual evidence for UI changes.
+
+Strict retains the full existing workflow. Missing assignments, uncertain identity, or invalid configuration never grant reduced safeguards.
+
+Never modify private assignments to bypass a task's safeguards. Change assignments only when I explicitly request that configuration change.
+
+Profiles never grant push approval. Preserve privacy checks, secret protection, size limits, repository hooks, and destructive-action confirmation.
+
+Native pipeline proof and custody always retain their own requirements. Never bypass an active pipeline because the repository has a relaxed profile.
+
 ## General Preferences
 - Be direct and concise; skip preamble and get to the point
 - When uncertain, ask clarifying questions rather than assuming
@@ -41,7 +67,7 @@ For GitHub operations, `gh-axi` controls command choice.
 - Never approve a PR without my explicit confirmation. Showing an approval draft isn't permission to approve.
 - Create gists as private/secret unless I explicitly request a public gist.
 - Use dedicated tokens or secrets for each workflow; never reuse them across workflows.
-- Every plan, code, and PR-description review requires at least three distinct non-Gemini models.
+- Strict plan, code, and PR-description reviews require at least three distinct non-Gemini models.
 - Verify every review finding before reporting it.
 - Show drafted PR review comments before posting them.
 - Run final validation after the last mutation before reporting completion.
@@ -70,7 +96,7 @@ Global routing exceptions and cross-skill boundaries:
 
 - **`gh-guard`** (`~/repos/dotfiles/bin/gh-guard`, linked at `~/.local/bin/gh`) guards three operations:
   - `gh pr ready` requires explicit confirmation before marking a draft ready. `gh pr ready --undo` separately requires an explicit request in the current conversation and `ZACK_CONFIRMED_PR_DRAFT=1` for non-interactive use.
-  - `gh pr create` requires all five passing `pr-marker` artifacts plus `ZACK_CONFIRMED_PR_CREATE=1`. It also lints the PR body.
+  - `gh pr create` requires the profile's `pr-marker` artifacts plus `ZACK_CONFIRMED_PR_CREATE=1`. It also lints the PR body.
   - `gh pr edit` lints body changes; edits to other PR fields pass through.
 
 - **`pr-marker`** (`~/repos/dotfiles/bin/pr-marker`, linked at `~/.local/bin/pr-marker`) is the source of truth for marker paths, formats, and validation. Use `pr-marker status` to inspect the five markers and `pr-marker check` to require them. The `plan`, `code-review`, and `pr-review` markers require at least three models; `code-review` also records the final clean convergence round. The `code-review` and machine-produced `tests` markers are HEAD-pinned. `pr-marker run-tests` requires a clean repository, runs the test-quality preflight and every supplied command, and supports only the documented `--no-test-change-reason` and `--narrow` exceptions.
@@ -79,7 +105,7 @@ If a new skill is added under `~/.copilot/skills/<name>/`, read its `SKILL.md` t
 
 ## My Standard Change Workflow
 
-Every non-trivial change follows these staged steps. The gates (`gh-guard` + `pr-marker`) and skills exist to make this the path of least resistance, not to add friction. `pr-marker status` shows which markers are still outstanding at any point.
+Every non-trivial change under the strict repository quality profile follows these staged steps. The gates (`gh-guard` + `pr-marker`) and skills exist to make this the path of least resistance, not to add friction. `pr-marker status` shows which markers are still outstanding at any point.
 
 1. **Plan.** Write the plan for the change.
 2. **Multi-model review the plan.** Run the multi-model Code Review Workflow (below) against the plan, address findings, and record the synthesis: `<plan review> | pr-marker write plan --models a,b,c -`.
