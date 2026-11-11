@@ -235,6 +235,13 @@ class RepoGuardsTest(unittest.TestCase):
             self.assertEqual(self.gh_profile(*args), "relaxed", args)
         self.env["GH_REPO"] = "example/work"
         self.assertEqual(self.gh_profile(), "strict")
+        for selector in (["--repo="], ["-R", ""], ["-R="]):
+            context = self.run_cmd(
+                [sys.executable, CLI, "gh-context", "--", "pr", "create", *selector]
+            ).stdout
+            profile, repository, _ = context.split("\t")
+            self.assertEqual(profile, "strict", selector)
+            self.assertEqual(repository, "github.com/example/work", selector)
         self.assertEqual(self.gh_profile("--repo", "example/personal"), "relaxed")
         self.assertEqual(
             self.gh_profile("-Rexample/personal", "-Rexample/work"), "strict"

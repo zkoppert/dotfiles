@@ -285,8 +285,8 @@ def gh_context(argv: list[str]) -> tuple[Policy, bool]:
         elif token not in GH_BOOLEAN_OPTIONS and token not in {"pr", "create"}:
             uncertain = True
         index += 1
-    target = targets[-1] if targets else os.environ.get("GH_REPO")
-    if len(targets) > 1:
+    target = (targets[-1] if targets else None) or os.environ.get("GH_REPO")
+    if len(targets) > 1 or any(not selector for selector in targets):
         uncertain = True
     host = os.environ.get("GH_HOST", "github.com")
     if not target:
