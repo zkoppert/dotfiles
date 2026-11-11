@@ -92,7 +92,7 @@ Treehouse must be installed at `~/.local/bin/treehouse`. The wrapper fails close
 
 The `com.zkoppert.dotfiles-sync` LaunchAgent checks this laptop's `~/repos/dotfiles` checkout daily at 09:00 and when loaded. It extends the existing job rather than adding another updater.
 
-The updater requires a clean `main` checkout without an unfinished Git operation. It fetches `origin main`, then fast-forwards with explicit flags that prevent rebasing, automatic stashing, and overwriting ignored files. Authentication must work without interactive prompts. Git commands have a two-minute timeout, and timed-out process groups are terminated.
+The updater requires a clean `main` checkout without an unfinished Git operation. It fetches `origin main` and merges its explicit remote-tracking ref instead of shared `FETCH_HEAD`. Fast-forward flags prevent rebasing, automatic stashing, and overwriting ignored files. Authentication must work without interactive prompts. Git commands have a two-minute timeout, and timed-out process groups are terminated.
 
 The job requires Git, Pi, and Node.js 22.19.0 or later on its configured `PATH`. After updating, it validates tracked skill metadata with the existing Pi SDK parser. It creates missing links in `~/.copilot/skills` and `~/.agents/skills` and ensures the shared instruction links. `PI_CODING_AGENT_DIR` selects the Pi instruction directory; `--pi-agent-dir` overrides it. The default is `~/.pi/agent`.
 

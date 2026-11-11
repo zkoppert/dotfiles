@@ -92,6 +92,28 @@ class DotfilesSyncTests(unittest.TestCase):
         self.assertEqual(again["created"], [])
         self.assertEqual(result["head_after"], again["head_after"])
 
+    def test_shared_fetch_head_cannot_select_an_unmerged_branch(self) -> None:
+        self.add_skill("main-skill")
+        self.publish()
+        expected = self.git(self.seed, "rev-parse", "HEAD")
+        self.git(self.seed, "checkout", "-b", "feature")
+        self.add_skill("unmerged")
+        self.git(self.seed, "add", ".")
+        self.git(self.seed, "commit", "-m", "Unmerged feature")
+        self.git(self.seed, "push", str(self.remote), "feature")
+        original = sync.git
+
+        def interleave_fetch(repository, *arguments):
+            output = original(repository, *arguments)
+            if arguments[0] == "fetch":
+                self.git(repository, "fetch", "origin", "feature")
+            return output
+
+        with patch.object(sync, "git", side_effect=interleave_fetch):
+            self.run_sync()
+        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), expected)
+        self.assertFalse((self.home / ".agents/skills/unmerged").exists())
+
     def test_dirty_wrong_branch_and_detached_checkouts_are_preserved(self) -> None:
         cases = ("tracked", "staged", "untracked", "branch", "detached")
         for case in cases:

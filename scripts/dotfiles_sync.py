@@ -90,9 +90,10 @@ def synchronize(
         raise SyncError("Pi agent directory must be absolute")
     before = require_clean_branch(repository, branch)
     if not check:
-        git(repository, "fetch", "--no-recurse-submodules", "origin", branch)
-        # Explicit merge flags also protect ignored local files and override pull configuration.
-        git(repository, "merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", "FETCH_HEAD")
+        remote_ref = f"refs/remotes/origin/{branch}"
+        git(repository, "fetch", "--no-recurse-submodules", "origin", f"refs/heads/{branch}:{remote_ref}")
+        # FETCH_HEAD can be replaced by an unrelated fetch between these commands.
+        git(repository, "merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", remote_ref)
         require_clean_branch(repository, branch)
     manifests = {}
     tracked_paths = git(repository, "ls-files", "-z", "--", ".copilot/skills", ".github/copilot-instructions.md").split("\0")
