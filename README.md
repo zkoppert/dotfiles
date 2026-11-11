@@ -143,6 +143,64 @@ Pi help/version, package/configuration commands, and session resume/fork/export 
 
 Treehouse must be installed at `~/.local/bin/treehouse`. The wrapper fails closed when a repository session needs isolation and Treehouse is unavailable.
 
+## How do dotfiles and skills stay updated?
+
+The `com.zkoppert.dotfiles-sync` LaunchAgent checks this laptop's `~/repos/dotfiles` checkout daily at 09:00 and when loaded. It extends the existing job rather than adding another updater.
+
+The updater requires a clean `main` checkout without an unfinished Git operation. It fetches `origin main` and merges its explicit remote-tracking ref instead of shared `FETCH_HEAD`. Fast-forward flags prevent rebasing, automatic stashing, and overwriting ignored files. Authentication must work without interactive prompts. Git commands have a two-minute timeout, and timed-out process groups are terminated.
+
+The job requires Git, Pi, and Node.js 22.19.0 or later on its configured `PATH`. After updating, it validates tracked skill metadata with the existing Pi SDK parser. It creates missing links in `~/.copilot/skills` and `~/.agents/skills` and ensures the shared instruction links. `PI_CODING_AGENT_DIR` selects the Pi instruction directory; `--pi-agent-dir` overrides it. The default is `~/.pi/agent`.
+
+Existing files, directories, and conflicting symlinks remain unchanged and cause a reported failure. Broken links require manual resolution. Private catalog skills and removed repository skills aren't deleted. The updater doesn't run the broad installer or restore Git history after a failed validation. Existing links follow trusted merged checkout contents, as they do after a manual pull.
+
+Inspect local state without fetching, creating links, or taking the update lock. Keep `-B` to prevent Python bytecode cache writes:
+
+```bash
+cd "$HOME/repos/dotfiles"
+python3 -B -m scripts.dotfiles_sync --repository "$PWD" --branch main --check
+```
+
+Check mode makes no remote-freshness claim. Exit status `2` means links are missing; status `1` reports a refusal or failure. A normal run creates missing links. Its nonblocking lock coordinates manual and scheduled runs; it doesn't lock out unrelated Git commands. Use Treehouse worktrees for feature work. Avoid other Git mutations in this managed checkout while an update runs.
+
+### Upgrade the existing laptop agent
+
+Merge and pull the script before deploying the plist. This plist uses absolute laptop paths and a Homebrew Python interpreter. Adjust those paths for another machine or a custom Pi agent directory. Confirm the current agent isn't running before reloading it. Loading the agent starts one immediate sync.
+
+The following upgrade preserves the original plist and restores it if loading the replacement fails:
+
+```bash
+(
+set -eu
+repo="$HOME/repos/dotfiles"
+target="$HOME/Library/LaunchAgents/com.zkoppert.dotfiles-sync.plist"
+backup_dir="$HOME/Library/Application Support/dotfiles-sync"
+backup="$backup_dir/agent.$(date -u +%Y%m%dT%H%M%SZ).plist"
+test -f "$target"
+test ! -L "$target"
+test ! -e "$backup"
+plutil -lint "$repo/LaunchAgents/com.zkoppert.dotfiles-sync.plist"
+mkdir -p "$HOME/Library/Logs" "$backup_dir"
+cp -p "$target" "$backup"
+launchctl bootout "gui/$(id -u)/com.zkoppert.dotfiles-sync"
+if cp -p "$repo/LaunchAgents/com.zkoppert.dotfiles-sync.plist" "$target" &&
+   launchctl bootstrap "gui/$(id -u)" "$target"; then
+  launchctl print "gui/$(id -u)/com.zkoppert.dotfiles-sync"
+else
+  cp -p "$backup" "$target"
+  launchctl bootstrap "gui/$(id -u)" "$target"
+  exit 1
+fi
+)
+```
+
+Results are timestamped JSON lines in `~/Library/Logs/dotfiles-sync.log`. Repeated runs create no duplicate links. No packages, hooks, shell startup files, or unrelated agents are installed. Rerun the upgrade when the plist changes; updating the checkout alone doesn't reload launchd configuration.
+
+Disable future runs without changing the checkout:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.zkoppert.dotfiles-sync"
+```
+
 ## How do I run Copilot in a durable Codespace session?
 
 Install dotfiles on the laptop and [configure the Codespace](#how-do-i-configure-copilot-tools-in-a-codespace). The laptop needs Python 3.9 or later, OpenSSH, and an authenticated GitHub CLI. Then run:
