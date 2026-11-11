@@ -2,7 +2,7 @@
   "schema_version": 2,
   "baseline": {
     "path": "tests/fixtures/instruction-migration/global-instructions-2026-11-06.txt",
-    "sha256": "7ef17c4ccdd7cd01a9dd010f9a66f75b756b3b307209ceabbf7b133c3e3333e2"
+    "sha256": "10fa001df96b795a6f8148692df6ed2ee3c36cfe5112fdc386255835bf165740"
   },
   "blocks": [
     {
@@ -31,113 +31,113 @@
     },
     {
       "id": "My Standard Change Workflow",
-      "sha256": "0c69618e467af0c0fa25a90b662ca68cc1232d3b12cb3ccc23f4ae001781449e",
+      "sha256": "f286cce27904939ea79474bd0c9b1741df14c711c75b41ff5282c3e23f34e45e",
       "source_start_line": 50,
-      "source_end_line": 66,
+      "source_end_line": 75,
       "destination": ".github/copilot-instructions.md",
       "scope": "Always loaded global guidance."
     },
     {
       "id": "Harnesses (close the feedback loop before guessing)",
       "sha256": "63149a5359976ec3fd43742d8bae782c689cc538bc73a622d78ba19746a996b7",
-      "source_start_line": 67,
-      "source_end_line": 81,
+      "source_start_line": 76,
+      "source_end_line": 90,
       "destination": ".github/copilot-instructions.md",
       "scope": "Always loaded global guidance."
     },
     {
       "id": "Pull Requests",
       "sha256": "65a56e0a5114fb746033940c041c402e5f74e00b08a62fe7e32132efab5075b4",
-      "source_start_line": 82,
-      "source_end_line": 117,
+      "source_start_line": 91,
+      "source_end_line": 126,
       "destination": ".copilot/skills/pull-request-workflow/SKILL.md",
       "scope": "Every pull request operation and PR-bound draft."
     },
     {
       "id": "Code Review Workflow",
       "sha256": "650bd1f9052f423b0d59b2061ba92b7c6eefb43e2e4d20521ee899b745c13624",
-      "source_start_line": 118,
-      "source_end_line": 241,
+      "source_start_line": 127,
+      "source_end_line": 250,
       "destination": ".copilot/skills/code-review-workflow/SKILL.md",
       "scope": "Every plan, code, security, self, and PR-description review."
     },
     {
       "id": "Code Style & Languages",
       "sha256": "c1ed372b52040d251420d96fe2843f89d44a07a06c5d5680c0b330f96ef2a482",
-      "source_start_line": 242,
-      "source_end_line": 278,
+      "source_start_line": 251,
+      "source_end_line": 287,
       "destination": ".copilot/skills/engineering-practices/SKILL.md",
       "scope": "Every code, test, configuration, and React implementation or review."
     },
     {
       "id": "Platform & System Design",
       "sha256": "ebbe27c731a8a4cffc6c04bc0de33d7adbcf350013782c8557c9c336070773b1",
-      "source_start_line": 279,
-      "source_end_line": 288,
+      "source_start_line": 288,
+      "source_end_line": 297,
       "destination": ".copilot/skills/engineering-practices/SKILL.md",
       "scope": "Every architecture and system-design task."
     },
     {
       "id": "GitHub CLI & API",
       "sha256": "6761bf82517bdf073d6b1e2ddc3029034d890524a4b2721a024ceea17ce317ba",
-      "source_start_line": 289,
-      "source_end_line": 297,
+      "source_start_line": 298,
+      "source_end_line": 306,
       "destination": ".copilot/skills/github-operations/SKILL.md",
       "scope": "Every GitHub read and write, after loading gh-axi."
     },
     {
       "id": "GitHub Actions Best Practices",
       "sha256": "431e27380be42c06badc1cdb80319a72ed10a48fde61a761d90bc615d6095a9f",
-      "source_start_line": 298,
-      "source_end_line": 305,
+      "source_start_line": 307,
+      "source_end_line": 314,
       "destination": ".copilot/skills/actions-security/SKILL.md",
       "scope": "Every GitHub Actions workflow or action-metadata task."
     },
     {
       "id": "Git & Version Control",
       "sha256": "b532e0b1ac9c13554a89434ea5bb38ea632933c9b4647e890912a46f51813a3b",
-      "source_start_line": 306,
-      "source_end_line": 312,
+      "source_start_line": 315,
+      "source_end_line": 321,
       "destination": ".github/copilot-instructions.md",
       "scope": "Always loaded global guidance."
     },
     {
       "id": "Excel & Report Generation",
       "sha256": "4019864844f59029d6f40616d6143a7bcf124ac99c41828efdf40b6015d2b32f",
-      "source_start_line": 313,
-      "source_end_line": 318,
+      "source_start_line": 322,
+      "source_end_line": 327,
       "destination": ".copilot/skills/spreadsheet-report-generation/SKILL.md",
       "scope": "Every spreadsheet and generated-report task."
     },
     {
       "id": "Writing Style",
       "sha256": "5428277e1794dda8dfb1c14d46b48ad6ea3e0fb8fbf26ac542fb384ffc229e4d",
-      "source_start_line": 319,
-      "source_end_line": 451,
+      "source_start_line": 328,
+      "source_end_line": 460,
       "destination": ".github/copilot-instructions.md",
       "scope": "Always loaded global guidance."
     },
     {
       "id": "File & Project Organization",
       "sha256": "b8b671261221963f3c33ba8b22f8ed17f049582af73a6572da20f55fead135dc",
-      "source_start_line": 452,
-      "source_end_line": 457,
+      "source_start_line": 461,
+      "source_end_line": 466,
       "destination": ".copilot/skills/engineering-practices/SKILL.md",
       "scope": "Every project-structure change."
     },
     {
       "id": "macOS Environment",
       "sha256": "3866f0545d343eb55787211fc1100e51d6eddaf028ee4891e6b5df15dc1fa1e8",
-      "source_start_line": 458,
-      "source_end_line": 464,
+      "source_start_line": 467,
+      "source_end_line": 473,
       "destination": ".github/copilot-instructions.md",
       "scope": "Always loaded global guidance."
     },
     {
       "id": "My Open Source GitHub Actions: Shared Patterns",
       "sha256": "317f3c347caa65d8b6551bb6ccec834f02f39c628c9c2cc48588a059024c9884",
-      "source_start_line": 465,
-      "source_end_line": 541,
+      "source_start_line": 474,
+      "source_end_line": 550,
       "destination": ".copilot/skills/open-source-actions-maintenance/SKILL.md",
       "scope": "Every task in the named shared-architecture repositories."
     }
