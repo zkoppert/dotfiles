@@ -276,6 +276,19 @@ class DotfilesSyncTests(unittest.TestCase):
         self.assertEqual(len(payload["missing"]), 4)
         self.assertFalse((self.home / ".copilot").exists())
 
+    def test_successful_command_does_not_stop_its_background_helper(self) -> None:
+        started, completed = self.root / "helper-started", self.root / "helper-completed"
+        child = f"import time; from pathlib import Path; Path({str(started)!r}).touch(); time.sleep(1); Path({str(completed)!r}).touch()"
+        parent = ("import subprocess,sys,time; from pathlib import Path; "
+                  f"subprocess.Popen([sys.executable,'-c',{child!r}],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+                  f"\nwhile not Path({str(started)!r}).exists(): time.sleep(0.01)\nprint('done')")
+        output = sync.run_command([sys.executable, "-c", parent], self.repo, timeout=5)
+        self.assertEqual(output, "done\n")
+        deadline = time.monotonic() + 5
+        while not completed.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(completed.exists(), "successful commands must not kill persistent helpers")
+
     def test_subprocess_timeout_stops_the_process_group(self) -> None:
         started, completed = self.root / "started", self.root / "completed"
         code = f"import time; from pathlib import Path; Path({str(started)!r}).touch(); time.sleep(5); Path({str(completed)!r}).touch()"

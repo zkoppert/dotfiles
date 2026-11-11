@@ -31,14 +31,17 @@ def run_command(command: list[str], repository: Path, *, timeout: float = 120) -
         command, cwd=repository, env=environment, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
     ) as process:
+        communication_complete = False
         try:
             output, _ = process.communicate(timeout=timeout)
+            communication_complete = True
         except subprocess.TimeoutExpired as error:
             raise SyncError("command timed out; inspect the checkout before retrying") from error
         finally:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
+            if not communication_complete:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
         if process.returncode:
             raise SyncError(f"{Path(command[0]).name} {command[1]} failed (exit {process.returncode})")
     return output
