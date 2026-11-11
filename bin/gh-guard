@@ -455,8 +455,9 @@ lint_pr_body_or_die() {
       target_repo="${lint_context#*$'\t'}"
       target_repo="${target_repo%$'\t'*}"
       target_repo="${target_repo#github.com/}"
-      if [ -z "$target_repo" ] && git rev-parse --show-toplevel >/dev/null 2>&1; then
-        target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
+      if [ -z "$target_repo" ]; then
+        echo 'gh-guard: cannot resolve PR target for body visibility; refusing publication.' >&2
+        exit 1
       fi
     fi
     if [ -n "$target_repo" ]; then

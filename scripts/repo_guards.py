@@ -61,7 +61,7 @@ def repository_id(raw: str) -> str:
                 host = "github.com"
             elif port and port not in {22, 80, 443}:
                 return ""
-            value = host + parsed.path
+            value = host + parsed.path.rstrip("/")
         except ValueError:
             return ""
     elif re.fullmatch(r"(?:[^/@:]+@)?[^/:]+:.+", value):

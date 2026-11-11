@@ -142,6 +142,7 @@ class RepoGuardsTest(unittest.TestCase):
         self.assign()
         for url in (
             "https://github.com/Example/Personal.git",
+            "https://github.com/Example/Personal/",
             "ssh://git@github.com:22/example/personal.git",
             "ssh://git@ssh.github.com:443/example/personal.git",
             "git@GitHub.com:EXAMPLE/PERSONAL.git",
@@ -378,6 +379,29 @@ class RepoGuardsTest(unittest.TestCase):
         refused = self.run_cmd([GUARD, "pr", "ready"], check=False)
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("ZACK_CONFIRMED_PR_READY", refused.stderr)
+
+    def test_unresolved_target_cannot_use_another_repository_visibility(self):
+        self.assign()
+        self.env["ZACK_CONFIRMED_PR_CREATE"] = "1"
+        linter = self.home / ".copilot/skills/validate-style/lint.py"
+        linter.parent.mkdir(parents=True)
+        linter.write_bytes(
+            (ROOT / ".copilot/skills/validate-style/lint.py").read_bytes()
+        )
+        refused = self.run_cmd(
+            [
+                GUARD,
+                "pr",
+                "create",
+                "--repo",
+                "not-a-repository",
+                "--body",
+                "I added behavior.",
+            ],
+            check=False,
+        )
+        self.assertIn("cannot resolve PR target for body visibility", refused.stderr)
+        self.assertNotIn("PUBLISHED", refused.stdout)
 
     def test_strict_publication_without_checkout_or_attached_branch_is_blocked(self):
         self.env["ZACK_CONFIRMED_PR_CREATE"] = "1"

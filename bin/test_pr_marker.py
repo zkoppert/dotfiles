@@ -282,6 +282,8 @@ class PublicationFixture:
             "    print('fixture publication intercepted')\n"
             "elif args == ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner']:\n"
             "    print('fixture/public')\n"
+            "elif args == ['repo', 'view', '--json', 'url,parent', '--jq', '.parent.url // .url']:\n"
+            "    print('https://github.com/fixture/public')\n"
             "elif args in (['api', 'repos/fixture/public', '--jq', '.visibility'],\n"
             "              ['repo', 'view', '--json', 'visibility', '--jq', '.visibility | ascii_downcase', '--', 'fixture/public'],\n"
             "              ['repo', 'view', '--json', 'visibility', '--jq', '.visibility | ascii_downcase', '--', 'ghe.example.test/fixture/public']):\n"
