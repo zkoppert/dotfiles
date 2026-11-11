@@ -92,6 +92,7 @@ def synchronize(
     if not check:
         remote_ref = f"refs/remotes/origin/{branch}"
         git(repository, "fetch", "--no-recurse-submodules", "origin", f"refs/heads/{branch}:{remote_ref}")
+        require_clean_branch(repository, branch)
         # FETCH_HEAD can be replaced by an unrelated fetch between these commands.
         git(repository, "merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", remote_ref)
         require_clean_branch(repository, branch)

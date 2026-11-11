@@ -105,7 +105,7 @@ cd "$HOME/repos/dotfiles"
 python3 -B -m scripts.dotfiles_sync --repository "$PWD" --branch main --check
 ```
 
-Check mode makes no remote-freshness claim. Exit status `2` means links are missing; status `1` reports a refusal or failure. A normal run creates missing links. Its nonblocking lock coordinates manual and scheduled runs; it doesn't lock out unrelated Git commands.
+Check mode makes no remote-freshness claim. Exit status `2` means links are missing; status `1` reports a refusal or failure. A normal run creates missing links. Its nonblocking lock coordinates manual and scheduled runs; it doesn't lock out unrelated Git commands. Use Treehouse worktrees for feature work. Avoid other Git mutations in this managed checkout while an update runs.
 
 ### Upgrade the existing laptop agent
 

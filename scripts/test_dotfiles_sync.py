@@ -114,6 +114,24 @@ class DotfilesSyncTests(unittest.TestCase):
         self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), expected)
         self.assertFalse((self.home / ".agents/skills/unmerged").exists())
 
+    def test_branch_switch_during_fetch_is_detected_before_merge(self) -> None:
+        before = self.git(self.repo, "rev-parse", "HEAD")
+        self.add_skill("new-main-skill")
+        self.publish()
+        original = sync.git
+
+        def switch_during_fetch(repository, *arguments):
+            output = original(repository, *arguments)
+            if arguments[0] == "fetch":
+                self.git(repository, "checkout", "-b", "work")
+            return output
+
+        with patch.object(sync, "git", side_effect=switch_during_fetch), self.assertRaises(sync.SyncError):
+            self.run_sync()
+        self.assertEqual(self.git(self.repo, "branch", "--show-current"), "work")
+        self.assertEqual(self.git(self.repo, "rev-parse", "HEAD"), before)
+        self.assertFalse((self.repo / ".copilot/skills/new-main-skill").exists())
+
     def test_dirty_wrong_branch_and_detached_checkouts_are_preserved(self) -> None:
         cases = ("tracked", "staged", "untracked", "branch", "detached")
         for case in cases:
