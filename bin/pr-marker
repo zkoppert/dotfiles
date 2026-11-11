@@ -88,8 +88,8 @@ Usage:
                                    run the evidence preflight and each check command;
                                    write the HEAD-pinned tests marker only if every
                                    command exits 0 and the repository stays clean
-  pr-marker status                 show all five markers and whether each passes
-  pr-marker check                  exit 0 only if every marker passes (fresh + over
+  pr-marker status                 show required and optional markers for the profile
+  pr-marker check                  exit 0 only if required markers pass (fresh + over
                                    floor)
   pr-marker capabilities --json    describe native proof requirements, not readiness
   pr-marker check --publication <actual gh argv>
@@ -1727,7 +1727,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
         )
         return 1
     if all_ok:
-        print("all markers satisfied")
+        print("all required markers satisfied")
     else:
         print("gate would BLOCK: fill the missing/stale markers")
         print(
@@ -1821,10 +1821,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_write.set_defaults(func=cmd_write)
 
-    p_status = sub.add_parser("status", help="show all markers and whether each passes")
+    p_status = sub.add_parser("status", help="show required and optional marker status")
     p_status.set_defaults(func=cmd_status)
 
-    p_check = sub.add_parser("check", help="exit 0 only if every marker passes")
+    p_check = sub.add_parser("check", help="exit 0 only if required markers pass")
     projection = p_check.add_mutually_exclusive_group()
     projection.add_argument(
         "--print-publication-repository",

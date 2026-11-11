@@ -84,7 +84,7 @@ repo-guards show --repo example/library --json
 pr-marker status
 ```
 
-Multiple repository identities use the strictest applicable profile. Worktrees share remote identity but keep separate marker evidence. `gh pr create` also checks explicit `--repo` selectors and `GH_REPO`. Explicit selectors take precedence over `GH_REPO`; `GH_HOST` qualifies unqualified selectors. Uncertain arguments cannot grant reduced safeguards.
+Multiple repository identities use the strictest applicable profile. Worktrees share remote identity but keep separate marker evidence. `gh pr create` also checks explicit `--repo` selectors and `GH_REPO`. Explicit selectors take precedence over `GH_REPO`; `GH_HOST` qualifies unqualified selectors. Uncertain arguments cannot grant reduced safeguards. Implicit PR targets use GitHub CLI resolution, including fork parents and configured default repositories. Lookup failures select strict.
 
 For standard work, record an actual self-review and local checks:
 
@@ -96,7 +96,7 @@ pr-marker run-tests --cmd 'python3 -m unittest discover'
 
 Standard PR creation requires `--draft`. Strict keeps its existing marker and native proof contracts. Relaxed marker checks are optional, not fabricated passes. Agents still need approval to push or create PRs. Explicitly requested checks still apply.
 
-The pre-push hook checks the actual network destination's live default branch. Missing default-branch evidence blocks branch pushes. Default-branch deletion and history rewriting remain blocked even for relaxed repositories. Feature-branch pushes retain existing size, privacy, and repository-hook checks. Marker certification stays at PR creation, not in the push hook. Tags and local pipeline transports retain their existing handling.
+The pre-push hook checks the actual network destination's live default branch. Missing default-branch evidence blocks branch pushes. Relaxed permits initial branch creation only after a successful lookup confirms no remote branches exist. Default-branch deletion and history rewriting remain blocked even for relaxed repositories. Feature-branch pushes retain existing size, privacy, and repository-hook checks. Marker certification stays at PR creation, not in the push hook. Tags and local pipeline transports retain their existing handling.
 
 Existing automation that pushes directly to a default branch needs an explicit relaxed assignment before installation. Review those assignments locally; don't publish the inventory. Native pipeline publication still requires its original strict proof and custody checks.
 

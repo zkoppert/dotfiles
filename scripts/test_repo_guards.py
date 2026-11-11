@@ -58,6 +58,10 @@ class RepoGuardsTest(unittest.TestCase):
             '#!/bin/sh\ncase "$*" in\n'
             ' "repo view --json nameWithOwner --jq .nameWithOwner") echo example/personal ;;\n'
             ' "repo view --json parent --jq "*) exit 0 ;;\n'
+            ' "repo view --json nameWithOwner,parent --jq "*)\n'
+            "   target=$(git config --get remote.origin.gh-resolved || true)\n"
+            '   [ "$target" = base ] && target=""\n'
+            '   printf "%s\\n" "${TEST_PR_BASE:-${target:-example/personal}}" ;;\n'
             ' "api repos/"*" --jq .visibility") echo public ;;\n'
             ' "pr create"*) echo PUBLISHED ;;\n'
             " *) exit 2 ;;\nesac\n"
@@ -149,6 +153,36 @@ class RepoGuardsTest(unittest.TestCase):
         ):
             self.run_cmd(["git", "remote", "set-url", "origin", url])
             self.assertEqual(self.profile()["profile"], "strict", url)
+
+    def test_scp_remotes_without_user_and_aliases_cannot_be_ignored(self):
+        self.assign()
+        self.run_cmd(
+            ["git", "remote", "set-url", "origin", "github.com:example/personal.git"]
+        )
+        self.assertEqual(self.profile()["profile"], "relaxed")
+        self.run_cmd(["git", "remote", "add", "upstream", "work-gh:example/work.git"])
+        self.assertEqual(self.profile()["profile"], "strict")
+        self.assertEqual(self.gh_profile(), "strict")
+        self.run_cmd(["git", "remote", "remove", "upstream"])
+        self.run_cmd(["git", "remote", "set-url", "origin", "example/personal"])
+        self.assertEqual(self.profile()["profile"], "strict")
+
+    def test_implicit_pr_target_uses_gh_default_and_parent_not_only_remotes(self):
+        self.assign()
+        self.run_cmd(["git", "config", "remote.origin.gh-resolved", "example/work"])
+        self.assertEqual(self.gh_profile(), "strict")
+        self.run_cmd(["git", "config", "remote.origin.gh-resolved", "base"])
+        self.env["TEST_PR_BASE"] = "example/parent"
+        self.assertEqual(self.gh_profile(), "strict")
+        self.env["ZACK_CONFIRMED_PR_CREATE"] = "1"
+        refused = self.run_cmd(
+            [GUARD, "pr", "create", "--title", "Example"], check=False
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertNotIn("PUBLISHED", refused.stdout)
+        self.assertEqual(self.gh_profile("--repo", "example/personal"), "relaxed")
+        self.env["TEST_PR_BASE"] = "not-a-repository"
+        self.assertEqual(self.gh_profile(), "strict")
 
     def test_multiple_remotes_use_strictest_and_local_gate_is_not_identity(self):
         self.assign()
@@ -336,6 +370,41 @@ class RepoGuardsTest(unittest.TestCase):
                 ["git", "--git-dir", self.remote, "rev-parse", "main"]
             ).stdout.strip(),
         )
+
+    def test_real_userless_scp_push_blocks_default_but_unknown_hosts_allow_features(
+        self,
+    ):
+        self.setup_remote()
+        refused = self.run_cmd(
+            ["git", "push", "github.com:example/personal.git", "main"], check=False
+        )
+        self.assertIn("strict blocks direct default-branch", refused.stderr)
+        self.run_cmd(["git", "push", "work-gh:group/sub/project.git", "HEAD:feature"])
+        refused = self.run_cmd(
+            ["git", "push", "work-gh:group/sub/project.git", "HEAD:main"], check=False
+        )
+        self.assertIn("strict blocks direct default-branch", refused.stderr)
+
+    def test_relaxed_can_initialize_an_empty_remote_but_missing_head_is_not_empty(self):
+        self.setup_remote()
+        self.run_cmd(
+            ["git", "--git-dir", self.remote, "update-ref", "-d", "refs/heads/main"]
+        )
+        self.assign()
+        result = self.run_cmd(["git", "push", "origin", "main"])
+        self.assertIn("relaxed permits initial branch creation", result.stderr)
+        self.run_cmd(
+            [
+                "git",
+                "--git-dir",
+                self.remote,
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/missing",
+            ]
+        )
+        refused = self.run_cmd(["git", "push", "origin", "HEAD:feature"], check=False)
+        self.assertIn("default branch is unavailable", refused.stderr)
 
     def test_push_respects_actual_default_and_repository_hook(self):
         self.setup_remote()

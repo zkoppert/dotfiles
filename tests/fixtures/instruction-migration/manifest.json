@@ -2,7 +2,7 @@
   "schema_version": 2,
   "baseline": {
     "path": "tests/fixtures/instruction-migration/global-instructions-2026-11-06.txt",
-    "sha256": "c297c21999994381c9352a6072149b362103b3c2341196ae1d431b84d01ff358"
+    "sha256": "7ef17c4ccdd7cd01a9dd010f9a66f75b756b3b307209ceabbf7b133c3e3333e2"
   },
   "blocks": [
     {
@@ -23,7 +23,7 @@
     },
     {
       "id": "Copilot Skills",
-      "sha256": "26f63a72ffafebc6332d004c4da5598ae7331bde8be3e8271633c02d0d2bc6f5",
+      "sha256": "1af9e0ddba112c4ee23ebe54d941d817bc1444a405510b0ad30a4e3957afb017",
       "source_start_line": 19,
       "source_end_line": 49,
       "destination": ".github/copilot-instructions.md",

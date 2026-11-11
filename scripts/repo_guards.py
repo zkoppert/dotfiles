@@ -64,8 +64,8 @@ def repository_id(raw: str) -> str:
             value = host + parsed.path
         except ValueError:
             return ""
-    elif re.fullmatch(r"[^/@:]+@[^/:]+:.+", value):
-        host, path = value.split("@", 1)[1].split(":", 1)
+    elif re.fullmatch(r"(?:[^/@:]+@)?[^/:]+:.+", value):
+        host, path = value.rsplit("@", 1)[-1].split(":", 1)
         value = host + "/" + path
     elif value.count("/") == 1:
         value = "github.com/" + value
@@ -133,17 +133,46 @@ def git(*args: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def network_remote(url: str) -> bool:
+    if url.startswith("file://"):
+        return False
+    return "://" in url or bool(re.match(r"^[^/]+:", url))
+
+
 def checkout_identities() -> list[str]:
     identities = []
     for remote in git("remote").splitlines():
         urls = git("remote", "get-url", "--all", remote).splitlines()
         for url in urls:
-            identity = repository_id(url)
-            if identity:
-                identities.append(identity)
-            elif remote == "origin" or "://" in url or "@" in url:
+            if network_remote(url):
+                identities.append(repository_id(url))
+            elif remote == "origin":
                 identities.append("")
     return identities
+
+
+def implicit_gh_target() -> str:
+    # gh can select a fork parent or a default repository absent from Git remotes.
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "repo",
+                "view",
+                "--json",
+                "nameWithOwner,parent",
+                "--jq",
+                ".parent.nameWithOwner // .nameWithOwner",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+            env={**os.environ, "GH_PROMPT_DISABLED": "1"},
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
 
 
 def resolve_policy(target: Optional[str] = None) -> Policy:
@@ -256,18 +285,16 @@ def gh_context(argv: list[str]) -> tuple[Policy, bool]:
         elif token not in GH_BOOLEAN_OPTIONS and token not in {"pr", "create"}:
             uncertain = True
         index += 1
-    target = targets[0] if len(targets) == 1 else os.environ.get("GH_REPO")
+    target = targets[-1] if targets else os.environ.get("GH_REPO")
     if len(targets) > 1:
         uncertain = True
     host = os.environ.get("GH_HOST", "github.com")
+    if not target:
+        target = implicit_gh_target()
+        if not target:
+            uncertain = True
     if target and target.count("/") == 1 and ":" not in target:
         target = host + "/" + target
-    if not target:
-        identities = checkout_identities()
-        if not identities or any(
-            not identity.startswith(host.lower() + "/") for identity in identities
-        ):
-            uncertain = True
     policy = resolve_policy(target)
     repository = repository_id(target) if target else ""
     if uncertain or (target is not None and not repository):
@@ -277,19 +304,8 @@ def gh_context(argv: list[str]) -> tuple[Policy, bool]:
 
 def check_push(remote_url: str, updates: str) -> int:
     """Protect the actual destination default branch; preserve local gate transport."""
-    identity = repository_id(remote_url)
-    if not identity:
-        if (
-            "://" not in remote_url
-            and "@" not in remote_url
-            or remote_url.startswith("file://")
-        ):
-            return 0
-        print(
-            "repo-guards: blocked push with unresolved network destination",
-            file=sys.stderr,
-        )
-        return 1
+    if not network_remote(remote_url):
+        return 0
     policy = resolve_policy(remote_url)
     branches = []
     for line in updates.splitlines():
@@ -317,6 +333,37 @@ def check_push(remote_url: str, updates: str) -> int:
         if result and result.returncode == 0
         else []
     )
+    if (
+        not refs
+        and policy.profile == "relaxed"
+        and result
+        and result.returncode == 0
+        and not result.stdout
+    ):
+        try:
+            heads = subprocess.run(
+                ["git", "ls-remote", "--exit-code", "--heads", "--", remote_url],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            heads = None
+        if (
+            heads
+            and heads.returncode == 2
+            and not heads.stdout
+            and all(
+                set(local_sha) != {"0"} and set(remote_sha) == {"0"}
+                for _, local_sha, _, remote_sha in branches
+            )
+        ):
+            print(
+                "repo-guards: relaxed permits initial branch creation", file=sys.stderr
+            )
+            return 0
     if len(refs) != 1:
         print(
             "repo-guards: blocked branch push; destination default branch is unavailable",

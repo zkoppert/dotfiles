@@ -447,24 +447,22 @@ lint_pr_body_or_die() {
     # to block references to private/internal repos in the PR body.
     local visibility_flag=""
     local target_repo=""
-    local lint_context
-    lint_context="$(python3 "$SELF_REAL_PATH/repo-guards" gh-context -- "$@")"
-    target_repo="${lint_context#*$'\t'}"
-    target_repo="${target_repo%$'\t'*}"
-    target_repo="${target_repo#github.com/}"
-    # Native targets come from the verified binding, not option-looking values.
     if [ "$native_publication" = "1" ]; then
       target_repo="$native_repository"
-    elif [ -z "$target_repo" ] && git rev-parse --show-toplevel >/dev/null 2>&1; then
-      target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
+    else
+      local lint_context
+      lint_context="$(python3 "$SELF_REAL_PATH/repo-guards" gh-context -- "$@")"
+      target_repo="${lint_context#*$'\t'}"
+      target_repo="${target_repo%$'\t'*}"
+      target_repo="${target_repo#github.com/}"
+      if [ -z "$target_repo" ] && git rev-parse --show-toplevel >/dev/null 2>&1; then
+        target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
+      fi
     fi
     if [ -n "$target_repo" ]; then
       local repo_vis=""
       local visibility_args=(api "repos/$target_repo" --jq .visibility)
-      if [[ "$target_repo" == */*/* ]]; then
-        visibility_args=(repo view --json visibility --jq '.visibility | ascii_downcase' -- "$target_repo")
-      fi
-      if [ "$native_publication" = "1" ]; then
+      if [[ "$target_repo" == */*/* ]] || [ "$native_publication" = "1" ]; then
         visibility_args=(repo view --json visibility --jq '.visibility | ascii_downcase' -- "$target_repo")
       fi
       if repo_vis="$("$REAL_GH" "${visibility_args[@]}" 2>/dev/null)"; then
