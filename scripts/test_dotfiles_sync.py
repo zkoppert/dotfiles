@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -74,6 +75,129 @@ class DotfilesSyncTests(unittest.TestCase):
 
     def run_sync(self, *, check: bool = False) -> dict:
         return sync.synchronize(self.repo, self.home, "main", check=check)
+
+    def installed_runtime(self) -> Path:
+        folder = self.seed / "scripts"
+        folder.mkdir()
+        for name in ("dotfiles_sync.py", "skill_metadata.py"):
+            shutil.copy2(ROOT / "scripts" / name, folder / name)
+        (self.seed / "bin").mkdir()
+        (self.seed / "bin/pi-treehouse").write_text("#!/bin/sh\nexit 99\n")
+        (self.seed / "bin/pi-treehouse").chmod(0o755)
+        self.publish()
+        self.git(self.repo, "pull", "--ff-only", "origin", "main")
+        result = sync.install_runtime(self.repo, self.home, "main")
+        return Path(result["runtime"]) / "dotfiles_sync.py"
+
+    def notifier(self) -> tuple:
+        capture = self.root / "notification.args"
+        binary = self.root / "notifier"
+        binary.write_text('#!/bin/sh\nprintf "%s\\0" "$@" > "$NOTIFIER_CAPTURE"\n')
+        binary.chmod(0o755)
+        return binary, capture
+
+    def invoke_installed(self, worker: Path, *extra: str, poison: bool = False) -> subprocess.CompletedProcess:
+        binary, capture = self.notifier()
+        environment = {**os.environ, "NOTIFIER_CAPTURE": str(capture)}
+        if poison:
+            environment["PYTHONPATH"] = str(self.repo)
+        return subprocess.run(
+            [sys.executable, "-I", "-S", "-B", str(worker), "--repository", str(self.repo),
+             "--branch", "main", "--home", str(self.home), "--pi-agent-dir", str(self.home / ".pi/agent"),
+             "--notifier", str(binary), *extra],
+            cwd=self.repo, env=environment, text=True, capture_output=True, timeout=120,
+        )
+
+    def test_installed_worker_skips_dirty_checkout_without_executing_initializer(self) -> None:
+        worker = self.installed_runtime()
+        sentinel = self.root / "untrusted-executed"
+        (self.repo / "scripts/__init__.py").write_text(f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\n")
+        (self.repo / "sitecustomize.py").write_text(f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\n")
+        self.add_skill("later")
+        self.publish()
+        before = snapshot(self.repo)
+        result = self.invoke_installed(worker, poison=True)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "skipped")
+        self.assertEqual(payload["reason"], "dirty_checkout")
+        self.assertIs(payload["notification_sent"], True)
+        self.assertFalse(sentinel.exists())
+        self.assertEqual(snapshot(self.repo), before)
+        self.assertFalse((self.home / ".copilot").exists())
+        arguments = (self.root / "notification.args").read_bytes().decode().split("\0")
+        self.assertEqual(arguments[arguments.index("-open") + 1], self.repo.as_uri())
+        self.assertIn("not clean", arguments[arguments.index("-message") + 1])
+
+    def test_installed_worker_does_not_execute_code_from_another_branch(self) -> None:
+        worker = self.installed_runtime()
+        sentinel = self.root / "branch-code-executed"
+        self.git(self.repo, "checkout", "-b", "untrusted")
+        for name in ("dotfiles_sync.py", "skill_metadata.py"):
+            (self.repo / "scripts" / name).write_text(f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\n")
+        self.git(self.repo, "add", ".")
+        self.git(self.repo, "commit", "-m", "Untrusted branch")
+        before = snapshot(self.repo)
+        result = self.invoke_installed(worker)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["reason"], "wrong_branch")
+        self.assertFalse(sentinel.exists())
+        self.assertEqual(snapshot(self.repo), before)
+
+    def test_installed_worker_uses_trusted_helper_with_treehouse_on_path(self) -> None:
+        worker = self.installed_runtime()
+        sentinel = self.root / "helper-code-executed"
+        (self.repo / "scripts/skill_metadata.py").write_text(f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\n")
+        self.git(self.repo, "update-index", "--assume-unchanged", "scripts/skill_metadata.py")
+        binaries = self.root / "bin"
+        binaries.mkdir()
+        (binaries / "pi").symlink_to(self.repo / "bin/pi-treehouse")
+        with patch.dict(os.environ, {"PATH": str(binaries) + os.pathsep + os.environ["PATH"]}):
+            result = self.invoke_installed(worker)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["status"], "ok")
+        self.assertFalse(sentinel.exists())
+        self.assertEqual((self.home / ".agents/skills/example").resolve(), self.repo / ".copilot/skills/example")
+
+    def test_dirty_check_is_readonly_and_does_not_notify(self) -> None:
+        worker = self.installed_runtime()
+        (self.repo / "local.txt").write_text("keep this work")
+        before = snapshot(self.home)
+        result = self.invoke_installed(worker, "--check")
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertEqual(json.loads(result.stdout)["status"], "skipped")
+        self.assertFalse((self.root / "notification.args").exists())
+        self.assertEqual(snapshot(self.home), before)
+
+    def test_notification_failure_is_visible_without_touching_user_work(self) -> None:
+        worker = self.installed_runtime()
+        (self.repo / "local.txt").write_text("keep")
+        original = self.notifier
+
+        def failing_notifier():
+            binary, capture = original()
+            binary.write_text("#!/bin/sh\nexit 1\n")
+            return binary, capture
+
+        with patch.object(self, "notifier", side_effect=failing_notifier):
+            result = self.invoke_installed(worker)
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertIs(json.loads(result.stdout)["notification_sent"], False)
+        self.assertEqual((self.repo / "local.txt").read_text(), "keep")
+
+    def test_runtime_snapshot_matches_git_and_rejects_checkout_destination(self) -> None:
+        worker = self.installed_runtime()
+        current = worker.parent
+        self.assertTrue(current.is_symlink())
+        for name in ("dotfiles_sync.py", "skill_metadata.py"):
+            expected = subprocess.check_output(["git", "show", f"HEAD:scripts/{name}"], cwd=self.repo)
+            self.assertEqual((current / name).read_bytes(), expected)
+        before = os.readlink(current)
+        again = sync.install_runtime(self.repo, self.home, "main")
+        self.assertEqual(os.readlink(Path(again["runtime"])), before)
+        with self.assertRaises(sync.SyncError):
+            sync.install_runtime(self.repo, self.home, "main", runtime_root=self.repo / "unsafe-runtime")
+        self.assertFalse((self.repo / "unsafe-runtime").exists())
 
     def test_fast_forward_links_new_skills_and_preserves_existing_links(self) -> None:
         before = self.git(self.repo, "rev-parse", "HEAD")
@@ -344,11 +468,14 @@ class DotfilesSyncTests(unittest.TestCase):
         self.assertEqual(plist["Label"], "com.zkoppert.dotfiles-sync")
         self.assertEqual(plist["StartCalendarInterval"], {"Hour": 9, "Minute": 0})
         self.assertIs(plist["RunAtLoad"], True)
-        self.assertEqual(plist["WorkingDirectory"], "/Users/zkoppert/repos/dotfiles")
+        self.assertEqual(plist["WorkingDirectory"], "/Users/zkoppert/Library/Application Support/dotfiles-sync")
         arguments = plist["ProgramArguments"]
-        self.assertIn("scripts.dotfiles_sync", arguments)
+        self.assertIn("/Users/zkoppert/Library/Application Support/dotfiles-sync/runtime/current/dotfiles_sync.py", arguments)
+        self.assertNotIn("-m", arguments)
+        self.assertIn("-I", arguments)
+        self.assertIn("-S", arguments)
         for flag, expected in (
-            ("--repository", plist["WorkingDirectory"]),
+            ("--repository", "/Users/zkoppert/repos/dotfiles"),
             ("--home", plist["EnvironmentVariables"]["HOME"]),
             ("--pi-agent-dir", "/Users/zkoppert/.pi/agent"),
         ):

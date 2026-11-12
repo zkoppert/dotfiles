@@ -8,16 +8,95 @@ import datetime as dt
 import fcntl
 import json
 import os
+import runpy
+import shutil
 import signal
 import subprocess
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Iterator, Optional
 
-from scripts.skill_metadata import skill_metadata_errors
+RUNTIME_DIRECTORY = Path(__file__).resolve().parent
+NOTIFICATION_GROUP = "dotfiles-sync-attention"
 
 
 class SyncError(RuntimeError):
     """An update or link check could not complete safely."""
+
+
+class CheckoutNotReady(SyncError):
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+def skill_metadata_errors(manifests: dict, repository: Path) -> dict:
+    # The scheduled copy loads only its approved sibling, never a checkout package.
+    helper = runpy.run_path(str(RUNTIME_DIRECTORY / "skill_metadata.py"))
+    return helper["skill_metadata_errors"](manifests, wrapper_path=repository / "bin/pi-treehouse")
+
+
+def notify_skipped(repository: Path, message: str, notifier: Path) -> bool:
+    try:
+        result = subprocess.run(
+            [str(notifier), "-title", "Dotfiles sync needs attention", "-message",
+             message + " Click to open the checkout.", "-group", NOTIFICATION_GROUP,
+             "-open", repository.expanduser().resolve().as_uri(), "-sound", "default"],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def install_runtime(repository: Path, home: Path, branch: str, *, runtime_root: Optional[Path] = None) -> dict:
+    repository = repository.expanduser().resolve(strict=True)
+    home = home.expanduser().resolve(strict=True)
+    head = require_clean_branch(repository, branch)
+    root = (runtime_root or home / "Library/Application Support/dotfiles-sync/runtime").expanduser().resolve()
+    if root == repository or repository in root.parents:
+        raise SyncError("trusted runtime must be outside the mutable checkout")
+    current = root / "current"
+    if current.exists() and not current.is_symlink():
+        raise SyncError("runtime current path is user-owned; it was preserved")
+    contents = {}
+    for name in ("dotfiles_sync.py", "skill_metadata.py"):
+        try:
+            contents[name] = subprocess.check_output(
+                ["git", "show", f"{head}:scripts/{name}"], cwd=repository,
+                stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise SyncError("could not read approved runtime files from Git") from error
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    version = root / head
+    if not version.exists():
+        stage = Path(tempfile.mkdtemp(prefix=".runtime-", dir=root))
+        try:
+            for name, content in contents.items():
+                path = stage / name
+                path.write_bytes(content)
+                path.chmod(0o600)
+            stage.rename(version)
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
+    if version.is_symlink() or not version.is_dir():
+        raise SyncError("runtime version path is not a trusted directory")
+    for name, content in contents.items():
+        path = version / name
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != content:
+            raise SyncError("existing runtime version differs from the approved Git files")
+    temporary = root / (".current-" + uuid.uuid4().hex)
+    temporary.symlink_to(version, target_is_directory=True)
+    try:
+        if current.exists() and not current.is_symlink():
+            raise SyncError("runtime current path changed; it was preserved")
+        temporary.replace(current)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {"status": "runtime_installed", "head": head, "runtime": str(current)}
 
 
 def run_command(command: list[str], repository: Path, *, timeout: float = 120) -> str:
@@ -55,17 +134,17 @@ def require_clean_branch(repository: Path, branch: str) -> str:
     root = Path(git(repository, "rev-parse", "--show-toplevel")).resolve()
     if root != repository:
         raise SyncError("repository must be the checkout root")
-    current = git(repository, "symbolic-ref", "--quiet", "--short", "HEAD")
+    current = git(repository, "branch", "--show-current") or "detached HEAD"
     if current != branch:
-        raise SyncError(f"expected branch {branch}; checkout remains on {current}")
+        raise CheckoutNotReady("wrong_branch", f"expected branch {branch}; checkout remains on {current}")
     for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "index.lock"):
         path = Path(git(repository, "rev-parse", "--git-path", marker))
         if not path.is_absolute():
             path = repository / path
         if path.exists():
-            raise SyncError(f"Git operation is in progress ({marker}); checkout was not updated")
+            raise CheckoutNotReady("git_operation", f"Git operation is in progress ({marker}); update skipped")
     if git(repository, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"):
-        raise SyncError("checkout has local changes; nothing was stashed or discarded")
+        raise CheckoutNotReady("dirty_checkout", "working tree is not clean; update skipped and local work preserved")
     return git(repository, "rev-parse", "HEAD")
 
 
@@ -104,7 +183,7 @@ def synchronize(
             manifests[repository / relative] = relative.parts[2]
     if not manifests:
         raise SyncError("no tracked skill manifests were found")
-    errors = skill_metadata_errors(manifests)
+    errors = skill_metadata_errors(manifests, repository)
     invalid = {path: messages for path, messages in errors.items() if messages}
     if invalid:
         names = sorted(manifests[Path(path)] for path in invalid)
@@ -165,17 +244,33 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--branch", required=True)
     parser.add_argument("--home", type=Path, default=Path.home())
     parser.add_argument("--pi-agent-dir", type=Path)
+    parser.add_argument("--notifier", type=Path, default=Path("/opt/homebrew/bin/terminal-notifier"))
+    parser.add_argument("--install-runtime", action="store_true", help="install an approved Git snapshot outside the checkout")
+    parser.add_argument("--runtime-root", type=Path)
     parser.add_argument("--check", action="store_true", help="inspect local state without updating Git or creating links")
     args = parser.parse_args(argv)
     code = 0
     try:
+        if args.check and args.install_runtime:
+            raise SyncError("check and install-runtime cannot be combined")
         if args.check:
             result = synchronize(args.repository, args.home, args.branch, check=True, pi_agent_dir=args.pi_agent_dir)
         else:
             with run_lock(args.home.expanduser()) as acquired:
-                result = synchronize(args.repository, args.home, args.branch, pi_agent_dir=args.pi_agent_dir) if acquired else {"status": "already_running"}
+                if not acquired:
+                    result = {"status": "already_running"}
+                elif args.install_runtime:
+                    result = install_runtime(args.repository, args.home, args.branch, runtime_root=args.runtime_root)
+                else:
+                    result = synchronize(args.repository, args.home, args.branch, pi_agent_dir=args.pi_agent_dir)
         if result["status"] == "attention_required":
             code = 2
+    except CheckoutNotReady as error:
+        sent = False
+        if not args.check and not args.install_runtime:
+            sent = notify_skipped(args.repository, str(error), args.notifier)
+        result = {"status": "skipped", "reason": error.reason, "message": str(error), "notification_sent": sent}
+        code = 0 if sent else 1
     except (OSError, ValueError, SyncError) as error:
         result = {"status": "error", "error": str(error)}
         code = 1

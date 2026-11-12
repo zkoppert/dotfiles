@@ -11,9 +11,10 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 
-def pi_sdk_path() -> Path:
+def pi_sdk_path(*, wrapper_path: Optional[Path] = None) -> Path:
     executable = shutil.which("pi")
     if executable is None:
         raise ValueError("Pi executable is missing from PATH")
@@ -33,7 +34,7 @@ def pi_sdk_path() -> Path:
         ) from error
     if tuple(map(int, version_match.groups())) < (22, 19, 0):
         raise ValueError(f"Node.js 22.19.0 or later is required (found {node_version})")
-    wrapper = Path(__file__).resolve().parents[1] / "bin" / "pi-treehouse"
+    wrapper = (wrapper_path or Path(__file__).resolve().parents[1] / "bin" / "pi-treehouse").resolve()
     if Path(executable).resolve() == wrapper:
         executable = os.environ.get("PI_REAL_PI") or next(
             (
@@ -69,8 +70,8 @@ def pi_sdk_path() -> Path:
     raise ValueError(f"cannot locate the installed Pi SDK for {executable_path}")
 
 
-def skill_metadata_errors(skills: dict[Path, str]) -> dict[str, list[str]]:
-    sdk = pi_sdk_path()
+def skill_metadata_errors(skills: dict[Path, str], *, wrapper_path: Optional[Path] = None) -> dict[str, list[str]]:
+    sdk = pi_sdk_path(wrapper_path=wrapper_path)
     script = r"""
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';

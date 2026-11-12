@@ -147,24 +147,28 @@ Treehouse must be installed at `~/.local/bin/treehouse`. The wrapper fails close
 
 The `com.zkoppert.dotfiles-sync` LaunchAgent checks this laptop's `~/repos/dotfiles` checkout daily at 09:00 and when loaded. It extends the existing job rather than adding another updater.
 
-The updater requires a clean `main` checkout without an unfinished Git operation. It fetches `origin main` and merges its explicit remote-tracking ref instead of shared `FETCH_HEAD`. Fast-forward flags prevent rebasing, automatic stashing, and overwriting ignored files. Authentication must work without interactive prompts. Git commands have a two-minute timeout, and timed-out process groups are terminated.
+The scheduled runner uses an approved copy outside the checkout, with isolated Python startup. It never imports Python packages from the working tree. Dirty checkouts, another active branch, or unfinished Git operations cause a skipped update and a clickable Mac notification. Local edits remain untouched; nothing is stashed or restored.
 
-The job requires Git, Pi, and Node.js 22.19.0 or later on its configured `PATH`. After updating, it validates tracked skill metadata with the existing Pi SDK parser. It creates missing links in `~/.copilot/skills` and `~/.agents/skills` and ensures the shared instruction links. `PI_CODING_AGENT_DIR` selects the Pi instruction directory; `--pi-agent-dir` overrides it. The default is `~/.pi/agent`.
+The updater requires a clean `main` checkout before updating. It fetches `origin main` and merges its explicit remote-tracking ref instead of shared `FETCH_HEAD`. Fast-forward flags prevent rebasing, automatic stashing, and overwriting ignored files. Authentication must work without interactive prompts. Git commands have a two-minute timeout, and timed-out process groups are terminated.
+
+The job requires Git, Pi, Node.js 22.19.0 or later, and Homebrew's `terminal-notifier`. The plist supplies the notifier path explicitly. After updating, it validates tracked skill metadata with the existing Pi SDK parser. It creates missing links in `~/.copilot/skills` and `~/.agents/skills` and ensures the shared instruction links. `PI_CODING_AGENT_DIR` selects the Pi instruction directory; `--pi-agent-dir` overrides it. The default is `~/.pi/agent`.
 
 Existing files, directories, and conflicting symlinks remain unchanged and cause a reported failure. Broken links require manual resolution. Private catalog skills and removed repository skills aren't deleted. The updater doesn't run the broad installer or restore Git history after a failed validation. Existing links follow trusted merged checkout contents, as they do after a manual pull.
 
-Inspect local state without fetching, creating links, or taking the update lock. Keep `-B` to prevent Python bytecode cache writes:
+The runner and metadata helper are copied from committed Git blobs into a versioned private directory. Updating dotfiles doesn't automatically replace that approved runner. Reinstall it from reviewed, clean `main` when either file changes. Old versions remain available for rollback.
+
+Inspect an installed runner without fetching, creating links, taking the update lock, or sending notifications:
 
 ```bash
-cd "$HOME/repos/dotfiles"
-python3 -B -m scripts.dotfiles_sync --repository "$PWD" --branch main --check
+runner="$HOME/Library/Application Support/dotfiles-sync/runtime/current/dotfiles_sync.py"
+python3 -I -S -B "$runner" --repository "$HOME/repos/dotfiles" --branch main --check
 ```
 
-Check mode makes no remote-freshness claim. Exit status `2` means links are missing; status `1` reports a refusal or failure. A normal run creates missing links. Its nonblocking lock coordinates manual and scheduled runs; it doesn't lock out unrelated Git commands. Use Treehouse worktrees for feature work. Avoid other Git mutations in this managed checkout while an update runs.
+Check mode makes no remote-freshness claim. Exit status `2` means links are missing; status `1` reports a refusal or failure. A scheduled skip returns success only if the notification command accepts the request. Failed notification requests return status `1`. JSON distinguishes `skipped` from a completed update. Repeated alerts replace the same notification group, and clicking opens the checkout. A normal run creates missing links. Its nonblocking lock coordinates manual and scheduled runs; it doesn't lock out unrelated Git commands. Use Treehouse worktrees for feature work. Avoid other Git mutations in this managed checkout while an update runs.
 
 ### Upgrade the existing laptop agent
 
-Merge and pull the script before deploying the plist. This plist uses absolute laptop paths and a Homebrew Python interpreter. Adjust those paths for another machine or a custom Pi agent directory. Confirm the current agent isn't running before reloading it. Loading the agent starts one immediate sync.
+Merge and pull the reviewed installer before deploying the plist. Run the installer by its explicit path with `-I -S`, not through a checkout package. This plist uses absolute laptop paths and a Homebrew Python interpreter. Adjust those paths for another machine or a custom Pi agent directory. Confirm the current agent isn't running before reloading it. Loading the agent starts one immediate sync.
 
 The following upgrade preserves the original plist and restores it if loading the replacement fails:
 
@@ -181,11 +185,17 @@ test ! -e "$backup"
 plutil -lint "$repo/LaunchAgents/com.zkoppert.dotfiles-sync.plist"
 mkdir -p "$HOME/Library/Logs" "$backup_dir"
 cp -p "$target" "$backup"
+current="$HOME/Library/Application Support/dotfiles-sync/runtime/current"
+previous_runtime=""
+if [ -L "$current" ]; then previous_runtime="$(readlink "$current")"; fi
 launchctl bootout "gui/$(id -u)/com.zkoppert.dotfiles-sync"
-if cp -p "$repo/LaunchAgents/com.zkoppert.dotfiles-sync.plist" "$target" &&
+if /opt/homebrew/bin/python3 -I -S -B "$repo/scripts/dotfiles_sync.py" \
+     --repository "$repo" --branch main --install-runtime &&
+   cp -p "$repo/LaunchAgents/com.zkoppert.dotfiles-sync.plist" "$target" &&
    launchctl bootstrap "gui/$(id -u)" "$target"; then
   launchctl print "gui/$(id -u)/com.zkoppert.dotfiles-sync"
 else
+  if [ -n "$previous_runtime" ]; then ln -sfn "$previous_runtime" "$current"; fi
   cp -p "$backup" "$target"
   launchctl bootstrap "gui/$(id -u)" "$target"
   exit 1
@@ -193,7 +203,7 @@ fi
 )
 ```
 
-Results are timestamped JSON lines in `~/Library/Logs/dotfiles-sync.log`. Repeated runs create no duplicate links. No packages, hooks, shell startup files, or unrelated agents are installed. Rerun the upgrade when the plist changes; updating the checkout alone doesn't reload launchd configuration.
+Results are timestamped JSON lines in `~/Library/Logs/dotfiles-sync.log`. Repeated runs create no duplicate links. No packages, hooks, shell startup files, or unrelated agents are installed. Rerun the upgrade when the runner, metadata helper, or plist changes. Updating the checkout alone doesn't replace the trusted runtime or reload launchd configuration.
 
 Disable future runs without changing the checkout:
 
