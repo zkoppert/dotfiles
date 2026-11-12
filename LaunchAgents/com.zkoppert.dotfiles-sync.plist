@@ -7,9 +7,10 @@
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/python3</string>
+        <string>-I</string>
+        <string>-S</string>
         <string>-B</string>
-        <string>-m</string>
-        <string>scripts.dotfiles_sync</string>
+        <string>/Users/zkoppert/Library/Application Support/dotfiles-sync/runtime/current/dotfiles_sync.py</string>
         <string>--repository</string>
         <string>/Users/zkoppert/repos/dotfiles</string>
         <string>--branch</string>
@@ -18,9 +19,11 @@
         <string>/Users/zkoppert</string>
         <string>--pi-agent-dir</string>
         <string>/Users/zkoppert/.pi/agent</string>
+        <string>--notifier</string>
+        <string>/opt/homebrew/bin/terminal-notifier</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/zkoppert/repos/dotfiles</string>
+    <string>/Users/zkoppert/Library/Application Support/dotfiles-sync</string>
     <key>RunAtLoad</key>
     <true/>
     <key>StartCalendarInterval</key>
