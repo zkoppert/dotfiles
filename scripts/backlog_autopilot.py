@@ -241,7 +241,7 @@ def notify(message):
             [
                 "/usr/bin/osascript",
                 "-e",
-                'on run argv\ndisplay notification (item 1 of argv) with title "Pi backlog autopilot"\nend run',
+                'on run argv\ndisplay notification (item 1 of argv) with title "Sentry issue worker"\nend run',
                 message,
             ],
             check=False,

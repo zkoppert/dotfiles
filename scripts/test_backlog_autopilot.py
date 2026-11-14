@@ -178,6 +178,7 @@ class NotificationTests(unittest.TestCase):
             self.assertTrue(worker.notify(message))
         self.assertEqual(send.call_args.args[0][-1], message)
         self.assertIn("item 1 of argv", send.call_args.args[0][-2])
+        self.assertIn('with title "Sentry issue worker"', send.call_args.args[0][-2])
         with patch.object(worker.sys, "platform", "darwin"), patch.object(
             worker.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)
         ), self.assertLogs(worker.LOG, level="ERROR"):
