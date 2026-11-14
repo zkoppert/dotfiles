@@ -353,6 +353,18 @@ class TailscaleTests(unittest.TestCase):
         self.config = {"state_dir": str(self.root), "tailscale": self.vpn.settings}
         self.journal = self.root / "tailscale-session.json"
 
+    def test_background_cli_forces_cli_mode_without_changing_parent_environment(self):
+        with patch.dict(os.environ, {"PATH": "/fixture"}, clear=True), patch.object(
+            worker, "command", side_effect=self.vpn.command
+        ) as command:
+            self.assertEqual(
+                worker.active_tailscale_profile(self.vpn.settings), "personal"
+            )
+            env = command.call_args.kwargs["env"]
+            self.assertEqual(env["TAILSCALE_BE_CLI"], "1")
+            self.assertEqual(env["PATH"], "/fixture")
+            self.assertNotIn("TAILSCALE_BE_CLI", os.environ)
+
     def test_selects_work_before_body_and_restores_personal_after_success_or_failure(
         self,
     ):
@@ -434,7 +446,8 @@ class TailscaleTests(unittest.TestCase):
         worker.atomic_json(vpn_state, {"selected": "personal", "switches": []})
         executable = self.root / "tailscale"
         executable.write_text("#!" + sys.executable + "\n" + f"""
-import json,pathlib,sys
+import json,os,pathlib,sys
+if not os.environ.get("TERM") and os.environ.get("TAILSCALE_BE_CLI")!="1": sys.exit(0)
 path=pathlib.Path({str(vpn_state)!r});state=json.loads(path.read_text());args=sys.argv[1:]
 if args==["switch","--list","--json"]:
  print(json.dumps([{{"id":p,"selected":p==state["selected"]}} for p in ("work","personal")]))
@@ -463,11 +476,17 @@ try:
   w.run_pi(config,root/"stage",root,"fixture",fd,pathlib.Path({str(MODULE_PATH.with_name('backlog_autopilot_policy.md'))!r}))
 except w.WorkerInterrupted as error: sys.exit(128+error.signum)
 """
+        background_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"TERM", "TERM_PROGRAM", "TAILSCALE_BE_CLI"}
+        }
         process = subprocess.Popen(
             [sys.executable, "-c", harness],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=background_env,
         )
         try:
             for _ in range(100):

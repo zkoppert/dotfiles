@@ -144,7 +144,7 @@ Find the IDs without changing profiles:
 /Applications/Tailscale.app/Contents/MacOS/Tailscale switch --list --json
 ```
 
-The worker selects and verifies the work profile before investigation. It restores the configured personal profile after completion, a pause, or an execution failure. Restoration also happens when work began with the GitHub profile already selected. Missing profiles or a disconnected work profile prevent execution instead of triggering login or changing credentials.
+The worker sets `TAILSCALE_BE_CLI=1` only for Tailscale commands, so the app CLI works without a terminal. It selects and verifies the work profile before investigation. It restores the configured personal profile after completion, a pause, or an execution failure. Restoration also happens when work began with the GitHub profile already selected. Missing profiles or a disconnected work profile prevent execution instead of triggering login or changing credentials.
 
 The worker saves `tailscale-session.json` before switching. On `SIGTERM` or `SIGINT`, the worker stops its child before restoring the profile. A later scheduled check recovers pending restoration after an abrupt crash, once no worker child holds the execution lock. Recovery also runs while paused or when no daily pass is due. Power loss or a forced kill cannot restore the network immediately. Failed restoration retains its receipt and reports an error for retry. An unrelated profile selected manually is not overwritten; operator review is required.
 

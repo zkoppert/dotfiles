@@ -167,7 +167,7 @@ def diagnostic(text):
     return text[-2000:]
 
 
-def command(argv, cwd=None, timeout=120):
+def command(argv, cwd=None, timeout=120, env=None):
     try:
         result = subprocess.run(
             argv,
@@ -177,6 +177,7 @@ def command(argv, cwd=None, timeout=120):
             capture_output=True,
             timeout=timeout,
             check=False,
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise InfrastructureError(
@@ -340,10 +341,16 @@ def exclusive_lock(directory):
         yield stream.fileno()
 
 
-def active_tailscale_profile(settings):
-    rows = json.loads(
-        command([settings["executable"], "switch", "--list", "--json"], timeout=30)
+def tailscale_command(settings, *args):
+    return command(
+        [settings["executable"], *args],
+        timeout=30,
+        env={**os.environ, "TAILSCALE_BE_CLI": "1"},
     )
+
+
+def active_tailscale_profile(settings):
+    rows = json.loads(tailscale_command(settings, "switch", "--list", "--json"))
     if not isinstance(rows, list) or any(
         not isinstance(row, dict)
         or not isinstance(row.get("id"), str)
@@ -366,7 +373,7 @@ def active_tailscale_profile(settings):
 
 def select_tailscale_profile(settings, profile):
     if active_tailscale_profile(settings) != profile:
-        command([settings["executable"], "switch", profile], timeout=30)
+        tailscale_command(settings, "switch", profile)
     if active_tailscale_profile(settings) != profile:
         raise InfrastructureError("Tailscale did not select the requested profile")
 
@@ -420,9 +427,7 @@ def tailscale_session(config):
     )
     try:
         select_tailscale_profile(settings, settings["work_profile"])
-        status = json.loads(
-            command([settings["executable"], "status", "--json"], timeout=30)
-        )
+        status = json.loads(tailscale_command(settings, "status", "--json"))
         if status.get("BackendState") != "Running":
             raise InfrastructureError(
                 "Tailscale work profile is not connected; operator login or reconnection is required"
