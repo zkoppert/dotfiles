@@ -76,27 +76,29 @@ class FakeTailscale:
 
 class ScheduleTests(unittest.TestCase):
     def test_daily_boundary_and_host_timezone_independence(self):
-        before = datetime.fromisoformat("2026-11-07T01:59:59+00:00")
-        after = datetime.fromisoformat("2026-11-07T02:00:00+00:00")
+        before = datetime.fromisoformat("2026-11-07T10:59:59+00:00")
+        after = datetime.fromisoformat("2026-11-07T11:00:00+00:00")
         self.assertEqual(
-            worker.latest_slot(before).isoformat(), "2026-11-05T18:00:00-08:00"
+            worker.latest_slot(before).isoformat(), "2026-11-06T03:00:00-08:00"
         )
         self.assertEqual(
-            worker.latest_slot(after).isoformat(), "2026-11-06T18:00:00-08:00"
+            worker.latest_slot(after).isoformat(), "2026-11-07T03:00:00-08:00"
         )
 
     def test_spring_offset_changes_without_changing_wall_time(self):
         instant = datetime.fromisoformat("2026-03-14T01:00:00+00:00")
         self.assertEqual(
-            worker.latest_slot(instant).isoformat(), "2026-03-13T18:00:00-07:00"
+            worker.latest_slot(instant).isoformat(), "2026-03-13T03:00:00-07:00"
         )
 
     def test_weekday_and_weekend_slots_advance_daily(self):
         for instant, expected in [
-            ("2026-11-08T02:00:00+00:00", "2026-11-07T18:00:00-08:00"),
-            ("2026-11-09T01:59:59+00:00", "2026-11-07T18:00:00-08:00"),
-            ("2026-03-09T00:59:59+00:00", "2026-03-07T18:00:00-08:00"),
-            ("2026-03-09T01:00:00+00:00", "2026-03-08T18:00:00-07:00"),
+            ("2026-11-08T11:00:00+00:00", "2026-11-08T03:00:00-08:00"),
+            ("2026-11-09T10:59:59+00:00", "2026-11-08T03:00:00-08:00"),
+            ("2026-03-08T09:59:59+00:00", "2026-03-07T03:00:00-08:00"),
+            ("2026-03-08T10:00:00+00:00", "2026-03-08T03:00:00-07:00"),
+            ("2026-11-01T10:59:59+00:00", "2026-10-31T03:00:00-07:00"),
+            ("2026-11-01T11:00:00+00:00", "2026-11-01T03:00:00-08:00"),
         ]:
             with self.subTest(instant=instant):
                 self.assertEqual(
@@ -998,6 +1000,14 @@ class WorkerTests(unittest.TestCase):
             (Path(self.config["state_dir"]) / "tailscale-session.json").exists()
         )
 
+    def test_config_rejects_naive_or_invalid_schedule_cutover(self):
+        for changed_at in ("2026-11-14T09:00:00", "not-a-date", 3):
+            worker.atomic_json(
+                self.config_path, {**self.config, "schedule_changed_at": changed_at}
+            )
+            with self.subTest(changed_at=changed_at), self.assertRaises(ValueError):
+                worker.load_config(self.config_path)
+
     def test_config_rejects_invalid_tailscale_profile_settings(self):
         for settings in (
             {},
@@ -1127,7 +1137,7 @@ class WorkerTests(unittest.TestCase):
                 self.assertEqual(
                     worker.main(["--config", str(self.config_path), "scheduled"]), 0
                 )
-        self.assertEqual(observed, ["2026-11-06T18:00:00-08:00"])
+        self.assertEqual(observed, ["2026-11-06T03:00:00-08:00"])
 
     def test_interrupted_run_retries_after_backoff_without_waiting_for_new_slot(self):
         instant = datetime.fromisoformat("2026-11-07T02:00:00+00:00")
@@ -1156,6 +1166,51 @@ class WorkerTests(unittest.TestCase):
             )
         self.assertEqual(execute.call_count, 1)
         self.assertNotIn("retry_after", worker.read_json(self.state_path))
+
+    def test_schedule_cutover_skips_past_slot_but_runs_at_next_three_am(self):
+        worker.atomic_json(
+            self.config_path,
+            {**self.config, "schedule_changed_at": "2026-11-14T17:00:00+00:00"},
+        )
+        with patch.object(
+            worker,
+            "now",
+            return_value=datetime.fromisoformat("2026-11-14T17:01:00+00:00"),
+        ), patch.object(worker, "execute") as execute:
+            self.assertEqual(
+                worker.main(["--config", str(self.config_path), "scheduled"]), 0
+            )
+        execute.assert_not_called()
+        with patch.object(
+            worker,
+            "now",
+            return_value=datetime.fromisoformat("2026-11-15T11:00:00+00:00"),
+        ), patch.object(worker, "execute") as execute:
+            for _ in range(2):
+                self.assertEqual(
+                    worker.main(["--config", str(self.config_path), "scheduled"]), 0
+                )
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(
+            worker.read_json(self.state_path)["last_slot"], "2026-11-15T03:00:00-08:00"
+        )
+
+    def test_schedule_cutover_does_not_block_recovery_of_an_active_run(self):
+        worker.atomic_json(
+            self.config_path,
+            {**self.config, "schedule_changed_at": "2026-11-14T17:00:00+00:00"},
+        )
+        worker.atomic_json(self.state_path, {**self.state, "active_run": "ongoing"})
+        with patch.object(
+            worker,
+            "now",
+            return_value=datetime.fromisoformat("2026-11-14T17:01:00+00:00"),
+        ), patch.object(worker, "execute") as execute:
+            self.assertEqual(
+                worker.main(["--config", str(self.config_path), "scheduled"]), 0
+            )
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(worker.read_json(self.state_path)["active_run"], "ongoing")
 
     def test_manual_run_does_not_consume_daily_slot(self):
         with patch.object(worker, "execute") as execute:
@@ -1287,7 +1342,7 @@ else:
         ):
             worker.install(self.config_path, self.config, MODULE_PATH.parent)
             saved = worker.read_json(self.state_path)
-            self.assertEqual(saved["last_slot"], "2026-11-03T18:00:00-08:00")
+            self.assertEqual(saved["last_slot"], "2026-11-03T03:00:00-08:00")
             release = worker.read_json(
                 Path(self.config["state_dir"]) / "current/release.json"
             )
@@ -1747,6 +1802,54 @@ else:
                 worker.read_json(stage / "receipt.json"), 1, issue()
             )
 
+    def test_future_install_preserves_running_release_state_and_launchagent(self):
+        home = self.root / "home"
+        with patch.object(worker.Path, "home", return_value=home):
+            worker.install(self.config_path, self.config, MODULE_PATH.parent)
+            root = Path(self.config["state_dir"])
+            previous = (root / "current").resolve()
+            files = {path.name: path.read_bytes() for path in previous.iterdir()}
+            worker.atomic_json(self.state_path, {**self.state, "active_run": "ongoing"})
+            state = self.state_path.read_bytes()
+            plist = home / "Library/LaunchAgents" / (worker.LABEL + ".plist")
+            plist_bytes = plist.read_bytes()
+            config_bytes = self.config_path.read_bytes()
+            with worker.exclusive_lock(root):
+                worker.install(
+                    self.config_path, self.config, MODULE_PATH.parent, future_only=True
+                )
+            self.assertNotEqual((root / "current").resolve(), previous)
+            self.assertEqual(self.state_path.read_bytes(), state)
+            self.assertEqual(plist.read_bytes(), plist_bytes)
+            self.assertEqual(self.config_path.read_bytes(), config_bytes)
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in previous.iterdir()}, files
+            )
+
+    def test_future_install_rejects_policy_changes_without_replacing_current(self):
+        home = self.root / "home"
+        with patch.object(worker.Path, "home", return_value=home):
+            worker.install(self.config_path, self.config, MODULE_PATH.parent)
+            current = (Path(self.config["state_dir"]) / "current").resolve()
+            candidate = self.root / "candidate/scripts"
+            candidate.mkdir(parents=True)
+            for name in (
+                "backlog_autopilot.py",
+                "backlog_autopilot_policy.md",
+                "backlog_autopilot_extension.ts",
+            ):
+                (candidate / name).write_bytes((MODULE_PATH.parent / name).read_bytes())
+            (candidate / "backlog_autopilot_policy.md").write_text(
+                "Different worker policy"
+            )
+            with self.assertRaisesRegex(ValueError, "cannot change the active policy"):
+                worker.install(
+                    self.config_path, self.config, candidate, future_only=True
+                )
+            self.assertEqual(
+                (Path(self.config["state_dir"]) / "current").resolve(), current
+            )
+
     def test_install_rejects_another_source_before_changing_release(self):
         config = {**self.config, "source_checkout": str(self.root / "other-source")}
         with self.assertRaisesRegex(ValueError, "configured source_checkout"):
@@ -1949,7 +2052,7 @@ else: sys.exit(9)
                 )
         self.assertEqual(execute.call_count, 1)
         self.assertEqual(
-            worker.read_json(self.state_path)["last_slot"], "2026-11-09T18:00:00-08:00"
+            worker.read_json(self.state_path)["last_slot"], "2026-11-09T03:00:00-08:00"
         )
 
     def test_pause_between_analysis_batches_preserves_receipt_without_starting_next_batch(

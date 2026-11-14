@@ -52,7 +52,7 @@ Treehouse must be installed at `~/.local/bin/treehouse`. The wrapper fails close
 
 The local worker analyzes all open tracking issues before it works on titles containing the exact substring `[Sentry]`. It saves issue snapshots, context notes, sessions, and outcomes outside Git checkouts.
 
-The schedule is daily at 18:00 in `America/Los_Angeles`, independent of the Mac's time zone. A minute timer checks whether work is due. Missed days collapse into one catch-up pass. The Mac must be running and connected; the job does not wake a powered-off Mac.
+The schedule is daily at 03:00 in `America/Los_Angeles`, independent of the Mac's time zone. A minute timer checks whether work is due. Missed days collapse into one catch-up pass. The Mac must be running and connected; the job does not wake a powered-off Mac.
 
 Keep private repository names in a local mode-0600 JSON file. Create the configuration with your actual repository values:
 
@@ -151,6 +151,8 @@ The worker saves `tailscale-session.json` before switching. On `SIGTERM` or `SIG
 Idle ticks and the `status`, `preflight`, and control commands do not initiate profile switching. The `status` output includes any pending network session. Automatic switching is disabled when the `tailscale` object is absent.
 
 Candidate self-improvements must have persistent tests and independent review. The worker cannot activate candidates through its control interface. Review candidates before running `install` again. Set `source_checkout` to the maintained source checkout before installation. When configured, the installer refuses another source checkout. Each release records its source commit, checkout, and runtime hashes in `release.json`. Installation retains prior releases; it does not change the saved daily slot or run history.
+
+For a scheduler-only update during active work, use the `install-future` CLI action. It publishes a new immutable release without changing the active worker's files, state, policy, extension, or LaunchAgent settings. Existing workers keep their resolved release; later scheduler invocations follow the updated pointer. Policy or extension changes require the normal idle installation path. Set the private `schedule_changed_at` timestamp when changing schedule times to prevent an immediate catch-up for a pre-change slot. The timestamp must include its UTC offset. Unfinished runs can still recover without waiting for the new daily time.
 
 ## How do I run Copilot in a durable Codespace session?
 

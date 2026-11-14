@@ -5,7 +5,7 @@ import argparse
 import base64
 import concurrent.futures
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
@@ -63,7 +63,7 @@ def now():
 
 def latest_slot(instant):
     local = instant.astimezone(PACIFIC)
-    slot = local.replace(hour=18, minute=0, second=0, microsecond=0)
+    slot = local.replace(hour=3, minute=0, second=0, microsecond=0)
     return slot if slot <= local else slot - timedelta(days=1)
 
 
@@ -135,6 +135,12 @@ def load_config(path):
         raise ValueError(
             "Implementation checkout cannot override the tracking checkout"
         )
+    changed_at = config.get("schedule_changed_at")
+    if changed_at is not None and (
+        not isinstance(changed_at, str)
+        or datetime.fromisoformat(changed_at).tzinfo is None
+    ):
+        raise ValueError("Schedule cutover requires an aware timestamp")
     settings = config.get("tailscale")
     if settings is not None:
         if not isinstance(settings, dict) or any(
@@ -329,9 +335,9 @@ def validate_analysis(receipt, batch, snapshot_hash):
 
 
 @contextmanager
-def exclusive_lock(directory):
+def exclusive_lock(directory, name="worker.lock"):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (directory / "worker.lock").open("a+") as stream:
+    with (directory / name).open("a+") as stream:
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -1173,7 +1179,7 @@ def execute(config, state, state_path, lock_fd, runtime):
     )
 
 
-def install(config_path, config, runtime):
+def install(config_path, config, runtime, future_only=False):
     source = runtime.resolve().parent
     if (
         config.get("source_checkout")
@@ -1183,9 +1189,40 @@ def install(config_path, config, runtime):
             "Install from the configured source_checkout to preserve maintained worker changes"
         )
     root = Path(config["state_dir"])
-    with exclusive_lock(root):
+    with ExitStack() as locks:
+        if not future_only:
+            locks.enter_context(exclusive_lock(root))
+        locks.enter_context(exclusive_lock(root, "release.lock"))
         state_path = root / "state.json"
-        if not state_path.exists():
+        if future_only:
+            # Active workers retain their resolved release; only new invocations follow current.
+            current = root / "current"
+            if (
+                not current.is_symlink()
+                or current.resolve().parent != root.resolve() / "releases"
+            ):
+                raise ValueError(
+                    "Future-only installation requires an existing immutable release"
+                )
+            previous = read_json(current / "release.json")
+            for name, expected in previous["sha256"].items():
+                if (
+                    hashlib.sha256((current / name).read_bytes()).hexdigest()
+                    != expected
+                ):
+                    raise ValueError(
+                        "Active release does not match its recorded hashes"
+                    )
+            for name in (
+                "backlog_autopilot_policy.md",
+                "backlog_autopilot_extension.ts",
+            ):
+                if (runtime / name).read_bytes() != (current / name).read_bytes():
+                    raise ValueError(
+                        "Future-only installation cannot change the active policy or extension"
+                    )
+            read_json(state_path)["last_slot"]
+        elif not state_path.exists():
             atomic_json(
                 state_path,
                 {"last_slot": latest_slot(now()).isoformat(), "active_run": None},
@@ -1227,6 +1264,11 @@ def install(config_path, config, runtime):
         temporary = root / (".current-" + uuid4().hex)
         temporary.symlink_to(version, target_is_directory=True)
         os.replace(temporary, current)
+        if future_only:
+            print(
+                "Future invocations will use the new release. Active runtime files and worker state are unchanged."
+            )
+            return
         agent_dir = Path(config["agent_dir"])
         extension = agent_dir / "extensions/backlog-autopilot.ts"
         if extension.exists() or extension.is_symlink():
@@ -1274,6 +1316,7 @@ def main(argv=None):
         "action",
         choices=[
             "install",
+            "install-future",
             "scheduled",
             "run",
             "dry-run",
@@ -1294,8 +1337,13 @@ def main(argv=None):
         config = load_config(args.config)
         root = Path(config["state_dir"])
         runtime = Path(__file__).resolve().parent
-        if args.action == "install":
-            install(args.config.resolve(), config, runtime)
+        if args.action in {"install", "install-future"}:
+            install(
+                args.config.resolve(),
+                config,
+                runtime,
+                future_only=args.action == "install-future",
+            )
             return 0
         if args.action == "preflight":
             result = preflight(config)
@@ -1317,6 +1365,9 @@ def main(argv=None):
         last_slot = datetime.fromisoformat(state["last_slot"])
         if last_slot.tzinfo is None:
             raise ValueError("Schedule state requires an aware timestamp")
+        cutover = datetime.fromisoformat(
+            config.get("schedule_changed_at", state["last_slot"])
+        )
         if args.action == "status":
             report_directory = state.get("last_run")
             if state.get("active_run"):
@@ -1342,7 +1393,7 @@ def main(argv=None):
                             else None
                         ),
                         "next_slot": (
-                            latest_slot(now()) + timedelta(days=1)
+                            latest_slot(max(now(), cutover)) + timedelta(days=1)
                         ).isoformat(),
                     },
                     indent=2,
@@ -1376,8 +1427,8 @@ def main(argv=None):
                 return 0
             if args.action == "scheduled":
                 slot = latest_slot(now())
-                if not state.get("active_run") and slot <= datetime.fromisoformat(
-                    state["last_slot"]
+                if not state.get("active_run") and slot <= max(
+                    datetime.fromisoformat(state["last_slot"]), cutover
                 ):
                     return 0
                 if state.get("retry_after") and now() < datetime.fromisoformat(
