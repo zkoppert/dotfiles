@@ -26,6 +26,11 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+
 LOG = logging.getLogger("backlog-autopilot")
 PACIFIC = ZoneInfo("America/Los_Angeles")
 LABEL = "com.zkoppert.backlog-autopilot"
@@ -107,6 +112,24 @@ def load_config(path):
             raise ValueError(f"{key} must be absolute")
     if not Path(config["checkout"]).is_dir():
         raise ValueError("Tracking checkout is unavailable")
+    checkouts = config.get("implementation_checkouts", {})
+    if not isinstance(checkouts, dict) or any(
+        repo not in repositories
+        or not isinstance(path, str)
+        or not Path(path).is_absolute()
+        for repo, path in checkouts.items()
+    ):
+        raise ValueError(
+            "Implementation checkouts must map allowlisted repositories to absolute paths"
+        )
+    if (
+        config["repository"] in checkouts
+        and Path(checkouts[config["repository"]]).resolve()
+        != Path(config["checkout"]).resolve()
+    ):
+        raise ValueError(
+            "Implementation checkout cannot override the tracking checkout"
+        )
     return config
 
 
@@ -441,6 +464,71 @@ def release_coordinator(config, run):
         LOG.exception("Coordinator lease retained; safe return did not succeed")
 
 
+def github_repository(remote):
+    match = re.fullmatch(
+        r"(?:https://github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?/?",
+        remote.strip(),
+    )
+    return match[1] if match else None
+
+
+def treehouse_limit(checkout):
+    if tomllib is None:
+        return None
+    limit = None
+    for path in (
+        Path.home() / ".config/treehouse/config.toml",
+        Path(checkout) / "treehouse.toml",
+    ):
+        if path.exists():
+            value = tomllib.loads(path.read_text()).get("max_trees", limit)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise ValueError("Treehouse max_trees is not a positive integer")
+            limit = value
+    return limit
+
+
+def worktree_pools(config):
+    checkouts = {
+        **config.get("implementation_checkouts", {}),
+        config["repository"]: config["checkout"],
+    }
+    pools = {}
+    for repository in config.get("allowed_repositories", [config["repository"]]):
+        checkout = checkouts.get(repository)
+        if not checkout:
+            pools[repository] = {
+                "state": "unknown",
+                "detail": "Local checkout is not configured",
+            }
+            continue
+        try:
+            remote = command(["git", "remote", "get-url", "origin"], cwd=checkout)
+            if github_repository(remote) != repository:
+                raise ValueError(
+                    "Local checkout origin does not match the configured repository"
+                )
+            rows = json.loads(command(["treehouse", "status", "--json"], cwd=checkout))
+            idle = sum(row["status"] == "available" for row in rows)
+            limit = treehouse_limit(checkout)
+            state = "unknown"
+            if idle:
+                state = "available"
+            elif limit is not None:
+                state = "can_create" if len(rows) < limit else "exhausted"
+            pools[repository] = {
+                "state": state,
+                "idle": idle,
+                "allocated": len(rows),
+                "limit": limit,
+            }
+        except (InfrastructureError, OSError, ValueError, KeyError) as error:
+            pools[repository] = {"state": "unknown", "detail": diagnostic(error)}
+    return pools
+
+
 def preflight(config):
     for executable in (
         "gh",
@@ -456,17 +544,17 @@ def preflight(config):
                 f"Required executable is unavailable: {executable}"
             )
     api(f"/repos/{config['repository']}")
-    rows = json.loads(
-        command(["treehouse", "status", "--json"], cwd=config["checkout"])
-    )
-    idle = sum(row["status"] == "available" for row in rows)
-    warnings = (
-        []
-        if idle
-        else [
-            "Treehouse has no idle implementation slots. Do not remove occupied worktrees."
-        ]
-    )
+    pools = worktree_pools(config)
+    warnings = []
+    for repository, pool in pools.items():
+        if pool["state"] == "exhausted":
+            warnings.append(
+                f"Treehouse pool for {repository} has no idle slots and has reached its configured limit. Do not remove occupied worktrees."
+            )
+        elif pool["state"] == "unknown":
+            warnings.append(
+                f"Treehouse capacity for {repository} is unknown. Use Treehouse acquisition as the final capacity check."
+            )
     hosts = {}
     mcp = Path(config["agent_dir"]) / "mcp.json"
     if mcp.exists():
@@ -504,7 +592,7 @@ def preflight(config):
         )
     return {
         "checked_at": now().isoformat(),
-        "idle_worktrees": idle,
+        "worktree_pools": pools,
         "telemetry": hosts,
         "warnings": warnings,
     }
@@ -546,6 +634,10 @@ def write_report(directory, run):
         f"* {diagnostic(warning)}"
         for warning in run.get("preflight", {}).get("warnings", [])
     ]
+    for repository, pool in run.get("preflight", {}).get("worktree_pools", {}).items():
+        lines.append(
+            f"* `{repository}`: {pool['state']}; idle: {pool.get('idle', 'unknown') or 'none'}; allocated: {pool.get('allocated', 'unknown') or 'none'}; limit: {pool.get('limit') or 'unknown'}"
+        )
     lines += ["", "## Issue results", ""]
     for number, item in run["items"].items():
         lines += [
@@ -738,15 +830,12 @@ def verify_pull_requests(config, receipt):
         if command(["git", "status", "--porcelain"], cwd=path).strip():
             raise ValueError("PR certification worktree has uncommitted changes")
         remote = command(["git", "remote", "get-url", "origin"], cwd=path).strip()
-        match = re.fullmatch(
-            r"(?:https://github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?/?",
-            remote,
-        )
-        if not match:
+        repository = github_repository(remote)
+        if not repository:
             raise ValueError("PR certification repository cannot be verified")
         sha = command(["git", "rev-parse", "HEAD"], cwd=path).strip()
         command(["pr-marker", "check"], cwd=path)
-        certified.add((match[1], sha))
+        certified.add((repository, sha))
     green = True
     for repository, endpoint, sha in prs:
         if (repository, sha) not in certified:
@@ -847,6 +936,9 @@ def execute(config, state, state_path, lock_fd, runtime):
             else:
                 stage = directory / "items" / str(number)
                 stage.mkdir(parents=True, exist_ok=True, mode=0o700)
+                run["preflight"] = preflight(config)
+                atomic_json(run_path, run)
+                write_report(directory, run)
                 task = {
                     "repository": config["repository"],
                     "number": number,

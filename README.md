@@ -68,6 +68,7 @@ home = Path.home()
 config = {
     "repository": "OWNER/TRACKER",
     "allowed_repositories": ["OWNER/TRACKER", "OWNER/APPLICATION"],
+    "implementation_checkouts": {"OWNER/APPLICATION": str(home / "repos/APPLICATION")},
     "checkout": str(home / "repos/TRACKER"),
     "agent_dir": str(home / ".pi/agent"),
     "state_dir": str(home / ".local/share/backlog-autopilot"),
@@ -108,7 +109,9 @@ The worker retains a lock across its Pi child process. An overlapping manual inv
 
 Repeated startup errors notify once for each daily slot and error. Pause prevents recovery until you resume. Read-only GitHub requests use CFS, with up to three attempts and short delays. Commands have timeouts and save bounded diagnostics with common credential patterns removed. Three consecutive dependency failures checkpoint the pass for later recovery. Issue results distinguish `infrastructure_error` from application or ownership blockers.
 
-The `preflight` CLI action checks required executables, GitHub access, idle Treehouse slots, and configured Splunk and Sentry hostnames. Each execution saves these checks before model work. DNS checks do not prove telemetry authentication or query access. Telemetry and capacity warnings accompany each task so independent investigations can continue without repeating known failures.
+The `preflight` CLI action checks required executables, GitHub access, repository-specific Treehouse capacity, and configured Splunk and Sentry hostnames. The scheduler refreshes these checks before each new issue investigation, not only at startup. DNS checks do not prove telemetry authentication or query access. Telemetry and capacity warnings accompany each task so independent investigations can continue without repeating known failures.
+
+The optional `implementation_checkouts` map names existing local roots for allowlisted repositories. The scheduler verifies each origin before inspecting its pool. Tracking repository capacity is separate from application repository capacity. A pool without idle slots is not exhausted when it can create another slot under its configured limit. Python 3.11 or later reads user and repository TOML settings to determine that limit. Earlier runtimes report unknown limits without claiming exhaustion. Missing mappings or unverifiable checkouts also produce an unknown result. Treehouse acquisition remains the final capacity check.
 
 The `status` action includes the last child heartbeat, activity time, stage, and report path. Running children update `progress.json` each minute. Two hours without output triggers one stall notification for that child, without stopping work. Each pass writes a private `report.md` with outcome counts, PR URLs, dependency warnings, and next actions. Inspect `launchd.log` and the report before retrying. Evidence and release archives have no automatic retention policy; review them before manual cleanup.
 

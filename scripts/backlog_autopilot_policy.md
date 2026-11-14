@@ -14,7 +14,7 @@ This worker runs with the operator's existing host permissions. It is not a secu
 
 Read the task file, its complete issue snapshot, and the complete context notes. Read previous-attempt evidence and sessions when present. Refresh the issue and comments through `gh-axi`. Read that skill and consult current CLI help first.
 
-Read `dependency_health` in the task before querying telemetry or starting implementation. Do not retry a hostname that the current preflight marked unavailable. Continue independent investigations, and report the missing dependency when it prevents a safe conclusion. Do not remove occupied Treehouse worktrees to create capacity.
+Read `dependency_health` in the task before querying telemetry or starting implementation. The scheduler refreshes this evidence before each new investigation. Apply each `worktree_pools` result only to its named repository. Tracking repository capacity is not a global implementation limit. An `available` pool has idle slots. A `can_create` pool has room under its configured limit. An `unknown` result does not prove exhaustion; use Treehouse acquisition as the final check. Do not retry a hostname that the current preflight marked unavailable. Continue independent investigations, and report the missing dependency when it prevents a safe conclusion. Do not remove occupied Treehouse worktrees to create capacity.
 
 Identify duplicate symptoms, shared infrastructure failures, existing fixes, dependencies, and ownership boundaries. Verify hypotheses against source and current telemetry. Keep evidence paths and query times.
 

@@ -210,6 +210,8 @@ class ReliabilityTests(unittest.TestCase):
             )
 
             def command(argv, **kwargs):
+                if argv[0] == "git":
+                    return "https://github.com/example/tracker.git"
                 if argv[0] == "treehouse":
                     return json.dumps([{"status": "leased"}])
                 if argv[-1] == "logs.example.test":
@@ -225,13 +227,49 @@ class ReliabilityTests(unittest.TestCase):
                 worker.shutil, "which", return_value="/tool"
             ), patch.object(worker, "api", return_value={}), patch.object(
                 worker, "command", side_effect=command
+            ), patch.object(
+                worker, "treehouse_limit", return_value=24
             ):
                 health = worker.preflight(config)
-            self.assertEqual(health["idle_worktrees"], 0)
+            self.assertEqual(health["worktree_pools"]["example/tracker"]["idle"], 0)
+            self.assertEqual(
+                health["worktree_pools"]["example/tracker"]["state"], "can_create"
+            )
             self.assertEqual(health["telemetry"]["Splunk"]["dns"], "unavailable")
             self.assertEqual(health["telemetry"]["Sentry"]["dns"], "available")
-            self.assertEqual(len(health["warnings"]), 2)
+            self.assertEqual(len(health["warnings"]), 1)
             self.assertNotIn("private-value", json.dumps(health))
+
+    def test_preflight_warns_only_for_the_exhausted_repository(self):
+        config = {
+            "repository": "example/tracker",
+            "checkout": "/tracker",
+            "agent_dir": "/unconfigured-agent",
+        }
+        pools = {
+            "example/tracker": {
+                "state": "can_create",
+                "idle": 0,
+                "allocated": 2,
+                "limit": 24,
+            },
+            "example/app": {
+                "state": "exhausted",
+                "idle": 0,
+                "allocated": 24,
+                "limit": 24,
+            },
+        }
+        with patch.object(worker.shutil, "which", return_value="/tool"), patch.object(
+            worker, "api", return_value={}
+        ), patch.object(worker, "worktree_pools", return_value=pools):
+            health = worker.preflight(config)
+        capacity_warnings = [
+            warning for warning in health["warnings"] if warning.startswith("Treehouse")
+        ]
+        self.assertEqual(len(capacity_warnings), 1)
+        self.assertIn("example/app", capacity_warnings[0])
+        self.assertNotIn("example/tracker", capacity_warnings[0])
 
     def test_preflight_missing_tool_prevents_github_and_model_work(self):
         with patch.object(worker.shutil, "which", return_value=None), patch.object(
@@ -264,6 +302,83 @@ class ReliabilityTests(unittest.TestCase):
             self.assertEqual(saved["child_pid"], 123)
             self.assertEqual(saved["status"], "running")
             self.assertEqual(saved["heartbeat_at"], "2026-11-07T04:00:00+00:00")
+
+
+class CapacityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.tracker = self.root / "tracker"
+        self.app = self.root / "app"
+        self.tracker.mkdir()
+        self.app.mkdir()
+        self.config = {
+            "repository": "example/tracker",
+            "checkout": str(self.tracker),
+            "allowed_repositories": ["example/tracker", "example/app"],
+            "implementation_checkouts": {"example/app": str(self.app)},
+        }
+        settings = self.root / ".config/treehouse/config.toml"
+        settings.parent.mkdir(parents=True)
+        settings.write_text("max_trees = 24\n")
+
+    def command(self, argv, cwd=None, **kwargs):
+        if argv[0] == "git":
+            return f"https://github.com/example/{Path(cwd).name}.git\n"
+        return json.dumps(
+            [{"status": "leased"}] * (2 if Path(cwd) == self.tracker else 17)
+            + ([] if Path(cwd) == self.tracker else [{"status": "available"}])
+        )
+
+    @unittest.skipIf(
+        sys.version_info < (3, 11), "Configured limits require the stdlib TOML parser"
+    )
+    def test_tracking_pool_without_idle_slots_does_not_hide_implementation_capacity(
+        self,
+    ):
+        with patch.object(worker.Path, "home", return_value=self.root), patch.object(
+            worker, "command", side_effect=self.command
+        ):
+            pools = worker.worktree_pools(self.config)
+        self.assertEqual(pools["example/tracker"]["state"], "can_create")
+        self.assertEqual(pools["example/tracker"]["limit"], 24)
+        self.assertEqual(pools["example/app"]["state"], "available")
+        self.assertEqual(pools["example/app"]["idle"], 1)
+
+    @unittest.skipIf(
+        sys.version_info < (3, 11), "Configured limits require the stdlib TOML parser"
+    )
+    def test_repo_override_and_real_exhaustion_are_distinct_from_no_idle_slots(self):
+        (self.tracker / "treehouse.toml").write_text("max_trees = 2\n")
+        with patch.object(worker.Path, "home", return_value=self.root), patch.object(
+            worker, "command", side_effect=self.command
+        ):
+            pools = worker.worktree_pools(self.config)
+        self.assertEqual(pools["example/tracker"]["state"], "exhausted")
+        self.assertEqual(pools["example/app"]["limit"], 24)
+
+    def test_unknown_limit_does_not_claim_pool_exhaustion(self):
+        with patch.object(worker, "tomllib", None), patch.object(
+            worker, "command", side_effect=self.command
+        ):
+            pools = worker.worktree_pools(self.config)
+        self.assertEqual(pools["example/tracker"]["state"], "unknown")
+        self.assertIsNone(pools["example/tracker"]["limit"])
+        self.assertEqual(pools["example/app"]["state"], "available")
+
+    def test_unmapped_or_wrong_repository_is_unknown_not_full(self):
+        config = {**self.config, "implementation_checkouts": {}}
+        with patch.object(worker, "command", side_effect=self.command):
+            pools = worker.worktree_pools(config)
+        self.assertEqual(pools["example/app"]["state"], "unknown")
+        self.assertIn("not configured", pools["example/app"]["detail"])
+        with patch.object(
+            worker, "command", return_value="https://github.com/other/repo.git"
+        ):
+            pools = worker.worktree_pools(self.config)
+        self.assertEqual(pools["example/app"]["state"], "unknown")
+        self.assertIn("does not match", pools["example/app"]["detail"])
 
 
 class PrCertificationTests(unittest.TestCase):
@@ -503,7 +618,7 @@ class WorkerTests(unittest.TestCase):
         self.state = {"last_slot": "2026-10-30T18:00:00-07:00", "active_run": None}
         worker.atomic_json(self.state_path, self.state)
         preflight = patch.object(
-            worker, "preflight", return_value={"warnings": [], "idle_worktrees": 1}
+            worker, "preflight", return_value={"warnings": [], "worktree_pools": {}}
         )
         preflight.start()
         self.addCleanup(preflight.stop)
@@ -523,6 +638,19 @@ class WorkerTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "allowlisted"):
             worker.load_config(self.config_path)
+
+    def test_config_rejects_untrusted_or_relative_implementation_checkouts(self):
+        for mapping in (
+            {"outsider/app": "/checkout"},
+            {"example/app": "relative"},
+            {"example/tracker": "/different-tracker"},
+            [],
+        ):
+            worker.atomic_json(
+                self.config_path, {**self.config, "implementation_checkouts": mapping}
+            )
+            with self.subTest(mapping=mapping), self.assertRaises(ValueError):
+                worker.load_config(self.config_path)
 
     def test_atomic_write_leaves_complete_json_and_no_temporary_files(self):
         worker.atomic_json(self.state_path, {"new": [1, 2, 3]})
@@ -1243,7 +1371,8 @@ allocation={"path":str(root),"lease_id":"replay","lease_holder":"replay"}
 if name=="treehouse":
     print(json.dumps([{**allocation,"status":"leased","processes":[]}] if sys.argv[1]=="status" else allocation))
 elif name=="git":
-    if sys.argv[1]=="rev-list": print("unpublished-replay")
+    if sys.argv[1:4]==["remote","get-url","origin"]: print("https://github.com/example/tracker.git")
+    elif sys.argv[1]=="rev-list": print("unpublished-replay")
     elif sys.argv[1]!="status": sys.exit(9)
 elif name=="gh":
     assert sys.argv[1:7]==["cfs","--","npx","-y","gh-axi","api"]
@@ -1278,6 +1407,7 @@ else: sys.exit(9)
             **os.environ,
             "PATH": str(tools) + os.pathsep + os.environ["PATH"],
             "WORKER_REPLAY_ROOT": str(self.root),
+            "HOME": str(self.root),
         }
         for _ in range(2):
             result = subprocess.run(
@@ -1309,6 +1439,47 @@ else: sys.exit(9)
         )
         progress = worker.read_json(Path(self.config["state_dir"]) / "progress.json")
         self.assertEqual(progress["status"], "finished")
+
+    def test_each_new_issue_gets_refreshed_dependency_health(self):
+        directory = self.saved_run(count=2)
+        health = [
+            {"warnings": [], "checked_at": label, "worktree_pools": {}}
+            for label in ("startup", "before-1", "before-2")
+        ]
+        observed = []
+
+        def model(config, stage, *args, **kwargs):
+            task = worker.read_json(stage / "task.json")
+            observed.append(task["dependency_health"]["checked_at"])
+            worker.atomic_json(
+                stage / "receipt.json",
+                {
+                    "number": task["number"],
+                    "outcome": "blocked",
+                    "summary": "Needs owner",
+                    "evidence": [],
+                },
+            )
+
+        with patch.object(worker, "preflight", side_effect=health), patch.object(
+            worker, "lease", return_value=self.root
+        ), patch.object(
+            worker,
+            "api",
+            side_effect=lambda endpoint: issue(int(endpoint.rsplit("/", 1)[1])),
+        ), patch.object(
+            worker, "run_pi", side_effect=model
+        ), patch.object(
+            worker, "notify"
+        ):
+            worker.execute(
+                self.config, self.state, self.state_path, 1, MODULE_PATH.parent
+            )
+        self.assertEqual(observed, ["before-1", "before-2"])
+        self.assertEqual(
+            worker.read_json(directory / "run.json")["preflight"]["checked_at"],
+            "before-2",
+        )
 
     def test_dependency_outage_checkpoints_and_retry_revisits_only_failed_items(self):
         directory = self.saved_run(count=4)
