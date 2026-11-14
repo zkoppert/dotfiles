@@ -97,7 +97,7 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.zkoppert.back
 
 Installation does not start remediation or consume the next Friday run. The dry run fetches real issues and comments without launching models or changing GitHub. It writes evidence under the private state directory.
 
-Run `/reload` in Pi to load `/autopilot status`, `/autopilot pause`, and `/autopilot resume`. Pause takes effect between items, not during active tool calls. The CLI provides the same controls:
+Run `/reload` in Pi to load `/autopilot status`, `/autopilot pause`, and `/autopilot resume`. Pause takes effect between analysis batches or issues, not during active tool calls. The CLI provides the same controls:
 
 ```bash
 # Inspect or resume saved progress without changing the Friday schedule.
@@ -126,6 +126,29 @@ The policy permits fully certified draft PRs and evidence-based stale-issue clos
 This worker uses the existing Pi profile and account credentials. Neither its prompt policy nor Treehouse provides a security sandbox. Use a dedicated account or isolated environment when issue sources are not trusted. Do not copy credentials into configuration or snapshots.
 
 Worker children set `BACKLOG_AUTOPILOT_CHILD=1` to prevent nested control commands. They also set `PI_CRON_DISABLED=1` to disable the existing in-session scheduler. These variables are coordination guards, not security boundaries.
+
+### How do I select the work Tailscale profile automatically?
+
+Profile switching changes the whole Mac's private-network connection. Keep profile IDs in the private worker configuration, not in this repository. Add an optional `tailscale` object with these fields:
+
+| Field | Value |
+| --- | --- |
+| `executable` | Absolute Tailscale CLI path, such as `/Applications/Tailscale.app/Contents/MacOS/Tailscale`. |
+| `work_profile` | Saved GitHub work profile ID. |
+| `restore_profile` | Saved personal profile ID to select after each execution attempt. |
+
+Find the IDs without changing profiles:
+
+```bash
+# Read saved account IDs and the current selection.
+/Applications/Tailscale.app/Contents/MacOS/Tailscale switch --list --json
+```
+
+The worker selects and verifies the work profile before investigation. It restores the configured personal profile after completion, a pause, or an execution failure. Restoration also happens when work began with the GitHub profile already selected. Missing profiles or a disconnected work profile prevent execution instead of triggering login or changing credentials.
+
+The worker saves `tailscale-session.json` before switching. On `SIGTERM` or `SIGINT`, the worker stops its child before restoring the profile. A later scheduled check recovers pending restoration after an abrupt crash, once no worker child holds the execution lock. Recovery also runs while paused or when no daily pass is due. Power loss or a forced kill cannot restore the network immediately. Failed restoration retains its receipt and reports an error for retry. An unrelated profile selected manually is not overwritten; operator review is required.
+
+Idle ticks and the `status`, `preflight`, and control commands do not initiate profile switching. The `status` output includes any pending network session. Automatic switching is disabled when the `tailscale` object is absent.
 
 Candidate self-improvements must have persistent tests and independent review. The worker cannot activate candidates through its control interface. Review candidates before running `install` again. Set `source_checkout` to the maintained source checkout before installation. When configured, the installer refuses another source checkout. Each release records its source commit, checkout, and runtime hashes in `release.json`. Installation retains prior releases; it does not change the saved daily slot or run history.
 

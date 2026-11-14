@@ -6,9 +6,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -32,6 +34,44 @@ def issue(number=1, title="[Sentry] Example", **fields):
 def envelope(value):
     encoded = base64.b64encode(json.dumps(value).encode()).decode()
     return f"api_response:\n  body: {encoded}\n  truncated: false\n"
+
+
+class FakeTailscale:
+    def __init__(self):
+        self.settings = {
+            "executable": "/fixture/tailscale",
+            "work_profile": "work",
+            "restore_profile": "personal",
+        }
+        self.selected = "personal"
+        self.ids = ["work", "personal", "third"]
+        self.events = []
+        self.fail_before = set()
+        self.fail_after = set()
+        self.backend = "Running"
+
+    def command(self, argv, **kwargs):
+        assert argv[0] == self.settings["executable"], argv
+        args = argv[1:]
+        if args == ["switch", "--list", "--json"]:
+            return json.dumps(
+                [
+                    {"id": profile, "selected": profile == self.selected}
+                    for profile in self.ids
+                ]
+            )
+        if args == ["status", "--json"]:
+            return json.dumps({"BackendState": self.backend})
+        if len(args) == 2 and args[0] == "switch" and args[1] in self.ids:
+            profile = args[1]
+            self.events.append(profile)
+            if profile in self.fail_before:
+                raise worker.InfrastructureError("Simulated switch failure")
+            self.selected = profile
+            if profile in self.fail_after:
+                raise worker.InfrastructureError("Simulated failure after switching")
+            return "Success"
+        raise AssertionError(argv)
 
 
 class ScheduleTests(unittest.TestCase):
@@ -302,6 +342,179 @@ class ReliabilityTests(unittest.TestCase):
             self.assertEqual(saved["child_pid"], 123)
             self.assertEqual(saved["status"], "running")
             self.assertEqual(saved["heartbeat_at"], "2026-11-07T04:00:00+00:00")
+
+
+class TailscaleTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.vpn = FakeTailscale()
+        self.config = {"state_dir": str(self.root), "tailscale": self.vpn.settings}
+        self.journal = self.root / "tailscale-session.json"
+
+    def test_selects_work_before_body_and_restores_personal_after_success_or_failure(
+        self,
+    ):
+        for already_work in (False, True):
+            for fail in (False, True):
+                with self.subTest(already_work=already_work, fail=fail):
+                    self.vpn.selected = "work" if already_work else "personal"
+                    self.vpn.events.clear()
+                    with patch.object(worker, "command", side_effect=self.vpn.command):
+                        try:
+                            with worker.tailscale_session(self.config):
+                                self.assertEqual(self.vpn.selected, "work")
+                                self.assertTrue(self.journal.exists())
+                                if fail:
+                                    raise ValueError("Work failed")
+                        except ValueError as error:
+                            self.assertTrue(fail)
+                            self.assertEqual(str(error), "Work failed")
+                    self.assertEqual(self.vpn.selected, "personal")
+                    self.assertFalse(self.journal.exists())
+                    self.assertEqual(
+                        self.vpn.events,
+                        ["personal"] if already_work else ["work", "personal"],
+                    )
+
+    def test_missing_profile_aborts_before_switching_or_recording_ownership(self):
+        self.vpn.ids.remove("work")
+        with patch.object(
+            worker, "command", side_effect=self.vpn.command
+        ), self.assertRaises(worker.InfrastructureError):
+            with worker.tailscale_session(self.config):
+                self.fail("Work ran without the configured profile")
+        self.assertEqual(self.vpn.events, [])
+        self.assertFalse(self.journal.exists())
+
+    def test_failed_or_disconnected_work_selection_restores_personal(self):
+        self.vpn.fail_after.add("work")
+        with patch.object(
+            worker, "command", side_effect=self.vpn.command
+        ), self.assertRaises(worker.InfrastructureError):
+            with worker.tailscale_session(self.config):
+                self.fail("Work ran after a switch failure")
+        self.assertEqual(self.vpn.selected, "personal")
+        self.assertFalse(self.journal.exists())
+        self.vpn.fail_after.clear()
+        self.vpn.backend = "NeedsLogin"
+        with patch.object(
+            worker, "command", side_effect=self.vpn.command
+        ), self.assertRaisesRegex(worker.InfrastructureError, "not connected"):
+            with worker.tailscale_session(self.config):
+                self.fail("Work ran without connectivity")
+        self.assertEqual(self.vpn.selected, "personal")
+
+    def test_restore_failure_retains_receipt_for_recovery(self):
+        self.vpn.fail_before.add("personal")
+        with patch.object(worker, "command", side_effect=self.vpn.command):
+            with self.assertRaises(worker.InfrastructureError):
+                with worker.tailscale_session(self.config):
+                    pass
+            self.assertEqual(self.vpn.selected, "work")
+            self.assertEqual(worker.read_json(self.journal)["phase"], "restoring")
+            self.vpn.fail_before.clear()
+            self.assertTrue(worker.restore_tailscale(self.config))
+        self.assertEqual(self.vpn.selected, "personal")
+        self.assertFalse(self.journal.exists())
+
+    def test_manual_third_profile_is_not_overridden_on_exit(self):
+        with patch.object(
+            worker, "command", side_effect=self.vpn.command
+        ), self.assertRaisesRegex(worker.InfrastructureError, "changed manually"):
+            with worker.tailscale_session(self.config):
+                self.vpn.selected = "third"
+        self.assertEqual(self.vpn.selected, "third")
+        self.assertTrue(self.journal.exists())
+        self.assertEqual(self.vpn.events, ["work"])
+
+    def test_real_sigterm_stops_child_before_restoring_profile(self):
+        vpn_state = self.root / "vpn.json"
+        worker.atomic_json(vpn_state, {"selected": "personal", "switches": []})
+        executable = self.root / "tailscale"
+        executable.write_text("#!" + sys.executable + "\n" + f"""
+import json,pathlib,sys
+path=pathlib.Path({str(vpn_state)!r});state=json.loads(path.read_text());args=sys.argv[1:]
+if args==["switch","--list","--json"]:
+ print(json.dumps([{{"id":p,"selected":p==state["selected"]}} for p in ("work","personal")]))
+elif args==["status","--json"]: print(json.dumps({{"BackendState":"Running"}}))
+elif len(args)==2 and args[0]=="switch":
+ state["selected"]=args[1];state["switches"].append(args[1]);path.write_text(json.dumps(state))
+else: sys.exit(9)
+""")
+        executable.chmod(0o700)
+        started = self.root / "child.pid"
+        fake_pi = self.root / "sleeping-pi"
+        fake_pi.write_text(
+            "#!"
+            + sys.executable
+            + "\nimport os,pathlib,time\n"
+            + f"pathlib.Path({str(started)!r}).write_text(str(os.getpid()))\ntime.sleep(60)\n"
+        )
+        fake_pi.chmod(0o700)
+        harness = f"""
+import importlib.util,pathlib,sys
+spec=importlib.util.spec_from_file_location("worker",{str(MODULE_PATH)!r});w=importlib.util.module_from_spec(spec);spec.loader.exec_module(w)
+root=pathlib.Path({str(self.root)!r})
+config={{"state_dir":str(root),"pi":{str(fake_pi)!r},"agent_dir":str(root),"model":"fixture","tailscale":{{"executable":{str(executable)!r},"work_profile":"work","restore_profile":"personal"}}}}
+try:
+ with w.exclusive_lock(root) as fd,w.worker_signals(),w.tailscale_session(config):
+  w.run_pi(config,root/"stage",root,"fixture",fd,pathlib.Path({str(MODULE_PATH.with_name('backlog_autopilot_policy.md'))!r}))
+except w.WorkerInterrupted as error: sys.exit(128+error.signum)
+"""
+        process = subprocess.Popen(
+            [sys.executable, "-c", harness],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            for _ in range(100):
+                if started.exists() or process.poll() is not None:
+                    break
+                time.sleep(0.05)
+            self.assertTrue(started.exists(), "Fixture child did not start")
+            child_pid = int(started.read_text())
+            self.assertEqual(worker.read_json(vpn_state)["selected"], "work")
+            process.send_signal(signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=15)
+            self.assertEqual(process.returncode, 128 + signal.SIGTERM, stderr)
+            self.assertEqual(
+                worker.read_json(vpn_state),
+                {"selected": "personal", "switches": ["work", "personal"]},
+            )
+            self.assertFalse(self.journal.exists())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child_pid, 0)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.communicate(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate()
+            if started.exists():
+                pid = int(started.read_text())
+                check = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "command="],
+                    capture_output=True,
+                    text=True,
+                )
+                if str(fake_pi) in check.stdout:
+                    os.kill(pid, signal.SIGTERM)
+
+    def test_crash_recovery_does_not_accept_changed_profile_configuration(self):
+        worker.atomic_json(
+            self.journal, {"work_profile": "other-work", "restore_profile": "personal"}
+        )
+        with patch.object(
+            worker, "command", side_effect=self.vpn.command
+        ), self.assertRaisesRegex(worker.InfrastructureError, "does not match"):
+            worker.restore_tailscale(self.config)
+        self.assertEqual(self.vpn.events, [])
+        self.assertTrue(self.journal.exists())
 
 
 class CapacityTests(unittest.TestCase):
@@ -622,6 +835,167 @@ class WorkerTests(unittest.TestCase):
         )
         preflight.start()
         self.addCleanup(preflight.stop)
+
+    def test_tailscale_work_wraps_execution_and_restores_after_failure(self):
+        vpn = FakeTailscale()
+        worker.atomic_json(self.config_path, {**self.config, "tailscale": vpn.settings})
+
+        def execute(*args):
+            self.assertEqual(vpn.selected, "work")
+            vpn.events.append("execute")
+            raise RuntimeError("Work failed")
+
+        with patch.object(worker, "command", side_effect=vpn.command), patch.object(
+            worker, "execute", side_effect=execute
+        ), patch.object(worker, "notify"):
+            self.assertEqual(worker.main(["--config", str(self.config_path), "run"]), 1)
+        self.assertEqual(vpn.events, ["work", "execute", "personal"])
+        self.assertFalse(
+            (Path(self.config["state_dir"]) / "tailscale-session.json").exists()
+        )
+
+    def test_failed_network_start_does_not_consume_daily_slot(self):
+        vpn = FakeTailscale()
+        vpn.fail_before.add("work")
+        worker.atomic_json(self.config_path, {**self.config, "tailscale": vpn.settings})
+        with patch.object(worker, "command", side_effect=vpn.command), patch.object(
+            worker, "execute"
+        ) as execute, patch.object(worker, "notify"), patch.object(
+            worker,
+            "now",
+            return_value=datetime.fromisoformat("2026-11-07T02:00:00+00:00"),
+        ):
+            self.assertEqual(
+                worker.main(["--config", str(self.config_path), "scheduled"]), 1
+            )
+        saved = worker.read_json(self.state_path)
+        self.assertEqual(saved["last_slot"], self.state["last_slot"])
+        self.assertIn("retry_after", saved)
+        self.assertEqual(vpn.selected, "personal")
+        execute.assert_not_called()
+
+    def test_pending_network_restores_even_when_paused_or_not_due(self):
+        vpn = FakeTailscale()
+        root = Path(self.config["state_dir"])
+        worker.atomic_json(self.config_path, {**self.config, "tailscale": vpn.settings})
+        instant = datetime.fromisoformat("2026-11-07T02:00:00+00:00")
+        worker.atomic_json(
+            self.state_path,
+            {**self.state, "last_slot": worker.latest_slot(instant).isoformat()},
+        )
+        for paused in (False, True):
+            vpn.selected = "work"
+            worker.atomic_json(
+                root / "tailscale-session.json",
+                {"work_profile": "work", "restore_profile": "personal"},
+            )
+            if paused:
+                (root / "paused").touch()
+            with patch.object(worker, "command", side_effect=vpn.command), patch.object(
+                worker, "execute"
+            ) as execute, patch.object(worker, "now", return_value=instant):
+                self.assertEqual(
+                    worker.main(["--config", str(self.config_path), "scheduled"]), 0
+                )
+            self.assertEqual(vpn.selected, "personal")
+            self.assertFalse((root / "tailscale-session.json").exists())
+            execute.assert_not_called()
+
+    def test_idle_tick_and_read_only_controls_do_not_switch_profiles(self):
+        vpn = FakeTailscale()
+        worker.atomic_json(self.config_path, {**self.config, "tailscale": vpn.settings})
+        instant = datetime.fromisoformat("2026-11-07T02:00:00+00:00")
+        worker.atomic_json(
+            self.state_path,
+            {**self.state, "last_slot": worker.latest_slot(instant).isoformat()},
+        )
+        with patch.object(worker, "command", side_effect=vpn.command), patch.object(
+            worker, "now", return_value=instant
+        ):
+            for action in ("scheduled", "status", "preflight"):
+                self.assertEqual(
+                    worker.main(["--config", str(self.config_path), action]), 0
+                )
+        self.assertEqual(vpn.events, [])
+        self.assertEqual(vpn.selected, "personal")
+
+    def test_restore_retry_does_not_repeat_a_completed_daily_pass(self):
+        vpn = FakeTailscale()
+        vpn.fail_before.add("personal")
+        worker.atomic_json(self.config_path, {**self.config, "tailscale": vpn.settings})
+        instant = datetime.fromisoformat("2026-11-07T02:00:00+00:00")
+        with patch.object(worker, "command", side_effect=vpn.command), patch.object(
+            worker, "execute"
+        ) as execute, patch.object(worker, "notify"), patch.object(
+            worker, "now", return_value=instant
+        ):
+            self.assertEqual(
+                worker.main(["--config", str(self.config_path), "scheduled"]), 1
+            )
+            vpn.fail_before.clear()
+            self.assertEqual(
+                worker.main(["--config", str(self.config_path), "scheduled"]), 0
+            )
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(vpn.selected, "personal")
+        self.assertNotIn("retry_after", worker.read_json(self.state_path))
+        self.assertFalse(
+            (Path(self.config["state_dir"]) / "tailscale-session.json").exists()
+        )
+
+    def test_held_worker_lock_prevents_network_restoration(self):
+        vpn = FakeTailscale()
+        vpn.selected = "work"
+        root = Path(self.config["state_dir"])
+        worker.atomic_json(self.config_path, {**self.config, "tailscale": vpn.settings})
+        worker.atomic_json(
+            root / "tailscale-session.json",
+            {"work_profile": "work", "restore_profile": "personal"},
+        )
+        with worker.exclusive_lock(root), patch.object(
+            worker, "command", side_effect=vpn.command
+        ), patch.object(worker, "notify"):
+            self.assertEqual(
+                worker.main(["--config", str(self.config_path), "scheduled"]), 0
+            )
+        self.assertEqual(vpn.selected, "work")
+        self.assertTrue((root / "tailscale-session.json").exists())
+        self.assertEqual(vpn.events, [])
+
+    def test_interrupt_restores_network_and_original_signal_handlers(self):
+        vpn = FakeTailscale()
+        worker.atomic_json(self.config_path, {**self.config, "tailscale": vpn.settings})
+        previous = signal.getsignal(signal.SIGTERM)
+        with patch.object(worker, "command", side_effect=vpn.command), patch.object(
+            worker, "execute", side_effect=worker.WorkerInterrupted(signal.SIGTERM)
+        ):
+            self.assertEqual(
+                worker.main(["--config", str(self.config_path), "run"]),
+                128 + signal.SIGTERM,
+            )
+        self.assertEqual(vpn.selected, "personal")
+        self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
+        self.assertFalse(
+            (Path(self.config["state_dir"]) / "tailscale-session.json").exists()
+        )
+
+    def test_config_rejects_invalid_tailscale_profile_settings(self):
+        for settings in (
+            {},
+            {
+                "executable": "relative",
+                "work_profile": "work",
+                "restore_profile": "personal",
+            },
+            {
+                "executable": "/tailscale",
+                "work_profile": "same",
+                "restore_profile": "same",
+            },
+        ):
+            worker.atomic_json(self.config_path, {**self.config, "tailscale": settings})
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                worker.load_config(self.config_path)
 
     def test_config_rejects_broad_permissions_symlinks_and_unauthorized_tracker(self):
         self.assertEqual(worker.load_config(self.config_path), self.config)
@@ -1558,6 +1932,38 @@ else: sys.exit(9)
         self.assertEqual(
             worker.read_json(self.state_path)["last_slot"], "2026-11-09T18:00:00-08:00"
         )
+
+    def test_pause_between_analysis_batches_preserves_receipt_without_starting_next_batch(
+        self,
+    ):
+        directory = self.saved_run(count=2)
+        rows = worker.read_json(directory / "snapshot/manifest.json")["issues"]
+        (directory / "analysis/0/receipt.json").unlink()
+
+        def analyze(config, stage, *args, **kwargs):
+            worker.atomic_json(
+                stage / "receipt.json",
+                {
+                    "snapshot_sha256": "snapshot",
+                    "notes": [{**rows[0], "note": "Verified first batch"}],
+                },
+            )
+            (Path(self.config["state_dir"]) / "paused").touch()
+
+        with patch.object(worker, "lease", return_value=self.root), patch.object(
+            worker, "analysis_batches", return_value=[[rows[0]], [rows[1]]]
+        ), patch.object(worker, "run_pi", side_effect=analyze) as model, patch.object(
+            worker, "api"
+        ) as api:
+            worker.execute(
+                self.config, self.state, self.state_path, 1, MODULE_PATH.parent
+            )
+        self.assertEqual(model.call_count, 1)
+        self.assertTrue((directory / "analysis/0/receipt.json").exists())
+        self.assertFalse((directory / "analysis/1").exists())
+        self.assertEqual(self.state["active_run"], "resume")
+        self.assertEqual(worker.read_json(directory / "run.json")["items"], {})
+        api.assert_not_called()
 
     def test_bad_analysis_prevents_any_remediation(self):
         snapshot_dir = Path(self.config["state_dir"]) / "runs/test/snapshot"

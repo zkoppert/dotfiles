@@ -52,6 +52,11 @@ class WorkerBusy(RuntimeError):
     """The stable worker lock belongs to another process."""
 
 
+class WorkerInterrupted(BaseException):
+    def __init__(self, signum):
+        self.signum = signum
+
+
 def now():
     return datetime.now(timezone.utc)
 
@@ -130,6 +135,22 @@ def load_config(path):
         raise ValueError(
             "Implementation checkout cannot override the tracking checkout"
         )
+    settings = config.get("tailscale")
+    if settings is not None:
+        if not isinstance(settings, dict) or any(
+            not isinstance(settings.get(key), str) or not settings[key].strip()
+            for key in ("executable", "work_profile", "restore_profile")
+        ):
+            raise ValueError(
+                "Tailscale configuration requires an executable and two profile IDs"
+            )
+        if (
+            not Path(settings["executable"]).is_absolute()
+            or settings["work_profile"] == settings["restore_profile"]
+        ):
+            raise ValueError(
+                "Tailscale requires an absolute executable and distinct profile IDs"
+            )
     return config
 
 
@@ -317,6 +338,117 @@ def exclusive_lock(directory):
                 "Another backlog worker or child still holds the lock"
             ) from None
         yield stream.fileno()
+
+
+def active_tailscale_profile(settings):
+    rows = json.loads(
+        command([settings["executable"], "switch", "--list", "--json"], timeout=30)
+    )
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict)
+        or not isinstance(row.get("id"), str)
+        or not isinstance(row.get("selected"), bool)
+        for row in rows
+    ):
+        raise InfrastructureError("Unexpected Tailscale profile response")
+    ids = [row["id"] for row in rows]
+    selected = [row["id"] for row in rows if row["selected"]]
+    if (
+        len(set(ids)) != len(ids)
+        or len(selected) != 1
+        or any(settings[key] not in ids for key in ("work_profile", "restore_profile"))
+    ):
+        raise InfrastructureError(
+            "Cannot verify the configured Tailscale profiles and active selection"
+        )
+    return selected[0]
+
+
+def select_tailscale_profile(settings, profile):
+    if active_tailscale_profile(settings) != profile:
+        command([settings["executable"], "switch", profile], timeout=30)
+    if active_tailscale_profile(settings) != profile:
+        raise InfrastructureError("Tailscale did not select the requested profile")
+
+
+def restore_tailscale(config):
+    path = Path(config["state_dir"]) / "tailscale-session.json"
+    if not path.exists():
+        return False
+    settings = config.get("tailscale")
+    receipt = read_json(path)
+    if not settings or any(
+        receipt.get(key) != settings[key] for key in ("work_profile", "restore_profile")
+    ):
+        raise InfrastructureError(
+            "Pending Tailscale restoration does not match configuration; reconcile it before continuing"
+        )
+    selected = active_tailscale_profile(settings)
+    if selected not in (settings["work_profile"], settings["restore_profile"]):
+        raise InfrastructureError(
+            "Tailscale profile changed manually; restoration needs operator review"
+        )
+    receipt["phase"] = "restoring"
+    atomic_json(path, receipt)
+    select_tailscale_profile(settings, settings["restore_profile"])
+    path.unlink()
+    LOG.info("Restored the configured personal Tailscale profile")
+    return True
+
+
+@contextmanager
+def tailscale_session(config):
+    settings = config.get("tailscale")
+    if not settings:
+        yield
+        return
+    active_tailscale_profile(settings)
+    path = Path(config["state_dir"]) / "tailscale-session.json"
+    if path.exists():
+        raise InfrastructureError(
+            "Recover pending Tailscale restoration before starting work"
+        )
+    atomic_json(
+        path,
+        {
+            "work_profile": settings["work_profile"],
+            "restore_profile": settings["restore_profile"],
+            "pid": os.getpid(),
+            "started_at": now().isoformat(),
+            "phase": "starting",
+        },
+    )
+    try:
+        select_tailscale_profile(settings, settings["work_profile"])
+        status = json.loads(
+            command([settings["executable"], "status", "--json"], timeout=30)
+        )
+        if status.get("BackendState") != "Running":
+            raise InfrastructureError(
+                "Tailscale work profile is not connected; operator login or reconnection is required"
+            )
+        receipt = read_json(path)
+        receipt["phase"] = "active"
+        atomic_json(path, receipt)
+        yield
+    finally:
+        restore_tailscale(config)
+
+
+@contextmanager
+def worker_signals():
+    def interrupt(signum, _frame):
+        raise WorkerInterrupted(signum)
+
+    previous = {
+        signum: signal.signal(signum, interrupt)
+        for signum in (signal.SIGTERM, signal.SIGINT)
+    }
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def notify(message):
@@ -883,6 +1015,9 @@ def execute(config, state, state_path, lock_fd, runtime):
     policy = runtime / "backlog_autopilot_policy.md"
     notes = []
     for index, batch in enumerate(analysis_batches(manifest, snapshot_dir)):
+        if (root / "paused").exists():
+            atomic_json(run_path, run)
+            return
         stage = directory / "analysis" / str(index)
         receipt_path = stage / "receipt.json"
         if receipt_path.exists():
@@ -1186,6 +1321,11 @@ def main(argv=None):
                     {
                         **state,
                         "paused": (root / "paused").exists(),
+                        "tailscale_session": (
+                            read_json(root / "tailscale-session.json")
+                            if (root / "tailscale-session.json").exists()
+                            else None
+                        ),
                         "progress": (
                             read_json(root / "progress.json")
                             if (root / "progress.json").exists()
@@ -1220,10 +1360,15 @@ def main(argv=None):
                 )
             )
             return 0
-        if (root / "paused").exists():
-            return 0
         with exclusive_lock(root) as lock_fd:
             state = read_json(state_path)
+            # Recover only after the lock proves that no worker child still owns the network.
+            if restore_tailscale(config) and not state.get("active_run"):
+                state.pop("retry_after", None)
+                state.pop("consecutive_failures", None)
+                atomic_json(state_path, state)
+            if (root / "paused").exists():
+                return 0
             if args.action == "scheduled":
                 slot = latest_slot(now())
                 if not state.get("active_run") and slot <= datetime.fromisoformat(
@@ -1234,11 +1379,12 @@ def main(argv=None):
                     state["retry_after"]
                 ):
                     return 0
-                if not state.get("active_run"):
-                    state["last_slot"] = slot.isoformat()
-                    atomic_json(state_path, state)
             try:
-                execute(config, state, state_path, lock_fd, runtime)
+                with worker_signals(), tailscale_session(config):
+                    if args.action == "scheduled" and not state.get("active_run"):
+                        state["last_slot"] = slot.isoformat()
+                        atomic_json(state_path, state)
+                    execute(config, state, state_path, lock_fd, runtime)
             except Exception:
                 failures = min(state.get("consecutive_failures", 0) + 1, 5)
                 state["consecutive_failures"] = failures
@@ -1253,6 +1399,9 @@ def main(argv=None):
                 state["last_slot"] = latest_slot(now()).isoformat()
             atomic_json(state_path, state)
         return 0
+    except WorkerInterrupted as error:
+        LOG.info("Worker interrupted; saved progress can resume")
+        return 128 + error.signum
     except WorkerBusy:
         if args.action == "scheduled":
             LOG.info("Scheduled pass deferred while another worker holds the lock")
