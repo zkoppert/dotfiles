@@ -108,6 +108,8 @@ The worker retains a lock across its Pi child process. An overlapping manual inv
 
 Scheduled failures consume that week's slot to avoid minute-by-minute retries. Repeated startup errors notify once for each weekly slot and error. Resume can start an overdue pass on the next timer tick. Inspect `launchd.log` and the latest run directory before retrying. Evidence and release archives have no automatic retention policy; review them before manual cleanup.
 
+On macOS, the scheduler sends a notification with each PR URL when it validates an `awaiting_review` result, before starting the next issue. It does not send review-ready alerts for `awaiting_ci`, blocked, or resolved results. The private `pr-notifications.json` file suppresses repeat alerts across resumed runs and later passes. Failed notification commands remain eligible for retry during subsequent execution. macOS notification settings still control banner visibility. The end-of-pass summary remains separate.
+
 There is no runtime or spending cap. The worker records recoverable blockers and moves to independent issues. Draft PRs remain unresolved until the fixes land and current evidence confirms resolution. A completed pass means every matching snapshot issue has an outcome, not that every issue is resolved. New issues wait for the next snapshot.
 
 The policy permits fully certified draft PRs and evidence-based stale-issue closure. Existing review, Codespace tests, demo, style, and `pr-marker` gates remain mandatory. A missing gate blocks publication. Merge approval remains human.

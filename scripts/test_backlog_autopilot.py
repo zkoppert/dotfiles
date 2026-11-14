@@ -167,6 +167,80 @@ class ReceiptTests(unittest.TestCase):
         worker.validate_outcome(receipt, 1, issue(state="closed"))
 
 
+class NotificationTests(unittest.TestCase):
+    def test_native_notification_passes_message_as_data_and_reports_delivery_failure(
+        self,
+    ):
+        message = 'Draft PR ready: https://github.com/example/app/pull/1 "quoted"'
+        with patch.object(worker.sys, "platform", "darwin"), patch.object(
+            worker.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)
+        ) as send:
+            self.assertTrue(worker.notify(message))
+        self.assertEqual(send.call_args.args[0][-1], message)
+        self.assertIn("item 1 of argv", send.call_args.args[0][-2])
+        with patch.object(worker.sys, "platform", "darwin"), patch.object(
+            worker.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)
+        ), self.assertLogs(worker.LOG, level="ERROR"):
+            self.assertFalse(worker.notify(message))
+
+    def test_ready_notifications_persist_across_runs_and_ignore_other_outcomes(self):
+        url = "https://github.com/example/app/pull/1"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            items = {
+                "1": {"outcome": "awaiting_ci", "pr_urls": [url]},
+                "2": {"outcome": "blocked", "pr_urls": [url]},
+                "3": {"outcome": "resolved", "pr_urls": [url]},
+            }
+            with patch.object(worker, "notify", return_value=True) as send:
+                worker.notify_ready_pull_requests(root, items)
+                send.assert_not_called()
+                items["1"]["outcome"] = "awaiting_review"
+                worker.notify_ready_pull_requests(root, items)
+                worker.notify_ready_pull_requests(root, {"99": items["1"]})
+            self.assertEqual(
+                [call.args[0] for call in send.call_args_list],
+                [f"Draft PR ready for your review: {url}"],
+            )
+            self.assertEqual(
+                set(worker.read_json(root / "pr-notifications.json")), {url}
+            )
+
+    def test_failed_notification_is_not_recorded_and_can_retry(self):
+        urls = [f"https://github.com/example/app/pull/{n}" for n in (1, 2)]
+        items = {"1": {"outcome": "awaiting_review", "pr_urls": urls}}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(worker, "notify", side_effect=[True, False]):
+                worker.notify_ready_pull_requests(root, items)
+            self.assertEqual(
+                set(worker.read_json(root / "pr-notifications.json")), {urls[0]}
+            )
+            with patch.object(worker, "notify", return_value=True) as send:
+                worker.notify_ready_pull_requests(root, items)
+            self.assertEqual(
+                send.call_args.args[0], f"Draft PR ready for your review: {urls[1]}"
+            )
+            self.assertEqual(
+                set(worker.read_json(root / "pr-notifications.json")), set(urls)
+            )
+
+    def test_notification_exception_does_not_discard_work_or_mark_delivery(self):
+        items = {
+            "1": {
+                "outcome": "awaiting_review",
+                "pr_urls": ["https://github.com/example/app/pull/1"],
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(
+                worker, "notify", side_effect=OSError("unavailable")
+            ), self.assertLogs(worker.LOG, level="ERROR"):
+                worker.notify_ready_pull_requests(root, items)
+            self.assertFalse((root / "pr-notifications.json").exists())
+
+
 class WorkerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -446,6 +520,101 @@ else:
             },
         )
         return directory
+
+    def test_ready_pr_notifies_before_next_issue_and_survives_resume(self):
+        directory = self.saved_run(count=2)
+        url = "https://github.com/example/app/pull/1"
+        result = {
+            "number": 1,
+            "outcome": "awaiting_review",
+            "summary": "Certified draft is ready",
+            "evidence": ["tests.log"],
+            "pr_urls": [url],
+            "worktrees": [str(self.root)],
+        }
+        worker.atomic_json(directory / "items/1/receipt.json", result)
+        messages = []
+
+        def fetch(endpoint):
+            number = int(endpoint.rsplit("/", 1)[1])
+            if number == 2:
+                self.assertEqual(messages, [f"Draft PR ready for your review: {url}"])
+                self.assertEqual(
+                    worker.read_json(directory / "run.json")["items"]["1"], result
+                )
+            return issue(number, state="open" if number == 1 else "closed")
+
+        with patch.object(worker, "lease", return_value=self.root), patch.object(
+            worker, "api", side_effect=fetch
+        ), patch.object(worker, "verify_pull_requests"), patch.object(
+            worker,
+            "notify",
+            side_effect=lambda message: messages.append(message) or True,
+        ):
+            worker.execute(
+                self.config, self.state, self.state_path, 1, MODULE_PATH.parent
+            )
+            self.state["active_run"] = "resume"
+            worker.execute(
+                self.config, self.state, self.state_path, 1, MODULE_PATH.parent
+            )
+        self.assertEqual(messages.count(f"Draft PR ready for your review: {url}"), 1)
+        saved = worker.read_json(directory / "run.json")
+        self.assertEqual(saved["items"]["1"], result)
+        self.assertEqual(saved["items"]["2"]["outcome"], "skipped")
+
+    def test_resume_retries_saved_ready_notification_before_leasing(self):
+        directory = self.saved_run()
+        url = "https://github.com/example/app/pull/1"
+        worker.atomic_json(
+            directory / "run.json",
+            {
+                "id": "resume",
+                "items": {"1": {"outcome": "awaiting_review", "pr_urls": [url]}},
+            },
+        )
+        with patch.object(
+            worker, "lease", side_effect=RuntimeError("No slot")
+        ), patch.object(worker, "notify", return_value=True) as send:
+            with self.assertRaisesRegex(RuntimeError, "No slot"):
+                worker.execute(
+                    self.config, self.state, self.state_path, 1, MODULE_PATH.parent
+                )
+        self.assertEqual(
+            send.call_args.args[0], f"Draft PR ready for your review: {url}"
+        )
+        self.assertEqual(
+            set(worker.read_json(directory.parent.parent / "pr-notifications.json")),
+            {url},
+        )
+
+    def test_unverified_pr_does_not_send_ready_notification(self):
+        directory = self.saved_run()
+        worker.atomic_json(
+            directory / "items/1/receipt.json",
+            {
+                "number": 1,
+                "outcome": "awaiting_review",
+                "summary": "Not certified",
+                "evidence": [],
+                "pr_urls": ["https://github.com/example/app/pull/1"],
+            },
+        )
+        with patch.object(worker, "lease", return_value=self.root), patch.object(
+            worker, "api", return_value=issue()
+        ), patch.object(
+            worker, "verify_pull_requests", side_effect=ValueError("Uncertified")
+        ), patch.object(
+            worker, "notify", return_value=True
+        ) as send:
+            worker.execute(
+                self.config, self.state, self.state_path, 1, MODULE_PATH.parent
+            )
+        self.assertEqual(
+            worker.read_json(directory / "run.json")["items"]["1"]["outcome"], "blocked"
+        )
+        self.assertEqual(send.call_count, 1)
+        self.assertTrue(send.call_args.args[0].startswith("Backlog pass finished:"))
 
     def test_resume_reconciles_a_saved_closure_receipt_before_eligibility(self):
         directory = self.saved_run()

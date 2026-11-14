@@ -237,7 +237,7 @@ def exclusive_lock(directory):
 def notify(message):
     LOG.info(message)
     if sys.platform == "darwin":
-        subprocess.run(
+        result = subprocess.run(
             [
                 "/usr/bin/osascript",
                 "-e",
@@ -247,6 +247,27 @@ def notify(message):
             check=False,
             stdin=subprocess.DEVNULL,
         )
+        if result.returncode:
+            LOG.error("macOS notification failed with exit code %s", result.returncode)
+        return result.returncode == 0
+    return False
+
+
+def notify_ready_pull_requests(directory, items):
+    path = directory / "pr-notifications.json"
+    try:
+        sent = read_json(path) if path.exists() else {}
+        for item in items.values():
+            if item["outcome"] != "awaiting_review":
+                continue
+            for url in item["pr_urls"]:
+                if url in sent:
+                    continue
+                if notify(f"Draft PR ready for your review: {url}"):
+                    sent[url] = now().isoformat()
+                    atomic_json(path, sent)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        LOG.exception("PR notification failed; saved issue outcomes remain intact")
 
 
 def notify_error_once(message, directory):
@@ -493,6 +514,7 @@ def execute(config, state, state_path, lock_fd, runtime):
         else {"id": state["active_run"], "started_at": now().isoformat(), "items": {}}
     )
     run["pid"] = os.getpid()
+    notify_ready_pull_requests(root, run["items"])
     workdir = lease(config, run, run_path)
     atomic_json(run_path, run)
     snapshot_dir = directory / "snapshot"
@@ -605,6 +627,7 @@ def execute(config, state, state_path, lock_fd, runtime):
             }
         atomic_json(run_path, run)
         atomic_json(ledger_path, ledger)
+        notify_ready_pull_requests(root, run["items"])
     run["finished_at"] = now().isoformat()
     run.pop("current_issue", None)
     run["outcome_counts"] = dict(

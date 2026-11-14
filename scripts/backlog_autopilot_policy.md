@@ -60,7 +60,7 @@ Human review feedback requires the operator's approval before replying, resolvin
 
 If checks are stuck or infrastructure fails, record `awaiting_ci` or `blocked`. Do not wait forever for a human or repeatedly retry the same failure.
 
-When required checks pass and review converges, post one actionable `@zkoppert` mention on the PR. State the outcome, evidence, and remaining review decision. Keep the PR draft. Verify that the comment exists. Use local notification as a fallback because same-account mentions may not notify the operator.
+When required checks pass and review converges, post one actionable `@zkoppert` mention on the PR. State the outcome, evidence, and remaining review decision. Keep the PR draft. Verify that the comment exists. Record `awaiting_review` with the PR URL in the receipt. The scheduler sends the macOS notification after it validates the receipt. Do not send a separate local PR notification.
 
 ## Publish concise evidence
 
