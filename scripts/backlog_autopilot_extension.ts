@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("autopilot", {
-    description: "Show backlog status, pause, or resume the weekly worker",
+    description: "Show Sentry issue worker status, pause, or resume daily work",
     handler: async (args, ctx) => {
       const action = args.trim() || "status";
       if (!["status", "pause", "resume"].includes(action)) {

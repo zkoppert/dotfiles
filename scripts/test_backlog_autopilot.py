@@ -35,11 +35,11 @@ def envelope(value):
 
 
 class ScheduleTests(unittest.TestCase):
-    def test_friday_boundary_and_host_timezone_independence(self):
+    def test_daily_boundary_and_host_timezone_independence(self):
         before = datetime.fromisoformat("2026-11-07T01:59:59+00:00")
         after = datetime.fromisoformat("2026-11-07T02:00:00+00:00")
         self.assertEqual(
-            worker.latest_slot(before).isoformat(), "2026-10-30T18:00:00-07:00"
+            worker.latest_slot(before).isoformat(), "2026-11-05T18:00:00-08:00"
         )
         self.assertEqual(
             worker.latest_slot(after).isoformat(), "2026-11-06T18:00:00-08:00"
@@ -50,6 +50,19 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(
             worker.latest_slot(instant).isoformat(), "2026-03-13T18:00:00-07:00"
         )
+
+    def test_weekday_and_weekend_slots_advance_daily(self):
+        for instant, expected in [
+            ("2026-11-08T02:00:00+00:00", "2026-11-07T18:00:00-08:00"),
+            ("2026-11-09T01:59:59+00:00", "2026-11-07T18:00:00-08:00"),
+            ("2026-03-09T00:59:59+00:00", "2026-03-07T18:00:00-08:00"),
+            ("2026-03-09T01:00:00+00:00", "2026-03-08T18:00:00-07:00"),
+        ]:
+            with self.subTest(instant=instant):
+                self.assertEqual(
+                    worker.latest_slot(datetime.fromisoformat(instant)).isoformat(),
+                    expected,
+                )
 
 
 class ApiTests(unittest.TestCase):
@@ -104,6 +117,220 @@ class ApiTests(unittest.TestCase):
             issue(pull_request={}),
         ]:
             self.assertFalse(worker.eligible(data))
+
+
+class ReliabilityTests(unittest.TestCase):
+    def test_api_uses_cfs_and_retries_only_a_bounded_number_of_times(self):
+        with patch.object(
+            worker,
+            "command",
+            side_effect=[worker.InfrastructureError("offline"), envelope({"ok": True})],
+        ) as command, patch.object(worker.time, "sleep"):
+            self.assertEqual(worker.api("/test"), {"ok": True})
+        self.assertEqual(command.call_count, 2)
+        self.assertEqual(
+            command.call_args.args[0][:6], ["gh", "cfs", "--", "npx", "-y", "gh-axi"]
+        )
+        with patch.object(
+            worker, "command", side_effect=worker.InfrastructureError("offline")
+        ) as command, patch.object(worker.time, "sleep"):
+            with self.assertRaises(worker.InfrastructureError):
+                worker.api("/test")
+        self.assertEqual(command.call_count, 3)
+
+    def test_real_command_failure_records_bounded_diagnostics_without_common_credentials(
+        self,
+    ):
+        script = "import sys; sys.stderr.write('x'*3000 + ' token=private-value Bearer secret-value ghp_fakecredential'); sys.exit(7)"
+        with self.assertRaises(worker.InfrastructureError) as raised:
+            worker.command([sys.executable, "-c", script])
+        text = str(raised.exception)
+        self.assertIn("exited 7", text)
+        self.assertIn("[REDACTED]", text)
+        self.assertLess(len(text), 2100)
+        for secret in ("private-value", "secret-value", "ghp_fakecredential"):
+            self.assertNotIn(secret, text)
+
+    def test_real_command_timeout_has_explicit_infrastructure_outcome(self):
+        with self.assertRaisesRegex(worker.InfrastructureError, "could not complete"):
+            worker.command(
+                [sys.executable, "-c", "import time; time.sleep(2)"], timeout=0.01
+            )
+
+    def test_object_check_run_pagination_includes_final_page(self):
+        with patch.object(
+            worker, "api", side_effect=[{"check_runs": [{"id": 1}]}, {"check_runs": []}]
+        ) as api:
+            self.assertEqual(
+                worker.pages("/checks?filter=latest", key="check_runs"), [{"id": 1}]
+            )
+        self.assertIn("page=2", api.call_args.args[0])
+
+    def test_ci_requires_completed_checks_and_latest_successful_statuses(self):
+        passed = {"id": 1, "status": "completed", "conclusion": "success"}
+        cases = [
+            ([passed], [], True),
+            ([], [], False),
+            ([{**passed, "status": "in_progress", "conclusion": None}], [], False),
+            ([{**passed, "conclusion": "failure"}], [], False),
+            ([passed], [{"id": 2, "context": "build", "state": "failure"}], False),
+            (
+                [],
+                [
+                    {"id": 3, "context": "build", "state": "success"},
+                    {"id": 2, "context": "build", "state": "failure"},
+                ],
+                True,
+            ),
+        ]
+        for checks, statuses, expected in cases:
+            with self.subTest(checks=checks, statuses=statuses), patch.object(
+                worker, "pages", side_effect=[checks, statuses]
+            ):
+                self.assertEqual(worker.ci_green("example/app", "sha"), expected)
+
+    def test_preflight_saves_dns_warnings_and_capacity_without_exposing_environment(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worker.atomic_json(
+                root / "mcp.json",
+                {
+                    "mcpServers": {
+                        "Splunk": {
+                            "env": {
+                                "SPLUNK_HOST": "logs.example.test",
+                                "TOKEN": "private-value",
+                            }
+                        },
+                        "Sentry": {"url": "https://sentry.example.test/mcp"},
+                    }
+                },
+            )
+
+            def command(argv, **kwargs):
+                if argv[0] == "treehouse":
+                    return json.dumps([{"status": "leased"}])
+                if argv[-1] == "logs.example.test":
+                    raise worker.InfrastructureError("DNS failed")
+                return ""
+
+            config = {
+                "repository": "example/tracker",
+                "checkout": str(root),
+                "agent_dir": str(root),
+            }
+            with patch.object(
+                worker.shutil, "which", return_value="/tool"
+            ), patch.object(worker, "api", return_value={}), patch.object(
+                worker, "command", side_effect=command
+            ):
+                health = worker.preflight(config)
+            self.assertEqual(health["idle_worktrees"], 0)
+            self.assertEqual(health["telemetry"]["Splunk"]["dns"], "unavailable")
+            self.assertEqual(health["telemetry"]["Sentry"]["dns"], "available")
+            self.assertEqual(len(health["warnings"]), 2)
+            self.assertNotIn("private-value", json.dumps(health))
+
+    def test_preflight_missing_tool_prevents_github_and_model_work(self):
+        with patch.object(worker.shutil, "which", return_value=None), patch.object(
+            worker, "api"
+        ) as api:
+            with self.assertRaisesRegex(worker.InfrastructureError, "executable"):
+                worker.preflight({})
+        api.assert_not_called()
+
+    def test_progress_records_heartbeat_and_detects_two_hours_without_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            started = datetime.fromisoformat("2026-11-07T02:00:00+00:00")
+            output = root / "output.log"
+            output.write_text("started")
+            os.utime(output, (started.timestamp(), started.timestamp()))
+            with patch.object(
+                worker,
+                "now",
+                return_value=datetime.fromisoformat("2026-11-07T04:00:00+00:00"),
+            ):
+                self.assertTrue(
+                    worker.progress({"state_dir": str(root)}, root, 123, started)
+                )
+                output.write_text("new progress")
+                self.assertFalse(
+                    worker.progress({"state_dir": str(root)}, root, 123, started)
+                )
+            saved = worker.read_json(root / "progress.json")
+            self.assertEqual(saved["child_pid"], 123)
+            self.assertEqual(saved["status"], "running")
+            self.assertEqual(saved["heartbeat_at"], "2026-11-07T04:00:00+00:00")
+
+
+class PrCertificationTests(unittest.TestCase):
+    def verify(
+        self,
+        *,
+        remote_sha="certified-sha",
+        local_remote="git@github.com:example/app.git",
+        dirty="",
+        green=True,
+        second_sha=None,
+    ):
+        pr = {
+            "state": "open",
+            "head": {"sha": remote_sha},
+            "assignees": [{"login": "zkoppert"}],
+            "requested_reviewers": [{"login": "copilot-pull-request-reviewer[bot]"}],
+        }
+        receipt = {
+            "outcome": "awaiting_review",
+            "pr_urls": ["https://github.com/example/app/pull/1"],
+            "worktrees": ["/worktree"],
+        }
+        outputs = [
+            json.dumps([{"path": "/worktree", "status": "leased"}]),
+            dirty,
+            local_remote,
+            "certified-sha",
+            "passed",
+        ]
+        with patch.object(
+            worker,
+            "api",
+            side_effect=[pr, {**pr, "head": {"sha": second_sha or remote_sha}}],
+        ), patch.object(worker, "pages", return_value=[]), patch.object(
+            worker, "command", side_effect=outputs
+        ), patch.object(
+            worker, "ci_green", return_value=green
+        ):
+            worker.verify_pull_requests(
+                {"allowed_repositories": ["example/app"]}, receipt
+            )
+        return receipt
+
+    def test_certified_remote_commit_and_green_ci_allow_review(self):
+        self.assertEqual(self.verify()["outcome"], "awaiting_review")
+        self.assertEqual(
+            self.verify(local_remote="https://github.com/example/app.git")["outcome"],
+            "awaiting_review",
+        )
+
+    def test_pending_or_failed_ci_downgrades_review_handoff(self):
+        result = self.verify(green=False)
+        self.assertEqual(result["outcome"], "awaiting_ci")
+        self.assertIn("GitHub checks", result["next_action"])
+
+    def test_remote_commit_repository_and_dirty_tree_cannot_borrow_certification(self):
+        for options, message in [
+            ({"remote_sha": "uncertified-sha"}, "does not match"),
+            ({"local_remote": "git@github.com:other/repo.git"}, "does not match"),
+            ({"dirty": " M source.py"}, "uncommitted"),
+            ({"second_sha": "new-remote-sha"}, "changed during"),
+        ]:
+            with self.subTest(options=options), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                self.verify(**options)
 
 
 class ReceiptTests(unittest.TestCase):
@@ -226,6 +453,21 @@ class NotificationTests(unittest.TestCase):
                 set(worker.read_json(root / "pr-notifications.json")), set(urls)
             )
 
+    def test_saved_ready_notification_requires_fresh_certification(self):
+        items = {
+            "1": {
+                "outcome": "awaiting_review",
+                "pr_urls": ["https://github.com/example/app/pull/1"],
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            worker,
+            "verify_pull_requests",
+            side_effect=ValueError("Remote commit changed"),
+        ), patch.object(worker, "notify") as send:
+            worker.notify_ready_pull_requests(Path(temporary), items, config={})
+        send.assert_not_called()
+
     def test_notification_exception_does_not_discard_work_or_mark_delivery(self):
         items = {
             "1": {
@@ -260,6 +502,11 @@ class WorkerTests(unittest.TestCase):
         self.state_path = Path(self.config["state_dir"]) / "state.json"
         self.state = {"last_slot": "2026-10-30T18:00:00-07:00", "active_run": None}
         worker.atomic_json(self.state_path, self.state)
+        preflight = patch.object(
+            worker, "preflight", return_value={"warnings": [], "idle_worktrees": 1}
+        )
+        preflight.start()
+        self.addCleanup(preflight.stop)
 
     def test_config_rejects_broad_permissions_symlinks_and_unauthorized_tracker(self):
         self.assertEqual(worker.load_config(self.config_path), self.config)
@@ -361,7 +608,35 @@ class WorkerTests(unittest.TestCase):
                 )
         self.assertEqual(observed, ["2026-11-06T18:00:00-08:00"])
 
-    def test_manual_run_does_not_consume_friday_slot(self):
+    def test_interrupted_run_retries_after_backoff_without_waiting_for_new_slot(self):
+        instant = datetime.fromisoformat("2026-11-07T02:00:00+00:00")
+
+        def interrupt(config, state, state_path, *args):
+            state["active_run"] = "interrupted"
+            worker.atomic_json(state_path, state)
+            raise RuntimeError("Network unavailable")
+
+        with patch.object(worker, "now", return_value=instant), patch.object(
+            worker, "execute", side_effect=interrupt
+        ) as execute, patch.object(worker, "notify"):
+            self.assertEqual(
+                worker.main(["--config", str(self.config_path), "scheduled"]), 1
+            )
+            self.assertEqual(
+                worker.main(["--config", str(self.config_path), "scheduled"]), 0
+            )
+            self.assertEqual(execute.call_count, 1)
+        retry = worker.read_json(self.state_path)["retry_after"]
+        with patch.object(
+            worker, "now", return_value=datetime.fromisoformat(retry)
+        ), patch.object(worker, "execute") as execute:
+            self.assertEqual(
+                worker.main(["--config", str(self.config_path), "scheduled"]), 0
+            )
+        self.assertEqual(execute.call_count, 1)
+        self.assertNotIn("retry_after", worker.read_json(self.state_path))
+
+    def test_manual_run_does_not_consume_daily_slot(self):
         with patch.object(worker, "execute") as execute:
             self.assertEqual(worker.main(["--config", str(self.config_path), "run"]), 0)
         self.assertEqual(execute.call_count, 1)
@@ -420,6 +695,7 @@ class WorkerTests(unittest.TestCase):
         receipt["pr_urls"] = ["https://github.com/example/app/pull/1"]
         pr = {
             "state": "open",
+            "head": {"sha": "certified-sha"},
             "assignees": [{"login": "zkoppert"}],
             "requested_reviewers": [{"login": "copilot-pull-request-reviewer[bot]"}],
         }
@@ -467,7 +743,13 @@ else:
         saved = worker.read_json(self.state_path)
         run = worker.read_json(Path(saved["last_run"]) / "run.json")
         self.assertEqual(set(run["items"]), {"1", "2"})
-        self.assertEqual(run["outcome_counts"], {"blocked": 2})
+        self.assertEqual(
+            run["outcome_counts"], {"infrastructure_error": 1, "blocked": 1}
+        )
+        report = (Path(saved["last_run"]) / "report.md").read_text()
+        self.assertIn("infrastructure_error: 1", report)
+        self.assertIn("Waiting for access", report)
+        self.assertTrue((Path(saved["last_run"]) / "items/1/error.json").exists())
         self.assertIn("Pi exited 7", run["items"]["1"]["summary"])
         self.assertEqual(run["items"]["2"]["summary"], "Waiting for access")
         self.assertIsNone(saved["active_run"])
@@ -484,7 +766,19 @@ else:
         ):
             worker.install(self.config_path, self.config, MODULE_PATH.parent)
             saved = worker.read_json(self.state_path)
-            self.assertEqual(saved["last_slot"], "2026-10-30T18:00:00-07:00")
+            self.assertEqual(saved["last_slot"], "2026-11-03T18:00:00-08:00")
+            release = worker.read_json(
+                Path(self.config["state_dir"]) / "current/release.json"
+            )
+            self.assertEqual(release["source_checkout"], str(MODULE_PATH.parent.parent))
+            self.assertEqual(
+                set(release["sha256"]),
+                {
+                    "backlog_autopilot.py",
+                    "backlog_autopilot_policy.md",
+                    "backlog_autopilot_extension.ts",
+                },
+            )
             plist = home / "Library/LaunchAgents" / (worker.LABEL + ".plist")
             import plistlib
 
@@ -576,7 +870,9 @@ else:
         )
         with patch.object(
             worker, "lease", side_effect=RuntimeError("No slot")
-        ), patch.object(worker, "notify", return_value=True) as send:
+        ), patch.object(worker, "verify_pull_requests") as verify, patch.object(
+            worker, "notify", return_value=True
+        ) as send:
             with self.assertRaisesRegex(RuntimeError, "No slot"):
                 worker.execute(
                     self.config, self.state, self.state_path, 1, MODULE_PATH.parent
@@ -588,6 +884,7 @@ else:
             set(worker.read_json(directory.parent.parent / "pr-notifications.json")),
             {url},
         )
+        self.assertEqual(verify.call_count, 1)
 
     def test_unverified_pr_does_not_send_ready_notification(self):
         directory = self.saved_run()
@@ -612,10 +909,11 @@ else:
                 self.config, self.state, self.state_path, 1, MODULE_PATH.parent
             )
         self.assertEqual(
-            worker.read_json(directory / "run.json")["items"]["1"]["outcome"], "blocked"
+            worker.read_json(directory / "run.json")["items"]["1"]["outcome"],
+            "infrastructure_error",
         )
         self.assertEqual(send.call_count, 1)
-        self.assertTrue(send.call_args.args[0].startswith("Backlog pass finished:"))
+        self.assertTrue(send.call_args.args[0].startswith("Pass finished:"))
 
     def test_resume_reconciles_a_saved_closure_receipt_before_eligibility(self):
         directory = self.saved_run()
@@ -786,6 +1084,7 @@ else:
         }
         pr = {
             "state": "open",
+            "head": {"sha": "certified-sha"},
             "assignees": [{"login": "zkoppert"}],
             "requested_reviewers": [],
         }
@@ -797,9 +1096,14 @@ else:
             "command",
             side_effect=[
                 json.dumps([{"path": "/worktree", "status": "leased"}]),
+                "",
+                "git@github.com:example/app.git",
+                "certified-sha",
                 "passed",
             ],
-        ) as command:
+        ) as command, patch.object(
+            worker, "ci_green", return_value=True
+        ):
             worker.verify_pull_requests(self.config, receipt)
         self.assertEqual(command.call_args.args[0], ["pr-marker", "check"])
         self.assertEqual(command.call_args.kwargs["cwd"], "/worktree")
@@ -921,6 +1225,168 @@ else:
             worker.validate_outcome(
                 worker.read_json(stage / "receipt.json"), 1, issue()
             )
+
+    def test_install_rejects_another_source_before_changing_release(self):
+        config = {**self.config, "source_checkout": str(self.root / "other-source")}
+        with self.assertRaisesRegex(ValueError, "configured source_checkout"):
+            worker.install(self.config_path, config, MODULE_PATH.parent)
+        self.assertFalse((Path(self.config["state_dir"]) / "current").exists())
+
+    def test_real_scheduled_cli_replay_writes_report_and_does_not_repeat_slot(self):
+        tools = self.root / "tools"
+        tools.mkdir()
+        fixture = r"""
+import base64,json,os,pathlib,sys
+root=pathlib.Path(os.environ["WORKER_REPLAY_ROOT"])
+name=pathlib.Path(sys.argv[0]).name
+allocation={"path":str(root),"lease_id":"replay","lease_holder":"replay"}
+if name=="treehouse":
+    print(json.dumps([{**allocation,"status":"leased","processes":[]}] if sys.argv[1]=="status" else allocation))
+elif name=="git":
+    if sys.argv[1]=="rev-list": print("unpublished-replay")
+    elif sys.argv[1]!="status": sys.exit(9)
+elif name=="gh":
+    assert sys.argv[1:7]==["cfs","--","npx","-y","gh-axi","api"]
+    endpoint=sys.argv[7]
+    issue={"id":101,"number":1,"title":"[Sentry] Replay","state":"open","comments":0}
+    if "/issues?" in endpoint: data=[issue] if endpoint.endswith("&page=1") else []
+    elif endpoint.endswith("/issues/1"): data=issue
+    elif endpoint=="/repos/example/tracker": data={"name":"tracker"}
+    else: raise RuntimeError(endpoint)
+    print("api_response:\n  body: "+base64.b64encode(json.dumps(data).encode()).decode()+"\n  truncated: false")
+elif name=="replay-pi":
+    stage=pathlib.Path(sys.argv[sys.argv.index("--session")+1]).parent
+    with (root/"model-calls.log").open("a") as log: log.write(str(stage)+"\n")
+    if stage.parent.name=="analysis":
+        prompt=json.loads((stage/"invocation.json").read_text())["prompt"]
+        batch=json.loads(prompt.split("Issues: ",1)[1])
+        manifest=json.loads((stage.parent.parent/"snapshot/manifest.json").read_text())
+        data={"snapshot_sha256":manifest["sha256"],"notes":[dict(row,note="Existing owner controls repair") for row in batch]}
+    else:
+        data={"number":1,"outcome":"blocked","summary":"Owner decision needed","evidence":[],"next_action":"Contact the owner"}
+    (stage/"receipt.json").write_text(json.dumps(data))
+else: sys.exit(9)
+"""
+        for name in ("treehouse", "git", "gh", "replay-pi"):
+            path = tools / name
+            path.write_text("#!" + sys.executable + "\n" + fixture)
+            path.chmod(0o700)
+        worker.atomic_json(
+            self.config_path, {**self.config, "pi": str(tools / "replay-pi")}
+        )
+        env = {
+            **os.environ,
+            "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+            "WORKER_REPLAY_ROOT": str(self.root),
+        }
+        for _ in range(2):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import runpy,sys; scope=runpy.run_path(sys.argv.pop(1)); scope['main'].__globals__['notify']=lambda message: False; sys.exit(scope['main']())",
+                    str(MODULE_PATH),
+                    "--config",
+                    str(self.config_path),
+                    "scheduled",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        state = worker.read_json(self.state_path)
+        self.assertIsNone(state["active_run"])
+        self.assertEqual(
+            len((self.root / "model-calls.log").read_text().splitlines()), 2
+        )
+        run = worker.read_json(Path(state["last_run"]) / "run.json")
+        self.assertEqual(run["outcome_counts"], {"blocked": 1})
+        self.assertIn(
+            "Owner decision needed", (Path(state["last_run"]) / "report.md").read_text()
+        )
+        progress = worker.read_json(Path(self.config["state_dir"]) / "progress.json")
+        self.assertEqual(progress["status"], "finished")
+
+    def test_dependency_outage_checkpoints_and_retry_revisits_only_failed_items(self):
+        directory = self.saved_run(count=4)
+        with patch.object(worker, "lease", return_value=self.root), patch.object(
+            worker, "api", side_effect=worker.InfrastructureError("offline")
+        ), patch.object(worker, "notify"):
+            with self.assertRaisesRegex(
+                worker.InfrastructureError, "Three consecutive"
+            ):
+                worker.execute(
+                    self.config, self.state, self.state_path, 1, MODULE_PATH.parent
+                )
+        saved = worker.read_json(directory / "run.json")
+        self.assertEqual(set(saved["items"]), {"1", "2", "3"})
+        self.assertTrue(all(item["retryable"] for item in saved["items"].values()))
+        self.assertEqual(self.state["active_run"], "resume")
+        with patch.object(worker, "lease", return_value=self.root), patch.object(
+            worker,
+            "api",
+            side_effect=lambda endpoint: issue(
+                int(endpoint.rsplit("/", 1)[1]), state="closed"
+            ),
+        ), patch.object(worker, "notify"):
+            worker.execute(
+                self.config, self.state, self.state_path, 1, MODULE_PATH.parent
+            )
+        saved = worker.read_json(directory / "run.json")
+        self.assertEqual(saved["outcome_counts"], {"skipped": 4})
+        self.assertIsNone(self.state["active_run"])
+
+    def test_stalled_child_notifies_once_and_keeps_waiting_for_completion(self):
+        class Child:
+            pid = 123
+            waits = 0
+
+            def wait(self, timeout=None):
+                self.waits += 1
+                if self.waits < 3:
+                    raise subprocess.TimeoutExpired("pi", timeout)
+                return 0
+
+        child = Child()
+        with patch.object(worker.subprocess, "Popen", return_value=child), patch.object(
+            worker, "progress", side_effect=[False, True, True, False]
+        ), patch.object(worker, "notify", return_value=True) as send:
+            worker.run_pi(
+                self.config,
+                self.root / "stage",
+                self.root,
+                "work",
+                1,
+                MODULE_PATH.with_name("backlog_autopilot_policy.md"),
+            )
+        self.assertEqual(child.waits, 3)
+        self.assertEqual(send.call_count, 1)
+        self.assertIn("Work is still running", send.call_args.args[0])
+
+    def test_completed_long_run_consumes_missed_daily_slots_without_starting_an_overlap(
+        self,
+    ):
+        self.state["active_run"] = "long-run"
+        worker.atomic_json(self.state_path, self.state)
+        instant = datetime.fromisoformat("2026-11-10T02:00:00+00:00")
+
+        def finish(config, state, state_path, *args):
+            state["active_run"] = None
+
+        with patch.object(worker, "now", return_value=instant), patch.object(
+            worker, "execute", side_effect=finish
+        ) as execute:
+            for _ in range(2):
+                self.assertEqual(
+                    worker.main(["--config", str(self.config_path), "scheduled"]), 0
+                )
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(
+            worker.read_json(self.state_path)["last_slot"], "2026-11-09T18:00:00-08:00"
+        )
 
     def test_bad_analysis_prevents_any_remediation(self):
         snapshot_dir = Path(self.config["state_dir"]) / "runs/test/snapshot"

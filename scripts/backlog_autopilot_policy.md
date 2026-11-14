@@ -14,6 +14,8 @@ This worker runs with the operator's existing host permissions. It is not a secu
 
 Read the task file, its complete issue snapshot, and the complete context notes. Read previous-attempt evidence and sessions when present. Refresh the issue and comments through `gh-axi`. Read that skill and consult current CLI help first.
 
+Read `dependency_health` in the task before querying telemetry or starting implementation. Do not retry a hostname that the current preflight marked unavailable. Continue independent investigations, and report the missing dependency when it prevents a safe conclusion. Do not remove occupied Treehouse worktrees to create capacity.
+
 Identify duplicate symptoms, shared infrastructure failures, existing fixes, dependencies, and ownership boundaries. Verify hypotheses against source and current telemetry. Keep evidence paths and query times.
 
 If `reconciliation_only` is true, use saved sessions, local evidence, and fresh task comments to reconstruct the previous attempt. Do not change GitHub or source. Record blocked when closure evidence is insufficient.
@@ -86,7 +88,7 @@ Write JSON to the task's receipt path. Include these fields:
 }
 ```
 
-Allowed outcomes are `resolved`, `awaiting_review`, `awaiting_ci`, and `blocked`. A resolved receipt needs evidence and confirmed GitHub closure. Include exact worktree paths, leases, session paths, branches, and PR links for unfinished implementation.
+Allowed outcomes are `resolved`, `awaiting_review`, `awaiting_ci`, `blocked`, and `infrastructure_error`. Use `infrastructure_error` for failed tools, authentication, connectivity, or execution, not for application defects or ownership decisions. Preserve diagnostics without credentials or customer content. A resolved receipt needs evidence and confirmed GitHub closure. Include exact worktree paths, leases, session paths, branches, and PR links for unfinished implementation.
 
 A recoverable blocker ends this item, not the entire backlog. Do not start another item yourself; the scheduler selects it.
 

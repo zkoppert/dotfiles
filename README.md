@@ -52,7 +52,7 @@ Treehouse must be installed at `~/.local/bin/treehouse`. The wrapper fails close
 
 The local worker analyzes all open tracking issues before it works on titles containing the exact substring `[Sentry]`. It saves issue snapshots, context notes, sessions, and outcomes outside Git checkouts.
 
-The schedule is Friday at 18:00 in `America/Los_Angeles`, independent of the Mac's time zone. A minute timer checks whether work is due. Missed weeks collapse into one catch-up pass. The Mac must be running and connected; the job does not wake a powered-off Mac.
+The schedule is daily at 18:00 in `America/Los_Angeles`, independent of the Mac's time zone. A minute timer checks whether work is due. Missed days collapse into one catch-up pass. The Mac must be running and connected; the job does not wake a powered-off Mac.
 
 Keep private repository names in a local mode-0600 JSON file. Create the configuration with your actual repository values:
 
@@ -104,13 +104,19 @@ python3 "$HOME/.local/share/backlog-autopilot/current/backlog_autopilot.py" stat
 python3 "$HOME/.local/share/backlog-autopilot/current/backlog_autopilot.py" run
 ```
 
-The worker retains a lock across its Pi child process. An overlapping manual invocation fails; scheduled ticks defer quietly. Interrupted runs retain their sessions, worktrees, and receipts. Run `run` to resume, or leave recovery for the next scheduled pass. Recovery preserves invalid analysis receipts and regenerates the affected batch. Clean coordinator worktrees return to Treehouse after completion; dirty or unmerged work stays intact.
+The worker retains a lock across its Pi child process. An overlapping manual invocation fails; scheduled ticks defer quietly. Interrupted runs retain their sessions, worktrees, and receipts. Scheduled ticks resume unfinished work after a retry delay, without waiting for the next daily slot. Delays start at five minutes and increase to one hour. Manual `run` bypasses the delay. Recovery preserves invalid analysis receipts and regenerates the affected batch. Clean coordinator worktrees return to Treehouse after completion; dirty or unmerged work stays intact.
 
-Scheduled failures consume that week's slot to avoid minute-by-minute retries. Repeated startup errors notify once for each weekly slot and error. Resume can start an overdue pass on the next timer tick. Inspect `launchd.log` and the latest run directory before retrying. Evidence and release archives have no automatic retention policy; review them before manual cleanup.
+Repeated startup errors notify once for each daily slot and error. Pause prevents recovery until you resume. Read-only GitHub requests use CFS, with up to three attempts and short delays. Commands have timeouts and save bounded diagnostics with common credential patterns removed. Three consecutive dependency failures checkpoint the pass for later recovery. Issue results distinguish `infrastructure_error` from application or ownership blockers.
 
-On macOS, notifications use the title **Sentry issue worker**. The scheduler includes each PR URL when it validates an `awaiting_review` result, before starting the next issue. It does not send review-ready alerts for `awaiting_ci`, blocked, or resolved results. The private `pr-notifications.json` file suppresses repeat alerts across resumed runs and later passes. Failed notification commands remain eligible for retry during subsequent execution. macOS notification settings still control banner visibility. The end-of-pass summary remains separate.
+The `preflight` CLI action checks required executables, GitHub access, idle Treehouse slots, and configured Splunk and Sentry hostnames. Each execution saves these checks before model work. DNS checks do not prove telemetry authentication or query access. Telemetry and capacity warnings accompany each task so independent investigations can continue without repeating known failures.
+
+The `status` action includes the last child heartbeat, activity time, stage, and report path. Running children update `progress.json` each minute. Two hours without output triggers one stall notification for that child, without stopping work. Each pass writes a private `report.md` with outcome counts, PR URLs, dependency warnings, and next actions. Inspect `launchd.log` and the report before retrying. Evidence and release archives have no automatic retention policy; review them before manual cleanup.
+
+On macOS, notifications use the title **Sentry issue worker**. The scheduler includes each PR URL when it validates an `awaiting_review` result, before starting the next issue. It does not send review-ready alerts for `awaiting_ci`, blocked, or resolved results. The private `pr-notifications.json` file suppresses repeat alerts across resumed runs and later passes. Failed notification commands remain eligible for retry when execution revisits the saved result. macOS notification settings still control banner visibility. The end-of-pass summary remains separate.
 
 There is no runtime or spending cap. The worker records recoverable blockers and moves to independent issues. Draft PRs remain unresolved until the fixes land and current evidence confirms resolution. A completed pass means every matching snapshot issue has an outcome, not that every issue is resolved. New issues wait for the next snapshot.
+
+Before a review handoff, the scheduler matches the remote PR commit and repository to a clean, Treehouse-managed certification checkout. It runs `pr-marker check` and checks all reported GitHub check runs and commit statuses. Missing, pending, or unsuccessful CI results keep the outcome at `awaiting_ci`. A remote commit change during verification prevents the handoff. The scheduler does not change manual PR readiness.
 
 The policy permits fully certified draft PRs and evidence-based stale-issue closure. Existing review, Codespace tests, demo, style, and `pr-marker` gates remain mandatory. A missing gate blocks publication. Merge approval remains human.
 
@@ -118,7 +124,7 @@ This worker uses the existing Pi profile and account credentials. Neither its pr
 
 Worker children set `BACKLOG_AUTOPILOT_CHILD=1` to prevent nested control commands. They also set `PI_CRON_DISABLED=1` to disable the existing in-session scheduler. These variables are coordination guards, not security boundaries.
 
-Candidate self-improvements must have persistent tests and independent review. The worker cannot activate candidates through its control interface. Review candidates before running `install` again. Installation retains prior releases; it does not change the weekly schedule state.
+Candidate self-improvements must have persistent tests and independent review. The worker cannot activate candidates through its control interface. Review candidates before running `install` again. Set `source_checkout` to the maintained source checkout before installation. When configured, the installer refuses another source checkout. Each release records its source commit, checkout, and runtime hashes in `release.json`. Installation retains prior releases; it does not change the saved daily slot or run history.
 
 ## How do I run Copilot in a durable Codespace session?
 

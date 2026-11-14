@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a weekly, resumable Pi backlog workflow on a trusted local machine."""
+"""Run the daily, resumable Sentry issue worker on a trusted local machine."""
 
 import argparse
 import base64
@@ -21,6 +21,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
+from urllib.parse import urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -28,7 +30,17 @@ LOG = logging.getLogger("backlog-autopilot")
 PACIFIC = ZoneInfo("America/Los_Angeles")
 LABEL = "com.zkoppert.backlog-autopilot"
 DEFAULT_CONFIG = Path.home() / ".config/backlog-autopilot/config.json"
-OUTCOMES = {"resolved", "awaiting_review", "awaiting_ci", "blocked"}
+OUTCOMES = {
+    "resolved",
+    "awaiting_review",
+    "awaiting_ci",
+    "blocked",
+    "infrastructure_error",
+}
+
+
+class InfrastructureError(RuntimeError):
+    """A dependency failed, rather than the tracked application behavior."""
 
 
 class WorkerBusy(RuntimeError):
@@ -41,10 +53,8 @@ def now():
 
 def latest_slot(instant):
     local = instant.astimezone(PACIFIC)
-    slot = (local - timedelta(days=(local.weekday() - 4) % 7)).replace(
-        hour=18, minute=0, second=0, microsecond=0
-    )
-    return slot if slot <= local else slot - timedelta(days=7)
+    slot = local.replace(hour=18, minute=0, second=0, microsecond=0)
+    return slot if slot <= local else slot - timedelta(days=1)
 
 
 def atomic_json(path, value):
@@ -100,8 +110,39 @@ def load_config(path):
     return config
 
 
-def command(argv, cwd=None):
-    return subprocess.check_output(argv, cwd=cwd, text=True, stdin=subprocess.DEVNULL)
+def diagnostic(text):
+    text = re.sub(
+        r"(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)", "[REDACTED]", str(text)
+    )
+    text = re.sub(
+        r"(?i)(bearer\s+|(?:token|password|secret|authorization)[\s=:]+)\S+",
+        r"\1[REDACTED]",
+        text,
+    )
+    text = re.sub(r"(https?://)[^/@\s]+:[^/@\s]+@", r"\1[REDACTED]@", text)
+    return text[-2000:]
+
+
+def command(argv, cwd=None, timeout=120):
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=cwd,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise InfrastructureError(
+            f"{Path(argv[0]).name} could not complete: {diagnostic(error)}"
+        ) from None
+    if result.returncode:
+        raise InfrastructureError(
+            f"{Path(argv[0]).name} exited {result.returncode}: {diagnostic(result.stderr)}"
+        )
+    return result.stdout
 
 
 def decode_api(output):
@@ -116,16 +157,37 @@ def decode_api(output):
 
 
 def api(path):
-    output = command(["npx", "-y", "gh-axi", "api", path, "--jq", "@base64", "--full"])
-    return decode_api(output)
+    for attempt in range(3):
+        try:
+            output = command(
+                [
+                    "gh",
+                    "cfs",
+                    "--",
+                    "npx",
+                    "-y",
+                    "gh-axi",
+                    "api",
+                    path,
+                    "--jq",
+                    "@base64",
+                    "--full",
+                ]
+            )
+            return decode_api(output)
+        except InfrastructureError:
+            if attempt == 2:
+                raise
+            time.sleep(2**attempt)
 
 
-def pages(path):
+def pages(path, key=None):
     rows = {}
     page = 1
     while True:
         separator = "&" if "?" in path else "?"
-        batch = api(f"{path}{separator}per_page=100&page={page}")
+        response = api(f"{path}{separator}per_page=100&page={page}")
+        batch = response[key] if key else response
         if not isinstance(batch, list):
             raise ValueError("Expected a GitHub API list")
         if not batch:
@@ -253,16 +315,27 @@ def notify(message):
     return False
 
 
-def notify_ready_pull_requests(directory, items):
+def notify_ready_pull_requests(directory, items, config=None):
     path = directory / "pr-notifications.json"
     try:
         sent = read_json(path) if path.exists() else {}
         for item in items.values():
             if item["outcome"] != "awaiting_review":
                 continue
-            for url in item["pr_urls"]:
-                if url in sent:
+            urls = [url for url in item["pr_urls"] if url not in sent]
+            if not urls:
+                continue
+            if config is not None:
+                try:
+                    verify_pull_requests(config, item)
+                except (InfrastructureError, ValueError, KeyError):
+                    LOG.warning(
+                        "Saved PR readiness could not be revalidated; notification deferred"
+                    )
                     continue
+                if item["outcome"] != "awaiting_review":
+                    continue
+            for url in urls:
                 if notify(f"Draft PR ready for your review: {url}"):
                     sent[url] = now().isoformat()
                     atomic_json(path, sent)
@@ -368,6 +441,129 @@ def release_coordinator(config, run):
         LOG.exception("Coordinator lease retained; safe return did not succeed")
 
 
+def preflight(config):
+    for executable in (
+        "gh",
+        "npx",
+        "node",
+        "git",
+        "treehouse",
+        "pr-marker",
+        config.get("pi", "/opt/homebrew/bin/pi"),
+    ):
+        if not shutil.which(executable):
+            raise InfrastructureError(
+                f"Required executable is unavailable: {executable}"
+            )
+    api(f"/repos/{config['repository']}")
+    rows = json.loads(
+        command(["treehouse", "status", "--json"], cwd=config["checkout"])
+    )
+    idle = sum(row["status"] == "available" for row in rows)
+    warnings = (
+        []
+        if idle
+        else [
+            "Treehouse has no idle implementation slots. Do not remove occupied worktrees."
+        ]
+    )
+    hosts = {}
+    mcp = Path(config["agent_dir"]) / "mcp.json"
+    if mcp.exists():
+        servers = read_json(mcp).get("mcpServers", {})
+        for name in ("Splunk", "Sentry"):
+            server = servers.get(name, {})
+            host = urlsplit(server.get("url", "")).hostname or server.get(
+                "env", {}
+            ).get("SPLUNK_HOST")
+            if not host:
+                warnings.append(
+                    f"{name} endpoint was not found; access remains unverified."
+                )
+                continue
+            host = urlsplit(host if "://" in host else "https://" + host).hostname
+            try:
+                command(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import socket,sys; socket.getaddrinfo(sys.argv[1],443)",
+                        host,
+                    ],
+                    timeout=15,
+                )
+                hosts[name] = {"dns": "available", "host": host}
+            except InfrastructureError:
+                hosts[name] = {"dns": "unavailable", "host": host}
+                warnings.append(
+                    f"{name} hostname resolution failed. Continue only independent investigations."
+                )
+    else:
+        warnings.append(
+            "Telemetry endpoint configuration is unavailable; access remains unverified."
+        )
+    return {
+        "checked_at": now().isoformat(),
+        "idle_worktrees": idle,
+        "telemetry": hosts,
+        "warnings": warnings,
+    }
+
+
+def progress(config, directory, pid, started, status="running"):
+    activity = max(
+        [started.timestamp()]
+        + [
+            path.stat().st_mtime
+            for path in (directory / "output.log", directory / "session.jsonl")
+            if path.exists()
+        ]
+    )
+    value = {
+        "stage": str(directory),
+        "child_pid": pid,
+        "heartbeat_at": now().isoformat(),
+        "last_activity_at": datetime.fromtimestamp(activity, timezone.utc).isoformat(),
+        "status": status,
+    }
+    atomic_json(Path(config["state_dir"]) / "progress.json", value)
+    return now().timestamp() - activity >= 2 * 60 * 60
+
+
+def write_report(directory, run):
+    counts = dict(Counter(item["outcome"] for item in run["items"].values()))
+    lines = ["# Sentry issue worker", "", f"Run: `{run['id']}`", "", "## Outcomes", ""]
+    for outcome in (
+        "resolved",
+        "awaiting_review",
+        "awaiting_ci",
+        "blocked",
+        "infrastructure_error",
+        "skipped",
+    ):
+        lines.append(f"* {outcome}: {counts.get(outcome) or 'none'}")
+    lines += ["", "## Dependency health", ""] + [
+        f"* {diagnostic(warning)}"
+        for warning in run.get("preflight", {}).get("warnings", [])
+    ]
+    lines += ["", "## Issue results", ""]
+    for number, item in run["items"].items():
+        lines += [
+            f"### Issue {number}: {item['outcome']}",
+            "",
+            diagnostic(item.get("summary", "")),
+            "",
+        ]
+        lines += [f"* PR: {url}" for url in item.get("pr_urls", [])]
+        if item.get("next_action"):
+            lines += ["", "Next action: " + diagnostic(item["next_action"]), ""]
+    path = directory / "report.md"
+    temporary = directory / ".report.pending"
+    temporary.write_text("\n".join(lines) + "\n")
+    temporary.replace(path)
+    return path
+
+
 def prepare_session(directory, workdir):
     session = directory / "session.jsonl"
     if session.exists():
@@ -428,19 +624,41 @@ def run_pi(config, directory, workdir, prompt, lock_fd, policy, analysis=False):
             pass_fds=(lock_fd,),
             start_new_session=True,
         )
-        atomic_json(
-            directory / "process.json",
-            {"pid": process.pid, "started_at": now().isoformat()},
-        )
+        started = now()
         try:
-            code = process.wait()
+            atomic_json(
+                directory / "process.json",
+                {"pid": process.pid, "started_at": started.isoformat()},
+            )
+            stalled_notified = False
+            while True:
+                stalled = progress(config, directory, process.pid, started)
+                if stalled and not stalled_notified:
+                    stalled_notified = bool(
+                        notify(
+                            f"No output for two hours. Work is still running: {directory}"
+                        )
+                    )
+                try:
+                    code = process.wait(timeout=60)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            progress(config, directory, process.pid, started, status="finished")
         except BaseException:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait()
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
             raise
     if code:
         if not (directory / "receipt.json").exists():
-            raise RuntimeError(f"Pi exited {code}; inspect {directory / 'output.log'}")
+            raise InfrastructureError(
+                f"Pi exited {code}; inspect {directory / 'output.log'}"
+            )
         LOG.warning(
             "Pi exited %s after writing a receipt; validating the receipt before classifying work",
             code,
@@ -464,40 +682,85 @@ def validate_outcome(receipt, number, fresh):
         raise ValueError("Awaiting review/CI requires a pull request URL")
 
 
+def ci_green(repository, sha):
+    checks = pages(
+        f"/repos/{repository}/commits/{sha}/check-runs?filter=latest", key="check_runs"
+    )
+    statuses = pages(f"/repos/{repository}/commits/{sha}/statuses")
+    latest = {}
+    for status in sorted(statuses, key=lambda row: row["id"], reverse=True):
+        latest.setdefault(status["context"], status["state"])
+    return (
+        bool(checks or latest)
+        and all(
+            check["status"] == "completed"
+            and check["conclusion"] in {"success", "neutral", "skipped"}
+            for check in checks
+        )
+        and all(state == "success" for state in latest.values())
+    )
+
+
 def verify_pull_requests(config, receipt):
     if receipt["outcome"] not in {"awaiting_review", "awaiting_ci"}:
         return
+    prs = []
     for url in receipt.get("pr_urls", []):
         match = re.fullmatch(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)", url)
         if not match or match[1] not in config["allowed_repositories"]:
             raise ValueError("Pull request target is outside the trusted allowlist")
-        pr = api(f"/repos/{match[1]}/pulls/{match[2]}")
+        endpoint = f"/repos/{match[1]}/pulls/{match[2]}"
+        pr = api(endpoint)
         if pr["state"] != "open":
             raise ValueError("Reported pending pull request is not open")
         if config.get("assignee", "zkoppert") not in [
             user["login"] for user in pr["assignees"]
         ]:
             raise ValueError("Pull request is missing the configured assignee")
-        reviews = pages(f"/repos/{match[1]}/pulls/{match[2]}/reviews")
+        reviews = pages(endpoint + "/reviews")
         reviewers = pr.get("requested_reviewers", []) + [
             review["user"] for review in reviews
         ]
         if not any("copilot" in user["login"].lower() for user in reviewers):
             raise ValueError("Copilot review has not been requested or completed")
-    if receipt["outcome"] in {"awaiting_review", "awaiting_ci"}:
-        paths = receipt.get("worktrees", [])
-        if not paths:
-            raise ValueError("Pull request receipt needs its certified worktree paths")
-        for path in paths:
-            rows = json.loads(command(["treehouse", "status", "--json"], cwd=path))
-            if not any(
-                row["path"] == path and row["status"] in {"leased", "dirty", "in-use"}
-                for row in rows
-            ):
-                raise ValueError(
-                    "PR certification worktree is not managed by Treehouse"
-                )
-            command(["pr-marker", "check"], cwd=path)
+        prs.append((match[1], endpoint, pr["head"]["sha"]))
+    paths = receipt.get("worktrees", [])
+    if not paths:
+        raise ValueError("Pull request receipt needs its certified worktree paths")
+    certified = set()
+    for path in paths:
+        rows = json.loads(command(["treehouse", "status", "--json"], cwd=path))
+        if not any(
+            row["path"] == path and row["status"] in {"leased", "dirty", "in-use"}
+            for row in rows
+        ):
+            raise ValueError("PR certification worktree is not managed by Treehouse")
+        if command(["git", "status", "--porcelain"], cwd=path).strip():
+            raise ValueError("PR certification worktree has uncommitted changes")
+        remote = command(["git", "remote", "get-url", "origin"], cwd=path).strip()
+        match = re.fullmatch(
+            r"(?:https://github\.com/|git@github\.com:)([\w.-]+/[\w.-]+?)(?:\.git)?/?",
+            remote,
+        )
+        if not match:
+            raise ValueError("PR certification repository cannot be verified")
+        sha = command(["git", "rev-parse", "HEAD"], cwd=path).strip()
+        command(["pr-marker", "check"], cwd=path)
+        certified.add((match[1], sha))
+    green = True
+    for repository, endpoint, sha in prs:
+        if (repository, sha) not in certified:
+            raise ValueError(
+                "Remote PR commit does not match a certified repository and commit"
+            )
+        green = ci_green(repository, sha) and green
+        if api(endpoint)["head"]["sha"] != sha:
+            raise ValueError("Remote PR commit changed during verification")
+    if receipt["outcome"] == "awaiting_review" and not green:
+        receipt["outcome"] = "awaiting_ci"
+        receipt["next_action"] = (
+            "Inspect missing, pending, or unsuccessful GitHub checks before review handoff."
+        )
 
 
 def execute(config, state, state_path, lock_fd, runtime):
@@ -514,9 +777,13 @@ def execute(config, state, state_path, lock_fd, runtime):
         else {"id": state["active_run"], "started_at": now().isoformat(), "items": {}}
     )
     run["pid"] = os.getpid()
-    notify_ready_pull_requests(root, run["items"])
+    ledger_path = root / "ledger.json"
+    ledger = read_json(ledger_path) if ledger_path.exists() else {}
+    notify_ready_pull_requests(root, {**ledger, **run["items"]}, config=config)
     workdir = lease(config, run, run_path)
+    run["preflight"] = preflight(config)
     atomic_json(run_path, run)
+    write_report(directory, run)
     snapshot_dir = directory / "snapshot"
     manifest_path = snapshot_dir / "manifest.json"
     manifest = (
@@ -553,10 +820,10 @@ def execute(config, state, state_path, lock_fd, runtime):
         notes.extend(receipt["notes"])
     context_path = directory / "context.json"
     atomic_json(context_path, {"snapshot_sha256": manifest["sha256"], "notes": notes})
-    ledger_path = root / "ledger.json"
-    ledger = read_json(ledger_path) if ledger_path.exists() else {}
+    infrastructure_streak = 0
     for row in manifest["issues"]:
-        if not row["eligible"] or str(row["number"]) in run["items"]:
+        previous = run["items"].get(str(row["number"]))
+        if not row["eligible"] or (previous and not previous.get("retryable")):
             continue
         if (root / "paused").exists():
             atomic_json(run_path, run)
@@ -591,6 +858,7 @@ def execute(config, state, state_path, lock_fd, runtime):
                     "fresh_issue": fresh,
                     "receipt": str(stage / "receipt.json"),
                     "source_checkout": config.get("source_checkout"),
+                    "dependency_health": run["preflight"],
                     "reconciliation_only": not eligible(fresh),
                     "fresh_comments": (
                         pages(endpoint + "/comments") if not eligible(fresh) else None
@@ -615,11 +883,27 @@ def execute(config, state, state_path, lock_fd, runtime):
             run["items"][str(number)] = result
             ledger[str(number)] = {**result, "run_directory": str(directory)}
         except Exception as error:
-            LOG.exception("Issue %s failed", number)
+            LOG.error(
+                "Issue %s infrastructure or validation failure: %s",
+                number,
+                diagnostic(error),
+            )
+            error_path = directory / "items" / str(number) / "error.json"
+            atomic_json(
+                error_path,
+                {
+                    "type": type(error).__name__,
+                    "diagnostic": diagnostic(error),
+                    "at": now().isoformat(),
+                },
+            )
             run["items"][str(number)] = {
                 "number": number,
-                "outcome": "blocked",
-                "summary": str(error),
+                "outcome": "infrastructure_error",
+                "retryable": isinstance(error, InfrastructureError),
+                "summary": diagnostic(error),
+                "evidence": [str(error_path)],
+                "next_action": "Restore the failed dependency or correct the invalid receipt, then retry.",
             }
             ledger[str(number)] = {
                 **run["items"][str(number)],
@@ -627,7 +911,17 @@ def execute(config, state, state_path, lock_fd, runtime):
             }
         atomic_json(run_path, run)
         atomic_json(ledger_path, ledger)
+        write_report(directory, run)
         notify_ready_pull_requests(root, run["items"])
+        infrastructure_streak = (
+            infrastructure_streak + 1
+            if run["items"][str(number)].get("retryable")
+            else 0
+        )
+        if infrastructure_streak >= 3:
+            raise InfrastructureError(
+                "Three consecutive dependency failures. The pass is checkpointed for retry."
+            )
     run["finished_at"] = now().isoformat()
     run.pop("current_issue", None)
     run["outcome_counts"] = dict(
@@ -638,10 +932,24 @@ def execute(config, state, state_path, lock_fd, runtime):
     state["last_run"] = str(directory)
     state["active_run"] = None
     atomic_json(state_path, state)
-    notify(f"Backlog pass finished: {run['outcome_counts']}. See {directory}")
+    report = write_report(directory, run)
+    counts = {name: run["outcome_counts"].get(name) or "none" for name in OUTCOMES}
+    notify(
+        f"Pass finished: {counts.get('resolved', 0)} closed; {counts.get('awaiting_review', 0)} ready; "
+        f"{counts.get('awaiting_ci', 0)} awaiting CI; {counts.get('blocked', 0)} blocked; "
+        f"{counts.get('infrastructure_error', 0)} infrastructure errors. Report: {report}"
+    )
 
 
 def install(config_path, config, runtime):
+    source = runtime.resolve().parent
+    if (
+        config.get("source_checkout")
+        and Path(config["source_checkout"]).resolve() != source
+    ):
+        raise ValueError(
+            "Install from the configured source_checkout to preserve maintained worker changes"
+        )
     root = Path(config["state_dir"])
     with exclusive_lock(root):
         state_path = root / "state.json"
@@ -662,6 +970,27 @@ def install(config_path, config, runtime):
             "backlog_autopilot_extension.ts",
         ):
             shutil.copyfile(runtime / name, version / name)
+        atomic_json(
+            version / "release.json",
+            {
+                "source_checkout": str(source),
+                "source_commit": command(
+                    ["git", "rev-parse", "HEAD"], cwd=source
+                ).strip(),
+                "source_dirty": bool(
+                    command(["git", "status", "--porcelain"], cwd=source).strip()
+                ),
+                "installed_at": now().isoformat(),
+                "sha256": {
+                    name: hashlib.sha256((version / name).read_bytes()).hexdigest()
+                    for name in (
+                        "backlog_autopilot.py",
+                        "backlog_autopilot_policy.md",
+                        "backlog_autopilot_extension.ts",
+                    )
+                },
+            },
+        )
         current = root / "current"
         temporary = root / (".current-" + uuid4().hex)
         temporary.symlink_to(version, target_is_directory=True)
@@ -711,7 +1040,16 @@ def main(argv=None):
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument(
         "action",
-        choices=["install", "scheduled", "run", "dry-run", "status", "pause", "resume"],
+        choices=[
+            "install",
+            "scheduled",
+            "run",
+            "dry-run",
+            "preflight",
+            "status",
+            "pause",
+            "resume",
+        ],
     )
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -727,6 +1065,11 @@ def main(argv=None):
         if args.action == "install":
             install(args.config.resolve(), config, runtime)
             return 0
+        if args.action == "preflight":
+            result = preflight(config)
+            atomic_json(root / "preflight.json", result)
+            print(json.dumps(result, indent=2))
+            return 0
         if args.action == "pause":
             (root / "paused").touch(mode=0o600)
             print("Paused. Active work stops at the next item boundary.")
@@ -734,7 +1077,7 @@ def main(argv=None):
         if args.action == "resume":
             (root / "paused").unlink(missing_ok=True)
             print(
-                "Resumed. An overdue Friday pass starts on the next tick. Use run to continue now."
+                "Resumed. Unfinished or overdue daily work starts on the next eligible tick."
             )
             return 0
         state_path = root / "state.json"
@@ -743,13 +1086,26 @@ def main(argv=None):
         if last_slot.tzinfo is None:
             raise ValueError("Schedule state requires an aware timestamp")
         if args.action == "status":
+            report_directory = state.get("last_run")
+            if state.get("active_run"):
+                report_directory = root / "runs" / state["active_run"]
             print(
                 json.dumps(
                     {
                         **state,
                         "paused": (root / "paused").exists(),
+                        "progress": (
+                            read_json(root / "progress.json")
+                            if (root / "progress.json").exists()
+                            else None
+                        ),
+                        "report": (
+                            str(Path(report_directory) / "report.md")
+                            if report_directory
+                            else None
+                        ),
                         "next_slot": (
-                            latest_slot(now()) + timedelta(days=7)
+                            latest_slot(now()) + timedelta(days=1)
                         ).isoformat(),
                     },
                     indent=2,
@@ -774,17 +1130,36 @@ def main(argv=None):
             return 0
         if (root / "paused").exists():
             return 0
-        if args.action == "scheduled" and latest_slot(now()) <= last_slot:
-            return 0
         with exclusive_lock(root) as lock_fd:
             state = read_json(state_path)
             if args.action == "scheduled":
                 slot = latest_slot(now())
-                if slot <= datetime.fromisoformat(state["last_slot"]):
+                if not state.get("active_run") and slot <= datetime.fromisoformat(
+                    state["last_slot"]
+                ):
                     return 0
-                state["last_slot"] = slot.isoformat()
+                if state.get("retry_after") and now() < datetime.fromisoformat(
+                    state["retry_after"]
+                ):
+                    return 0
+                if not state.get("active_run"):
+                    state["last_slot"] = slot.isoformat()
+                    atomic_json(state_path, state)
+            try:
+                execute(config, state, state_path, lock_fd, runtime)
+            except Exception:
+                failures = min(state.get("consecutive_failures", 0) + 1, 5)
+                state["consecutive_failures"] = failures
+                state["retry_after"] = (
+                    now() + timedelta(minutes=min(60, 5 * 2 ** (failures - 1)))
+                ).isoformat()
                 atomic_json(state_path, state)
-            execute(config, state, state_path, lock_fd, runtime)
+                raise
+            state.pop("retry_after", None)
+            state.pop("consecutive_failures", None)
+            if args.action == "scheduled" and not state.get("active_run"):
+                state["last_slot"] = latest_slot(now()).isoformat()
+            atomic_json(state_path, state)
         return 0
     except WorkerBusy:
         if args.action == "scheduled":
