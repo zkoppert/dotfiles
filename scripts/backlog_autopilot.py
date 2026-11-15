@@ -164,8 +164,9 @@ def diagnostic(text):
     text = re.sub(
         r"(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)", "[REDACTED]", str(text)
     )
+    text = re.sub(r"(?i)(bearer\s+)\S+", r"\1[REDACTED]", text)
     text = re.sub(
-        r"(?i)(bearer\s+|(?:token|password|secret|authorization)[\s=:]+)\S+",
+        r"""(?i)((?:token|password|secret|authorization)["']?[\s=:]+)(?:"[^"]*"|'[^']*'|\S+)""",
         r"\1[REDACTED]",
         text,
     )
@@ -190,8 +191,13 @@ def command(argv, cwd=None, timeout=120, env=None):
             f"{Path(argv[0]).name} could not complete: {diagnostic(error)}"
         ) from None
     if result.returncode:
+        details = "\n".join(
+            f"{name}: {diagnostic(value)}"
+            for name, value in (("stderr", result.stderr), ("stdout", result.stdout))
+            if value
+        )
         raise InfrastructureError(
-            f"{Path(argv[0]).name} exited {result.returncode}: {diagnostic(result.stderr)}"
+            f"{Path(argv[0]).name} exited {result.returncode}: {details}"
         )
     return result.stdout
 
@@ -406,6 +412,34 @@ def restore_tailscale(config):
     select_tailscale_profile(settings, settings["restore_profile"])
     path.unlink()
     LOG.info("Restored the configured personal Tailscale profile")
+    return True
+
+
+def recover_tailscale(config, state, state_path, scheduled):
+    pending = (Path(config["state_dir"]) / "tailscale-session.json").exists()
+    deadline = state.get("tailscale_restore_retry_after")
+    if pending and scheduled and deadline and now() < datetime.fromisoformat(deadline):
+        return False
+    try:
+        restored = restore_tailscale(config)
+    except Exception:
+        failures = min(state.get("tailscale_restore_failures", 0) + 1, 3)
+        state["tailscale_restore_failures"] = failures
+        state["tailscale_restore_retry_after"] = (
+            now() + timedelta(seconds=(60, 120, 300)[failures - 1])
+        ).isoformat()
+        atomic_json(state_path, state)
+        raise
+    keys = ["tailscale_restore_failures", "tailscale_restore_retry_after"]
+    if restored and not state.get("active_run"):
+        keys += ["retry_after", "consecutive_failures"]
+    changed = False
+    for key in keys:
+        if key in state:
+            state.pop(key)
+            changed = True
+    if changed:
+        atomic_json(state_path, state)
     return True
 
 
@@ -1419,10 +1453,10 @@ def main(argv=None):
         with exclusive_lock(root) as lock_fd:
             state = read_json(state_path)
             # Recover only after the lock proves that no worker child still owns the network.
-            if restore_tailscale(config) and not state.get("active_run"):
-                state.pop("retry_after", None)
-                state.pop("consecutive_failures", None)
-                atomic_json(state_path, state)
+            if not recover_tailscale(
+                config, state, state_path, scheduled=args.action == "scheduled"
+            ):
+                return 0
             if (root / "paused").exists():
                 return 0
             if args.action == "scheduled":

@@ -193,6 +193,28 @@ class ReliabilityTests(unittest.TestCase):
         for secret in ("private-value", "secret-value", "ghp_fakecredential"):
             self.assertNotIn(secret, text)
 
+    def test_command_error_keeps_primary_stdout_cause_and_redacts_both_streams(self):
+        stdout = (
+            'error: feed access denied; "token": "private value"\ncode: AUTH_FAILED\n'
+        )
+        stderr = "cfs: command failed; Authorization: Bearer bearer-secret\n"
+        script = (
+            "import sys; sys.stdout.write("
+            + repr(stdout)
+            + "); sys.stderr.write("
+            + repr(stderr)
+            + "); sys.exit(1)"
+        )
+        with self.assertRaises(worker.InfrastructureError) as raised:
+            worker.command([sys.executable, "-c", script])
+        message = str(raised.exception)
+        self.assertIn("feed access denied", message)
+        self.assertIn("AUTH_FAILED", message)
+        self.assertIn("cfs: command failed", message)
+        self.assertNotIn("private value", message)
+        self.assertNotIn("bearer-secret", message)
+        self.assertIn("[REDACTED]", message)
+
     def test_real_command_timeout_has_explicit_infrastructure_outcome(self):
         with self.assertRaisesRegex(worker.InfrastructureError, "could not complete"):
             worker.command(
@@ -963,6 +985,60 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(
             (Path(self.config["state_dir"]) / "tailscale-session.json").exists()
         )
+
+    def test_restoration_failures_back_off_without_blocking_operator_recovery(self):
+        vpn = FakeTailscale()
+        vpn.selected = "work"
+        vpn.fail_before.add("personal")
+        root = Path(self.config["state_dir"])
+        worker.atomic_json(self.config_path, {**self.config, "tailscale": vpn.settings})
+        worker.atomic_json(
+            root / "tailscale-session.json",
+            {"work_profile": "work", "restore_profile": "personal"},
+        )
+        worker.atomic_json(
+            self.state_path,
+            {
+                **self.state,
+                "active_run": "interrupted",
+                "retry_after": "2030-01-01T00:00:00+00:00",
+            },
+        )
+        (root / "paused").touch()
+        instant = datetime.fromisoformat("2026-11-07T02:00:00+00:00")
+        for attempt, delay in enumerate((60, 120, 300, 300), 1):
+            with patch.object(worker, "command", side_effect=vpn.command), patch.object(
+                worker, "notify"
+            ), patch.object(worker, "now", return_value=instant):
+                self.assertEqual(
+                    worker.main(["--config", str(self.config_path), "scheduled"]), 1
+                )
+                saved = worker.read_json(self.state_path)
+                due = datetime.fromisoformat(saved["tailscale_restore_retry_after"])
+                self.assertEqual((due - instant).total_seconds(), delay)
+                self.assertEqual(saved["retry_after"], "2030-01-01T00:00:00+00:00")
+                self.assertEqual(
+                    worker.main(["--config", str(self.config_path), "scheduled"]), 0
+                )
+            self.assertEqual(len(vpn.events), attempt)
+            self.assertEqual(vpn.selected, "work")
+            instant = due
+        vpn.fail_before.clear()
+        with patch.object(worker, "command", side_effect=vpn.command), patch.object(
+            worker,
+            "now",
+            return_value=datetime.fromisoformat("2026-11-07T02:00:01+00:00"),
+        ), patch.object(worker, "execute") as execute:
+            self.assertEqual(worker.main(["--config", str(self.config_path), "run"]), 0)
+        self.assertEqual(vpn.selected, "personal")
+        self.assertFalse((root / "tailscale-session.json").exists())
+        self.assertNotIn(
+            "tailscale_restore_retry_after", worker.read_json(self.state_path)
+        )
+        self.assertNotIn(
+            "tailscale_restore_failures", worker.read_json(self.state_path)
+        )
+        execute.assert_not_called()
 
     def test_held_worker_lock_prevents_network_restoration(self):
         vpn = FakeTailscale()
