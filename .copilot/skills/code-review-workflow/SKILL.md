@@ -24,7 +24,7 @@ Run the **code diff** gate as a convergence loop, not a single pass. Follow-up o
 - After addressing a batch of verified blocking or fix-before-merge findings, re-run the full multi-model panel on the updated diff.
 - A clean round has no new verified **Blocking** or **fix-before-merge** findings. A verified follow-up can remain when its current value does not justify added scope.
 - Every initial review and re-review must use newly launched, session-free reviewers. Do not resume a reviewer's prior conversation, reuse a fixing agent as a reviewer, or let a reviewer certify code written to satisfy its own recommendation. Give the new panel the updated diff and relevant requirements, but treat prior findings, fix summaries, and tests from the fix turn as claims that require independent verification.
-- **Cap at 5 rounds.** Stop when a round is clean. If the fifth round still surfaces a verified blocking finding, fix it, say the cap was reached, and let me decide whether to continue.
+- **Cap at 10 rounds.** Stop when a round is clean. If round 10 still has a verified blocking finding, fix it and report that we reached the cap. Ask me whether to continue.
 - Record the final clean round with `pr-marker write code-review --models a,b,c --convergence-rounds N -`. Both `pr-marker` and `gh-guard` reject a code-review marker without valid final-clean-round metadata.
 - The **plan** and **PR-description** gates stay single-pass unless I ask otherwise.
 

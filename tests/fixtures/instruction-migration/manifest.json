@@ -2,7 +2,7 @@
   "schema_version": 2,
   "baseline": {
     "path": "tests/fixtures/instruction-migration/global-instructions-2026-11-06.txt",
-    "sha256": "f42ed13c21a4f93925349bfbc8119b440de979f8470be16edaa6c5af1614c32c"
+    "sha256": "44ea9055ebcf983f139b6832ca4311b4a49335f645da34480cd8b23a20ac653e"
   },
   "blocks": [
     {
@@ -31,7 +31,7 @@
     },
     {
       "id": "My Standard Change Workflow",
-      "sha256": "f286cce27904939ea79474bd0c9b1741df14c711c75b41ff5282c3e23f34e45e",
+      "sha256": "81f4a60322ccc293ba24403ef1af604376c21469b3f2b04079064489103c5601",
       "source_start_line": 51,
       "source_end_line": 76,
       "destination": ".github/copilot-instructions.md",
@@ -55,7 +55,7 @@
     },
     {
       "id": "Code Review Workflow",
-      "sha256": "650bd1f9052f423b0d59b2061ba92b7c6eefb43e2e4d20521ee899b745c13624",
+      "sha256": "0a199368f1fb2baa390dd799d7c0049612f1e19b38229e9c53c303691af1cc78",
       "source_start_line": 128,
       "source_end_line": 251,
       "destination": ".copilot/skills/code-review-workflow/SKILL.md",
