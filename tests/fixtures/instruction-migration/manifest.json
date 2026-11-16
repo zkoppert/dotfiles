@@ -143,6 +143,9 @@
     }
   ],
   "pre_action_routes": {
+    "any Playwright browser task": [
+      "playwright"
+    ],
     "any file mutation or code, test, configuration, architecture, or system-design review": [
       "engineering-practices"
     ],

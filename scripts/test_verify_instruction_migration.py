@@ -20,6 +20,7 @@ class InstructionMigrationTest(unittest.TestCase):
     """Reject content loss and broken skill routing."""
 
     APPROVED_ROUTES = {
+        "any Playwright browser task": ["playwright"],
         "any file mutation or code, test, configuration, architecture, or system-design review": ["engineering-practices"],
         "any plan, code, security, self, or PR-description review": ["code-review-workflow"],
         "any PR operation or PR-bound draft": ["pull-request-workflow"],

@@ -29,6 +29,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
         "memory-sweep",
         "nux-fr-handoff",
         "open-source-actions-maintenance",
+        "playwright",
         "pr-body-render-check",
         "proxima-review-lab",
         "pull-request-workflow",
