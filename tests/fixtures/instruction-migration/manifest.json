@@ -223,7 +223,7 @@
     {
       "id": "Pre-action skill routing",
       "destination": ".github/copilot-instructions.md",
-      "sha256": "c0b1378a10873afef9b4dafbce93a0f07480b8a93763449daf338982fdf0cdd0"
+      "sha256": "c5104c9a34a9c279999e7a34d46a08ac816624bb7a4fe9e5fcf5c81b8749431c"
     },
     {
       "id": "Pull Requests",

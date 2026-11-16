@@ -49,6 +49,7 @@ Load each applicable skill before the first relevant command, edit, review, or e
 For GitHub operations, `gh-axi` controls command choice.
 
 - Before any file mutation or code, test, configuration, architecture, or system-design review, read `engineering-practices` in full.
+- Before any Playwright browser task, read `playwright` in full.
 - Before any plan, code, security, self, or PR-description review, read `code-review-workflow` in full.
 - Before any PR operation or PR-bound draft, read `pull-request-workflow` in full.
 - Before any GitHub operation, read `gh-axi` first and read `github-operations` second.
