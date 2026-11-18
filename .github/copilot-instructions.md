@@ -12,7 +12,7 @@ Private assignments live in `~/.config/repo-guards/config.yaml`, outside Git. Ne
 | --- | --- | --- | --- |
 | `relaxed` | Optional | Optional | Direct default-branch push or draft PR |
 | `standard` | Local tests | HEAD-pinned self-review | Draft PR |
-| `strict` | Full Codespace checks | Current three-model workflow | Draft PR with all five markers |
+| `strict` | Change-relevant Codespace checks | Current three-model workflow | Draft PR with all five markers |
 
 These profiles replace mandatory quality steps in the standard workflow, Harnesses, review skills, and wrapper guidance below. Other rules still apply.
 
@@ -20,13 +20,22 @@ For relaxed work, don't require tests, reviews, Codespaces, demos, or markers un
 
 For standard work, use `pr-marker write code-review` for self-review evidence. Use `pr-marker run-tests` for local checks. Capture visual evidence for UI changes.
 
-Strict retains the full existing workflow. Missing assignments, uncertain identity, or invalid configuration never grant reduced safeguards.
+Strict retains the review, evidence, and Codespace requirements. Test scope follows the change, not the repository size. Missing assignments, uncertain identity, or invalid configuration never grant reduced safeguards.
 
 Never modify private assignments to bypass a task's safeguards. Change assignments only when I explicitly request that configuration change.
 
 Profiles never grant push approval. Preserve privacy checks, secret protection, size limits, repository hooks, and destructive-action confirmation.
 
 Native pipeline proof and custody always retain their own requirements. Never bypass an active pipeline because the repository has a relaxed profile.
+
+### Choose change-relevant checks
+
+- Select test targets and packages that cover the changed behavior and affected contracts.
+- Include affected callers and integration boundaries when shared code or interfaces change.
+- Run applicable lint, type-check, and build targets for the same scope.
+- Run repository-wide checks only when the change has repository-wide impact or I explicitly request them.
+- Explain the selected scope and any coverage gaps. Normal target or package selection does not require `--narrow`.
+- Report other failures separately. Establish their connection before expanding the repair scope.
 
 ## General Preferences
 - Be direct and concise; skip preamble and get to the point
@@ -101,7 +110,7 @@ Global routing exceptions and cross-skill boundaries:
   - `gh pr create` requires the profile's `pr-marker` artifacts plus `ZACK_CONFIRMED_PR_CREATE=1`. It also lints the PR body.
   - `gh pr edit` lints body changes; edits to other PR fields pass through.
 
-- **`pr-marker`** (`~/repos/dotfiles/bin/pr-marker`, linked at `~/.local/bin/pr-marker`) is the source of truth for marker paths, formats, and validation. Use `pr-marker status` to inspect profile requirements and `pr-marker check` to enforce them. Under strict policy, `plan`, `code-review`, and `pr-review` require at least three models; `code-review` also records the final clean convergence round. The `code-review` and machine-produced `tests` markers are HEAD-pinned. `pr-marker run-tests` requires a clean repository, runs the test-quality preflight and every supplied command, and supports only the documented `--no-test-change-reason` and `--narrow` exceptions.
+- **`pr-marker`** (`~/repos/dotfiles/bin/pr-marker`, linked at `~/.local/bin/pr-marker`) is the source of truth for marker paths, formats, and validation. Use `pr-marker status` to inspect profile requirements and `pr-marker check` to enforce them. Under strict policy, `plan`, `code-review`, and `pr-review` require at least three models; `code-review` also records the final clean convergence round. The `code-review` and machine-produced `tests` markers are HEAD-pinned. `pr-marker run-tests` requires a clean repository, runs the test-quality preflight and every supplied command, and records the selected commands. Use `--no-test-change-reason` for missing persistent tests and `--narrow` for relevant checks that could not run. Normal target or package selection needs neither exception.
 
 If a new skill is added under `~/.copilot/skills/<name>/`, read its `SKILL.md` to learn when to invoke it. The auto-loaded skill registry, not this selective list, provides general discoverability.
 
@@ -122,20 +131,20 @@ Every non-trivial change under the strict repository quality profile follows the
    - Make one focused pass. Stop when further edits offer no concrete improvement to clarity, complexity, or maintenance.
    - Record the simplifications made, or explain why the current design is already the simplest safe option.
    - If refinement changes files, rerun focused tests, commit, and repeat step 4 against the updated diff. Respect its review cap.
-6. **Test in a Codespace.** Spin up a Codespace and run the **full** test suite plus the CI-equivalent checks (lint, type-check, build), never just the affected tests, via `pr-marker run-tests --cmd '<command>' [--cmd ...]`, which runs the test-quality evidence preflight and writes the machine-produced, HEAD-pinned `tests` marker only when every command exits 0 and the repository remains clean. Slowness is never a reason to narrow the suite (hours is fine); only genuine infeasibility, recorded via `--narrow`. Never rely on pushing to CI to find out, and never open a draft PR that then fails CI (see the Harnesses section and my codespace-testing habits).
+6. **Test relevant targets in a Codespace.** Select test targets and package suites from the changed behavior, affected callers, and integration boundaries. Run applicable lint, type-check, and build targets for that scope. Use `pr-marker run-tests --cmd '<command>' [--cmd ...]` to record the exact checks. It runs the test-quality preflight and writes the HEAD-pinned `tests` marker only when every command passes and the repository stays clean. Explain the selected scope and any coverage gaps. Run repository-wide checks only for repository-wide impact or my explicit request. Don't push merely to discover whether relevant checks pass.
 7. **Record a demo and capture before/after.** Use the `record-demo` skill (Codespace + Playwright) to capture before/after images and an optional walkthrough, then write the `demo` marker. For a change with no visual surface, record an explicit `N/A` justification plus an alternative visual aid.
 8. **Draft the PR description, then multi-model review it.** Write the PR body in first person with the repo template and relevant demo evidence from step 7. Run the multi-model review and record the synthesis: `<PR-description review> | pr-marker write pr-review --models a,b,c -`.
 9. **My human review of it all.** I review the plan, the code, the demo, and the PR description before anything is pushed. Wait for my go-ahead.
 10. **Push and open a draft PR.** After my go-ahead, push the branch and open a draft PR with `ZACK_CONFIRMED_PR_CREATE=1 gh pr create ...` (all five markers must already exist). Assign me, and keep it a draft until I explicitly ask to mark it ready.
 11. **Request and monitor the Copilot review.** Immediately after creating the draft PR, add Copilot as a requested reviewer through GitHub's reviewer request mechanism. Never request the review by mentioning Copilot in a comment. Watch the draft PR for new review feedback:
-    - For Copilot feedback, verify each comment against the code and runtime behavior. Address verified findings and commit the fix locally. Before pushing, run the `test-quality` skill, run the full multi-model code-review convergence loop with newly launched session-free reviewers, run the full Codespace test suite and CI-equivalent checks through `pr-marker run-tests`, and refresh the HEAD-pinned `code-review` and `tests` markers for the fix commit. Push only after the new HEAD is fully certified, then reply to the original comment and resolve the thread when fully addressed. Do not act on inaccurate feedback.
+    - For Copilot feedback, verify each comment against the code and runtime behavior. Address verified findings and commit the fix locally. Before pushing, run the `test-quality` skill. Run a fresh multi-model convergence review with session-free reviewers who did not author or fix the code. Run change-relevant Codespace tests and applicable lint/type-check/build targets through `pr-marker run-tests`. Refresh the HEAD-pinned `code-review` and `tests` markers for that fix commit. Push only after the new HEAD is fully certified, then reply to the original comment and resolve the thread when fully addressed. Do not act on inaccurate feedback.
     - For human feedback, verify each comment and prepare and validate the fix locally. Do not reply, resolve the thread, or push the fix commit until I explicitly approve those actions.
 
 ## Harnesses (close the feedback loop before guessing)
 
 Before claiming work is done, build a way to *see* the output yourself. Don't make me the validation step when you can validate automatically. Spend time on the harness before spending time on the code.
 
-- **Tests are the default harness.** If a test suite exists, run it before each commit and before reporting status, and report the outcome. If a module has no tests, write minimal tests that pin down the current behavior (or the intended behavior, for net-new code) before changing it, then use them as guardrails for the actual change. Lint counts as a cheap always-on signal, not a substitute for tests.
+- **Tests are the default harness.** Run the relevant test targets or package suites before each commit and before reporting status, and report the outcome. If a module has no tests, write minimal tests before changing it. Cover current behavior, or intended behavior for new code. Use those tests to protect the actual change. Lint counts as a cheap always-on signal, not a substitute for tests.
 - **Coverage is diagnostic, not the goal.** Design scenarios from requirements first, then use coverage to find forgotten code. Never create tests named or documented by source line solely to increase coverage. For every important test, apply the no-op check: it must fail if the protected behavior is removed, inverted, or returns the wrong value.
 - **Commit deterministic regression tests.** An ad hoc validation script or tests-marker command does not replace a persistent repository test for behavior that can be tested deterministically. If committed tests are genuinely infeasible, record a specific reason with `--no-test-change-reason`.
 - **CI is the final automated harness.** Never consider work done until CI is green. After pushing to a PR, wait for CI to complete and verify all required jobs pass. If checks fail, investigate and fix before reporting success. Do not tell me a PR is ready while any required check is still red or pending. If a required check is stuck, flaky, or failing for reasons outside the diff (platform outage, infra issue, unrelated test), say so explicitly and ask whether to wait, retry, or escalate; don't silently mark the work done.

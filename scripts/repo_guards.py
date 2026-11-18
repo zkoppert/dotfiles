@@ -24,7 +24,7 @@ PROFILES = {
     },
     "strict": {
         "markers": ["plan", "code-review", "demo", "pr-review", "tests"],
-        "tests": "full Codespace checks",
+        "tests": "change-relevant Codespace checks",
         "review": "three-model panels",
     },
 }

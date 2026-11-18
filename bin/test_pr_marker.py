@@ -2286,11 +2286,23 @@ def test_run_tests() -> None:
             assert "exit 0" in body
             assert "Test-quality evidence preflight:" in body
             assert "- evidence: not-applicable" in body
+            assert "# tests: change-relevant check run" in body
+            assert "Test scope: change-relevant targets and packages" in body
+            assert "Additional scope limits: none" in body
             # The machine-produced result header must be present (the gate keys on it).
             assert pr_marker.TESTS_RESULT_HEADER in body
             assert pr_marker.has_result_header(marker)
             ok, detail, _size, _path = pr_marker.marker_status(tests, "feat/tests")
             assert ok and detail == "ok", detail
+
+            scope_limit = "Hardware-dependent integration target unavailable."
+            assert (
+                pr_marker.main(["run-tests", "--cmd", "true", "--narrow", scope_limit])
+                == 0
+            )
+            assert f"Additional scope limits: {scope_limit}" in marker.read_text(
+                encoding="utf-8"
+            )
 
             # A later failing run must invalidate the prior passing marker, so a
             # green marker can never outlive a subsequent red run.

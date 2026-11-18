@@ -167,8 +167,8 @@ KINDS: dict[str, Kind] = {
         "tests",
         "tests.md",
         120,
-        "machine-produced record of a full CI-equivalent check run "
-        "(tests, lint, type-check, build) passing green in a Codespace",
+        "machine-produced record of change-relevant checks "
+        "(tests and applicable lint, type-check, build targets)",
         pinned=True,
         requires_result=True,
     ),
@@ -705,7 +705,7 @@ def _run_test_quality_preflight(
 def cmd_run_tests(args: argparse.Namespace) -> int:
     """Run the check commands and write the `tests` marker only if all pass.
 
-    Streams each command's output live (so a long full-suite run is watchable),
+    Streams each selected command's output live,
     records the exit codes as machine proof, and writes the HEAD-pinned marker
     only when every command exits 0. Any failure writes nothing and exits
     non-zero, so the gate stays blocked until a real green run exists.
@@ -732,7 +732,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         for entry in dirty_before:
             print(f"  {entry}", file=sys.stderr)
         print(
-            "Commit or remove the changes, then run the full checks again.",
+            "Commit or remove the changes, then run the relevant checks again.",
             file=sys.stderr,
         )
         return 1
@@ -792,7 +792,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         for entry in dirty_after:
             print(f"  {entry}", file=sys.stderr)
         print(
-            "Clean or commit the generated changes, then run the full checks again.",
+            "Clean or commit the generated changes, then run the relevant checks again.",
             file=sys.stderr,
         )
         return 1
@@ -812,7 +812,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         print(f"  branch: {branch} -> {final_branch or 'detached'}", file=sys.stderr)
         print(f"  HEAD: {head} -> {final_head or 'unavailable'}", file=sys.stderr)
         print(
-            "Restore the starting branch and commit, then run the full checks again.",
+            "Restore the starting branch and commit, then run the relevant checks again.",
             file=sys.stderr,
         )
         return 1
@@ -825,7 +825,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
     lines = [
         f"{REVIEWED_COMMIT_PREFIX}{head}{REVIEWED_COMMIT_SUFFIX}",
         TESTS_RESULT_HEADER,
-        "# tests: full CI-equivalent check run",
+        "# tests: change-relevant check run",
         "",
         f"RESULT: passed (all {len(results)} command(s) exited 0)",
         f"Codespace: {codespace}",
@@ -845,7 +845,11 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         "Commands:",
     ]
     lines += [f"- exit {code} in {dur:.1f}s: {cmd}" for cmd, code, dur in results]
-    lines += ["", f"Narrowing: {args.narrow or 'none (full suite)'}"]
+    lines += [
+        "",
+        "Test scope: change-relevant targets and packages",
+        f"Additional scope limits: {args.narrow or 'none'}",
+    ]
     content = "\n".join(lines) + "\n"
 
     path = marker_path(kind, branch)
@@ -1866,8 +1870,8 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="COMMAND",
         help=(
-            "a check command to run (repeatable), e.g. "
-            "--cmd 'make test' --cmd 'make lint'"
+            "a relevant test, lint, type-check, or build command "
+            "for the changed targets/packages (repeatable)"
         ),
     )
     p_run.add_argument(
@@ -1879,8 +1883,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--narrow",
         default=None,
         help=(
-            "record an explicit infeasibility narrowing "
-            "(genuine infeasibility only, never slowness)"
+            "record why a relevant check could not run; selecting "
+            "relevant targets/packages does not require this option"
         ),
     )
     p_run.add_argument(

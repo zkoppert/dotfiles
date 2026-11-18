@@ -100,7 +100,9 @@ class RepoGuardsTest(unittest.TestCase):
         ).stdout.split("\t")[0]
 
     def test_strict_default_and_private_assignment(self):
-        self.assertEqual(self.profile()["profile"], "strict")
+        default = self.profile()
+        self.assertEqual(default["profile"], "strict")
+        self.assertEqual(default["tests"], "change-relevant Codespace checks")
         self.assign()
         output = self.profile()
         self.assertEqual(output["profile"], "relaxed")

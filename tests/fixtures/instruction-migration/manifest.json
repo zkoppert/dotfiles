@@ -2,7 +2,7 @@
   "schema_version": 2,
   "baseline": {
     "path": "tests/fixtures/instruction-migration/global-instructions-2026-11-06.txt",
-    "sha256": "44ea9055ebcf983f139b6832ca4311b4a49335f645da34480cd8b23a20ac653e"
+    "sha256": "77f8c36b07a8bb1e147036d6586919fecdf14b6331558b1eb76b5369c5d5446f"
   },
   "blocks": [
     {
@@ -23,7 +23,7 @@
     },
     {
       "id": "Copilot Skills",
-      "sha256": "5de6d2952176334353976282228b2569caa091900c7005863af48a892846ae32",
+      "sha256": "b069aaed92bf6e9f9108b635f1dece91a3b2199bf98f0ff18509a00d6a10aafa",
       "source_start_line": 19,
       "source_end_line": 50,
       "destination": ".github/copilot-instructions.md",
@@ -31,7 +31,7 @@
     },
     {
       "id": "My Standard Change Workflow",
-      "sha256": "81f4a60322ccc293ba24403ef1af604376c21469b3f2b04079064489103c5601",
+      "sha256": "1793dce99c205e7731a37f2093119d28d824d2b945e15de06a37322ffcac7038",
       "source_start_line": 51,
       "source_end_line": 76,
       "destination": ".github/copilot-instructions.md",
@@ -39,7 +39,7 @@
     },
     {
       "id": "Harnesses (close the feedback loop before guessing)",
-      "sha256": "63149a5359976ec3fd43742d8bae782c689cc538bc73a622d78ba19746a996b7",
+      "sha256": "76b70164d15ad9a3b41881ab5c49053717db0371567d3cf447de6e20b8241559",
       "source_start_line": 77,
       "source_end_line": 91,
       "destination": ".github/copilot-instructions.md",
@@ -47,7 +47,7 @@
     },
     {
       "id": "Pull Requests",
-      "sha256": "65a56e0a5114fb746033940c041c402e5f74e00b08a62fe7e32132efab5075b4",
+      "sha256": "be783516dbccd39e897a22aeb6fe43bad5d28067fcb29d4e2fe5032be3830dd1",
       "source_start_line": 92,
       "source_end_line": 127,
       "destination": ".copilot/skills/pull-request-workflow/SKILL.md",
@@ -63,7 +63,7 @@
     },
     {
       "id": "Code Style & Languages",
-      "sha256": "c1ed372b52040d251420d96fe2843f89d44a07a06c5d5680c0b330f96ef2a482",
+      "sha256": "76d536123fdec7cc62b26eea5bea9e956d731dd990fdbd3e9c699405882b0928",
       "source_start_line": 252,
       "source_end_line": 288,
       "destination": ".copilot/skills/engineering-practices/SKILL.md",
