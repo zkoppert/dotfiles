@@ -297,7 +297,7 @@ When writing or reviewing React components, follow these composition principles.
 - **Conflict detection over conflict prevention** - Instead of relying on contributors to avoid conflicts (e.g., DB migrations, config changes), build detection into the pipeline. Conflicting migrations should be blocked automatically. Overlapping feature flags should raise a warning.
 
 ## GitHub CLI & API
-- Use `--json` flag with `gh` for structured output that can be parsed programmatically
+- **Structured output**: `gh-axi api` returns Token-Oriented Object Notation (TOON), not raw JSON. Inspect the response shape before parsing. For scripted JSON reads, request `--jq '@base64' --full`. Check the command exit status before decoding. Read the TOON `api_response.body` value before base64 decoding. Decode each nonempty body line, then parse each decoded JSON value. A paginated response can contain multiple values. Reject responses marked `truncated: true`. Decode GitHub file-content base64 separately when needed. Use `--json` only with commands that document that flag.
 - When searching across an org, use `gh search prs`, `gh search issues`, etc. with `--owner` filter
 - Always disable pagers: `git --no-pager`, `gh --no-pager`, or pipe to `cat`
 - **Gists**: I use gists frequently for drafts, sharing, and iteration. **Always create gists as private/secret by default** unless I explicitly ask for a public gist. When editing gists programmatically, use `gh api` to fetch raw file content instead of `gh gist view --raw` (which prepends the description and causes duplication on re-upload)

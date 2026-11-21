@@ -2,7 +2,7 @@
   "schema_version": 2,
   "baseline": {
     "path": "tests/fixtures/instruction-migration/global-instructions-2026-11-06.txt",
-    "sha256": "77f8c36b07a8bb1e147036d6586919fecdf14b6331558b1eb76b5369c5d5446f"
+    "sha256": "9231456a771cb4c7ca95d9664ced0bda1cf0275117176eb0d13bd120c171705b"
   },
   "blocks": [
     {
@@ -79,7 +79,7 @@
     },
     {
       "id": "GitHub CLI & API",
-      "sha256": "6761bf82517bdf073d6b1e2ddc3029034d890524a4b2721a024ceea17ce317ba",
+      "sha256": "7def4a7d3097dead34c169e676e0d2a09e2daa3b9619fc9b3ff0352ab7fef44f",
       "source_start_line": 299,
       "source_end_line": 307,
       "destination": ".copilot/skills/github-operations/SKILL.md",
