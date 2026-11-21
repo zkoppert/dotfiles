@@ -164,6 +164,22 @@ class InstallScriptTest(unittest.TestCase):
             text=True,
         )
 
+    def test_subagent_monitor_installation_runs_on_macos(self) -> None:
+        worker = self.repo / "scripts/pi_subagent_monitor.py"
+        worker.write_text(
+            "import json, os, pathlib, sys\n"
+            "pathlib.Path(os.environ['HOME'], 'monitor-install.json').write_text(json.dumps(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        self.run_installer()
+        self.assertEqual(json.loads((self.home / "monitor-install.json").read_text()), ["install"])
+
+    def test_subagent_monitor_installation_failure_is_visible(self) -> None:
+        worker = self.repo / "scripts/pi_subagent_monitor.py"
+        worker.write_text("raise SystemExit(1)\n", encoding="utf-8")
+        result = self.run_installer()
+        self.assertIn("Subagent monitor installation failed", result.stderr)
+
     def prepare_node_install(self) -> None:
         scripts = {
             "uname": (

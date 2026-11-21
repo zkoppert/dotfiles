@@ -17,6 +17,31 @@ My personal configuration for macOS and GitHub Codespaces.
 
 `record-demo` still owns pre-PR before/after evidence and the required `demo` marker. `ui-screenshot-presentation` defines how to present authentic UI captures in PR descriptions. `validate-pr-with-codespace` validates an already-open PR and does not satisfy the demo marker. The `gho11y` plugin covers observability, while accessibility findings use `remediate-accessibility-audit`. `session-portability` handles general development handoffs, while specialized handoff skills keep their narrower workflows.
 
+## How do background agents report progress?
+
+Background agents can stop without notifying their parent session. The `subagent-monitor` skill requires registration whenever an agent starts background work.
+
+On macOS, `install.sh` installs `pi-subagent-monitor` and a user LaunchAgent. The watcher checks registered batches every minute, without Pi cron or model calls.
+
+Desktop notifications report changed states. A Pi extension delivers pending updates into the registered parent conversation when that conversation is idle. Existing sessions need `/reload` once after installation. Future sessions load the extension automatically.
+
+The watcher distinguishes blocked agents, inactive processes, stale activity, PR creation, and reported completion. It never treats process exit or PR creation as successful validation. Completion reports include an evidence path; the parent must verify that evidence.
+
+Run `pi-subagent-monitor status` to inspect the last snapshot. State lives in `~/.local/state/pi-subagent-monitor`, and logs live in `~/Library/Logs/pi-subagent-monitor`. The installer honors `PI_CODING_AGENT_DIR` for extension placement.
+
+The LaunchAgent runs while the user is logged in. Sleeping computers resume checks after waking. Pending session updates survive Pi closure and watcher restarts. Monitoring never grants publication or restart authority.
+
+Use these focused checks when changing the monitor:
+
+```bash
+# Exercise real processes, CLI reporting, notification retry, and installation.
+python3 -m unittest scripts.test_pi_subagent_monitor
+# Exercise delivery through Pi's extension API contract.
+node --test tests/pi_subagent_monitor.test.mjs
+```
+
+The extension test requires a Node.js release with native TypeScript support. The installed extension uses Pi's normal TypeScript loader.
+
 ## How are global instructions organized?
 
 The global file keeps rules that apply to every session. Task-specific guidance lives in skills that load before the related action.

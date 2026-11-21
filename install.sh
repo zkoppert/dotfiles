@@ -47,6 +47,13 @@ if [ -d "$DOTFILES_DIR/.copilot/skills" ]; then
   done
 fi
 
+# Keep background-agent monitoring available independently of Pi's scheduler.
+if [ "$(uname)" = "Darwin" ] && [ -f "$DOTFILES_DIR/scripts/pi_subagent_monitor.py" ]; then
+  if ! python3 "$DOTFILES_DIR/scripts/pi_subagent_monitor.py" install; then
+    echo "⚠ Subagent monitor installation failed; inspect the error before launching background agents." >&2
+  fi
+fi
+
 # Install Linux-only dependencies for the remote Copilot environment.
 if [ "$(uname)" = "Linux" ]; then
   if ! node_version="$(node --version 2>/dev/null)" ||
