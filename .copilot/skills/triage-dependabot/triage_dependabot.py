@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Triage Dependabot PRs surfaced via GitHub notifications.
+"""Historical Dependabot notification helpers with a disabled command entrypoint.
 
 For each unread notification whose subject is a PullRequest authored by
 ``dependabot[bot]``, this tool fetches the PR and decides one of four
@@ -29,6 +29,12 @@ Usage:
 """
 
 from __future__ import annotations
+
+if __name__ == "__main__":
+    raise SystemExit(
+        "The historical notification command cannot run. "
+        "Use the guarded runner: ~/.local/bin/triage-dependabot --dry-run."
+    )
 
 import argparse
 import contextlib
@@ -2453,7 +2459,3 @@ def main(argv: list[str] | None = None) -> int:
     for err in stats.errors:
         print(f"ERROR: {err}", file=sys.stderr)
     return 1 if stats.errors else 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
