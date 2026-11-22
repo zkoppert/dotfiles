@@ -1012,6 +1012,7 @@ def process_group_alive(group):
         capture_output=True,
         text=True,
         check=True,
+        timeout=5,
     )
     return any(
         len(fields) == 2 and fields[0] == str(group) and not fields[1].startswith("Z")
