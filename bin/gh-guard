@@ -378,7 +378,7 @@ sys.stdout.buffer.write(b"\0".join(context[key].encode("utf-8") for key in ("rep
 fi
 
 # Native calls lint the verified file; legacy calls extract the body from
-# --body / --body-file flags. A failed lint blocks either calling subcommand.
+# --body / --body-file flags and their short aliases. A failed lint blocks either calling subcommand.
 # Only legacy calls may skip lint when no body flag is present (e.g., an edit
 # that only changes labels, or a create that opens the editor).
 #
@@ -403,7 +403,8 @@ lint_pr_body_or_die() {
     body_source="verified --body-file $native_body_file"
   else
     for arg in "$@"; do
-      case "$prev_arg" in
+      if [ -n "$prev_arg" ]; then
+        case "$prev_arg" in
         --body)
           body_content="$arg"
           body_source="--body"
@@ -418,14 +419,31 @@ lint_pr_body_or_die() {
             body_skip_reason="--body-file $arg (file not found)"
           fi
           ;;
-      esac
+        esac
+        prev_arg=""
+        continue
+      fi
       case "$arg" in
+        --body|-b) prev_arg="--body" ;;
+        --body-file|-F) prev_arg="--body-file" ;;
+        -a|--assignee|--attach|-B|--base|-H|--head|-l|--label|-m|--milestone|-p|--project|--recover|-r|--reviewer|-R|--repo|-T|--template|-t|--title|--hostname|--token|--add-assignee|--remove-assignee|--add-label|--remove-label|--add-project|--remove-project|--add-reviewer|--remove-reviewer)
+          prev_arg="ignore"
+          ;;
         --body=*)
           body_content="${arg#--body=}"
           body_source="--body="
           ;;
-        --body-file=*)
+        -b?*)
+          body_content="${arg#-b}"
+          body_content="${body_content#=}"
+          body_source="-b"
+          ;;
+        --body-file=*|-F?*)
           path="${arg#--body-file=}"
+          if [[ "$arg" == -F* ]]; then
+            path="${arg#-F}"
+            path="${path#=}"
+          fi
           if [ "$path" = "-" ]; then
             body_skip_reason="--body-file=- (stdin; cannot safely re-read)"
           elif [ -f "$path" ]; then
@@ -436,7 +454,6 @@ lint_pr_body_or_die() {
           fi
           ;;
       esac
-      prev_arg="$arg"
     done
   fi
 

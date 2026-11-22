@@ -2210,6 +2210,44 @@ def test_legacy_confirmation_and_body_rules_stop_publication() -> None:
             assert fixture.snapshot() == before
 
 
+def test_legacy_body_aliases_cannot_bypass_lint_or_privacy_checks() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = PublicationFixture(Path(tmp))
+        fixture.populate_legacy_markers()
+        body_file = Path(tmp) / "body.md"
+        for body, diagnostic in (
+            ("This PR adds a guard.", "no-this-pr-subject"),
+            (
+                "I fixed https://github.com/fixture/private/pull/1.",
+                "no-private-repo-ref",
+            ),
+        ):
+            body_file.write_text(body, encoding="utf-8")
+            for args in (
+                ["-b", body],
+                [f"-b{body}"],
+                [f"-b={body}"],
+                ["-F", str(body_file)],
+                [f"-F{body_file}"],
+                [f"-F={body_file}"],
+                ["--body", body, "--title", "-bI preserved all checks."],
+            ):
+                result = fixture.create("--draft", *args, confirmed=False)
+                assert result.returncode == 1, (args, result.stderr)
+                assert diagnostic in result.stderr, (args, result.stderr)
+                assert not fixture.publications.exists()
+        accepted = fixture.create(
+            "--draft",
+            "--title",
+            "--body=This PR adds a guard.",
+            "--body",
+            "I preserved all checks.",
+            confirmed=False,
+        )
+        assert accepted.returncode == 0, accepted.stderr
+        assert fixture.publications.exists()
+
+
 def test_legacy_draft_needs_markers_but_not_confirmation() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         fixture = PublicationFixture(Path(tmp))
@@ -3188,6 +3226,7 @@ def main() -> int:
         test_legacy_marker_floors_through_entry_points,
         test_legacy_marker_rejections_stop_publication,
         test_legacy_confirmation_and_body_rules_stop_publication,
+        test_legacy_body_aliases_cannot_bypass_lint_or_privacy_checks,
         test_legacy_draft_needs_markers_but_not_confirmation,
         test_interactive_draft_needs_markers_without_confirmation_prompt,
         test_pin_roundtrip,
