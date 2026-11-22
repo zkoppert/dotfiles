@@ -95,12 +95,12 @@ plutil -lint "$HOME/Library/LaunchAgents/com.zkoppert.backlog-autopilot.plist"
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.zkoppert.backlog-autopilot.plist"
 ```
 
-Installation does not start remediation or consume the next Friday run. The dry run fetches real issues and comments without launching models or changing GitHub. It writes evidence under the private state directory.
+Installation does not start remediation or consume the next daily run. The dry run fetches real issues and comments without launching models or changing GitHub. It writes evidence under the private state directory.
 
 Run `/reload` in Pi to load `/autopilot status`, `/autopilot pause`, and `/autopilot resume`. Pause takes effect between analysis batches or issues, not during active tool calls. The CLI provides the same controls:
 
 ```bash
-# Inspect or resume saved progress without changing the Friday schedule.
+# Inspect or resume saved progress without changing the daily schedule.
 python3 "$HOME/.local/share/backlog-autopilot/current/backlog_autopilot.py" status
 python3 "$HOME/.local/share/backlog-autopilot/current/backlog_autopilot.py" run
 ```
