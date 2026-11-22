@@ -2236,6 +2236,15 @@ def test_legacy_body_aliases_cannot_bypass_lint_or_privacy_checks() -> None:
                 assert result.returncode == 1, (args, result.stderr)
                 assert diagnostic in result.stderr, (args, result.stderr)
                 assert not fixture.publications.exists()
+        for args in (
+            ["-db", "This PR adds a guard."],
+            ["--draft", "-wb", "This PR adds a guard."],
+            ["--draft", "-dF", str(body_file)],
+        ):
+            refused = fixture.create(*args, confirmed=False)
+            assert refused.returncode == 1, (args, refused.stderr)
+            assert "ZACK_CONFIRMED_PR_CREATE" in refused.stderr
+            assert not fixture.publications.exists()
         accepted = fixture.create(
             "--draft",
             "--title",
