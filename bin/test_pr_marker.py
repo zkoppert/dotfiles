@@ -2184,6 +2184,8 @@ def test_legacy_confirmation_and_body_rules_stop_publication() -> None:
         before = fixture.snapshot()
         for args, confirmed, diagnostic in (
             ([], False, "ZACK_CONFIRMED_PR_CREATE"),
+            (["--draft", "-d=false"], False, "ZACK_CONFIRMED_PR_CREATE"),
+            (["--draft", "-wd=false"], False, "ZACK_CONFIRMED_PR_CREATE"),
             (
                 ["--draft", "--body", "This PR adds a guard."],
                 False,

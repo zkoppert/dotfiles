@@ -252,6 +252,21 @@ class RepoGuardsTest(unittest.TestCase):
         self.env["GH_HOST"] = "elsewhere.test"
         self.assertEqual(self.gh_profile("--repo", "example/personal"), "strict")
 
+    def test_uncertain_flags_cannot_authorize_draft_publication(self):
+        self.assign()
+        for args in (
+            ["--draft", "-d=false"],
+            ["--draft", "-wd=false"],
+            ["--draft", "--unknown"],
+        ):
+            with self.subTest(args=args):
+                result = self.run_cmd(
+                    [sys.executable, CLI, "gh-context", "--", "pr", "create", *args]
+                )
+                profile, _, draft = result.stdout.strip().split("\t")
+                self.assertEqual(profile, "strict")
+                self.assertEqual(draft, "0")
+
     def test_relaxed_draft_skips_markers_and_confirmation(self):
         self.assign()
         self.assertEqual(self.run_cmd([sys.executable, MARKER, "check"]).returncode, 0)
