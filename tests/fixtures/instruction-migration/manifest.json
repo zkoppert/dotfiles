@@ -2,7 +2,7 @@
   "schema_version": 2,
   "baseline": {
     "path": "tests/fixtures/instruction-migration/global-instructions-2026-11-06.txt",
-    "sha256": "9231456a771cb4c7ca95d9664ced0bda1cf0275117176eb0d13bd120c171705b"
+    "sha256": "e35658b9f46cc20178d22a66180735e43ca39589fbaec54f963719891f36fa52"
   },
   "blocks": [
     {
@@ -23,7 +23,7 @@
     },
     {
       "id": "Copilot Skills",
-      "sha256": "b069aaed92bf6e9f9108b635f1dece91a3b2199bf98f0ff18509a00d6a10aafa",
+      "sha256": "7c8a1064139fd9ee66ed6e37e6dbcefced137255be7a047bcd826edb12711596",
       "source_start_line": 19,
       "source_end_line": 50,
       "destination": ".github/copilot-instructions.md",
@@ -31,7 +31,7 @@
     },
     {
       "id": "My Standard Change Workflow",
-      "sha256": "1793dce99c205e7731a37f2093119d28d824d2b945e15de06a37322ffcac7038",
+      "sha256": "1571ed176407dd96c30867608734a738b391b933175428e0a7c31ca51127c76e",
       "source_start_line": 51,
       "source_end_line": 76,
       "destination": ".github/copilot-instructions.md",
@@ -47,97 +47,97 @@
     },
     {
       "id": "Pull Requests",
-      "sha256": "be783516dbccd39e897a22aeb6fe43bad5d28067fcb29d4e2fe5032be3830dd1",
+      "sha256": "b5405c63ff0bfdc9fb87f8b0faf03a3163ed3de9dc0038ad4491b68f6cdf9ba6",
       "source_start_line": 92,
-      "source_end_line": 127,
+      "source_end_line": 128,
       "destination": ".copilot/skills/pull-request-workflow/SKILL.md",
       "scope": "Every pull request operation and PR-bound draft."
     },
     {
       "id": "Code Review Workflow",
       "sha256": "0a199368f1fb2baa390dd799d7c0049612f1e19b38229e9c53c303691af1cc78",
-      "source_start_line": 128,
-      "source_end_line": 251,
+      "source_start_line": 129,
+      "source_end_line": 252,
       "destination": ".copilot/skills/code-review-workflow/SKILL.md",
       "scope": "Every plan, code, security, self, and PR-description review."
     },
     {
       "id": "Code Style & Languages",
       "sha256": "76d536123fdec7cc62b26eea5bea9e956d731dd990fdbd3e9c699405882b0928",
-      "source_start_line": 252,
-      "source_end_line": 288,
+      "source_start_line": 253,
+      "source_end_line": 289,
       "destination": ".copilot/skills/engineering-practices/SKILL.md",
       "scope": "Every code, test, configuration, and React implementation or review."
     },
     {
       "id": "Platform & System Design",
       "sha256": "ebbe27c731a8a4cffc6c04bc0de33d7adbcf350013782c8557c9c336070773b1",
-      "source_start_line": 289,
-      "source_end_line": 298,
+      "source_start_line": 290,
+      "source_end_line": 299,
       "destination": ".copilot/skills/engineering-practices/SKILL.md",
       "scope": "Every architecture and system-design task."
     },
     {
       "id": "GitHub CLI & API",
       "sha256": "7def4a7d3097dead34c169e676e0d2a09e2daa3b9619fc9b3ff0352ab7fef44f",
-      "source_start_line": 299,
-      "source_end_line": 307,
+      "source_start_line": 300,
+      "source_end_line": 308,
       "destination": ".copilot/skills/github-operations/SKILL.md",
       "scope": "Every GitHub read and write, after loading gh-axi."
     },
     {
       "id": "GitHub Actions Best Practices",
       "sha256": "431e27380be42c06badc1cdb80319a72ed10a48fde61a761d90bc615d6095a9f",
-      "source_start_line": 308,
-      "source_end_line": 315,
+      "source_start_line": 309,
+      "source_end_line": 316,
       "destination": ".copilot/skills/actions-security/SKILL.md",
       "scope": "Every GitHub Actions workflow or action-metadata task."
     },
     {
       "id": "Git & Version Control",
       "sha256": "b532e0b1ac9c13554a89434ea5bb38ea632933c9b4647e890912a46f51813a3b",
-      "source_start_line": 316,
-      "source_end_line": 322,
+      "source_start_line": 317,
+      "source_end_line": 323,
       "destination": ".github/copilot-instructions.md",
       "scope": "Always loaded global guidance."
     },
     {
       "id": "Excel & Report Generation",
       "sha256": "4019864844f59029d6f40616d6143a7bcf124ac99c41828efdf40b6015d2b32f",
-      "source_start_line": 323,
-      "source_end_line": 328,
+      "source_start_line": 324,
+      "source_end_line": 329,
       "destination": ".copilot/skills/spreadsheet-report-generation/SKILL.md",
       "scope": "Every spreadsheet and generated-report task."
     },
     {
       "id": "Writing Style",
       "sha256": "5428277e1794dda8dfb1c14d46b48ad6ea3e0fb8fbf26ac542fb384ffc229e4d",
-      "source_start_line": 329,
-      "source_end_line": 461,
+      "source_start_line": 330,
+      "source_end_line": 462,
       "destination": ".github/copilot-instructions.md",
       "scope": "Always loaded global guidance."
     },
     {
       "id": "File & Project Organization",
       "sha256": "b8b671261221963f3c33ba8b22f8ed17f049582af73a6572da20f55fead135dc",
-      "source_start_line": 462,
-      "source_end_line": 467,
+      "source_start_line": 463,
+      "source_end_line": 468,
       "destination": ".copilot/skills/engineering-practices/SKILL.md",
       "scope": "Every project-structure change."
     },
     {
       "id": "macOS Environment",
       "sha256": "3866f0545d343eb55787211fc1100e51d6eddaf028ee4891e6b5df15dc1fa1e8",
-      "source_start_line": 468,
-      "source_end_line": 474,
+      "source_start_line": 469,
+      "source_end_line": 475,
       "destination": ".github/copilot-instructions.md",
       "scope": "Always loaded global guidance."
     },
     {
       "id": "My Open Source GitHub Actions: Shared Patterns",
       "sha256": "317f3c347caa65d8b6551bb6ccec834f02f39c628c9c2cc48588a059024c9884",
-      "source_start_line": 475,
-      "source_end_line": 551,
+      "source_start_line": 476,
+      "source_end_line": 552,
       "destination": ".copilot/skills/open-source-actions-maintenance/SKILL.md",
       "scope": "Every task in the named shared-architecture repositories."
     }
@@ -226,7 +226,7 @@
     {
       "id": "Pre-action skill routing",
       "destination": ".github/copilot-instructions.md",
-      "sha256": "c5104c9a34a9c279999e7a34d46a08ac816624bb7a4fe9e5fcf5c81b8749431c"
+      "sha256": "c6766483f30b469d648b9c9ba6fd3ce99c0f311cb91c650541cf1f6de18da051"
     },
     {
       "id": "Pull Requests",
