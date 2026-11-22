@@ -192,19 +192,7 @@ def observe(task, now, registered_at):
     return {"state": "stopped", "summary": "No tracked agent is running. Process exit is not proof of success. Inspect result.md.", "pr_url": ""}
 
 
-def notify(event, root):
-    executable = shutil.which("terminal-notifier")
-    if executable is None:
-        raise RuntimeError("terminal-notifier is unavailable; the durable session inbox still contains the update")
-    message = "; ".join(f"{item['id']}: {item['state']}" for item in event["updates"])
-    result = subprocess.run([executable, "-title", "Pi agent progress", "-message", message[:240],
-                             "-group", f"pi-subagents-{event['batch']}", "-open", (root / "status.json").as_uri()],
-                            check=False, text=True, capture_output=True, timeout=15)
-    if result.returncode:
-        raise RuntimeError(f"Notification failed: {result.stderr.strip()}")
-
-
-def poll(root, *, now=None, notifications=True):
+def poll(root, *, now=None):
     now = time.time() if now is None else now
     with locked(root):
         store = load(root / "registry.json", {"batches": {}, "outbox": {}})
@@ -226,9 +214,8 @@ def poll(root, *, now=None, notifications=True):
             if updates:
                 event_id = uuid.uuid4().hex
                 outbox[event_id] = {"id": event_id, "batch": batch_id, "parent_session": batch["parent_session"],
-                                    "observed_at": now, "updates": updates, "inbox_delivered": False,
-                                    "desktop_delivered": False}
-        # Save observations and pending deliveries together before notifying either channel.
+                                    "observed_at": now, "updates": updates, "inbox_delivered": False}
+        # Persist pending updates before attempting inbox delivery.
         atomic_json(root / "registry.json", store)
         atomic_json(root / "status.json", all_items)
         for event_id, event in list(outbox.items()):
@@ -236,16 +223,7 @@ def poll(root, *, now=None, notifications=True):
                 inbox = root / "inbox" / digest(event["parent_session"]) / f"{event_id}.json"
                 atomic_json(inbox, event)
                 event["inbox_delivered"] = True
-            if notifications and not event["desktop_delivered"]:
-                try:
-                    notify(event, root)
-                    event["desktop_delivered"] = True
-                    event.pop("notification_error", None)
-                except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-                    event["notification_error"] = str(error)
-                    print(str(error), file=sys.stderr)
-            if event["inbox_delivered"] and event["desktop_delivered"]:
-                del outbox[event_id]
+            del outbox[event_id]
         atomic_json(root / "registry.json", store)
         return all_items
 
@@ -267,7 +245,7 @@ def install(home, state_root, *, bootstrap=True):
     wrapper = home / ".local/bin/pi-subagent-monitor"
     if wrapper.exists() and "# Managed by pi-subagent-monitor." not in wrapper.read_text():
         raise FileExistsError(f"Preserving unmanaged command: {wrapper}")
-    skills = [home / relative / "subagent-monitor/SKILL.md" for relative in (".agents/skills", ".copilot/skills")]
+    skills = [home / relative / "subagent-monitor/SKILL.md" for relative in (".copilot/skills", ".agents/skills")]
     for target in skills:
         if target.exists() and "<!-- Managed by pi-subagent-monitor. -->" not in target.read_text():
             raise FileExistsError(f"Preserving existing skill: {target}")
@@ -280,10 +258,15 @@ def install(home, state_root, *, bootstrap=True):
     shutil.copy2(Path(__file__).resolve(), runtime / "pi_subagent_monitor.py")
     extension.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(extension_source, extension)
-    for target in skills:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.resolve() != skill_source.resolve():
-            shutil.copy2(skill_source, target)
+    canonical, alias = skills
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    if canonical.resolve() != skill_source.resolve():
+        shutil.copy2(skill_source, canonical)
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    # Pi deduplicates skill files by real path, not by their contents.
+    if alias.resolve() != canonical.resolve():
+        alias.unlink(missing_ok=True)
+        alias.symlink_to(os.path.relpath(canonical, alias.parent))
     wrapper.parent.mkdir(parents=True, exist_ok=True)
     wrapper.write_text("#!/bin/sh\n# Managed by pi-subagent-monitor.\nexec " + shlex.join([
         sys.executable, "-I", str(runtime / "pi_subagent_monitor.py")]) + ' "$@"\n')
@@ -315,7 +298,8 @@ def main():
     registration.add_argument("--manifest", type=Path, required=True)
     registration.add_argument("--parent-session", type=Path, required=True)
     polling = commands.add_parser("poll")
-    polling.add_argument("--no-notify", action="store_true")
+    polling.add_argument("--no-notify", action="store_true",
+                         help="Compatibility option; desktop notifications are always disabled")
     commands.add_parser("status")
     reporting = commands.add_parser("report")
     reporting.add_argument("--artifacts", type=Path, required=True)
@@ -334,7 +318,7 @@ def main():
         if args.command == "register":
             result = register(root, args.manifest, args.parent_session)
         elif args.command == "poll":
-            result = poll(root, notifications=not args.no_notify)
+            result = poll(root)
         elif args.command == "status":
             result = load(root / "status.json", [])
         elif args.command == "report":

@@ -42,7 +42,7 @@ class MonitorTests(unittest.TestCase):
         return monitor.register(self.state, self.manifest, self.parent)
 
     def poll(self, now=None):
-        return monitor.poll(self.state, now=now, notifications=False)
+        return monitor.poll(self.state, now=now)
 
     def events(self):
         return list((self.state / "inbox").rglob("*.json"))
@@ -154,13 +154,42 @@ class MonitorTests(unittest.TestCase):
         self.poll()
         self.assertEqual(len(self.events()), 1)
 
-    def test_notifier_failure_is_retried_without_duplicate_inbox(self):
+    def test_poll_delivers_inbox_without_desktop_commands(self):
         self.register()
-        with patch.object(monitor, "notify", side_effect=[RuntimeError("fixture failure"), None]) as notify:
-            monitor.poll(self.state)
-            monitor.poll(self.state)
-            self.assertEqual(notify.call_count, 2)
+        with patch.object(monitor.subprocess, "run", side_effect=AssertionError("Unexpected desktop command")):
+            self.assertEqual(monitor.poll(self.state)[0]["state"], "stopped")
         self.assertEqual(len(self.events()), 1)
+        self.assertEqual(monitor.load(self.state / "registry.json")["outbox"], {})
+
+    def test_inbox_failure_is_retried_without_duplicate_updates(self):
+        self.register()
+        atomic_json = monitor.atomic_json
+
+        def fail_inbox(path, value):
+            if "inbox" in path.parts:
+                raise OSError("Fixture inbox failure")
+            atomic_json(path, value)
+
+        with patch.object(monitor, "atomic_json", side_effect=fail_inbox), self.assertRaises(OSError):
+            self.poll()
+        self.assertEqual(len(monitor.load(self.state / "registry.json")["outbox"]), 1)
+        self.poll()
+        self.poll()
+        self.assertEqual(len(self.events()), 1)
+        self.assertEqual(monitor.load(self.state / "registry.json")["outbox"], {})
+
+    def test_legacy_desktop_backlog_is_retired_without_replaying_inbox(self):
+        self.register()
+        self.poll()
+        event = monitor.load(self.events()[0])
+        event.update(inbox_delivered=True, desktop_delivered=False, notification_error="Old desktop failure")
+        store = monitor.load(self.state / "registry.json")
+        store["outbox"][event["id"]] = event
+        monitor.atomic_json(self.state / "registry.json", store)
+        with patch.object(monitor.subprocess, "run", side_effect=AssertionError("Unexpected desktop command")):
+            self.poll()
+        self.assertEqual(len(self.events()), 1)
+        self.assertEqual(monitor.load(self.state / "registry.json")["outbox"], {})
 
     def test_cli_registration_report_poll_and_install(self):
         script = Path(monitor.__file__).resolve()
@@ -171,7 +200,10 @@ class MonitorTests(unittest.TestCase):
             return json.loads(result.stdout)
         cli("register", "--manifest", str(self.manifest), "--parent-session", str(self.parent))
         cli("report", "--artifacts", str(self.artifacts), "--state", "blocked", "--summary", "Fixture blocker")
+        self.assertEqual(cli("poll")[0]["state"], "blocked")
         self.assertEqual(cli("poll", "--no-notify")[0]["state"], "blocked")
+        self.assertEqual(len(self.events()), 1)
+        self.assertEqual(monitor.load(self.state / "registry.json")["outbox"], {})
         self.assertEqual(cli("status")[0]["state"], "blocked")
         home = self.root / "home"
         installed = cli("install", "--home", str(home), "--no-bootstrap")
@@ -179,11 +211,40 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(plist["StartInterval"], 60)
         self.assertTrue(plist["RunAtLoad"])
         self.assertIn("poll", plist["ProgramArguments"])
-        self.assertTrue((home / ".agents/skills/subagent-monitor/SKILL.md").exists())
+        alias = home / ".agents/skills/subagent-monitor/SKILL.md"
+        canonical = home / ".copilot/skills/subagent-monitor/SKILL.md"
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(alias.resolve(), canonical.resolve())
+        self.assertEqual(canonical.read_text(), (script.parents[1] / ".copilot/skills/subagent-monitor/SKILL.md").read_text())
         self.assertTrue((home / ".pi/agent/extensions/subagent-monitor.ts").exists())
         self.assertTrue((home / ".local/bin/pi-subagent-monitor").is_file())
         again = cli("install", "--home", str(home), "--no-bootstrap")
         self.assertEqual(installed, again)
+
+    def test_installer_migrates_duplicate_managed_skills(self):
+        home = self.root / "home"
+        for directory in (".agents", ".copilot"):
+            target = home / directory / "skills/subagent-monitor/SKILL.md"
+            target.parent.mkdir(parents=True)
+            target.write_text("<!-- Managed by pi-subagent-monitor. -->\nOld copy\n")
+        monitor.install(home, self.state, bootstrap=False)
+        alias = home / ".agents/skills/subagent-monitor/SKILL.md"
+        canonical = home / ".copilot/skills/subagent-monitor/SKILL.md"
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(alias.resolve(), canonical.resolve())
+        self.assertNotIn("Old copy", canonical.read_text())
+        monitor.install(home, self.state, bootstrap=False)
+        self.assertEqual(alias.resolve(), canonical.resolve())
+
+    def test_installer_preserves_unmanaged_skill_before_writing(self):
+        home = self.root / "home"
+        target = home / ".agents/skills/subagent-monitor/SKILL.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("User-owned skill\n")
+        with self.assertRaises(FileExistsError):
+            monitor.install(home, self.state, bootstrap=False)
+        self.assertEqual(target.read_text(), "User-owned skill\n")
+        self.assertFalse((home / ".local/share/pi-subagent-monitor").exists())
 
     def test_installer_preserves_unmanaged_extension(self):
         home = self.root / "home"

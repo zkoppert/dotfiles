@@ -23,7 +23,9 @@ Background agents can stop without notifying their parent session. The `subagent
 
 On macOS, `install.sh` installs `pi-subagent-monitor` and a user LaunchAgent. The watcher checks registered batches every minute, without Pi cron or model calls.
 
-Desktop notifications report changed states. A Pi extension delivers pending updates into the registered parent conversation when that conversation is idle. Existing sessions need `/reload` once after installation. Future sessions load the extension automatically.
+The monitor never sends macOS desktop notifications. A Pi extension delivers pending updates into the registered parent conversation when that conversation is idle. Existing sessions need `/reload` once after installation. Future sessions load the extension automatically.
+
+The installer keeps one skill file under `~/.copilot/skills/subagent-monitor`. The `~/.agents/skills` entry links to that file, which prevents duplicate-name warnings in Pi.
 
 The watcher distinguishes blocked agents, inactive processes, stale activity, PR creation, and reported completion. It never treats process exit or PR creation as successful validation. Completion reports include an evidence path; the parent must verify that evidence.
 
@@ -34,7 +36,7 @@ The LaunchAgent runs while the user is logged in. Sleeping computers resume chec
 Use these focused checks when changing the monitor:
 
 ```bash
-# Exercise real processes, CLI reporting, notification retry, and installation.
+# Exercise real processes, inbox retry, silent polling, and installation.
 python3 -m unittest scripts.test_pi_subagent_monitor
 # Exercise delivery through Pi's extension API contract.
 node --test tests/pi_subagent_monitor.test.mjs

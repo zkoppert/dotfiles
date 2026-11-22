@@ -1,7 +1,7 @@
 ---
 name: subagent-monitor
 description: Use whenever launching, delegating to, resuming, or checking background coding agents or parallel subagents. Register automatic launchd monitoring before reporting agents as running. Deliver blocked, stalled, stopped, PR-created, and completion updates without waiting for the user to ask. Do not use Pi cron.
-compatibility: macOS launchd, Python 3, terminal-notifier, and the Pi subagent-monitor extension.
+compatibility: macOS launchd, Python 3, and the Pi subagent-monitor extension.
 ---
 <!-- Managed by pi-subagent-monitor. -->
 
@@ -24,7 +24,13 @@ python3 scripts/pi_subagent_monitor.py install
 
 The LaunchAgent polls every minute while the user is logged in. Sleeping computers resume checks after waking.
 
-Desktop notifications work without an open Pi session. A loaded Pi extension delivers pending updates when the parent conversation is idle.
+Do not send macOS desktop notifications. Deliver updates only through the durable parent-session inbox and the Pi extension.
+
+A loaded Pi extension delivers pending updates when the parent conversation is idle. If Pi is closed, updates wait in the inbox.
+
+The installer keeps one skill file in `~/.copilot/skills/subagent-monitor`. The `~/.agents/skills` entry links to that file to prevent name collisions.
+
+Do not create separate skill copies in these search paths.
 
 New sessions load the extension automatically. Existing sessions need `/reload` once after installation. Never claim chat delivery before verifying extension loading.
 
@@ -52,8 +58,8 @@ Replace the example PID with the actual launched process. Never copy example ide
 ```bash
 # Register the real launch manifest against the actual parent session.
 pi-subagent-monitor register --manifest "$BATCH_DIR/launches.json" --parent-session "$PI_SESSION_FILE"
-# Check the registered batch without sending a desktop notification.
-pi-subagent-monitor poll --no-notify
+# Check the registered batch and queue parent-session updates.
+pi-subagent-monitor poll
 ```
 
 Verify the task count and parent-session path. Check process states before telling the user that monitoring is active.
@@ -112,7 +118,7 @@ launchctl print "gui/$(id -u)/com.zkoppert.pi-subagent-monitor"
 
 State lives in `~/.local/state/pi-subagent-monitor`. Logs live in `~/Library/Logs/pi-subagent-monitor`.
 
-The watcher retries desktop notification failures. Session inbox files persist while Pi is closed and across watcher restarts.
+The watcher never sends desktop notifications. Session inbox files persist while Pi is closed and across watcher restarts.
 
 Identical observations don't create new alerts. Delivery can repeat after a crash between sending a message and recording delivery.
 
