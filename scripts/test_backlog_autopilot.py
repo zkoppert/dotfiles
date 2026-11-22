@@ -2370,7 +2370,7 @@ elif name=="replay-pi":
     (stage/"receipt.json").write_text(json.dumps(data))
 else: sys.exit(9)
 """
-        for name in ("treehouse", "git", "gh", "replay-pi"):
+        for name in ("treehouse", "git", "gh", "replay-pi", "npx", "node", "pr-marker"):
             path = tools / name
             path.write_text("#!" + sys.executable + "\n" + fixture)
             path.chmod(0o700)
@@ -2379,7 +2379,7 @@ else: sys.exit(9)
         )
         env = {
             **os.environ,
-            "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+            "PATH": str(tools) + os.pathsep + os.defpath,
             "WORKER_REPLAY_ROOT": str(self.root),
             "HOME": str(self.root),
         }
