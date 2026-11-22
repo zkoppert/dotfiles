@@ -35,6 +35,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
         "pull-request-workflow",
         "record-demo",
         "spreadsheet-report-generation",
+        "subagent-monitor",
         "test-quality",
         "treehouse-workflow",
         "triage-dependabot",
