@@ -150,7 +150,7 @@ The worker saves `tailscale-session.json` before switching. On `SIGTERM` or `SIG
 
 Completion notifications wait until the personal profile is selected and its backend reports a running connection to the matching tailnet. Restoration makes up to three attempts before leaving the receipt for scheduled recovery. Delayed backend transitions and ambiguous CLI failures do not count as success without verification. Manual selection of another profile stops automatic restoration instead of overriding that choice.
 
-A finished pass retains a pending completion notification if restoration fails. A later scheduler tick can verify restoration and deliver that notification without repeating the completed investigations. Failed notification delivery remains pending. Older completed passes do not generate new completion alerts after an upgrade.
+A finished pass retains a pending completion notification if restoration fails. A later scheduler tick can verify restoration and deliver that notification without repeating the completed investigations. Failed notification delivery remains pending. A scheduled tick that delivers a deferred completion waits until the next tick before starting another pass. Older completed passes do not generate new completion alerts after an upgrade.
 
 Ticks without pending restoration or due work do not switch profiles. The `status`, `preflight`, and control commands do not initiate switching. The `status` output includes any pending network session. Automatic switching is disabled when the `tailscale` object is absent.
 

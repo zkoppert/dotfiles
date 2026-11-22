@@ -1115,6 +1115,42 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("completion_notified_at", completed)
         self.assertNotIn("completion_notification_pending", completed)
 
+    def test_deferred_completion_does_not_reacquire_work_in_the_same_tick(self):
+        vpn = FakeTailscale()
+        vpn.selected = "work"
+        root = Path(self.config["state_dir"])
+        directory = root / "runs" / "completed"
+        worker.atomic_json(self.config_path, {**self.config, "tailscale": vpn.settings})
+        worker.atomic_json(
+            directory / "run.json",
+            {
+                "finished_at": "2026-11-06T14:00:00+00:00",
+                "completion_notification_pending": True,
+            },
+        )
+        worker.atomic_json(self.state_path, {**self.state, "last_run": str(directory)})
+        worker.atomic_json(root / "tailscale-session.json", vpn.settings)
+        with patch.object(worker, "command", side_effect=vpn.command), patch.object(
+            worker, "execute"
+        ) as execute, patch.object(worker, "notify", return_value=True), patch.object(
+            worker,
+            "now",
+            return_value=datetime.fromisoformat("2026-11-07T12:00:00+00:00"),
+        ):
+            self.assertEqual(
+                worker.main(["--config", str(self.config_path), "scheduled"]), 0
+            )
+            self.assertEqual(vpn.events, ["personal"])
+            self.assertEqual(vpn.selected, "personal")
+            execute.assert_not_called()
+            self.assertEqual(
+                worker.read_json(self.state_path)["last_slot"], self.state["last_slot"]
+            )
+            self.assertEqual(
+                worker.main(["--config", str(self.config_path), "scheduled"]), 0
+            )
+        self.assertEqual(execute.call_count, 1)
+
     def test_failed_network_start_does_not_consume_daily_slot(self):
         vpn = FakeTailscale()
         vpn.fail_before.add("work")

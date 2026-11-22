@@ -1552,7 +1552,9 @@ def main(argv=None):
                 config, state, state_path, scheduled=args.action == "scheduled"
             ):
                 return 0
-            notify_completed_run(config, state)
+            if notify_completed_run(config, state) and args.action == "scheduled":
+                # Do not announce restoration and reacquire the work network in the same tick.
+                return 0
             if (root / "paused").exists():
                 return 0
             if args.action == "scheduled":
