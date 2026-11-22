@@ -2,6 +2,7 @@
 """Monitor registered Pi agents without restarting agents or changing their authority."""
 
 import argparse
+import datetime
 import fcntl
 import hashlib
 import json
@@ -68,8 +69,24 @@ def process_identity(pid):
     return {"pid": pid, "started": " ".join(parts[1:6]), "command": parts[6]}
 
 
+def same_process(current, expected):
+    # Pi replaces its argv title after startup; PID and start time remain stable.
+    return bool(current and expected and current["pid"] == expected["pid"]
+                and current["started"] == expected["started"])
+
+
 def process_matches(expected):
-    return process_identity(expected["pid"]) == expected
+    return same_process(process_identity(expected["pid"]), expected)
+
+
+def launch_time_matches(identity, item):
+    recorded = item.get("resumed_at", item.get("started_at", ""))
+    try:
+        launched_at = datetime.datetime.fromisoformat(recorded).timestamp()
+        process_started = time.mktime(time.strptime(identity["started"], "%a %b %d %H:%M:%S %Y"))
+    except (ValueError, TypeError):
+        return False
+    return abs(launched_at - process_started) < 10
 
 
 def register(root, manifest, parent_session):
@@ -86,7 +103,8 @@ def register(root, manifest, parent_session):
             raise ValueError(f"Missing task artifacts: {artifacts}")
         identity = process_identity(item.get("pid"))
         session = str(artifacts / "session.jsonl")
-        if identity and session not in identity["command"]:
+        if (identity and session not in identity["command"]
+                and (identity["command"].strip() != "pi" or not launch_time_matches(identity, item))):
             identity = None
         task_id = str(item.get("issue", item.get("id", "")))
         if not task_id or task_id in {task["id"] for task in tasks}:
@@ -141,11 +159,15 @@ def observe(task, now, registered_at):
         raise TypeError("Invalid continuation receipt")
     if continuation.get("state") == "running":
         identity = process_identity(continuation.get("agent_pid"))
-        if identity and str(artifacts / "session.jsonl") in identity["command"]:
-            expected = task.get("continuation_process")
+        expected = task.get("continuation_process")
+        bound = identity and (str(artifacts / "session.jsonl") in identity["command"]
+                              or same_process(identity, expected)
+                              or (identity["command"].strip() == "pi" and launch_time_matches(
+                                  identity, {"started_at": continuation.get("updated_at", "")})))
+        if bound:
             if expected is None:
                 task["continuation_process"] = identity
-            active = identity == task["continuation_process"]
+            active = same_process(identity, task["continuation_process"])
         else:
             active = False
     else:

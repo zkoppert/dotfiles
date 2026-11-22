@@ -1,5 +1,6 @@
 """Exercise durable monitoring with real processes, files, and CLI entry points."""
 
+import datetime
 import json
 import plistlib
 import subprocess
@@ -110,6 +111,30 @@ class MonitorTests(unittest.TestCase):
         identity = {"pid": 12, "started": "old", "command": "original"}
         with patch.object(monitor, "process_identity", return_value={**identity, "started": "new"}):
             self.assertFalse(monitor.process_matches(identity))
+
+    def test_process_title_change_does_not_report_live_agent_as_stopped(self):
+        identity = {"pid": 12, "started": "Sat Nov 21 16:55:10 2026", "command": str(self.session)}
+        launches = json.loads(self.manifest.read_text())
+        launches[0]["pid"] = 12
+        self.manifest.write_text(json.dumps(launches))
+        with patch.object(monitor, "process_identity", return_value=identity):
+            self.register()
+        with patch.object(monitor, "process_identity", return_value={**identity, "command": "pi"}):
+            self.assertEqual(self.poll()[0]["state"], "running")
+
+    def test_registration_accepts_renamed_pi_only_with_matching_launch_time(self):
+        identity = {"pid": 12, "started": time.strftime("%a %b %d %H:%M:%S %Y"), "command": "pi"}
+        launches = json.loads(self.manifest.read_text())
+        launches[0].update(pid=12, resumed_at=datetime.datetime.now(datetime.UTC).isoformat())
+        self.manifest.write_text(json.dumps(launches))
+        with patch.object(monitor, "process_identity", return_value=identity):
+            self.register()
+            self.assertEqual(self.poll()[0]["state"], "running")
+        launches[0]["resumed_at"] = "2020-01-01T00:00:00Z"
+        self.manifest.write_text(json.dumps(launches))
+        with patch.object(monitor, "process_identity", return_value=identity):
+            self.register()
+            self.assertEqual(self.poll()[0]["state"], "stopped")
 
     def test_controller_waiting_keeps_batch_active(self):
         process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
