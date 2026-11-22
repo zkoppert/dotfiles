@@ -252,7 +252,22 @@ class RepoGuardsTest(unittest.TestCase):
         self.env["GH_HOST"] = "elsewhere.test"
         self.assertEqual(self.gh_profile("--repo", "example/personal"), "strict")
 
-    def test_relaxed_pr_skips_markers_but_still_requires_authorization(self):
+    def test_uncertain_flags_cannot_authorize_draft_publication(self):
+        self.assign()
+        for args in (
+            ["--draft", "-d=false"],
+            ["--draft", "-wd=false"],
+            ["--draft", "--unknown"],
+        ):
+            with self.subTest(args=args):
+                result = self.run_cmd(
+                    [sys.executable, CLI, "gh-context", "--", "pr", "create", *args]
+                )
+                profile, _, draft = result.stdout.strip().split("\t")
+                self.assertEqual(profile, "strict")
+                self.assertEqual(draft, "0")
+
+    def test_relaxed_draft_skips_markers_and_confirmation(self):
         self.assign()
         self.assertEqual(self.run_cmd([sys.executable, MARKER, "check"]).returncode, 0)
         refused = self.run_cmd(
@@ -260,6 +275,20 @@ class RepoGuardsTest(unittest.TestCase):
         )
         self.assertNotEqual(refused.returncode, 0)
         self.assertNotIn("PUBLISHED", refused.stdout)
+        for flag in ("--draft", "-d", "--draft=true"):
+            published = self.run_cmd(
+                [GUARD, "pr", "create", flag, "--title", "Example"]
+            )
+            self.assertEqual(published.stdout.strip(), "PUBLISHED")
+        for args in (
+            ["--draft=false"],
+            ["--title", "--draft"],
+            ["--body", "--draft"],
+            ["--draft", "--draft=false"],
+        ):
+            refused = self.run_cmd([GUARD, "pr", "create", *args], check=False)
+            self.assertNotEqual(refused.returncode, 0, args)
+            self.assertNotIn("PUBLISHED", refused.stdout)
         self.env["ZACK_CONFIRMED_PR_CREATE"] = "1"
         published = self.run_cmd([GUARD, "pr", "create", "--title", "Example"])
         self.assertEqual(published.stdout.strip(), "PUBLISHED")
@@ -295,7 +324,6 @@ class RepoGuardsTest(unittest.TestCase):
         )
         self.run_cmd([sys.executable, MARKER, "run-tests", "--cmd", "true"])
         self.run_cmd([sys.executable, MARKER, "check"])
-        self.env["ZACK_CONFIRMED_PR_CREATE"] = "1"
         refused = self.run_cmd(
             [GUARD, "pr", "create", "--title", "Example"], check=False
         )

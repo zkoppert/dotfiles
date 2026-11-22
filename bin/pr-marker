@@ -229,6 +229,7 @@ def _native_policy() -> dict:
         },
         "min_review_models": MIN_MODELS,
         "excluded_model_prefixes": list(PROHIBITED_MODEL_PREFIXES),
+        # Retain the v1 field for proof compatibility and non-draft creation.
         "create_confirmation_env": "ZACK_CONFIRMED_PR_CREATE",
         "review_budget_scope": "code-only",
         "plan_order": "before-implementation",
@@ -1633,10 +1634,11 @@ def cmd_native_check(
         request = _native_request(argv)
         if (
             request["operation"] == "create"
+            and not request["draft"]
             and os.environ.get("ZACK_CONFIRMED_PR_CREATE") != "1"
         ):
             raise NativeProofError(
-                "native creation requires same-call ZACK_CONFIRMED_PR_CREATE=1"
+                "native non-draft creation requires same-call ZACK_CONFIRMED_PR_CREATE=1"
             )
         context = _native_context()
         body = _native_body(request["body-file"])

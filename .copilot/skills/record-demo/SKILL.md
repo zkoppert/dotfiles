@@ -8,8 +8,9 @@ description: This skill should be used AFTER code changes have been reviewed and
 Zack's staged change workflow is: plan, multi-model review the plan, draft changes
 locally, multi-model review the code, test in a Codespace, **record a demo and
 capture before/after images**, draft the PR with a multi-model review of the PR
-description, human review, then push and open a draft PR. This skill owns the
-demo-and-before/after step.
+description, then push and open a draft PR without separate human approval.
+Human review follows on the draft. The repository quality profile controls which
+checks are required. This skill owns the demo-and-before/after step.
 
 The output feeds the `demo` marker that gh-guard gates on. `gh pr create` stays
 blocked until `<branch>/demo.md` exists (see the `pr-marker` helper below), so
@@ -218,4 +219,6 @@ alternative visual aid. Fix any gap it reports before moving on to the PR descri
 
 Continue the workflow: write the PR description (reusing the before/after block),
 run the multi-model review of the PR description and write the `pr-review` marker,
-then let the human review before `ZACK_CONFIRMED_PR_CREATE=1 gh pr create ...`.
+then push the working branch and run `gh pr create --draft ...` after required
+checks pass. Don't wait for separate human approval. Keep the PR as a draft for
+human review.

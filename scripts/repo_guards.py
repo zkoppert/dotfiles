@@ -299,6 +299,8 @@ def gh_context(argv: list[str]) -> tuple[Policy, bool]:
     repository = repository_id(target) if target else ""
     if uncertain or (target is not None and not repository):
         policy = Policy(reason="uncertain PR target")
+        # Unparsed flags can disable an earlier draft flag in gh's parser.
+        draft = False
     return Policy(policy.profile, policy.reason, repository), draft
 
 

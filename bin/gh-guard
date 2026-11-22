@@ -35,9 +35,8 @@
 #      edits would otherwise bypass the `pr create` lint.
 #
 # Behavior:
-#   - In an interactive shell (TTY): prompt for confirmation before running.
-#   - In a non-interactive shell (e.g., an agent's bash tool): refuse unless
-#     the per-command confirmation condition is met.
+#   - Draft creation needs evidence, not human confirmation, in any shell.
+#   - Non-draft creation and readiness changes still require confirmation.
 #
 # Per-command confirmation:
 #   - `gh pr ready`:  set ZACK_CONFIRMED_PR_READY=1 in the same invocation.
@@ -46,15 +45,16 @@
 #   - `gh pr create`: write all five per-branch review/demo/tests markers under
 #       <git-dir>/copilot-pr-review/ (use `pr-marker write <kind> -`, and
 #       `pr-marker run-tests` for the tests marker)
-#     AND set ZACK_CONFIRMED_PR_CREATE=1 in the same invocation. `<git-dir>` is
+#     For non-draft creation, also confirm interactively or set
+#     ZACK_CONFIRMED_PR_CREATE=1 in the same invocation. `<git-dir>` is
 #     the per-checkout git directory as reported by `git rev-parse
 #     --absolute-git-dir`, so worktrees resolve to the per-worktree gitdir
 #     (e.g. `<main>/.git/worktrees/<name>/copilot-pr-review/`) rather than the
 #     gitlink file at `<worktree>/.git`. Each marker must meet its byte floor
 #     so a bare `touch` does not satisfy it - actual review/demo content has to
-#     land there before the PR can be opened. Both conditions are required
-#     for strict publication. If the wrapper cannot resolve the checkout or
-#     branch, strict publication is blocked because evidence cannot be checked.
+#     land there before the PR can be opened. Evidence is required in both
+#     interactive and non-interactive shells. If the checkout or branch cannot
+#     be resolved, strict publication is blocked because evidence cannot be checked.
 #
 # Known limitations (PATH-shim is a soft guard, not adversarial):
 #   - `gh api repos/.../pulls` and `gh api graphql` createPullRequest mutations
@@ -378,7 +378,7 @@ sys.stdout.buffer.write(b"\0".join(context[key].encode("utf-8") for key in ("rep
 fi
 
 # Native calls lint the verified file; legacy calls extract the body from
-# --body / --body-file flags. A failed lint blocks either calling subcommand.
+# --body / --body-file flags and their short aliases. A failed lint blocks either calling subcommand.
 # Only legacy calls may skip lint when no body flag is present (e.g., an edit
 # that only changes labels, or a create that opens the editor).
 #
@@ -403,7 +403,8 @@ lint_pr_body_or_die() {
     body_source="verified --body-file $native_body_file"
   else
     for arg in "$@"; do
-      case "$prev_arg" in
+      if [ -n "$prev_arg" ]; then
+        case "$prev_arg" in
         --body)
           body_content="$arg"
           body_source="--body"
@@ -418,14 +419,31 @@ lint_pr_body_or_die() {
             body_skip_reason="--body-file $arg (file not found)"
           fi
           ;;
-      esac
+        esac
+        prev_arg=""
+        continue
+      fi
       case "$arg" in
+        --body|-b) prev_arg="--body" ;;
+        --body-file|-F) prev_arg="--body-file" ;;
+        -a|--assignee|--attach|-B|--base|-H|--head|-l|--label|-m|--milestone|-p|--project|--recover|-r|--reviewer|-R|--repo|-T|--template|-t|--title|--hostname|--token|--add-assignee|--remove-assignee|--add-label|--remove-label|--add-project|--remove-project|--add-reviewer|--remove-reviewer)
+          prev_arg="ignore"
+          ;;
         --body=*)
           body_content="${arg#--body=}"
           body_source="--body="
           ;;
-        --body-file=*)
+        -b?*)
+          body_content="${arg#-b}"
+          body_content="${body_content#=}"
+          body_source="-b"
+          ;;
+        --body-file=*|-F?*)
           path="${arg#--body-file=}"
+          if [[ "$arg" == -F* ]]; then
+            path="${arg#-F}"
+            path="${path#=}"
+          fi
           if [ "$path" = "-" ]; then
             body_skip_reason="--body-file=- (stdin; cannot safely re-read)"
           elif [ -f "$path" ]; then
@@ -436,7 +454,6 @@ lint_pr_body_or_die() {
           fi
           ;;
       esac
-      prev_arg="$arg"
     done
   fi
 
@@ -519,6 +536,22 @@ if [ "$native_publication" = "1" ]; then
   exec "$REAL_GH" "$@"
 fi
 
+confirm_non_draft_create() {
+  [ "${policy_context##*$'\t'}" = "1" ] && return 0
+  if [ -t 0 ] && [ -t 1 ]; then
+    printf "Open a non-draft PR? [y/N] " >&2
+    read -r ans
+    case "$ans" in
+      y|Y|yes|YES|Yes) return 0 ;;
+      *) echo "Aborted." >&2; exit 1 ;;
+    esac
+  fi
+  if [ "${ZACK_CONFIRMED_PR_CREATE:-}" != "1" ]; then
+    echo 'gh-guard: non-draft creation requires approval and ZACK_CONFIRMED_PR_CREATE=1; use --draft for automatic creation.' >&2
+    exit 1
+  fi
+}
+
 # Native proof above always takes precedence over user quality profiles.
 if [ "$is_pr_create" = "1" ]; then
   policy_context="$(python3 "$SELF_REAL_PATH/repo-guards" gh-context -- "$@")"
@@ -534,10 +567,7 @@ if [ "$is_pr_create" = "1" ]; then
         echo "gh-guard: $quality_profile marker requirements are not satisfied." >&2
         exit 1
       fi
-      if [ "${ZACK_CONFIRMED_PR_CREATE:-}" != "1" ]; then
-        echo 'gh-guard: PR creation still requires explicit approval and ZACK_CONFIRMED_PR_CREATE=1.' >&2
-        exit 1
-      fi
+      confirm_non_draft_create
       echo "gh-guard: quality profile $quality_profile" >&2
       exec "$REAL_GH" "$@"
       ;;
@@ -788,8 +818,7 @@ if [ "$is_pr_create" = "1" ]; then
 
     # Start optimistic; any failing eval_marker clears the flag. All five must
     # pass, so their order here is cosmetic (shown in workflow order). This block
-    # runs before the TTY/non-TTY split, so it feeds both the soft prompt and the
-    # non-TTY hard gate.
+    # applies in both interactive and non-interactive shells.
     marker_all_ok=1
     eval_marker "plan review"          "$marker_base/plan.md"        "$PLAN_MIN_BYTES"        0 1 0 0
     eval_marker "code review"          "$marker_base/code-review.md" "$CODE_REVIEW_MIN_BYTES" 1 1 0 1
@@ -803,29 +832,8 @@ if [ "$is_pr_create" = "1" ]; then
     exit 1
   fi
 
-  if [ -t 0 ] && [ -t 1 ]; then
-    echo "About to run: gh $*" >&2
-    if [ "$marker_all_ok" = "1" ]; then
-      echo "All five PR-readiness markers present (plan, code, demo, PR-description, tests)." >&2
-    else
-      echo "Missing PR-readiness markers (Zack's staged change workflow):" >&2
-      printf '%s' "$status_lines" >&2
-      echo "Run the plan review, code review, demo/before-after capture, PR-description review, and the change-relevant checks (pr-marker run-tests), then write each with pr-marker." >&2
-    fi
-    printf "Continue? [y/N] " >&2
-    read -r ans
-    case "$ans" in
-      y|Y|yes|YES|Yes) ;;
-      *) echo "Aborted." >&2; exit 1 ;;
-    esac
-  else
-    pass=0
-    if [ "$marker_all_ok" = "1" ] && [ "${ZACK_CONFIRMED_PR_CREATE:-}" = "1" ]; then
-      pass=1
-    fi
-
-    if [ "$pass" = "0" ]; then
-      cat >&2 <<EOF
+  if [ "$marker_all_ok" != "1" ]; then
+    cat >&2 <<EOF
 gh-guard: \`gh pr create\` blocked.
 
 Reason: Zack's staged change workflow requires five artifacts before a PR is
@@ -875,16 +883,15 @@ A STALE code-review or tests marker means HEAD moved since it was written (the
 artifact never saw the shipping commits). Re-run it and rewrite so it re-pins to
 the current HEAD.
 
-Then set the explicit confirmation env var in the same invocation:
+Once all five markers pass, create the draft without a confirmation variable:
 
-  ZACK_CONFIRMED_PR_CREATE=1 gh pr create <args>
+  gh pr create --draft <args>
 
-Both all five markers AND the env var are required inside a git checkout.
-ZACK_CONFIRMED_PR_CREATE='${ZACK_CONFIRMED_PR_CREATE:-}'.
+Non-draft creation still requires explicit approval.
 EOF
-      exit 1
-    fi
+    exit 1
   fi
+  confirm_non_draft_create
 fi
 
 # --- gh pr edit ----------------------------------------------------------
