@@ -469,6 +469,51 @@ class TailscaleTests(unittest.TestCase):
                 self.fail("Work ran without connectivity")
         self.assertEqual(self.vpn.selected, "personal")
 
+    def test_work_selection_requires_the_matching_running_tailnet(self):
+        self.vpn.connected_profile = "personal"
+        with patch.object(
+            worker, "command", side_effect=self.vpn.command
+        ), self.assertRaises(worker.InfrastructureError), worker.tailscale_session(
+            self.config
+        ):
+            self.fail("Investigation ran while the backend still used personal")
+        self.assertEqual(self.vpn.selected, "personal")
+        self.assertFalse(self.journal.exists())
+
+    def test_work_readiness_rechecks_selection_after_backend_status(self):
+        def command(argv, **kwargs):
+            value = self.vpn.command(argv, **kwargs)
+            if argv[1:] == ["status", "--json"] and self.vpn.selected == "work":
+                self.vpn.selected = "personal"
+            return value
+
+        with patch.object(worker, "command", side_effect=command), self.assertRaises(
+            worker.InfrastructureError
+        ), worker.tailscale_session(self.config):
+            self.fail("Investigation ran after selection changed back to personal")
+        self.assertEqual(self.vpn.selected, "personal")
+
+    def test_restore_waits_for_failed_process_group_cleanup(self):
+        self.vpn.selected = "work"
+        worker.atomic_json(self.journal, {**self.vpn.settings, "cleanup_group": 12345})
+        with patch.object(
+            worker, "command", side_effect=self.vpn.command
+        ), patch.object(
+            worker, "process_group_alive", return_value=True
+        ), self.assertRaisesRegex(
+            worker.InfrastructureError, "cleanup is pending"
+        ):
+            worker.restore_tailscale(self.config)
+        self.assertTrue(self.journal.exists())
+        self.assertEqual(self.vpn.selected, "work")
+        self.assertEqual(self.vpn.events, [])
+        with patch.object(
+            worker, "command", side_effect=self.vpn.command
+        ), patch.object(worker, "process_group_alive", return_value=False):
+            self.assertTrue(worker.restore_tailscale(self.config))
+        self.assertEqual(self.vpn.selected, "personal")
+        self.assertFalse(self.journal.exists())
+
     def test_restore_failure_retains_receipt_for_recovery(self):
         self.vpn.fail_before.add("personal")
         with patch.object(worker, "command", side_effect=self.vpn.command):
@@ -570,6 +615,70 @@ class TailscaleTests(unittest.TestCase):
         self.assertEqual(self.vpn.selected, "third")
         self.assertTrue(self.journal.exists())
         self.assertEqual(self.vpn.events, ["work"])
+
+    def test_normal_pi_exit_stops_term_resistant_descendants_before_restoration(self):
+        ready = self.root / "descendant.pid"
+        fake_pi = self.root / "forking-pi"
+        fake_pi.write_text("#!" + sys.executable + "\n" + f"""
+import os,pathlib,signal,time
+path=pathlib.Path({str(ready)!r})
+if os.fork()==0:
+ signal.signal(signal.SIGTERM,signal.SIG_IGN)
+ path.write_text(str(os.getpid()))
+ while True: time.sleep(1)
+while not path.exists(): time.sleep(0.01)
+os._exit(0)
+""")
+        fake_pi.chmod(0o700)
+        config = {
+            **self.config,
+            "pi": str(fake_pi),
+            "agent_dir": str(self.root),
+            "model": "fixture",
+        }
+
+        def live_descendant():
+            if not ready.exists():
+                return False
+            result = subprocess.run(
+                ["ps", "-p", ready.read_text().strip(), "-o", "stat="],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return bool(
+                result.stdout.strip()
+            ) and not result.stdout.lstrip().startswith("Z")
+
+        def command(argv, **kwargs):
+            if argv[1:] == ["switch", "personal"]:
+                self.assertFalse(
+                    live_descendant(), "Network restored before descendant stopped"
+                )
+            return self.vpn.command(argv, **kwargs)
+
+        try:
+            with patch.object(worker, "command", side_effect=command), patch.object(
+                worker, "PROCESS_GROUP_GRACE_SECONDS", 0.1, create=True
+            ):
+                with worker.exclusive_lock(self.root) as fd, worker.tailscale_session(
+                    config
+                ):
+                    worker.run_pi(
+                        config,
+                        self.root / "stage",
+                        self.root,
+                        "fixture",
+                        fd,
+                        MODULE_PATH.with_name("backlog_autopilot_policy.md"),
+                    )
+                self.assertFalse(live_descendant())
+                with worker.exclusive_lock(self.root):
+                    pass
+            self.assertEqual(self.vpn.selected, "personal")
+        finally:
+            if live_descendant():
+                os.kill(int(ready.read_text()), signal.SIGKILL)
 
     def test_real_sigterm_stops_child_before_restoring_profile(self):
         vpn_state = self.root / "vpn.json"
@@ -969,6 +1078,43 @@ class NotificationTests(unittest.TestCase):
                 )
                 self.assertFalse(worker.notify_completed_run(config, state))
                 self.assertEqual(send.call_count, 2)
+
+    def test_pending_completion_survives_a_new_last_run_pointer(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "runs" / "first"
+            second = root / "runs" / "second"
+            for directory in [first, second]:
+                worker.atomic_json(
+                    directory / "run.json",
+                    {
+                        "finished_at": "2026-11-07T02:00:00+00:00",
+                        "completion_notification_pending": True,
+                    },
+                )
+            config = {"state_dir": str(root)}
+            with patch.object(worker, "notify", return_value=False):
+                self.assertFalse(
+                    worker.notify_completed_run(config, {"last_run": str(first)})
+                )
+            messages = []
+            with patch.object(
+                worker,
+                "notify",
+                side_effect=lambda message: messages.append(message) or True,
+            ):
+                self.assertTrue(
+                    worker.notify_completed_run(config, {"last_run": str(second)})
+                )
+            for directory in [first, second]:
+                self.assertNotIn(
+                    "completion_notification_pending",
+                    worker.read_json(directory / "run.json"),
+                )
+                self.assertTrue(
+                    any(str(directory / "report.md") in message for message in messages)
+                )
+            self.assertEqual(len(messages), 2)
 
     def test_saved_ready_notification_requires_fresh_certification(self):
         items = {
@@ -2338,21 +2484,52 @@ else: sys.exit(9)
         self.assertEqual(saved["outcome_counts"], {"skipped": 4})
         self.assertIsNone(self.state["active_run"])
 
+    def test_unresolved_child_cleanup_stops_before_the_next_issue(self):
+        directory = self.saved_run(count=2)
+        with patch.object(worker, "lease", return_value=self.root), patch.object(
+            worker,
+            "api",
+            side_effect=lambda endpoint: issue(int(endpoint.rsplit("/", 1)[1])),
+        ) as api, patch.object(
+            worker, "run_pi", side_effect=worker.WorkerCleanupPending("cleanup pending")
+        ), patch.object(
+            worker, "notify"
+        ), self.assertRaises(
+            worker.WorkerCleanupPending
+        ):
+            worker.execute(
+                self.config, self.state, self.state_path, 1, MODULE_PATH.parent
+            )
+        self.assertEqual(api.call_count, 1)
+        self.assertEqual(worker.read_json(directory / "run.json")["current_issue"], 1)
+        self.assertIsNotNone(self.state["active_run"])
+
     def test_stalled_child_notifies_once_and_keeps_waiting_for_completion(self):
         class Child:
             pid = 123
             waits = 0
+            returncode = None
+
+            def poll(self):
+                return self.returncode
 
             def wait(self, timeout=None):
+                if self.returncode is not None:
+                    return self.returncode
                 self.waits += 1
                 if self.waits < 3:
                     raise subprocess.TimeoutExpired("pi", timeout)
-                return 0
+                self.returncode = 0
+                return self.returncode
 
         child = Child()
         with patch.object(worker.subprocess, "Popen", return_value=child), patch.object(
             worker, "progress", side_effect=[False, True, True, False]
-        ), patch.object(worker, "notify", return_value=True) as send:
+        ), patch.object(
+            worker, "process_group_alive", return_value=False
+        ), patch.object(
+            worker, "notify", return_value=True
+        ) as send:
             worker.run_pi(
                 self.config,
                 self.root / "stage",

@@ -34,6 +34,7 @@ except ImportError:
 LOG = logging.getLogger("backlog-autopilot")
 PACIFIC = ZoneInfo("America/Los_Angeles")
 LABEL = "com.zkoppert.backlog-autopilot"
+PROCESS_GROUP_GRACE_SECONDS = 10
 DEFAULT_CONFIG = Path.home() / ".config/backlog-autopilot/config.json"
 OUTCOMES = {
     "resolved",
@@ -54,6 +55,10 @@ class TailscaleProfileChanged(InfrastructureError):
 
 class WorkerBusy(RuntimeError):
     """The stable worker lock belongs to another process."""
+
+
+class WorkerCleanupPending(BaseException):
+    """Stop the pass while delegated process cleanup remains unresolved."""
 
 
 class WorkerInterrupted(BaseException):
@@ -391,14 +396,14 @@ def active_tailscale_profile(settings):
     return next(row["id"] for row in tailscale_profiles(settings) if row["selected"])
 
 
-def personal_tailscale_ready(settings):
+def tailscale_profile_ready(settings, profile):
     selected = next(row for row in tailscale_profiles(settings) if row["selected"])
-    if selected["id"] != settings["restore_profile"]:
+    if selected["id"] != profile:
         return False
     tailnet = selected.get("tailnet")
     if not isinstance(tailnet, str) or not tailnet:
         raise InfrastructureError(
-            "Cannot verify the personal Tailscale tailnet identity"
+            "Cannot verify the selected Tailscale tailnet identity"
         )
     status = json.loads(tailscale_command(settings, "status", "--json"))
     connected = status.get("CurrentTailnet") if isinstance(status, dict) else None
@@ -407,8 +412,12 @@ def personal_tailscale_ready(settings):
         and status.get("BackendState") == "Running"
         and isinstance(connected, dict)
         and connected.get("Name") == tailnet
-        and active_tailscale_profile(settings) == settings["restore_profile"]
+        and active_tailscale_profile(settings) == profile
     )
+
+
+def personal_tailscale_ready(settings):
+    return tailscale_profile_ready(settings, settings["restore_profile"])
 
 
 def select_tailscale_profile(settings, profile):
@@ -430,6 +439,17 @@ def restore_tailscale(config):
         raise InfrastructureError(
             "Pending Tailscale restoration does not match configuration; reconcile it before continuing"
         )
+    blocked_group = receipt.get("cleanup_group")
+    if blocked_group is not None:
+        if (
+            type(blocked_group) is not int
+            or blocked_group <= 0
+            or process_group_alive(blocked_group)
+        ):
+            raise InfrastructureError(
+                "Delegated worker cleanup is pending; network restoration is deferred"
+            )
+        receipt.pop("cleanup_group")
     receipt["phase"] = "restoring"
     atomic_json(path, receipt)
     for attempt in range(3):
@@ -514,8 +534,7 @@ def tailscale_session(config):
     )
     try:
         select_tailscale_profile(settings, settings["work_profile"])
-        status = json.loads(tailscale_command(settings, "status", "--json"))
-        if status.get("BackendState") != "Running":
+        if not tailscale_profile_ready(settings, settings["work_profile"]):
             raise InfrastructureError(
                 "Tailscale work profile is not connected; operator login or reconnection is required"
             )
@@ -563,56 +582,92 @@ def notify(message):
 
 
 def notify_completed_run(config, state):
+    root = Path(config["state_dir"])
+    queue_path = root / "completion-notifications.json"
+    pending = read_json(queue_path) if queue_path.exists() else []
+    if not isinstance(pending, list) or any(
+        not isinstance(item, str) for item in pending
+    ):
+        raise InfrastructureError("Invalid pending completion notification queue")
+    pending = list(dict.fromkeys(pending))
+
+    def load(location):
+        directory = Path(location)
+        if directory.resolve().parent != (root / "runs").resolve():
+            raise InfrastructureError(
+                "Completion notification points outside worker run storage"
+            )
+        run_path = directory / "run.json"
+        return (directory, run_path, read_json(run_path)) if run_path.exists() else None
+
     last_run = state.get("last_run")
-    if not last_run:
+    latest = load(last_run) if last_run else None
+    if (
+        latest
+        and latest[2].get("finished_at")
+        and latest[2].get("completion_notification_pending")
+        and last_run not in pending
+    ):
+        pending.append(last_run)
+    if not pending:
         return False
-    directory = Path(last_run)
-    if directory.resolve().parent != (Path(config["state_dir"]) / "runs").resolve():
-        raise InfrastructureError(
-            "Completion notification points outside worker run storage"
-        )
-    run_path = directory / "run.json"
-    if not run_path.exists():
-        return False
-    run = read_json(run_path)
-    if not run.get("finished_at") or not run.get("completion_notification_pending"):
-        return False
-    if (Path(config["state_dir"]) / "tailscale-session.json").exists():
+    atomic_json(queue_path, pending)
+    if (root / "tailscale-session.json").exists():
         return False
     settings = config.get("tailscale")
-    if settings:
-        try:
-            if not personal_tailscale_ready(settings):
-                LOG.warning(
-                    "Completion notification deferred: personal Tailscale is not ready"
-                )
-                return False
-        except (InfrastructureError, json.JSONDecodeError):
+    delivered_any = False
+    for location in list(pending):
+        entry = load(location)
+        if entry is None:
             LOG.warning(
-                "Completion notification deferred: personal Tailscale cannot be verified"
+                "Pending completion evidence is unavailable; delivery remains pending"
             )
-            return False
-    counts = {
-        name: run.get("outcome_counts", {}).get(name) or "none" for name in OUTCOMES
-    }
-    suffix = " Personal Tailscale profile verified and connected." if settings else ""
-    message = (
-        f"Pass finished: {counts['resolved']} closed; {counts['awaiting_review']} ready; "
-        f"{counts['awaiting_ci']} awaiting CI; {counts['blocked']} blocked; "
-        f"{counts['infrastructure_error']} infrastructure errors. Report: {directory / 'report.md'}."
-        f"{suffix}"
-    )
-    try:
-        delivered = notify(message)
-    except Exception:
-        LOG.exception("Completion notification failed; delivery remains pending")
-        return False
-    if not delivered:
-        return False
-    run.pop("completion_notification_pending")
-    run["completion_notified_at"] = now().isoformat()
-    atomic_json(run_path, run)
-    return True
+            continue
+        directory, run_path, run = entry
+        if not run.get("completion_notification_pending"):
+            pending.remove(location)
+            atomic_json(queue_path, pending)
+            continue
+        if not run.get("finished_at"):
+            continue
+        if settings:
+            try:
+                if not personal_tailscale_ready(settings):
+                    LOG.warning(
+                        "Completion notification deferred: personal Tailscale is not ready"
+                    )
+                    break
+            except (InfrastructureError, json.JSONDecodeError):
+                LOG.warning(
+                    "Completion notification deferred: personal Tailscale cannot be verified"
+                )
+                break
+        counts = {
+            name: run.get("outcome_counts", {}).get(name) or "none" for name in OUTCOMES
+        }
+        suffix = (
+            " Personal Tailscale profile verified and connected." if settings else ""
+        )
+        message = (
+            f"Pass finished: {counts['resolved']} closed; {counts['awaiting_review']} ready; "
+            f"{counts['awaiting_ci']} awaiting CI; {counts['blocked']} blocked; "
+            f"{counts['infrastructure_error']} infrastructure errors. Report: {directory / 'report.md'}."
+            f"{suffix}"
+        )
+        try:
+            delivered = notify(message)
+        except Exception:
+            LOG.exception("Completion notification failed; delivery remains pending")
+            break
+        if not delivered:
+            break
+        run.pop("completion_notification_pending")
+        run["completion_notified_at"] = now().isoformat()
+        atomic_json(run_path, run)
+        pending.remove(location)
+        atomic_json(queue_path, pending)
+        delivered_any = True
+    return delivered_any
 
 
 def notify_ready_pull_requests(directory, items, config=None):
@@ -951,6 +1006,40 @@ def prepare_session(directory, workdir):
     )
 
 
+def process_group_alive(group):
+    result = subprocess.run(
+        ["ps", "-axo", "pgid=,stat="],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return any(
+        len(fields) == 2 and fields[0] == str(group) and not fields[1].startswith("Z")
+        for fields in (line.split() for line in result.stdout.splitlines())
+    )
+
+
+def stop_pi_process_group(process):
+    process.poll()
+    for signum in (signal.SIGTERM, signal.SIGKILL):
+        if not process_group_alive(process.pid):
+            process.wait()
+            return
+        try:
+            os.killpg(process.pid, signum)
+        except ProcessLookupError:
+            process.wait()
+            return
+        deadline = time.monotonic() + PROCESS_GROUP_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            process.poll()
+            if not process_group_alive(process.pid):
+                process.wait()
+                return
+            time.sleep(0.05)
+    raise InfrastructureError("Delegated Pi process group did not terminate")
+
+
 def run_pi(config, directory, workdir, prompt, lock_fd, policy, analysis=False):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     session, previous = prepare_session(directory, workdir)
@@ -1014,15 +1103,18 @@ def run_pi(config, directory, workdir, prompt, lock_fd, policy, analysis=False):
                 except subprocess.TimeoutExpired:
                     continue
             progress(config, directory, process.pid, started, status="finished")
-        except BaseException:
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGTERM)
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
-            raise
+        finally:
+            try:
+                stop_pi_process_group(process)
+            except BaseException as error:
+                journal = Path(config["state_dir"]) / "tailscale-session.json"
+                if journal.exists():
+                    receipt = read_json(journal)
+                    receipt["cleanup_group"] = process.pid
+                    atomic_json(journal, receipt)
+                raise WorkerCleanupPending(
+                    "Delegated process cleanup remains pending"
+                ) from error
     if code:
         if not (directory / "receipt.json").exists():
             raise InfrastructureError(
@@ -1588,6 +1680,10 @@ def main(argv=None):
                 state["last_slot"] = latest_slot(now()).isoformat()
             atomic_json(state_path, state)
         return 0
+    except WorkerCleanupPending as error:
+        LOG.error("Worker stopped: %s", error)
+        notify_error_once(str(error), args.config.parent)
+        return 1
     except WorkerInterrupted as error:
         LOG.info("Worker interrupted; saved progress can resume")
         return 128 + error.signum
