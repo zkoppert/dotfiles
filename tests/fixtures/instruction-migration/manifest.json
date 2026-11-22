@@ -2,7 +2,7 @@
   "schema_version": 2,
   "baseline": {
     "path": "tests/fixtures/instruction-migration/global-instructions-2026-11-06.txt",
-    "sha256": "e35658b9f46cc20178d22a66180735e43ca39589fbaec54f963719891f36fa52"
+    "sha256": "96eb8f00279cbbf477b148f74219f763a50a55c97a3dedccad3b3024b3d1bc38"
   },
   "blocks": [
     {
@@ -111,33 +111,33 @@
     },
     {
       "id": "Writing Style",
-      "sha256": "5428277e1794dda8dfb1c14d46b48ad6ea3e0fb8fbf26ac542fb384ffc229e4d",
+      "sha256": "a5a8e2bf67bcdecd1ec2996475aa952c4cd36e888e9c2bfde2ea1a786037f7d5",
       "source_start_line": 330,
-      "source_end_line": 462,
+      "source_end_line": 470,
       "destination": ".github/copilot-instructions.md",
       "scope": "Always loaded global guidance."
     },
     {
       "id": "File & Project Organization",
       "sha256": "b8b671261221963f3c33ba8b22f8ed17f049582af73a6572da20f55fead135dc",
-      "source_start_line": 463,
-      "source_end_line": 468,
+      "source_start_line": 471,
+      "source_end_line": 476,
       "destination": ".copilot/skills/engineering-practices/SKILL.md",
       "scope": "Every project-structure change."
     },
     {
       "id": "macOS Environment",
       "sha256": "3866f0545d343eb55787211fc1100e51d6eddaf028ee4891e6b5df15dc1fa1e8",
-      "source_start_line": 469,
-      "source_end_line": 475,
+      "source_start_line": 477,
+      "source_end_line": 483,
       "destination": ".github/copilot-instructions.md",
       "scope": "Always loaded global guidance."
     },
     {
       "id": "My Open Source GitHub Actions: Shared Patterns",
       "sha256": "317f3c347caa65d8b6551bb6ccec834f02f39c628c9c2cc48588a059024c9884",
-      "source_start_line": 476,
-      "source_end_line": 552,
+      "source_start_line": 484,
+      "source_end_line": 560,
       "destination": ".copilot/skills/open-source-actions-maintenance/SKILL.md",
       "scope": "Every task in the named shared-architecture repositories."
     }

@@ -5,7 +5,17 @@ description: Apply ASD-STE100 and hard writing rules before external text is pos
 
 # Validate Style: apply ASD-STE100 and enforce hard rules
 
-Use this skill **before** finalizing any text that will be posted externally on Zack's behalf. Apply ASD-STE100 principles to editable prose, then run the linter for deterministic rules. Apply the preservation requirement in `~/.copilot/copilot-instructions.md` when protected text conflicts with a rule. Do not claim formal ASD-STE100 compliance without the applicable specification and an approved dictionary.
+**Write all prose to the ASD-STE100 Simplified Technical English standard.** This includes PR descriptions, documentation, reports, status updates, and terminal responses. Follow the standard's writing rules and approved vocabulary.
+
+Use active voice, consistent terms, and explicit references. Keep instructions at 20 words or fewer. Keep descriptive sentences at 25 words or fewer. Preserve exact code, quotations, commands, identifiers, legal text, and required template language.
+
+Use the applicable specification and approved dictionary to resolve questions. If either reference is unavailable, state the limitation when relevant. Don't silently substitute a smaller set of style preferences.
+
+## Validation guidance
+
+Before external publication, run `validate-style`. Its checks supplement the standard; passing the linter doesn't establish full compliance. Claim formal compliance only after verification against the applicable specification and approved dictionary.
+
+Use this skill before finalizing external text on Zack's behalf. Apply the preservation requirement in `~/.copilot/copilot-instructions.md` when protected text conflicts with a rule.
 
 ## ASD-STE100 review
 

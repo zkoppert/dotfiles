@@ -329,7 +329,15 @@ When creating or modifying GitHub Actions workflows:
 
 ## Writing Style
 
-- **Use ASD-STE100 Simplified Technical English for all artifacts and communications.** Use controlled vocabulary, active voice, consistent terms, and explicit references. Keep instructions at 20 words or fewer. Keep descriptive sentences at 25 words or fewer. Avoid idioms, ambiguous pronouns, unnecessary words, and multiple instructions in one sentence. Preserve exact code, quotations, commands, identifiers, legal text, and required template language when those sources must remain unchanged. Do not claim formal ASD-STE100 compliance without the applicable specification and an approved dictionary. Run the `validate-style` skill before external publication.
+**Write all prose to the ASD-STE100 Simplified Technical English standard.** This includes PR descriptions, documentation, reports, status updates, and terminal responses. Follow the standard's writing rules and approved vocabulary.
+
+Use active voice, consistent terms, and explicit references. Keep instructions at 20 words or fewer. Keep descriptive sentences at 25 words or fewer. Preserve exact code, quotations, commands, identifiers, legal text, and required template language.
+
+Use the applicable specification and approved dictionary to resolve questions. If either reference is unavailable, state the limitation when relevant. Don't silently substitute a smaller set of style preferences.
+
+### Validation guidance
+
+Before external publication, run `validate-style`. Its checks supplement the standard; passing the linter doesn't establish full compliance. Claim formal compliance only after verification against the applicable specification and approved dictionary.
 
 ### Voice & Tone
 - Use a **conversational, direct tone** - not corporate or stiff. Write like talking to a peer, not lecturing.
