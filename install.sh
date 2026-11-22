@@ -6,28 +6,136 @@ set -e
 
 DOTFILES_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Symlink copilot instructions for Copilot CLI
+# Symlink global instructions for Copilot CLI and Pi.
 if [ -f "$DOTFILES_DIR/.github/copilot-instructions.md" ]; then
-  mkdir -p "$HOME/.copilot"
-  ln -sf "$DOTFILES_DIR/.github/copilot-instructions.md" "$HOME/.copilot/copilot-instructions.md"
-  echo "✓ Linked copilot-instructions.md → ~/.copilot/copilot-instructions.md"
-fi
-
-# Symlink user-scope Copilot CLI skills so they auto-load on every session.
-if [ -d "$DOTFILES_DIR/.copilot/skills" ]; then
-  mkdir -p "$HOME/.copilot/skills"
-  for skill_path in "$DOTFILES_DIR/.copilot/skills/"*/; do
-    [ -d "$skill_path" ] || continue
-    skill_name="$(basename "$skill_path")"
-    target="$HOME/.copilot/skills/$skill_name"
+  instructions_source="$DOTFILES_DIR/.github/copilot-instructions.md"
+  pi_agent_dir="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+  case "$pi_agent_dir" in
+    "~") pi_agent_dir="$HOME" ;;
+    \~/*) pi_agent_dir="$HOME/${pi_agent_dir#\~/}" ;;
+    /*) ;;
+    *)
+      echo "✗ PI_CODING_AGENT_DIR must be absolute or start with ~/" >&2
+      exit 1
+      ;;
+  esac
+  mkdir -p "$HOME/.copilot" "$pi_agent_dir"
+  for target in "$HOME/.copilot/copilot-instructions.md" "$pi_agent_dir/AGENTS.md"; do
     if [ -L "$target" ] || [ ! -e "$target" ]; then
-      ln -sfn "$skill_path" "$target"
-      echo "✓ Linked skill $skill_name → $target"
+      ln -sfn "$instructions_source" "$target"
+      echo "✓ Linked global instructions → $target"
     else
       echo "⚠ $target exists and is not a symlink - skipping"
     fi
   done
 fi
+
+# Link local skills into the Copilot and Agent Skills discovery roots.
+if [ -d "$DOTFILES_DIR/.copilot/skills" ]; then
+  mkdir -p "$HOME/.copilot/skills" "$HOME/.agents/skills"
+  for skill_path in "$DOTFILES_DIR/.copilot/skills/"*/; do
+    [ -d "$skill_path" ] || continue
+    skill_name="$(basename "$skill_path")"
+    for target in "$HOME/.copilot/skills/$skill_name" "$HOME/.agents/skills/$skill_name"; do
+      if [ -L "$target" ] || [ ! -e "$target" ]; then
+        ln -sfn "$skill_path" "$target"
+        echo "✓ Linked skill $skill_name → $target"
+      else
+        echo "⚠ $target exists and is not a symlink - skipping"
+      fi
+    done
+  done
+fi
+
+# Keep background-agent monitoring available independently of Pi's scheduler.
+if [ "$(uname)" = "Darwin" ] && [ -f "$DOTFILES_DIR/scripts/pi_subagent_monitor.py" ]; then
+  if ! python3 "$DOTFILES_DIR/scripts/pi_subagent_monitor.py" install; then
+    echo "⚠ Subagent monitor installation failed; inspect the error before launching background agents." >&2
+  fi
+fi
+
+# Install Linux-only dependencies for the remote Copilot environment.
+if [ "$(uname)" = "Linux" ]; then
+  if ! node_version="$(node --version 2>/dev/null)" ||
+    [[ ! "$node_version" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] ||
+    (( 10#${BASH_REMATCH[1]} < 22 || (10#${BASH_REMATCH[1]} == 22 && 10#${BASH_REMATCH[2]} < 19) )); then
+    case "$(uname -m)" in
+      x86_64) node_arch="x64" ;;
+      aarch64 | arm64) node_arch="arm64" ;;
+      *) node_arch="" ;;
+    esac
+    if [ -n "$node_arch" ] &&
+      command -v curl >/dev/null 2>&1 &&
+      command -v python3 >/dev/null 2>&1 &&
+      command -v tar >/dev/null 2>&1; then
+      if node_version="$(
+        set -o pipefail
+        curl -fsSL https://nodejs.org/dist/index.json |
+          python3 -c 'import json, re, sys; print(next(item["version"] for item in json.load(sys.stdin) if re.fullmatch(r"v22\.[0-9]+\.[0-9]+", item["version"]) and tuple(map(int, item["version"][1:].split("."))) >= (22, 19, 0)))'
+      )"; then
+        node_dir="$HOME/.local/share/node-v22"
+        mkdir -p "$node_dir" "$HOME/.local/bin"
+        node_stage="$(mktemp -d "$HOME/.local/share/.node-v22.XXXXXX")"
+        node_archive="$node_stage/archive.tar.xz"
+        cleanup_node_install() {
+          if { [ -e "$node_stage/previous" ] || [ -L "$node_stage/previous" ]; } &&
+            [ ! -e "$node_dir" ] && [ ! -L "$node_dir" ]; then
+            mv "$node_stage/previous" "$node_dir" || return 1
+          fi
+          rm -rf "$node_stage"
+        }
+        trap cleanup_node_install EXIT
+        mkdir "$node_stage/runtime"
+        if curl -fsSL "https://nodejs.org/dist/$node_version/node-$node_version-linux-$node_arch.tar.xz" -o "$node_archive" &&
+          tar -xJf "$node_archive" --strip-components=1 -C "$node_stage/runtime" &&
+          mv "$node_dir" "$node_stage/previous" &&
+          mv "$node_stage/runtime" "$node_dir"; then
+          for node_command in node npm npx corepack; do
+            node_target="$HOME/.local/bin/$node_command"
+            if [ -L "$node_target" ] || [ ! -e "$node_target" ]; then
+              ln -sfn "$node_dir/bin/$node_command" "$node_target"
+            else
+              echo "⚠ $node_target exists and is not a symlink - skipping"
+            fi
+          done
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "✓ Installed Node.js $node_version → ~/.local/share/node-v22"
+        else
+          echo "⚠ Failed to install Node.js 22.19.0 or later - continuing dotfiles setup"
+        fi
+        cleanup_node_install
+        trap - EXIT
+      else
+        echo "⚠ Cannot look up Node.js 22.19.0 or later. Check access to https://nodejs.org/dist/index.json and rerun ./install.sh. Continuing dotfiles setup."
+      fi
+    else
+      echo "⚠ Node.js 22.19.0 or later is required and this system has no supported automatic installer"
+    fi
+  fi
+
+  if ! command -v 1up >/dev/null 2>&1; then
+    one_up_target="$HOME/.local/bin/1up"
+    ONE_UP_MODULE="${COPILOT_1UP_MODULE:-}"
+    if [ -e "$one_up_target" ] || [ -L "$one_up_target" ]; then
+      echo "⚠ $one_up_target exists - skipping 1up install"
+    elif [ -n "$ONE_UP_MODULE" ] && command -v go >/dev/null 2>&1; then
+      mkdir -p "$HOME/.local/bin"
+      one_up_path="${ONE_UP_MODULE%@*}"
+      one_up_owner="${one_up_path%/*}"
+      if GOBIN="$HOME/.local/bin" GOPRIVATE="$one_up_owner/*" go install "$ONE_UP_MODULE"; then
+        echo "✓ Installed 1up → ~/.local/bin/1up"
+      else
+        echo "⚠ Failed to install 1up - continuing dotfiles setup"
+      fi
+    else
+      echo "⚠ 1up is missing - set COPILOT_1UP_MODULE to its versioned Go module"
+    fi
+  fi
+fi
+
+skill_metadata_valid() {
+  python3 "$DOTFILES_DIR/scripts/skill_metadata.py" "$1" "$2"
+}
 
 # Install private catalog tools only when the source is supplied outside this
 # public repository.
@@ -40,8 +148,16 @@ else
     for skill_name in $CATALOG_SKILLS; do
       skill_target="$HOME/.copilot/skills/$skill_name/SKILL.md"
       if [ -f "$skill_target" ]; then
-        echo "✓ Copilot skill $skill_name is already installed"
-      elif gh skill install "$CATALOG_REPO" "skills/$skill_name" --agent github-copilot --scope user </dev/null; then
+        if skill_metadata_valid "$skill_target" "$skill_name"; then
+          echo "✓ Copilot skill $skill_name is already installed"
+          continue
+        elif [ "$?" -ne 1 ]; then
+          echo "⚠ Cannot validate existing catalog skill $skill_name; skipping installation"
+          continue
+        fi
+      fi
+      if gh skill install "$CATALOG_REPO" "skills/$skill_name" --agent github-copilot --scope user </dev/null &&
+        skill_metadata_valid "$skill_target" "$skill_name"; then
         echo "✓ Installed Copilot skill $skill_name"
       else
         echo "⚠ Failed to install Copilot skill $skill_name - continuing dotfiles setup"
@@ -90,81 +206,47 @@ print("enabled" if any(plugin.get("enabled") is True for plugin in matches) else
   fi
 fi
 
-# Install Linux-only dependencies for the remote Copilot environment.
-if [ "$(uname)" = "Linux" ]; then
-  node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
-  if [ -z "$node_major" ] || [ "$node_major" -lt 22 ]; then
-    case "$(uname -m)" in
-      x86_64) node_arch="x64" ;;
-      aarch64 | arm64) node_arch="arm64" ;;
-      *) node_arch="" ;;
-    esac
-    if [ -n "$node_arch" ] &&
-      command -v curl >/dev/null 2>&1 &&
-      command -v python3 >/dev/null 2>&1 &&
-      command -v tar >/dev/null 2>&1; then
-      if node_version="$(
-        set -o pipefail
-        curl -fsSL https://nodejs.org/dist/index.json |
-          python3 -c 'import json, sys; print(next(item["version"] for item in json.load(sys.stdin) if item["version"].startswith("v22.")))'
-      )"; then
-        node_dir="$HOME/.local/share/node-v22"
-        mkdir -p "$node_dir" "$HOME/.local/bin"
-        node_stage="$(mktemp -d "$HOME/.local/share/.node-v22.XXXXXX")"
-        node_archive="$node_stage/archive.tar.xz"
-        cleanup_node_install() {
-          if { [ -e "$node_stage/previous" ] || [ -L "$node_stage/previous" ]; } &&
-            [ ! -e "$node_dir" ] && [ ! -L "$node_dir" ]; then
-            mv "$node_stage/previous" "$node_dir" || return 1
-          fi
-          rm -rf "$node_stage"
-        }
-        trap cleanup_node_install EXIT
-        mkdir "$node_stage/runtime"
-        if curl -fsSL "https://nodejs.org/dist/$node_version/node-$node_version-linux-$node_arch.tar.xz" -o "$node_archive" &&
-          tar -xJf "$node_archive" --strip-components=1 -C "$node_stage/runtime" &&
-          mv "$node_dir" "$node_stage/previous" &&
-          mv "$node_stage/runtime" "$node_dir"; then
-          for node_command in node npm npx corepack; do
-            node_target="$HOME/.local/bin/$node_command"
-            if [ -L "$node_target" ] || [ ! -e "$node_target" ]; then
-              ln -sfn "$node_dir/bin/$node_command" "$node_target"
-            else
-              echo "⚠ $node_target exists and is not a symlink - skipping"
-            fi
-          done
-          echo "✓ Installed Node.js $node_version → ~/.local/share/node-v22"
-        else
-          echo "⚠ Failed to install Node.js 22 - continuing dotfiles setup"
-        fi
-        cleanup_node_install
-        trap - EXIT
-      else
-        echo "⚠ Cannot look up Node.js 22. Check access to https://nodejs.org/dist/index.json and rerun ./install.sh. Continuing dotfiles setup."
-      fi
-    else
-      echo "⚠ Node.js 22 is required and this system has no supported automatic installer"
-    fi
+for skill_name in $CATALOG_SKILLS; do
+  skill_path="$HOME/.copilot/skills/$skill_name"
+  if ! [ -f "$skill_path/SKILL.md" ] || ! skill_metadata_valid "$skill_path/SKILL.md" "$skill_name"; then
+    echo "⚠ Cannot validate catalog skill $skill_name; skipping Pi mirror"
+    continue
   fi
+  mkdir -p "$HOME/.agents/skills"
+  target="$HOME/.agents/skills/$skill_name"
+  if [ -L "$target" ] || [ ! -e "$target" ]; then
+    ln -sfn "$skill_path" "$target"
+    echo "✓ Linked catalog skill $skill_name → $target"
+  else
+    echo "⚠ $target exists and is not a symlink - skipping"
+  fi
+done
 
-  if ! command -v 1up >/dev/null 2>&1; then
-    one_up_target="$HOME/.local/bin/1up"
-    ONE_UP_MODULE="${COPILOT_1UP_MODULE:-}"
-    if [ -e "$one_up_target" ] || [ -L "$one_up_target" ]; then
-      echo "⚠ $one_up_target exists - skipping 1up install"
-    elif [ -n "$ONE_UP_MODULE" ] && command -v go >/dev/null 2>&1; then
-      mkdir -p "$HOME/.local/bin"
-      one_up_path="${ONE_UP_MODULE%@*}"
-      one_up_owner="${one_up_path%/*}"
-      if GOBIN="$HOME/.local/bin" GOPRIVATE="$one_up_owner/*" go install "$ONE_UP_MODULE"; then
-        echo "✓ Installed 1up → ~/.local/bin/1up"
-      else
-        echo "⚠ Failed to install 1up - continuing dotfiles setup"
-      fi
+# Block accidental interactive Python package resolution outside CFS on macOS.
+CFS_GUARD_SOURCE="$DOTFILES_DIR/bin/cfs-package-guard"
+if [ "$(uname)" = "Darwin" ] && [ -x "$CFS_GUARD_SOURCE" ]; then
+  CFS_GUARD_BIN="$HOME/.local/libexec/cfs-package-guard/bin"
+  mkdir -p "$CFS_GUARD_BIN"
+  for package_command in pip pip3 pip-compile pip-sync uv uvx; do
+    package_target="$CFS_GUARD_BIN/$package_command"
+    if [ -L "$package_target" ] || [ ! -e "$package_target" ]; then
+      ln -sfn "$CFS_GUARD_SOURCE" "$package_target"
+      echo "✓ Linked CFS package guard for $package_command → $package_target"
     else
-      echo "⚠ 1up is missing - set COPILOT_1UP_MODULE to its versioned Go module"
+      echo "⚠ $package_target exists and is not a symlink - skipping"
     fi
-  fi
+  done
+
+  CFS_PATH_LINE="export PATH=\"\$HOME/.local/libexec/cfs-package-guard/bin:\$PATH\"  # dotfiles: CFS package guard"
+  for shell_rc in "$HOME/.zprofile" "$HOME/.zshrc" "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bashrc"; do
+    rc_short="${shell_rc/#$HOME/~}"
+    if [ -f "$shell_rc" ] && grep -q "dotfiles: CFS package guard" "$shell_rc"; then
+      echo "✓ CFS package guard PATH already in $rc_short"
+    else
+      printf '\n%s\n' "$CFS_PATH_LINE" >> "$shell_rc"
+      echo "✓ Added CFS package guard PATH to $rc_short (open a new shell to apply)"
+    fi
+  done
 fi
 
 # Install gh guard wrapper as a PATH shim at ~/.local/bin/gh.
@@ -184,7 +266,7 @@ if [ -x "$DOTFILES_DIR/bin/gh-guard" ]; then
   # over the real gh binary. Cover both zsh (macOS default) and bash (Codespaces,
   # Linux). brew shellenv (in .zprofile) prepends /opt/homebrew/bin, so we add
   # our own prepend AFTER brew runs.
-  PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\"  # dotfiles: gh wrapper"
+  PATH_LINE="export PATH=\"\$HOME/.local/libexec/cfs-package-guard/bin:\$HOME/.local/bin:\$PATH\"  # dotfiles: gh wrapper"
   for shell_rc in "$HOME/.zprofile" "$HOME/.profile" "$HOME/.bashrc"; do
     rc_short="${shell_rc/#$HOME/~}"
     if [ -f "$shell_rc" ] && grep -q "dotfiles: gh wrapper" "$shell_rc"; then
@@ -208,7 +290,7 @@ if [ -x "$DOTFILES_DIR/bin/pi-treehouse" ]; then
   else
     echo "⚠ $PI_TARGET exists and is not a symlink - skipping Pi Treehouse wrapper"
   fi
-  PI_ALIAS='alias pi='\''"$HOME/.local/bin/pi"'\''  # dotfiles: treehouse-isolated pi'
+  PI_ALIAS="alias pi='\"\$HOME/.local/bin/pi\"'  # dotfiles: treehouse-isolated pi"
   if [ -f "$HOME/.zshrc" ] && grep -q "dotfiles: treehouse-isolated pi" "$HOME/.zshrc"; then
     echo "✓ Pi Treehouse alias already in ~/.zshrc"
   else
@@ -347,7 +429,7 @@ done
 # Add the local-only review environment shortcut on macOS.
 if [ "$(uname)" = "Darwin" ]; then
   if [ -x "$DOTFILES_DIR/bin/copilot-launch" ]; then
-    COPILOT_ALIAS='alias copilot='\''"$HOME/.local/bin/copilot-launch"'\''  # dotfiles: named copilot'
+    COPILOT_ALIAS="alias copilot='\"\$HOME/.local/bin/copilot-launch\"'  # dotfiles: named copilot"
     if [ -f "$HOME/.zshrc" ] && grep -q "dotfiles: named copilot" "$HOME/.zshrc"; then
       echo "✓ Named Copilot alias already in ~/.zshrc"
     elif [ -f "$HOME/.zshrc" ] && grep -Eq '^[[:space:]]*(alias[[:space:]]+copilot=|copilot[[:space:]]*\(\)|function[[:space:]]+copilot([[:space:]]|\(|$))' "$HOME/.zshrc"; then
@@ -369,6 +451,18 @@ if [ "$(uname)" = "Darwin" ]; then
       echo "✓ Added review lab alias to $rc_short"
     fi
   done
+fi
+
+# Private assignments are user-managed and must never be copied into dotfiles.
+if [ -x "$DOTFILES_DIR/bin/repo-guards" ]; then
+  mkdir -p "$HOME/.local/bin"
+  target="$HOME/.local/bin/repo-guards"
+  if [ -L "$target" ] || [ ! -e "$target" ]; then
+    ln -sfn "$DOTFILES_DIR/bin/repo-guards" "$target"
+    echo "✓ Linked repository policy resolver → $target"
+  else
+    echo "⚠ $target exists and is not a symlink - skipping"
+  fi
 fi
 
 # Install pr-marker helper as a PATH shim at ~/.local/bin/pr-marker.

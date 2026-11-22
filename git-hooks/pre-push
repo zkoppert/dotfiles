@@ -85,6 +85,12 @@ if [ -z "$remote_url" ]; then
   exit 0
 fi
 
+if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$HOOK_DIR/../bin/repo-guards" ]; then
+  echo 'pre-push: repository quality policy tooling is unavailable.' >&2
+  exit 1
+fi
+printf '%s\n' "$push_updates" | python3 "$HOOK_DIR/../bin/repo-guards" check-push -- "$remote_url"
+
 # Extract owner/repo from the remote URL
 # Handles: git@github.com:owner/repo.git, https://github.com/owner/repo.git
 owner_repo="$(github_repo_from_url "$remote_url")"

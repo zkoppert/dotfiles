@@ -8,16 +8,29 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+
+from scripts.skill_metadata import pi_sdk_path
 
 
 class InstallScriptTest(unittest.TestCase):
     """Exercise install.sh in an isolated home directory."""
 
     RC_FILES = (".zshrc", ".bashrc", ".bash_profile")
+    CATALOG_SKILLS = (
+        "validate-pr-with-codespace",
+        "session-portability",
+        "cleanup-worktrees",
+        "remediate-accessibility-audit",
+        "graphql-availability-investigator",
+        "milestone-release-tracking",
+        "prod-explain",
+        "gh-axi",
+    )
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -33,6 +46,34 @@ class InstallScriptTest(unittest.TestCase):
         self.installer = self.repo / "install.sh"
         self.installer.write_bytes(source.read_bytes())
         self.installer.chmod(0o755)
+        metadata_source = Path(__file__).with_name("scripts") / "skill_metadata.py"
+        metadata_target = self.repo / "scripts" / "skill_metadata.py"
+        metadata_target.parent.mkdir()
+        shutil.copy2(metadata_source, metadata_target)
+        self.pi_package = self.root / "npm" / "lib" / "node_modules" / "@earendil-works" / "pi-coding-agent"
+        (self.pi_package / "dist" / "bundle").mkdir(parents=True)
+        (self.pi_package / "package.json").write_text(json.dumps({
+            "name": "@earendil-works/pi-coding-agent", "type": "module", "main": "./dist/index.js",
+        }), encoding="utf-8")
+        (self.pi_package / "dist" / "index.js").write_text("export {};\n", encoding="utf-8")
+        cli = self.pi_package / "dist" / "bundle" / "cli.js"
+        cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        cli.chmod(0o755)
+        (self.fake_bin / "pi").symlink_to(cli)
+        node = self.fake_bin / "node"
+        node.write_text(
+            "#!/bin/sh\n"
+            'if [ "$*" = --version ]; then\n'
+            '  printf \'%s\\n\' "$FAKE_CURRENT_NODE_VERSION"\n'
+            '  exit "$FAKE_CURRENT_NODE_EXIT"\n'
+            'fi\n'
+            'if [ -n "$REAL_NODE" ]; then exec "$REAL_NODE" "$@"; fi\n'
+            '[ "$1" = --input-type=module ] || exit 2\n'
+            f"exec {shlex.quote(sys.executable)} -c 'import json, sys; "
+            "print(json.dumps({path: [] for path in json.load(sys.stdin)}))'\n",
+            encoding="utf-8",
+        )
+        node.chmod(0o755)
 
         uname = self.fake_bin / "uname"
         uname.write_text("#!/bin/sh\nprintf 'Darwin\\n'\n", encoding="utf-8")
@@ -51,7 +92,15 @@ class InstallScriptTest(unittest.TestCase):
             "  [ \"${FAKE_GH_FAIL:-0}\" = 1 ] && exit 1\n"
             "  skill_name=${4#skills/}\n"
             "  mkdir -p \"$HOME/.copilot/skills/$skill_name\"\n"
-            "  printf '# installed\\n' > \"$HOME/.copilot/skills/$skill_name/SKILL.md\"\n"
+            '  if [ "$skill_name" = gh-axi ] && [ -n "${FAKE_CATALOG_CONTENT+x}" ]; then\n'
+            '    printf \'%s\' "$FAKE_CATALOG_CONTENT" > "$HOME/.copilot/skills/$skill_name/SKILL.md"\n'
+            '    exit 0\n'
+            '  fi\n'
+            "  printf '%s\\n' '---' 'description: Catalog fixture' 'metadata:' "
+            '"  github-path: skills/$skill_name" '
+            "'  github-ref: refs/heads/main' '  github-repo: https://example.invalid/catalog' "
+            "'  hermes:' '    tags: [git, automation]' "
+            '"name: $skill_name" \'---\' "# $skill_name" > "$HOME/.copilot/skills/$skill_name/SKILL.md"\n'
             "fi\n",
             encoding="utf-8",
         )
@@ -83,13 +132,27 @@ class InstallScriptTest(unittest.TestCase):
         copilot.chmod(0o755)
 
         self.env = dict(os.environ)
+        for name in ("PI_CODING_AGENT_DIR", "PI_REAL_PI", "REAL_NODE", "FAKE_CATALOG_CONTENT"):
+            self.env.pop(name, None)
         self.env["HOME"] = str(self.home)
         self.env["PATH"] = f"{self.fake_bin}{os.pathsep}{self.env['PATH']}"
         self.env["GIT_CONFIG_GLOBAL"] = str(self.home / ".gitconfig")
         self.env["GIT_CONFIG_SYSTEM"] = os.devnull
         self.env["COPILOT_SKILL_CATALOG_REPO"] = "private/catalog"
+        self.env["FAKE_CURRENT_NODE_VERSION"] = "v22.19.0"
+        self.env["FAKE_CURRENT_NODE_EXIT"] = "0"
         self.env["FAKE_COPILOT_LIST_STATUS"] = "0"
         self.env.pop("FAKE_COPILOT_PLUGINS_JSON", None)
+
+    def use_real_pi_sdk(self) -> None:
+        if shutil.which("pi") is None or shutil.which("node") is None:
+            self.fail("Pi and Node.js are required for catalog metadata regressions")
+        sdk = pi_sdk_path()
+        self.env["REAL_NODE"] = shutil.which("node")
+        (self.pi_package / "dist" / "index.js").write_text(
+            f"export {{ DefaultResourceLoader, SettingsManager, parseFrontmatter }} from {json.dumps(sdk.as_uri())};\n",
+            encoding="utf-8",
+        )
 
     def run_installer(self) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -101,6 +164,22 @@ class InstallScriptTest(unittest.TestCase):
             text=True,
         )
 
+    def test_subagent_monitor_installation_runs_on_macos(self) -> None:
+        worker = self.repo / "scripts/pi_subagent_monitor.py"
+        worker.write_text(
+            "import json, os, pathlib, sys\n"
+            "pathlib.Path(os.environ['HOME'], 'monitor-install.json').write_text(json.dumps(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        self.run_installer()
+        self.assertEqual(json.loads((self.home / "monitor-install.json").read_text()), ["install"])
+
+    def test_subagent_monitor_installation_failure_is_visible(self) -> None:
+        worker = self.repo / "scripts/pi_subagent_monitor.py"
+        worker.write_text("raise SystemExit(1)\n", encoding="utf-8")
+        result = self.run_installer()
+        self.assertIn("Subagent monitor installation failed", result.stderr)
+
     def prepare_node_install(self) -> None:
         scripts = {
             "uname": (
@@ -111,7 +190,12 @@ class InstallScriptTest(unittest.TestCase):
                 "  printf 'Linux\\n'\n"
                 "fi\n"
             ),
-            "node": "#!/bin/sh\nprintf '20\\n'\n",
+            "node": (
+                "#!/bin/sh\n"
+                '[ "$*" = --version ] || exit 90\n'
+                'printf \'%s\\n\' "$FAKE_CURRENT_NODE_VERSION"\n'
+                'exit "$FAKE_CURRENT_NODE_EXIT"\n'
+            ),
             "1up": "#!/bin/sh\nexit 0\n",
             "curl": (
                 "#!/bin/sh\n"
@@ -122,7 +206,7 @@ class InstallScriptTest(unittest.TestCase):
                 '    printf \'%s\\n\' "$FAKE_NODE_INDEX"\n'
                 '    exit "$FAKE_NODE_INDEX_EXIT"\n'
                 "    ;;\n"
-                "  https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz)\n"
+                "  https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-x64.tar.xz)\n"
                 '    [ "$3" = -o ] && [ "$#" -eq 4 ] || exit 2\n'
                 '    printf \'%s\\n\' "$4" > "$HOME/node-archive-path"\n'
                 '    cp "$FAKE_NODE_ARCHIVE" "$4" || exit "$?"\n'
@@ -138,8 +222,10 @@ class InstallScriptTest(unittest.TestCase):
             command.chmod(0o755)
         self.env.update(
             {
+                "FAKE_CURRENT_NODE_VERSION": "v22.18.12",
+                "FAKE_CURRENT_NODE_EXIT": "0",
                 "FAKE_NODE_INDEX": json.dumps(
-                    [{"version": "v24.0.0"}, {"version": "v22.0.0"}]
+                    [{"version": "v24.0.0"}, {"version": "v22.19.0"}]
                 ),
                 "FAKE_NODE_INDEX_EXIT": "0",
                 "TMPDIR": str(self.root),
@@ -149,11 +235,18 @@ class InstallScriptTest(unittest.TestCase):
         (runtime / "bin").mkdir(parents=True)
         for name in ("node", "npm", "npx", "corepack"):
             command = runtime / "bin" / name
-            command.write_text("#!/bin/sh\nprintf 'v22.0.0\\n'\n", encoding="utf-8")
+            command.write_text(
+                "#!/bin/sh\n"
+                'if [ "$*" = --version ]; then printf \'v22.19.0\\n\'; exit 0; fi\n'
+                '[ "$1" = --input-type=module ] || exit 2\n'
+                f"exec {shlex.quote(sys.executable)} -c 'import json, sys; "
+                "print(json.dumps({path: [] for path in json.load(sys.stdin)}))'\n",
+                encoding="utf-8",
+            )
             command.chmod(0o755)
         archive_path = self.root / "node-release.tar.xz"
         with tarfile.open(archive_path, "w:xz") as archive:
-            archive.add(runtime, arcname="node-v22.0.0-linux-x64")
+            archive.add(runtime, arcname="node-v22.19.0-linux-x64")
         self.env["FAKE_NODE_ARCHIVE"] = str(archive_path)
 
     def prepare_existing_node_runtime(self) -> Path:
@@ -177,6 +270,161 @@ class InstallScriptTest(unittest.TestCase):
             )
             self.assertEqual(result.stdout, version + "\n", name)
 
+    def install_routed_skills(self) -> set[str]:
+        source_root = Path(__file__).parent
+        manifest = json.loads(
+            (source_root / "tests/fixtures/instruction-migration/manifest.json").read_text(encoding="utf-8")
+        )
+        routed_skills = {name for names in manifest["pre_action_routes"].values() for name in names}
+        for name in routed_skills:
+            if name not in manifest["external_skills"]:
+                shutil.copytree(
+                    source_root / ".copilot" / "skills" / name,
+                    self.repo / ".copilot" / "skills" / name,
+                )
+        source_instructions = source_root / ".github" / "copilot-instructions.md"
+        (self.repo / ".github").mkdir()
+        shutil.copy2(source_instructions, self.repo / ".github" / "copilot-instructions.md")
+
+        self.run_installer()
+        return routed_skills
+
+    def test_routed_skills_are_discoverable_in_both_clients(self) -> None:
+        routed_skills = self.install_routed_skills()
+        for root in (self.home / ".copilot" / "skills", self.home / ".agents" / "skills"):
+            for name in routed_skills:
+                with self.subTest(root=root, skill=name):
+                    installed = root / name
+                    owner = self.home if name == "gh-axi" else self.repo
+                    expected = owner / ".copilot" / "skills" / name
+                    self.assertTrue((installed / "SKILL.md").is_file())
+                    self.assertEqual(installed.resolve(), expected.resolve())
+        copilot_instructions = self.home / ".copilot" / "copilot-instructions.md"
+        pi_instructions = self.home / ".pi" / "agent" / "AGENTS.md"
+        self.assertTrue(copilot_instructions.is_symlink())
+        self.assertTrue(pi_instructions.is_symlink())
+        installed_source = self.repo / ".github" / "copilot-instructions.md"
+        self.assertEqual(copilot_instructions.resolve(), installed_source.resolve())
+        self.assertEqual(pi_instructions.resolve(), installed_source.resolve())
+        self.assertFalse((self.home / "tests" / "fixtures" / "instruction-migration").exists())
+
+    def test_installed_routes_reach_the_real_pi_sdk(self) -> None:
+        self.use_real_pi_sdk()
+        routed_skills = self.install_routed_skills()
+        verifier = Path(__file__).with_name("bin") / "verify-codespace-copilot-env"
+        program = (
+            "import json, runpy, sys; from pathlib import Path; "
+            "discover = runpy.run_path(sys.argv[1])['effective_pi_skills']; "
+            "print(json.dumps(discover(Path.home() / '.pi' / 'agent')))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", program, str(verifier)],
+            cwd=self.repo, env=self.env, capture_output=True, text=True, check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        winners = json.loads(result.stdout)
+        self.assertTrue(routed_skills <= winners.keys())
+        for name in routed_skills:
+            expected = (self.home if name == "gh-axi" else self.repo) / ".copilot" / "skills" / name / "SKILL.md"
+            self.assertEqual(Path(winners[name]["filePath"]).resolve(), expected.resolve())
+            self.assertFalse(winners[name]["disableModelInvocation"])
+
+    def test_instruction_links_follow_the_active_pi_agent_directory(self) -> None:
+        instructions = self.repo / ".github" / "copilot-instructions.md"
+        instructions.parent.mkdir()
+        instructions.write_text("# Shared guidance\n", encoding="utf-8")
+        default = self.home / ".pi" / "agent" / "AGENTS.md"
+        for setting, directory in (
+            (None, default.parent),
+            ("", default.parent),
+            (str(self.home / "absolute agent"), self.home / "absolute agent"),
+            ("~/custom agent", self.home / "custom agent"),
+            ("~", self.home),
+        ):
+            with self.subTest(setting=setting):
+                default.unlink(missing_ok=True)
+                if setting is None:
+                    self.env.pop("PI_CODING_AGENT_DIR", None)
+                else:
+                    self.env["PI_CODING_AGENT_DIR"] = setting
+
+                self.run_installer()
+
+                for target in (
+                    self.home / ".copilot" / "copilot-instructions.md",
+                    directory / "AGENTS.md",
+                ):
+                    self.assertTrue(target.is_symlink())
+                    self.assertEqual(target.resolve(), instructions.resolve())
+                    self.assertEqual(target.read_bytes(), b"# Shared guidance\n")
+                if directory != default.parent:
+                    self.assertFalse(default.exists())
+
+    def test_relative_pi_agent_directory_is_rejected(self) -> None:
+        instructions = self.repo / ".github" / "copilot-instructions.md"
+        instructions.parent.mkdir()
+        instructions.write_text("# Shared guidance\n", encoding="utf-8")
+        self.env["PI_CODING_AGENT_DIR"] = "relative-agent"
+
+        result = subprocess.run(
+            [str(self.installer)],
+            cwd=self.repo,
+            env=self.env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("PI_CODING_AGENT_DIR must be absolute or start with ~/", result.stderr)
+        self.assertFalse((self.repo / "relative-agent").exists())
+
+    def test_custom_pi_instruction_files_are_preserved(self) -> None:
+        instructions = self.repo / ".github" / "copilot-instructions.md"
+        instructions.parent.mkdir()
+        instructions.write_text("# Shared guidance\n", encoding="utf-8")
+        self.env["PI_CODING_AGENT_DIR"] = "~/custom agent"
+        target = self.home / "custom agent" / "AGENTS.md"
+        target.parent.mkdir()
+        target.write_text("Keep my guidance.\n", encoding="utf-8")
+
+        for _ in range(2):
+            result = self.run_installer()
+
+            self.assertFalse(target.is_symlink())
+            self.assertEqual(target.read_bytes(), b"Keep my guidance.\n")
+            self.assertIn(f"{target} exists and is not a symlink", result.stdout)
+            self.assertFalse((self.home / ".pi" / "agent" / "AGENTS.md").exists())
+
+    def test_existing_instruction_and_skill_files_are_preserved(self) -> None:
+        source_skill = Path(__file__).with_name(".copilot") / "skills" / "actions-security"
+        shutil.copytree(source_skill, self.repo / ".copilot" / "skills" / "actions-security")
+        source_instructions = Path(__file__).with_name(".github") / "copilot-instructions.md"
+        (self.repo / ".github").mkdir()
+        shutil.copy2(source_instructions, self.repo / ".github" / "copilot-instructions.md")
+        sentinels = {
+            self.home / ".copilot" / "copilot-instructions.md": self.home / ".copilot" / "copilot-instructions.md",
+            self.home / ".pi" / "agent" / "AGENTS.md": self.home / ".pi" / "agent" / "AGENTS.md",
+            self.home / ".copilot" / "skills" / "actions-security" / "SKILL.md": self.home / ".copilot" / "skills" / "actions-security",
+            self.home / ".agents" / "skills" / "actions-security" / "SKILL.md": self.home / ".agents" / "skills" / "actions-security",
+        }
+        pi_shadows = (
+            self.home / ".pi" / "agent" / "AGENTS.override.md",
+            self.home / ".pi" / "agent" / "skills" / "actions-security" / "SKILL.md",
+        )
+        for path in (*sentinels, *pi_shadows):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("keep me\n", encoding="utf-8")
+
+        result = self.run_installer()
+
+        for path in (*sentinels, *pi_shadows):
+            self.assertFalse(path.is_symlink())
+            self.assertEqual(path.read_text(encoding="utf-8"), "keep me\n")
+        for warning_target in sentinels.values():
+            self.assertIn(f"{warning_target} exists and is not a symlink", result.stdout)
+
     def test_review_lab_alias_is_added_once_on_macos(self) -> None:
         self.run_installer()
         self.run_installer()
@@ -186,45 +434,52 @@ class InstallScriptTest(unittest.TestCase):
             content = (self.home / rc_name).read_text(encoding="utf-8")
             self.assertEqual(content.count(alias_line), 1)
 
+    def test_cfs_package_guard_is_installed_once_on_macos(self) -> None:
+        source_guard = Path(__file__).with_name("bin") / "cfs-package-guard"
+        guard_dir = self.repo / "bin"
+        guard_dir.mkdir()
+        guard = guard_dir / "cfs-package-guard"
+        guard.write_bytes(source_guard.read_bytes())
+        guard.chmod(0o755)
+
+        self.run_installer()
+        self.run_installer()
+
+        installed_dir = self.home / ".local" / "libexec" / "cfs-package-guard" / "bin"
+        for command in ("pip", "pip3", "pip-compile", "pip-sync", "uv", "uvx"):
+            self.assertEqual(guard.resolve(), (installed_dir / command).resolve())
+        path_line = 'export PATH="$HOME/.local/libexec/cfs-package-guard/bin:$PATH"  # dotfiles: CFS package guard'
+        for rc_name in (".zprofile", ".zshrc", ".profile", ".bash_profile", ".bashrc"):
+            self.assertEqual(1, (self.home / rc_name).read_text(encoding="utf-8").count(path_line))
+
     def test_catalog_tools_are_installed_once(self) -> None:
         self.run_installer()
         second_run = self.run_installer()
 
-        expected_skills = (
-            "validate-pr-with-codespace",
-            "session-portability",
-            "cleanup-worktrees",
-            "remediate-accessibility-audit",
-            "graphql-availability-investigator",
-            "milestone-release-tracking",
-            "prod-explain",
-            "gh-axi",
-        )
-        self.assertEqual(
-            {path.name for path in (self.home / ".copilot" / "skills").iterdir()},
-            set(expected_skills),
-        )
+        for root in (self.home / ".copilot" / "skills", self.home / ".agents" / "skills"):
+            self.assertEqual({path.name for path in root.iterdir()}, set(self.CATALOG_SKILLS))
+            for name in self.CATALOG_SKILLS:
+                self.assertEqual(
+                    (root / name / "SKILL.md").read_text(encoding="utf-8"),
+                    "---\ndescription: Catalog fixture\nmetadata:\n"
+                    f"  github-path: skills/{name}\n"
+                    "  github-ref: refs/heads/main\n"
+                    "  github-repo: https://example.invalid/catalog\n"
+                    "  hermes:\n    tags: [git, automation]\n"
+                    f"name: {name}\n---\n# {name}\n",
+                )
+                self.assertEqual(
+                    (root / name).resolve(),
+                    (self.home / ".copilot" / "skills" / name).resolve(),
+                )
         gh_calls = (self.home / "gh.log").read_text(encoding="utf-8").splitlines()
-        for skill_name in expected_skills:
+        for name in self.CATALOG_SKILLS:
             expected_call = (
-                f"skill install private/catalog skills/{skill_name} "
+                f"skill install private/catalog skills/{name} "
                 "--agent github-copilot --scope user"
             )
             self.assertEqual(gh_calls.count(expected_call), 1)
-            self.assertEqual(
-                (
-                    self.home
-                    / ".copilot"
-                    / "skills"
-                    / skill_name
-                    / "SKILL.md"
-                ).read_text(encoding="utf-8"),
-                "# installed\n",
-            )
-            self.assertIn(
-                f"Copilot skill {skill_name} is already installed",
-                second_run.stdout,
-            )
+            self.assertIn(f"Copilot skill {name} is already installed", second_run.stdout)
 
         copilot_calls = (
             self.home / "copilot.log"
@@ -237,6 +492,209 @@ class InstallScriptTest(unittest.TestCase):
             "Copilot plugin gho11y is already installed",
             second_run.stdout,
         )
+
+    def test_macos_catalog_validation_requires_supported_node(self) -> None:
+        self.use_real_pi_sdk()
+        for version, supported in (("v22.18.0", False), ("v22.18.12", False), ("v22.19.0", True)):
+            with self.subTest(version=version):
+                self.env["FAKE_CURRENT_NODE_VERSION"] = version
+
+                result = self.run_installer()
+
+                if supported:
+                    self.assertEqual(result.stderr, "")
+                else:
+                    self.assertIn(f"Node.js 22.19.0 or later is required (found {version})", result.stderr)
+                for name in self.CATALOG_SKILLS:
+                    source = self.home / ".copilot" / "skills" / name
+                    mirror = self.home / ".agents" / "skills" / name
+                    self.assertTrue((source / "SKILL.md").is_file())
+                    if supported:
+                        self.assertTrue(mirror.is_symlink())
+                        self.assertEqual(mirror.resolve(), source.resolve())
+                    else:
+                        self.assertFalse(mirror.exists())
+                self.assertFalse((self.home / ".local" / "share" / "node-v22").exists())
+                self.assertFalse((self.home / ".local" / "bin" / "node").exists())
+
+    def test_unavailable_validation_preserves_existing_catalog_skills(self) -> None:
+        originals = {}
+        for name in self.CATALOG_SKILLS:
+            source = self.home / ".copilot" / "skills" / name
+            source.mkdir(parents=True)
+            originals[source / "SKILL.md"] = f"---\nname: {name}\ndescription: Existing catalog skill\n---\n# Retained {name}\n"
+            originals[source / "reference.txt"] = f"Keep the existing {name} reference.\n"
+            mirror = self.home / ".agents" / "skills" / name
+            mirror.parent.mkdir(parents=True, exist_ok=True)
+            mirror.symlink_to(source)
+        for path, content in originals.items():
+            path.write_text(content, encoding="utf-8")
+
+        for failure, version, error in (
+            ("runtime", "v22.18.12", "Node.js 22.19.0 or later is required"),
+            ("SDK", "v22.19.0", "cannot locate the installed Pi SDK"),
+        ):
+            self.env["FAKE_CURRENT_NODE_VERSION"] = version
+            if failure == "SDK":
+                (self.pi_package / "dist" / "index.js").unlink()
+            for attempt in range(2):
+                with self.subTest(failure=failure, attempt=attempt):
+                    result = self.run_installer()
+
+                    calls = [shlex.split(line) for line in (self.home / "gh.log").read_text(encoding="utf-8").splitlines()]
+                    self.assertFalse(any(call[:2] == ["skill", "install"] for call in calls), calls)
+                    self.assertIn(error, result.stderr)
+                    for path, content in originals.items():
+                        self.assertEqual(path.read_text(encoding="utf-8"), content)
+                    for name in self.CATALOG_SKILLS:
+                        self.assertIn(f"Cannot validate existing catalog skill {name}; skipping installation", result.stdout)
+                        mirror = self.home / ".agents" / "skills" / name
+                        self.assertEqual(mirror.readlink(), self.home / ".copilot" / "skills" / name)
+
+    def test_nested_catalog_metadata_is_preserved_on_reinstall(self) -> None:
+        self.use_real_pi_sdk()
+        source = self.home / ".copilot" / "skills" / "gh-axi"
+        source.mkdir(parents=True)
+        content = (
+            "---\ndescription: >-\n  Existing catalog guidance.\n"
+            "metadata:\n  github-path: skills/gh-axi\n  hermes:\n    tags: [github, git]\n"
+            "name: gh-axi\n---\n# GitHub operations\n"
+        )
+        (source / "SKILL.md").write_text(content, encoding="utf-8")
+        asset = source / "reference.txt"
+        asset.write_text("Keep this asset.\n", encoding="utf-8")
+
+        self.run_installer()
+        repeated = self.run_installer()
+
+        self.assertIn("Copilot skill gh-axi is already installed", repeated.stdout)
+        self.assertEqual((source / "SKILL.md").read_text(encoding="utf-8"), content)
+        self.assertEqual(asset.read_text(encoding="utf-8"), "Keep this asset.\n")
+        calls = (self.home / "gh.log").read_text(encoding="utf-8").splitlines()
+        for name in self.CATALOG_SKILLS:
+            expected_calls = 0 if name == "gh-axi" else 1
+            self.assertEqual(calls.count(
+                f"skill install private/catalog skills/{name} --agent github-copilot --scope user"
+            ), expected_calls)
+            self.assertEqual(
+                (self.home / ".agents" / "skills" / name).resolve(),
+                (self.home / ".copilot" / "skills" / name).resolve(),
+            )
+
+    def test_invalid_catalog_metadata_is_not_mirrored_without_catalog_configuration(self) -> None:
+        self.use_real_pi_sdk()
+        del self.env["COPILOT_SKILL_CATALOG_REPO"]
+        source = self.home / ".copilot" / "skills" / "gh-axi" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        mirror = self.home / ".agents" / "skills" / "gh-axi"
+        for content in (
+            "---\nmetadata:\n  name: gh-axi\ndescription: Nested name only\n---\n# Skill\n",
+            "---\nname: gh-axi\ndescription: Disabled\ndisable-model-invocation: true\n---\n# Skill\n",
+            "---\nname: gh-axi\ndescription: [invalid\n---\n# Skill\n",
+        ):
+            with self.subTest(content=content):
+                source.write_text(content, encoding="utf-8")
+
+                result = self.run_installer()
+
+                self.assertIn("Cannot validate catalog skill gh-axi; skipping Pi mirror", result.stdout)
+                self.assertFalse(mirror.exists())
+                self.assertEqual(source.read_text(encoding="utf-8"), content)
+        source.write_text(
+            "---\nname: gh-axi\ndescription: Valid\nmetadata:\n  tags: [git]\n---\n# Skill\n", encoding="utf-8",
+        )
+
+        self.run_installer()
+
+        self.assertEqual(mirror.resolve(), source.parent.resolve())
+        self.assertFalse((self.home / "copilot.log").exists())
+
+    def test_invalid_catalog_install_is_rejected_then_repaired(self) -> None:
+        self.use_real_pi_sdk()
+        self.env["FAKE_CATALOG_CONTENT"] = "---\nname: gh-axi\ndescription: Disabled\ndisable-model-invocation: true\n---\n"
+        mirror = self.home / ".agents" / "skills" / "gh-axi"
+
+        failed = self.run_installer()
+
+        self.assertIn("Failed to install Copilot skill gh-axi", failed.stdout)
+        self.assertFalse(mirror.exists())
+        self.assertTrue((self.home / ".agents" / "skills" / "cleanup-worktrees" / "SKILL.md").is_file())
+        del self.env["FAKE_CATALOG_CONTENT"]
+
+        repaired = self.run_installer()
+
+        self.assertIn("Installed Copilot skill gh-axi", repaired.stdout)
+        self.assertTrue((mirror / "SKILL.md").is_file())
+        self.assertEqual(mirror.resolve(), (self.home / ".copilot" / "skills" / "gh-axi").resolve())
+
+    def test_existing_catalog_skills_are_mirrored_without_catalog_configuration(self) -> None:
+        self.run_installer()
+        del self.env["COPILOT_SKILL_CATALOG_REPO"]
+        for name in self.CATALOG_SKILLS:
+            (self.home / ".agents" / "skills" / name).unlink()
+
+        result = self.run_installer()
+
+        self.assertIn("COPILOT_SKILL_CATALOG_REPO is not set", result.stdout)
+        for name in self.CATALOG_SKILLS:
+            mirror = self.home / ".agents" / "skills" / name
+            source = self.home / ".copilot" / "skills" / name
+            self.assertTrue(mirror.is_symlink())
+            self.assertEqual(mirror.resolve(), source.resolve())
+            self.assertTrue((mirror / "SKILL.md").is_file())
+
+    def test_catalog_mirrors_preserve_owned_files_and_directories(self) -> None:
+        target = self.home / ".agents" / "skills" / "gh-axi"
+        target.parent.mkdir(parents=True)
+        for kind in ("file", "directory"):
+            with self.subTest(kind=kind):
+                if kind == "directory":
+                    target.mkdir()
+                    sentinel = target / "SKILL.md"
+                else:
+                    sentinel = target
+                sentinel.write_text("keep me\n", encoding="utf-8")
+
+                result = self.run_installer()
+
+                self.assertFalse(target.is_symlink())
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep me\n")
+                self.assertIn(f"{target} exists and is not a symlink", result.stdout)
+                sentinel.unlink()
+                if kind == "directory":
+                    target.rmdir()
+
+    def test_catalog_mirrors_refresh_existing_and_broken_symlinks(self) -> None:
+        owned = self.root / "owned-skill"
+        owned.mkdir()
+        sentinel = owned / "SKILL.md"
+        sentinel.write_text("keep me\n", encoding="utf-8")
+        mirror_root = self.home / ".agents" / "skills"
+        mirror_root.mkdir(parents=True)
+        (mirror_root / "gh-axi").symlink_to(owned)
+        (mirror_root / "prod-explain").symlink_to(self.root / "missing-skill")
+
+        self.run_installer()
+
+        for name in ("gh-axi", "prod-explain"):
+            self.assertTrue((mirror_root / name).is_symlink())
+            self.assertEqual(
+                (mirror_root / name).resolve(),
+                (self.home / ".copilot" / "skills" / name).resolve(),
+            )
+            self.assertTrue((mirror_root / name / "SKILL.md").is_file())
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep me\n")
+
+    def test_catalog_mirrors_follow_content_and_asset_updates(self) -> None:
+        self.run_installer()
+        source = self.home / ".copilot" / "skills" / "gh-axi"
+        mirror = self.home / ".agents" / "skills" / "gh-axi"
+        content = "---\nname: gh-axi\ndescription: Updated fixture\n---\n# Updated skill\n"
+        (source / "SKILL.md").write_text(content, encoding="utf-8")
+        (source / "reference.txt").write_text("updated reference\n", encoding="utf-8")
+
+        self.assertEqual((mirror / "SKILL.md").read_text(encoding="utf-8"), content)
+        self.assertEqual((mirror / "reference.txt").read_text(encoding="utf-8"), "updated reference\n")
 
     def test_disabled_plugin_produces_an_enable_instruction(self) -> None:
         plugin_dir = self.home / ".copilot"
@@ -396,6 +854,25 @@ class InstallScriptTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Personal pre-push guard is inactive", result.stderr)
 
+    def test_repository_guard_install_preserves_private_assignments_and_owned_command(self) -> None:
+        command = self.repo / "bin" / "repo-guards"
+        command.parent.mkdir()
+        shutil.copy2(Path(__file__).with_name("bin") / "repo-guards", command)
+        private = self.home / ".config/repo-guards/config.yaml"
+        private.parent.mkdir(parents=True)
+        private.write_text("version: 1\nrepositories:\n  example/personal: relaxed\n", encoding="utf-8")
+        private.chmod(0o600)
+        original = private.read_bytes()
+        self.assertEqual(self.run_installer().returncode, 0)
+        installed = self.home / ".local/bin/repo-guards"
+        self.assertEqual(installed.resolve(), command.resolve())
+        self.assertEqual(private.read_bytes(), original)
+        installed.unlink()
+        installed.write_text("user-owned command\n", encoding="utf-8")
+        self.assertEqual(self.run_installer().returncode, 0)
+        self.assertEqual(installed.read_text(encoding="utf-8"), "user-owned command\n")
+        self.assertEqual(private.read_bytes(), original)
+
     def test_stack_extension_is_installed_once(self) -> None:
         first_run = self.run_installer()
         second_run = self.run_installer()
@@ -416,7 +893,8 @@ class InstallScriptTest(unittest.TestCase):
 
         result = self.run_installer()
 
-        self.assertIn("Installed Node.js v22.0.0", result.stdout)
+        self.assertIn("Installed Node.js v22.19.0", result.stdout)
+        self.assertTrue((self.home / ".agents" / "skills" / "gh-axi" / "SKILL.md").is_file())
         for name in ("node", "npm", "npx", "corepack"):
             target = self.home / ".local" / "bin" / name
             self.assertTrue(target.is_symlink())
@@ -432,9 +910,54 @@ class InstallScriptTest(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(version.stdout, "v22.0.0\n")
+        self.assertEqual(version.stdout, "v22.19.0\n")
         downloaded_archive = Path((self.home / "node-archive-path").read_text().strip())
         self.assertFalse(downloaded_archive.exists())
+
+    def test_node_versions_below_the_sdk_floor_are_upgraded(self) -> None:
+        self.prepare_node_install()
+        for version, exit_status in (
+            ("", "127"),
+            ("invalid", "0"),
+            ("v20.19.0", "0"),
+            ("v22.0.0", "0"),
+            ("v22.18.0", "0"),
+            ("v22.18.12", "0"),
+            ("v22.19.0-rc.1", "0"),
+            ("v22.19.0", "1"),
+        ):
+            with self.subTest(version=version, exit_status=exit_status):
+                self.env["FAKE_CURRENT_NODE_VERSION"] = version
+                self.env["FAKE_CURRENT_NODE_EXIT"] = exit_status
+
+                result = self.run_installer()
+
+                self.assertIn("Installed Node.js v22.19.0", result.stdout)
+                self.assert_node_commands_version("v22.19.0")
+
+    def test_supported_node_versions_do_not_trigger_downloads(self) -> None:
+        self.prepare_node_install()
+        original = (self.fake_bin / "node").read_bytes()
+        for version in ("v22.19.0", "v22.19.1", "v22.20.0", "v23.0.0", "v24.1.0"):
+            with self.subTest(version=version):
+                self.env["FAKE_CURRENT_NODE_VERSION"] = version
+
+                self.run_installer()
+
+                self.assertFalse((self.home / "curl.log").exists())
+                self.assertFalse((self.home / ".local" / "share" / "node-v22").exists())
+                self.assertEqual((self.fake_bin / "node").read_bytes(), original)
+
+    def test_node_release_selection_excludes_older_node_22_releases(self) -> None:
+        self.prepare_node_install()
+        self.env["FAKE_NODE_INDEX"] = json.dumps([
+            {"version": "v22.18.12"}, {"version": "v22.19.0"},
+        ])
+
+        result = self.run_installer()
+
+        self.assertIn("Installed Node.js v22.19.0", result.stdout)
+        self.assert_node_commands_version("v22.19.0")
 
     def test_node_update_replaces_the_existing_runtime_after_extraction(self) -> None:
         self.prepare_node_install()
@@ -444,8 +967,8 @@ class InstallScriptTest(unittest.TestCase):
         for _ in range(2):
             result = self.run_installer()
 
-            self.assertIn("Installed Node.js v22.0.0", result.stdout)
-            self.assert_node_commands_version("v22.0.0")
+            self.assertIn("Installed Node.js v22.19.0", result.stdout)
+            self.assert_node_commands_version("v22.19.0")
             self.assertFalse((runtime / "obsolete.txt").exists())
             self.assertEqual(set(runtime.parent.iterdir()), {runtime})
 
@@ -455,15 +978,15 @@ class InstallScriptTest(unittest.TestCase):
         self.assert_node_commands_version("v20.19.0")
         (self.root / "node-runtime" / "new-only.txt").write_text("new runtime\n", encoding="utf-8")
         with tarfile.open(self.env["FAKE_NODE_ARCHIVE"], "w:xz") as archive:
-            archive.add(self.root / "node-runtime", arcname="node-v22.0.0-linux-x64")
-            broken_link = tarfile.TarInfo("node-v22.0.0-linux-x64/broken-link")
+            archive.add(self.root / "node-runtime", arcname="node-v22.19.0-linux-x64")
+            broken_link = tarfile.TarInfo("node-v22.19.0-linux-x64/broken-link")
             broken_link.type = tarfile.LNKTYPE
-            broken_link.linkname = "node-v22.0.0-linux-x64/missing-target"
+            broken_link.linkname = "node-v22.19.0-linux-x64/missing-target"
             archive.addfile(broken_link)
 
         result = self.run_installer()
 
-        self.assertIn("Failed to install Node.js 22", result.stdout)
+        self.assertIn("Failed to install Node.js 22.19.0 or later", result.stdout)
         self.assertIn("Dotfiles install complete.", result.stdout)
         self.assert_node_commands_version("v20.19.0")
         self.assertEqual((runtime / "obsolete.txt").read_text(), "previous runtime\n")
@@ -492,7 +1015,7 @@ class InstallScriptTest(unittest.TestCase):
 
         result = self.run_installer()
 
-        self.assertIn("Failed to install Node.js 22", result.stdout)
+        self.assertIn("Failed to install Node.js 22.19.0 or later", result.stdout)
         self.assertIn("Dotfiles install complete.", result.stdout)
         self.assertTrue((self.home / "node-move-failed").exists())
         self.assert_node_commands_version("v20.19.0")
@@ -502,14 +1025,22 @@ class InstallScriptTest(unittest.TestCase):
     def test_node_staging_is_cleaned_when_command_linking_fails(self) -> None:
         self.prepare_node_install()
         runtime = self.prepare_existing_node_runtime()
+        real_ln = shutil.which("ln")
+        if real_ln is None:
+            self.fail("ln is required to exercise install.sh")
         ln = self.fake_bin / "ln"
-        ln.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        ln.write_text(
+            "#!/bin/sh\n"
+            '[ "$3" = "$HOME/.local/bin/node" ] && exit 1\n'
+            f'exec {shlex.quote(real_ln)} "$@"\n',
+            encoding="utf-8",
+        )
         ln.chmod(0o755)
 
         with self.assertRaises(subprocess.CalledProcessError):
             self.run_installer()
 
-        self.assert_node_commands_version("v22.0.0")
+        self.assert_node_commands_version("v22.19.0")
         self.assertEqual(set(runtime.parent.iterdir()), {runtime})
         downloaded_archive = Path((self.home / "node-archive-path").read_text().strip())
         self.assertFalse(downloaded_archive.exists())
@@ -518,12 +1049,12 @@ class InstallScriptTest(unittest.TestCase):
         self.prepare_node_install()
         owned = self.root / "owned-file"
         owned.write_text("keep me\n", encoding="utf-8")
-        predictable = self.root / "node-v22.0.0-linux-x64.tar.xz"
+        predictable = self.root / "node-v22.19.0-linux-x64.tar.xz"
         predictable.symlink_to(owned)
 
         result = self.run_installer()
 
-        self.assertIn("Installed Node.js v22.0.0", result.stdout)
+        self.assertIn("Installed Node.js v22.19.0", result.stdout)
         self.assertEqual(owned.read_text(encoding="utf-8"), "keep me\n")
         self.assertTrue(predictable.is_symlink())
         self.assertEqual(predictable.readlink(), owned)
@@ -541,7 +1072,7 @@ class InstallScriptTest(unittest.TestCase):
 
                 result = self.run_installer()
 
-                self.assertIn("Failed to install Node.js 22", result.stdout)
+                self.assertIn("Failed to install Node.js 22.19.0 or later", result.stdout)
                 self.assertIn("Dotfiles install complete.", result.stdout)
                 self.assertFalse((self.home / ".local" / "bin" / "node").exists())
                 downloaded_archive = Path((self.home / "node-archive-path").read_text().strip())
@@ -624,7 +1155,8 @@ class InstallScriptTest(unittest.TestCase):
             ("network failure", "", 6),
             ("invalid JSON", "{", 0),
             ("no Node.js 22 release", '[{"version":"v24.0.0"}]', 0),
-            ("failed transfer with valid JSON", '[{"version":"v22.0.0"}]', 18),
+            ("only unsupported Node.js 22 releases", '[{"version":"v22.18.12"}]', 0),
+            ("failed transfer with valid JSON", '[{"version":"v22.19.0"}]', 18),
         )
         for name, index, status in cases:
             with self.subTest(case=name):
@@ -635,7 +1167,7 @@ class InstallScriptTest(unittest.TestCase):
 
                 result = self.run_installer()
 
-                self.assertIn("Cannot look up Node.js 22", result.stdout)
+                self.assertIn("Cannot look up Node.js 22.19.0 or later", result.stdout)
                 self.assertIn("rerun ./install.sh", result.stdout)
                 self.assertIn("Dotfiles install complete.", result.stdout)
                 self.assertTrue(target.is_symlink())
@@ -655,7 +1187,7 @@ class InstallScriptTest(unittest.TestCase):
         npx.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         npx.chmod(0o755)
         node = self.fake_bin / "node"
-        node.write_text("#!/bin/sh\nprintf '22\\n'\n", encoding="utf-8")
+        node.write_text("#!/bin/sh\nprintf 'v22.19.0\\n'\n", encoding="utf-8")
         node.chmod(0o755)
         go = self.fake_bin / "go"
         go.write_text(
@@ -669,7 +1201,7 @@ class InstallScriptTest(unittest.TestCase):
         go.chmod(0o755)
         self.env["COPILOT_1UP_MODULE"] = "private.example/one-up@v1.2.3"
         # A host-installed 1up would skip the installation this test exercises.
-        for name in ("dirname", "mkdir", "chmod", "python3"):
+        for name in ("dirname", "mkdir", "chmod", "ln", "python3"):
             command = shutil.which(name)
             self.assertIsNotNone(command, f"{name} is required to exercise install.sh")
             (self.fake_bin / name).symlink_to(command)
@@ -733,17 +1265,25 @@ class InstallScriptTest(unittest.TestCase):
     def test_missing_catalog_commands_are_nonfatal(self) -> None:
         (self.fake_bin / "gh").unlink()
         (self.fake_bin / "copilot").unlink()
-        dirname = shutil.which("dirname")
-        if dirname is None:
-            self.fail("dirname is required to exercise install.sh")
-        (self.fake_bin / "dirname").symlink_to(dirname)
+        for name in ("dirname", "mkdir", "ln", "python3"):
+            command = shutil.which(name)
+            if command is None:
+                self.fail(f"{name} is required to exercise install.sh")
+            (self.fake_bin / name).symlink_to(command)
         self.env["PATH"] = str(self.fake_bin)
+        source = self.home / ".copilot" / "skills" / "gh-axi"
+        source.mkdir(parents=True)
+        content = "---\nname: gh-axi\ndescription: Existing fixture\n---\n# GitHub operations\n"
+        (source / "SKILL.md").write_text(content, encoding="utf-8")
 
         result = self.run_installer()
 
         self.assertIn("gh is missing", result.stdout)
         self.assertIn("copilot is missing", result.stdout)
         self.assertIn("Dotfiles install complete.", result.stdout)
+        mirror = self.home / ".agents" / "skills" / "gh-axi"
+        self.assertEqual(mirror.resolve(), source.resolve())
+        self.assertEqual((mirror / "SKILL.md").read_text(encoding="utf-8"), content)
 
     def test_catalog_install_failures_are_nonfatal(self) -> None:
         self.env["FAKE_GH_FAIL"] = "1"
@@ -753,10 +1293,11 @@ class InstallScriptTest(unittest.TestCase):
 
         self.assertEqual(
             result.stdout.count("Failed to install Copilot skill"),
-            8,
+            len(self.CATALOG_SKILLS),
         )
         self.assertIn("Failed to install Copilot plugin gho11y", result.stdout)
         self.assertIn("Dotfiles install complete.", result.stdout)
+        self.assertFalse((self.home / ".agents" / "skills").exists())
 
     def test_existing_deploy_alias_is_preserved(self) -> None:
         definitions = (

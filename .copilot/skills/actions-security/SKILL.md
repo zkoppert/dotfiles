@@ -1,6 +1,6 @@
 ---
 name: actions-security
-description: This skill should be used WHENEVER authoring, editing, or reviewing GitHub Actions workflow files (.github/workflows/*.yml or *.yaml, composite actions, reusable workflows). It encodes GitHub's internal secure-Actions authoring rules (script-injection hardening, SHA pinning, least-privilege tokens, runner safety, secret handling) and runs a local zizmor + actionlint harness. Also triggered when the user asks to "harden this workflow", "check this action for security issues", "review my workflow", "run zizmor", or "is this Action injection-safe".
+description: This skill should be used WHENEVER authoring, editing, or reviewing GitHub Actions workflow files (.github/workflows/*.yml or *.yaml, composite actions, reusable workflows), or filtering activity data for a report. It encodes secure Actions authoring rules, report filtering, and a local zizmor + actionlint harness. Also triggered by workflow hardening, action security review, zizmor, or injection-safety requests.
 ---
 
 # Actions Security: harden GitHub Actions workflows before they ship
@@ -93,3 +93,13 @@ suppressing them; only add a `# zizmor: ignore[rule]` comment as a documented la
 Run the harness, then walk each `run:` block and each `pull_request_target`/`workflow_run`
 trigger by hand to confirm no untrusted field reaches a shell. Report only verified issues,
 and prefer a `suggestion` block showing the `env:`-binding fix.
+
+## GitHub Actions Best Practices
+When creating or modifying GitHub Actions workflows:
+1. Always use the **latest release** of each action
+2. Pin actions to their **full commit SHA** (not tags) with a comment showing the **full version tag**: `uses: actions/checkout@<sha> # v6.0.2` (not just `# v6`)
+3. Validate workflow syntax before committing
+4. Use **dedicated tokens/secrets** for each workflow; do not reuse tokens across different workflows
+5. When filtering activity data for reports, exclude Dependabot PRs from summaries (they add noise)
+
+<!-- This boundary keeps the migrated baseline block byte-verifiable. -->

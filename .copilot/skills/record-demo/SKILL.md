@@ -8,8 +8,9 @@ description: This skill should be used AFTER code changes have been reviewed and
 Zack's staged change workflow is: plan, multi-model review the plan, draft changes
 locally, multi-model review the code, test in a Codespace, **record a demo and
 capture before/after images**, draft the PR with a multi-model review of the PR
-description, human review, then push and open a draft PR. This skill owns the
-demo-and-before/after step.
+description, then push and open a draft PR without separate human approval.
+Human review follows on the draft. The repository quality profile controls which
+checks are required. This skill owns the demo-and-before/after step.
 
 The output feeds the `demo` marker that gh-guard gates on. `gh pr create` stays
 blocked until `<branch>/demo.md` exists (see the `pr-marker` helper below), so
@@ -38,6 +39,8 @@ the PR description. Two paths:
   `~/repos/dotfiles/bin/pr-marker`.
 - The `validate-pr-with-codespace` skill is available. Reuse its Codespace
   lifecycle and app-bringup playbook instead of inventing a second startup flow.
+- The `ui-screenshot-presentation` skill is available. Use it when presenting
+  captured UI in the PR description.
 
 ## Step 1: scaffold the artifact layout
 
@@ -126,6 +129,10 @@ the "use vision for visual work" rule; do not assume the capture is correct. Rej
 screenshots with missing CSS, broken icons, placeholder error pages, loading
 spinners, dev overlays, or a different route/state than the matching image.
 
+After capture, load `ui-screenshot-presentation` before composing annotated figures
+or before/after artwork. Preserve each authentic capture and style only its
+surrounding presentation.
+
 ### Environment fingerprint
 
 Before recording, write these facts into the demo marker:
@@ -212,4 +219,6 @@ alternative visual aid. Fix any gap it reports before moving on to the PR descri
 
 Continue the workflow: write the PR description (reusing the before/after block),
 run the multi-model review of the PR description and write the `pr-review` marker,
-then let the human review before `ZACK_CONFIRMED_PR_CREATE=1 gh pr create ...`.
+then push the working branch and run `gh pr create --draft ...` after required
+checks pass. Don't wait for separate human approval. Keep the PR as a draft for
+human review.

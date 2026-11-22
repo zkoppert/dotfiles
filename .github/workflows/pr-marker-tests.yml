@@ -10,23 +10,42 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Keep Python 3.9 coverage on a runner with published interpreter builds.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # Run on 3.9 to enforce the CPython 3.9.6 floor bin/pr-marker targets.
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.9'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.19.0'
+          package-manager-cache: false
+      - name: Install Pi SDK contract
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pi-sdk" --no-audit --no-fund @earendil-works/pi-coding-agent@1.3.0
+          printf '%s\n' "$RUNNER_TEMP/pi-sdk/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Run Pi runtime contract tests
+        run: python3 -m unittest -v test_pi_treehouse scripts.test_skill_metadata
+      - name: Run daily dotfiles sync tests
+        run: python3 -B -m unittest -v scripts.test_dotfiles_sync
+      - name: Verify instruction migration
+        run: python3 scripts/verify_instruction_migration.py && python3 -m unittest scripts/test_verify_instruction_migration.py
       - name: Run pr-marker / gh-guard gate tests
         run: python3 bin/test_pr_marker.py
+      - name: Run repository quality profile tests
+        run: python3 scripts/test_repo_guards.py
       - name: Run test-quality checker tests
         run: python3 .copilot/skills/test-quality/test_check.py
       - name: Run memory-sweep tests
         run: python3 .copilot/skills/memory-sweep/tests.py
-      - name: Run install script tests
-        run: python3 test_install.py && python3 test_pr_size_guard.py
+      - name: Run record-demo tests
+        run: PYTHONPATH=.copilot/skills/record-demo python3 -m unittest discover -s .copilot/skills/record-demo -p 'test_*.py'
+      - name: Run install and package guard tests
+        run: python3 test_install.py && python3 test_pr_size_guard.py && python3 test_cfs_package_guard.py && python3 test_triage_dependabot_wrapper.py
       - name: Run babysit-prs wrapper tests
         run: python3 test_babysit_prs_wrapper.py
       - name: Run durable Codespace Copilot tests

@@ -2,14 +2,30 @@
 # Start new Pi work in a leased Treehouse worktree by default.
 set -euo pipefail
 
-real_pi="${PI_REAL_PI:-/opt/homebrew/bin/pi}"
+real_pi="${PI_REAL_PI:-}"
+if [ -z "$real_pi" ]; then
+  path_entries="$PATH:"
+  while [[ "$path_entries" == *:* ]]; do
+    directory="${path_entries%%:*}"
+    path_entries="${path_entries#*:}"
+    candidate="${directory:-.}/pi"
+    if [ -f "$candidate" ] && [ -x "$candidate" ] && ! [ "$candidate" -ef "$0" ]; then
+      real_pi="$candidate"
+      break
+    fi
+  done
+fi
 treehouse_bin="$HOME/.local/bin/treehouse"
 pi_args=("$@")
 
-if [ ! -x "$real_pi" ]; then
-  echo "pi-treehouse wrapper: real Pi not found at $real_pi" >&2
+if [ ! -f "$real_pi" ] || [ ! -x "$real_pi" ] || [ "$real_pi" -ef "$0" ]; then
+  echo "pi-treehouse wrapper: real Pi not found at ${real_pi:-PATH}" >&2
   exit 127
 fi
+case "$real_pi" in
+  /*) ;;
+  *) real_pi="$PWD/$real_pi" ;;
+esac
 if [ "${PI_TREEHOUSE_BYPASS:-0}" = "1" ]; then
   exec "$real_pi" "$@"
 fi

@@ -282,6 +282,8 @@ class PublicationFixture:
             "    print('fixture publication intercepted')\n"
             "elif args == ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner']:\n"
             "    print('fixture/public')\n"
+            "elif args == ['repo', 'view', '--json', 'url,parent', '--jq', '.parent.url // .url']:\n"
+            "    print('https://github.com/fixture/public')\n"
             "elif args in (['api', 'repos/fixture/public', '--jq', '.visibility'],\n"
             "              ['repo', 'view', '--json', 'visibility', '--jq', '.visibility | ascii_downcase', '--', 'fixture/public'],\n"
             "              ['repo', 'view', '--json', 'visibility', '--jq', '.visibility | ascii_downcase', '--', 'ghe.example.test/fixture/public']):\n"
@@ -704,7 +706,7 @@ class NativePublicationFixture(PublicationFixture):
         self,
         *,
         guard=False,
-        confirmed=True,
+        confirmed=False,
         print_repository=False,
         print_lint_context=False,
     ) -> subprocess.CompletedProcess:
@@ -767,7 +769,7 @@ class NativePublicationFixture(PublicationFixture):
         assert self.snapshot() == markers, "lint refusal rewrote legacy markers"
         assert self.payload.read_bytes() == payload, "lint refusal rewrote native proof"
 
-    def assert_fixture_accepted(self, *, confirmed=True) -> None:
+    def assert_fixture_accepted(self, *, confirmed=False) -> None:
         markers, payload = self.snapshot(), self.payload.read_bytes()
         for guard in (False, True):
             result = self.native(guard=guard, confirmed=confirmed)
@@ -794,7 +796,7 @@ class NativePublicationFixture(PublicationFixture):
         ], calls
         self.publications.unlink()
 
-    def assert_denied(self, diagnostic: str, *, confirmed=True) -> None:
+    def assert_denied(self, diagnostic: str, *, confirmed=False) -> None:
         markers, payload = self.snapshot(), self.payload.read_bytes()
         # Only immutable refusal cases can share the fixture concurrently;
         # verification-time Git/body mutations must keep their original order.
@@ -953,11 +955,21 @@ def test_native_complete_fixture_does_not_require_or_write_legacy_markers() -> N
         assert fixture.proof["plan"]["run_id"] != fixture.proof["preparation_id"]
         for path in fixture.paths.values():
             path.unlink()
-        fixture.assert_fixture_accepted()
+        fixture.assert_fixture_accepted(confirmed=False)
         assert fixture.snapshot() == {}, "native acceptance synthesized markers"
-        fixture.assert_denied("same-call ZACK_CONFIRMED_PR_CREATE", confirmed=False)
         fixture.env["FIXTURE_NATIVE_EXIT"] = "1"
         fixture.assert_denied("native verifier refused")
+
+
+def test_native_non_draft_creation_still_requires_confirmation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = NativePublicationFixture(Path(tmp))
+        fixture.argv.remove("--draft")
+        fixture.proof["binding"]["draft"] = False
+        fixture.save()
+        fixture.assert_denied("non-draft creation requires same-call", confirmed=False)
+        assert not fixture.verifier_calls.exists()
+        fixture.assert_fixture_accepted(confirmed=True)
 
 
 def test_native_preparation_binding_and_admission_are_required() -> None:
@@ -1205,7 +1217,7 @@ def test_native_proposed_exception_preserves_remaining_proof_and_history() -> No
             fixture.proof["total_plan_rounds"] = plan_rounds
             fixture.save()
             fixture.assert_fixture_accepted()
-        fixture.assert_denied("same-call ZACK_CONFIRMED_PR_CREATE", confirmed=False)
+        fixture.assert_fixture_accepted(confirmed=False)
         for support in (False, True):
             fixture.proof = fixture.protocol_fixture()
             fixture.proof["policy"]["planning_exception_support"] = support
@@ -1300,7 +1312,6 @@ def test_native_locators_require_proof_without_legacy_fallback() -> None:
             fixture.env[key] = ""
             fixture.assert_denied("both native run/attempt locators")
             fixture.env[key] = original
-        fixture.assert_denied("same-call ZACK_CONFIRMED_PR_CREATE", confirmed=False)
         assert not fixture.verifier_calls.exists()
         checked = fixture.marker("check")
         assert checked.returncode == 1 and "actual gh argv" in checked.stderr
@@ -2166,17 +2177,27 @@ def test_legacy_marker_rejections_stop_publication() -> None:
 
 
 def test_legacy_confirmation_and_body_rules_stop_publication() -> None:
-    """Valid markers alone cannot authorize a create or bypass body linting."""
+    """Draft permission doesn't authorize non-drafts or bypass body linting."""
     with tempfile.TemporaryDirectory() as tmp:
         fixture = PublicationFixture(Path(tmp))
         fixture.populate_legacy_markers()
         before = fixture.snapshot()
         for args, confirmed, diagnostic in (
             ([], False, "ZACK_CONFIRMED_PR_CREATE"),
-            (["--body", "This PR adds a guard."], True, "no-this-pr-subject"),
+            (["--draft", "-d=false"], False, "ZACK_CONFIRMED_PR_CREATE"),
+            (["--draft", "-wd=false"], False, "ZACK_CONFIRMED_PR_CREATE"),
             (
-                ["--body", "I fixed https://github.com/fixture/private/pull/1."],
-                True,
+                ["--draft", "--body", "This PR adds a guard."],
+                False,
+                "no-this-pr-subject",
+            ),
+            (
+                [
+                    "--draft",
+                    "--body",
+                    "I fixed https://github.com/fixture/private/pull/1.",
+                ],
+                False,
                 "no-private-repo-ref",
             ),
         ):
@@ -2187,6 +2208,122 @@ def test_legacy_confirmation_and_body_rules_stop_publication() -> None:
                 not fixture.publications.exists()
             ), "rejected create reached native publication"
             assert fixture.snapshot() == before
+
+
+def test_legacy_body_aliases_cannot_bypass_lint_or_privacy_checks() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = PublicationFixture(Path(tmp))
+        fixture.populate_legacy_markers()
+        body_file = Path(tmp) / "body.md"
+        for body, diagnostic in (
+            ("This PR adds a guard.", "no-this-pr-subject"),
+            (
+                "I fixed https://github.com/fixture/private/pull/1.",
+                "no-private-repo-ref",
+            ),
+        ):
+            body_file.write_text(body, encoding="utf-8")
+            for args in (
+                ["-b", body],
+                [f"-b{body}"],
+                [f"-b={body}"],
+                ["-F", str(body_file)],
+                [f"-F{body_file}"],
+                [f"-F={body_file}"],
+                ["--body", body, "--title", "-bI preserved all checks."],
+            ):
+                result = fixture.create("--draft", *args, confirmed=False)
+                assert result.returncode == 1, (args, result.stderr)
+                assert diagnostic in result.stderr, (args, result.stderr)
+                assert not fixture.publications.exists()
+        for args in (
+            ["-db", "This PR adds a guard."],
+            ["--draft", "-wb", "This PR adds a guard."],
+            ["--draft", "-dF", str(body_file)],
+        ):
+            refused = fixture.create(*args, confirmed=False)
+            assert refused.returncode == 1, (args, refused.stderr)
+            assert "ZACK_CONFIRMED_PR_CREATE" in refused.stderr
+            assert not fixture.publications.exists()
+        accepted = fixture.create(
+            "--draft",
+            "--title",
+            "--body=This PR adds a guard.",
+            "--body",
+            "I preserved all checks.",
+            confirmed=False,
+        )
+        assert accepted.returncode == 0, accepted.stderr
+        assert fixture.publications.exists()
+
+
+def test_legacy_draft_needs_markers_but_not_confirmation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = PublicationFixture(Path(tmp))
+        refused = fixture.create("--draft", confirmed=False)
+        assert refused.returncode == 1, refused.stderr
+        assert "MISSING" in refused.stderr
+        assert not fixture.publications.exists()
+        fixture.populate_legacy_markers()
+        before = fixture.snapshot()
+        result = fixture.create("--draft", confirmed=False)
+        assert result.returncode == 0, result.stderr
+        assert "fixture publication intercepted" in result.stdout
+        published = json.loads(fixture.publications.read_text())
+        assert "--draft" in published["argv"]
+        assert fixture.snapshot() == before
+
+
+def test_interactive_draft_needs_markers_without_confirmation_prompt() -> None:
+    import pty
+
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = PublicationFixture(Path(tmp))
+        fixture.populate_legacy_markers()
+        master, slave = pty.openpty()
+        try:
+            argv = [
+                str(_MODULE_PATH.with_name("gh-guard")),
+                "pr",
+                "create",
+                "--draft",
+                "--title",
+                "fixture",
+            ]
+            result = subprocess.run(
+                argv,
+                cwd=fixture.repo,
+                env=fixture.env,
+                stdin=slave,
+                stdout=slave,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            assert result.returncode == 0, result.stderr
+            assert "[y/N]" not in result.stderr
+            assert fixture.publications.exists()
+            fixture.publications.unlink()
+            fixture.paths["plan"].unlink()
+            os.write(master, b"y\n")
+            refused = subprocess.run(
+                argv,
+                cwd=fixture.repo,
+                env=fixture.env,
+                stdin=slave,
+                stdout=slave,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            assert refused.returncode == 1, refused.stderr
+            assert "MISSING" in refused.stderr
+            assert not fixture.publications.exists()
+        finally:
+            os.close(master)
+            os.close(slave)
 
 
 def test_gh_guard_blocks_noninteractive_draft_conversion() -> None:
@@ -2284,11 +2421,23 @@ def test_run_tests() -> None:
             assert "exit 0" in body
             assert "Test-quality evidence preflight:" in body
             assert "- evidence: not-applicable" in body
+            assert "# tests: change-relevant check run" in body
+            assert "Test scope: change-relevant targets and packages" in body
+            assert "Additional scope limits: none" in body
             # The machine-produced result header must be present (the gate keys on it).
             assert pr_marker.TESTS_RESULT_HEADER in body
             assert pr_marker.has_result_header(marker)
             ok, detail, _size, _path = pr_marker.marker_status(tests, "feat/tests")
             assert ok and detail == "ok", detail
+
+            scope_limit = "Hardware-dependent integration target unavailable."
+            assert (
+                pr_marker.main(["run-tests", "--cmd", "true", "--narrow", scope_limit])
+                == 0
+            )
+            assert f"Additional scope limits: {scope_limit}" in marker.read_text(
+                encoding="utf-8"
+            )
 
             # A later failing run must invalidate the prior passing marker, so a
             # green marker can never outlive a subsequent red run.
@@ -3052,6 +3201,7 @@ def main() -> int:
         test_native_lint_context_projection_requires_complete_proof,
         test_native_malformed_lint_projection_cannot_reach_publication,
         test_native_complete_fixture_does_not_require_or_write_legacy_markers,
+        test_native_non_draft_creation_still_requires_confirmation,
         test_native_preparation_binding_and_admission_are_required,
         test_native_baseline_checks_and_plan_reviews_precede_implementation,
         test_native_proposed_exception_requires_bound_native_authorization,
@@ -3085,6 +3235,9 @@ def main() -> int:
         test_legacy_marker_floors_through_entry_points,
         test_legacy_marker_rejections_stop_publication,
         test_legacy_confirmation_and_body_rules_stop_publication,
+        test_legacy_body_aliases_cannot_bypass_lint_or_privacy_checks,
+        test_legacy_draft_needs_markers_but_not_confirmation,
+        test_interactive_draft_needs_markers_without_confirmation_prompt,
         test_pin_roundtrip,
         test_run_tests,
         test_test_quality_preflight,

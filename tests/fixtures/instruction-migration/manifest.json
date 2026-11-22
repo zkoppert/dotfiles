@@ -1,0 +1,277 @@
+{
+  "schema_version": 2,
+  "baseline": {
+    "path": "tests/fixtures/instruction-migration/global-instructions-2026-11-06.txt",
+    "sha256": "96eb8f00279cbbf477b148f74219f763a50a55c97a3dedccad3b3024b3d1bc38"
+  },
+  "blocks": [
+    {
+      "id": "preamble",
+      "sha256": "1d0a483e806cbc76c7aeff7060e32e993368db2d41dea7b6c877c721b3860897",
+      "source_start_line": 1,
+      "source_end_line": 4,
+      "destination": ".github/copilot-instructions.md",
+      "scope": "Always loaded global guidance."
+    },
+    {
+      "id": "General Preferences",
+      "sha256": "0646f1812ac8dbc6dde6f4f730e102bedcc94444d96603baaff599c9f2a8fff5",
+      "source_start_line": 5,
+      "source_end_line": 18,
+      "destination": ".github/copilot-instructions.md",
+      "scope": "Always loaded global guidance."
+    },
+    {
+      "id": "Copilot Skills",
+      "sha256": "7c8a1064139fd9ee66ed6e37e6dbcefced137255be7a047bcd826edb12711596",
+      "source_start_line": 19,
+      "source_end_line": 50,
+      "destination": ".github/copilot-instructions.md",
+      "scope": "Always loaded global guidance."
+    },
+    {
+      "id": "My Standard Change Workflow",
+      "sha256": "1571ed176407dd96c30867608734a738b391b933175428e0a7c31ca51127c76e",
+      "source_start_line": 51,
+      "source_end_line": 76,
+      "destination": ".github/copilot-instructions.md",
+      "scope": "Always loaded global guidance."
+    },
+    {
+      "id": "Harnesses (close the feedback loop before guessing)",
+      "sha256": "76b70164d15ad9a3b41881ab5c49053717db0371567d3cf447de6e20b8241559",
+      "source_start_line": 77,
+      "source_end_line": 91,
+      "destination": ".github/copilot-instructions.md",
+      "scope": "Always loaded global guidance."
+    },
+    {
+      "id": "Pull Requests",
+      "sha256": "b5405c63ff0bfdc9fb87f8b0faf03a3163ed3de9dc0038ad4491b68f6cdf9ba6",
+      "source_start_line": 92,
+      "source_end_line": 128,
+      "destination": ".copilot/skills/pull-request-workflow/SKILL.md",
+      "scope": "Every pull request operation and PR-bound draft."
+    },
+    {
+      "id": "Code Review Workflow",
+      "sha256": "0a199368f1fb2baa390dd799d7c0049612f1e19b38229e9c53c303691af1cc78",
+      "source_start_line": 129,
+      "source_end_line": 252,
+      "destination": ".copilot/skills/code-review-workflow/SKILL.md",
+      "scope": "Every plan, code, security, self, and PR-description review."
+    },
+    {
+      "id": "Code Style & Languages",
+      "sha256": "76d536123fdec7cc62b26eea5bea9e956d731dd990fdbd3e9c699405882b0928",
+      "source_start_line": 253,
+      "source_end_line": 289,
+      "destination": ".copilot/skills/engineering-practices/SKILL.md",
+      "scope": "Every code, test, configuration, and React implementation or review."
+    },
+    {
+      "id": "Platform & System Design",
+      "sha256": "ebbe27c731a8a4cffc6c04bc0de33d7adbcf350013782c8557c9c336070773b1",
+      "source_start_line": 290,
+      "source_end_line": 299,
+      "destination": ".copilot/skills/engineering-practices/SKILL.md",
+      "scope": "Every architecture and system-design task."
+    },
+    {
+      "id": "GitHub CLI & API",
+      "sha256": "7def4a7d3097dead34c169e676e0d2a09e2daa3b9619fc9b3ff0352ab7fef44f",
+      "source_start_line": 300,
+      "source_end_line": 308,
+      "destination": ".copilot/skills/github-operations/SKILL.md",
+      "scope": "Every GitHub read and write, after loading gh-axi."
+    },
+    {
+      "id": "GitHub Actions Best Practices",
+      "sha256": "431e27380be42c06badc1cdb80319a72ed10a48fde61a761d90bc615d6095a9f",
+      "source_start_line": 309,
+      "source_end_line": 316,
+      "destination": ".copilot/skills/actions-security/SKILL.md",
+      "scope": "Every GitHub Actions workflow or action-metadata task."
+    },
+    {
+      "id": "Git & Version Control",
+      "sha256": "b532e0b1ac9c13554a89434ea5bb38ea632933c9b4647e890912a46f51813a3b",
+      "source_start_line": 317,
+      "source_end_line": 323,
+      "destination": ".github/copilot-instructions.md",
+      "scope": "Always loaded global guidance."
+    },
+    {
+      "id": "Excel & Report Generation",
+      "sha256": "4019864844f59029d6f40616d6143a7bcf124ac99c41828efdf40b6015d2b32f",
+      "source_start_line": 324,
+      "source_end_line": 329,
+      "destination": ".copilot/skills/spreadsheet-report-generation/SKILL.md",
+      "scope": "Every spreadsheet and generated-report task."
+    },
+    {
+      "id": "Writing Style",
+      "sha256": "a5a8e2bf67bcdecd1ec2996475aa952c4cd36e888e9c2bfde2ea1a786037f7d5",
+      "source_start_line": 330,
+      "source_end_line": 470,
+      "destination": ".github/copilot-instructions.md",
+      "scope": "Always loaded global guidance."
+    },
+    {
+      "id": "File & Project Organization",
+      "sha256": "b8b671261221963f3c33ba8b22f8ed17f049582af73a6572da20f55fead135dc",
+      "source_start_line": 471,
+      "source_end_line": 476,
+      "destination": ".copilot/skills/engineering-practices/SKILL.md",
+      "scope": "Every project-structure change."
+    },
+    {
+      "id": "macOS Environment",
+      "sha256": "3866f0545d343eb55787211fc1100e51d6eddaf028ee4891e6b5df15dc1fa1e8",
+      "source_start_line": 477,
+      "source_end_line": 483,
+      "destination": ".github/copilot-instructions.md",
+      "scope": "Always loaded global guidance."
+    },
+    {
+      "id": "My Open Source GitHub Actions: Shared Patterns",
+      "sha256": "317f3c347caa65d8b6551bb6ccec834f02f39c628c9c2cc48588a059024c9884",
+      "source_start_line": 484,
+      "source_end_line": 560,
+      "destination": ".copilot/skills/open-source-actions-maintenance/SKILL.md",
+      "scope": "Every task in the named shared-architecture repositories."
+    }
+  ],
+  "pre_action_routes": {
+    "any Playwright browser task": [
+      "playwright"
+    ],
+    "any file mutation or code, test, configuration, architecture, or system-design review": [
+      "engineering-practices"
+    ],
+    "any plan, code, security, self, or PR-description review": [
+      "code-review-workflow"
+    ],
+    "any PR operation or PR-bound draft": [
+      "pull-request-workflow"
+    ],
+    "any GitHub operation": [
+      "gh-axi",
+      "github-operations"
+    ],
+    "any workflow or action-metadata change or review": [
+      "actions-security"
+    ],
+    "work in the named open-source Action repositories": [
+      "open-source-actions-maintenance"
+    ],
+    "recurring reports, retrospectives, handoffs, or performance feedback": [
+      "code-review-workflow"
+    ],
+    "filtering activity data for a report": [
+      "actions-security"
+    ],
+    "spreadsheet or generated-report work": [
+      "spreadsheet-report-generation"
+    ]
+  },
+  "external_skills": [
+    "gh-axi"
+  ],
+  "skill_requirements": {
+    "engineering-practices": [
+      "authoring",
+      "reviewing code",
+      "configuration",
+      "architecture"
+    ],
+    "code-review-workflow": [
+      "plan review",
+      "code review",
+      "self-review",
+      "multi-model",
+      "recurring report",
+      "handoff",
+      "performance feedback"
+    ],
+    "pull-request-workflow": [
+      "pull request",
+      "approval",
+      "PR description"
+    ],
+    "github-operations": [
+      "GitHub",
+      "gh-axi",
+      "API"
+    ],
+    "actions-security": [
+      "GitHub Actions",
+      "workflow",
+      "composite actions",
+      "activity data",
+      "report"
+    ],
+    "open-source-actions-maintenance": [
+      "contributors",
+      "evergreen",
+      "issue-metrics"
+    ],
+    "spreadsheet-report-generation": [
+      "Excel",
+      "spreadsheet",
+      "generated reports"
+    ]
+  },
+  "runtime_contracts": [
+    {
+      "id": "Pre-action skill routing",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "c6766483f30b469d648b9c9ba6fd3ce99c0f311cb91c650541cf1f6de18da051"
+    },
+    {
+      "id": "Pull Requests",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "e5f3a827206bb59a18f1d1296c5d10f590f86e9499a554f53d20f3670b23774d"
+    },
+    {
+      "id": "Code Review Workflow",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "09c40247b43ebaa8e5dbb1273bde73e1cfef33c573e604d8565870323ad1081b"
+    },
+    {
+      "id": "Code Style & Languages",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "223432d5f19683dc0e4b64b3220a35e30b99f2ebf99fc0b4826c4774ff6398c7"
+    },
+    {
+      "id": "Platform & System Design",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "cbf2bd2aa9936c23d34c39b1d9758e4d039af3376bfdfa45e456168f12753a26"
+    },
+    {
+      "id": "GitHub CLI & API",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "93dd2cad13f325d380ee9a7cbfb8ec5cd2f581b68f3fa75ab66041fa9d7b9fec"
+    },
+    {
+      "id": "GitHub Actions Best Practices",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "74b65a6bb03f4497374eb378657ff7f1a715ffc7a21989fa57a09aa02ff807b4"
+    },
+    {
+      "id": "Excel & Report Generation",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "4027f11c90985a98809fde8625f6e7794705888061ed960493819d1e3f6b53c9"
+    },
+    {
+      "id": "File & Project Organization",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "2cbbd50c84439ced2ba2f31716ec3a0a3021c6b7263f8e9270d183c91d84b7d7"
+    },
+    {
+      "id": "My Open Source GitHub Actions: Shared Patterns",
+      "destination": ".github/copilot-instructions.md",
+      "sha256": "7e06a27712565f916fbbe615c91279cead2e695afef4b8deec8132c08ad006c5"
+    }
+  ]
+}

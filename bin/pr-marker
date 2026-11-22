@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Read/write the per-branch PR-readiness marker files that gh-guard gates on.
 
-Zack's change workflow requires five review, demo, and check-run artifacts to
-exist before `gh pr create` is allowed to open a PR (enforced by the gh-guard
-PATH shim). The artifacts for a branch live together in a per-branch directory
+The strict workflow requires five review, demo, and check-run artifacts before
+`gh pr create` (enforced by gh-guard). Private repository profiles can reduce
+legacy requirements: standard uses pinned self-review/tests; relaxed needs no
+markers. Native publication proof always retains the strict protocol. The artifacts for a branch live together in a per-branch directory
 `<git-dir>/copilot-pr-review/<encoded-branch>/`, one file per kind.
 
 This helper is the single source of truth for the marker path encoding so that
@@ -16,7 +17,7 @@ minimum size in bytes, whether HEAD-pinned, and whether a multi-model review):
 
   code-review  code-review.md   200   multi-model review of the code diff
                                       (pinned, requires >=3 models and a final
-                                      clean convergence round from 1 through 5)
+                                      clean convergence round from 1 through 10)
   plan         plan.md          120   multi-model review of the plan
                                       (requires >=3 models)
   demo         demo.md          120   demo video + before/after images
@@ -44,7 +45,7 @@ The demo and tests markers are exempt.
 The code-review marker also requires `--convergence-rounds N`, where N is the
 final panel round that found no new verified findings. `status`/`check` and
 gh-guard accept rounds 1 through 99. The standard workflow remains capped at
-5 rounds; higher values record explicitly authorized confirmation rounds.
+10 rounds; higher values record explicitly authorized confirmation rounds.
 
 The tests marker is machine-produced: `run-tests` requires a clean repository,
 runs the test-quality evidence preflight and the given check commands, verifies
@@ -87,8 +88,8 @@ Usage:
                                    run the evidence preflight and each check command;
                                    write the HEAD-pinned tests marker only if every
                                    command exits 0 and the repository stays clean
-  pr-marker status                 show all five markers and whether each passes
-  pr-marker check                  exit 0 only if every marker passes (fresh + over
+  pr-marker status                 show required and optional markers for the profile
+  pr-marker check                  exit 0 only if required markers pass (fresh + over
                                    floor)
   pr-marker capabilities --json    describe native proof requirements, not readiness
   pr-marker check --publication <actual gh argv>
@@ -109,10 +110,13 @@ import sys
 import tempfile
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from repo_guards import Policy, gh_context, resolve_policy
 
 
 @dataclass(frozen=True)
@@ -163,8 +167,8 @@ KINDS: dict[str, Kind] = {
         "tests",
         "tests.md",
         120,
-        "machine-produced record of a full CI-equivalent check run "
-        "(tests, lint, type-check, build) passing green in a Codespace",
+        "machine-produced record of change-relevant checks "
+        "(tests and applicable lint, type-check, build targets)",
         pinned=True,
         requires_result=True,
     ),
@@ -192,7 +196,7 @@ PROHIBITED_MODEL_PREFIXES = ("gemini",)
 
 # A code-review marker must record that its final review round was clean and
 # how many rounds were needed. Both pr-marker and gh-guard enforce the exact
-# header. The standard workflow is capped at 5 rounds, but an explicitly
+# header. The standard workflow is capped at 10 rounds, but an explicitly
 # authorized confirmation beyond the cap must still be recorded accurately.
 REVIEW_CONVERGENCE_PREFIX = "<!-- review-convergence: clean; rounds: "
 REVIEW_CONVERGENCE_SUFFIX = " -->"
@@ -225,6 +229,7 @@ def _native_policy() -> dict:
         },
         "min_review_models": MIN_MODELS,
         "excluded_model_prefixes": list(PROHIBITED_MODEL_PREFIXES),
+        # Retain the v1 field for proof compatibility and non-draft creation.
         "create_confirmation_env": "ZACK_CONFIRMED_PR_CREATE",
         "review_budget_scope": "code-only",
         "plan_order": "before-implementation",
@@ -493,9 +498,15 @@ def strip_generated_headers(content: str) -> str:
     return "".join(kept)
 
 
+def policy_kind(kind: Kind, policy: Policy) -> Kind:
+    if policy.profile == "standard" and kind.name == "code-review":
+        return replace(kind, requires_models=False, requires_convergence=False, summary="self-review of the code diff")
+    return kind
+
+
 def cmd_write(args: argparse.Namespace) -> int:
     """Write marker content from a file or stdin, refusing content below the floor."""
-    kind = _resolve_kind(args.kind)
+    kind = policy_kind(_resolve_kind(args.kind), resolve_policy(getattr(args, "repo", None)))
     if kind.requires_result:
         print(
             f"pr-marker: the {kind.name} marker is machine-produced; write it with "
@@ -695,7 +706,7 @@ def _run_test_quality_preflight(
 def cmd_run_tests(args: argparse.Namespace) -> int:
     """Run the check commands and write the `tests` marker only if all pass.
 
-    Streams each command's output live (so a long full-suite run is watchable),
+    Streams each selected command's output live,
     records the exit codes as machine proof, and writes the HEAD-pinned marker
     only when every command exits 0. Any failure writes nothing and exits
     non-zero, so the gate stays blocked until a real green run exists.
@@ -722,7 +733,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         for entry in dirty_before:
             print(f"  {entry}", file=sys.stderr)
         print(
-            "Commit or remove the changes, then run the full checks again.",
+            "Commit or remove the changes, then run the relevant checks again.",
             file=sys.stderr,
         )
         return 1
@@ -782,7 +793,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         for entry in dirty_after:
             print(f"  {entry}", file=sys.stderr)
         print(
-            "Clean or commit the generated changes, then run the full checks again.",
+            "Clean or commit the generated changes, then run the relevant checks again.",
             file=sys.stderr,
         )
         return 1
@@ -802,7 +813,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         print(f"  branch: {branch} -> {final_branch or 'detached'}", file=sys.stderr)
         print(f"  HEAD: {head} -> {final_head or 'unavailable'}", file=sys.stderr)
         print(
-            "Restore the starting branch and commit, then run the full checks again.",
+            "Restore the starting branch and commit, then run the relevant checks again.",
             file=sys.stderr,
         )
         return 1
@@ -815,7 +826,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
     lines = [
         f"{REVIEWED_COMMIT_PREFIX}{head}{REVIEWED_COMMIT_SUFFIX}",
         TESTS_RESULT_HEADER,
-        "# tests: full CI-equivalent check run",
+        "# tests: change-relevant check run",
         "",
         f"RESULT: passed (all {len(results)} command(s) exited 0)",
         f"Codespace: {codespace}",
@@ -835,7 +846,11 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
         "Commands:",
     ]
     lines += [f"- exit {code} in {dur:.1f}s: {cmd}" for cmd, code, dur in results]
-    lines += ["", f"Narrowing: {args.narrow or 'none (full suite)'}"]
+    lines += [
+        "",
+        "Test scope: change-relevant targets and packages",
+        f"Additional scope limits: {args.narrow or 'none'}",
+    ]
     content = "\n".join(lines) + "\n"
 
     path = marker_path(kind, branch)
@@ -1619,10 +1634,11 @@ def cmd_native_check(
         request = _native_request(argv)
         if (
             request["operation"] == "create"
+            and not request["draft"]
             and os.environ.get("ZACK_CONFIRMED_PR_CREATE") != "1"
         ):
             raise NativeProofError(
-                "native creation requires same-call ZACK_CONFIRMED_PR_CREATE=1"
+                "native non-draft creation requires same-call ZACK_CONFIRMED_PR_CREATE=1"
             )
         context = _native_context()
         body = _native_body(request["body-file"])
@@ -1694,8 +1710,14 @@ def cmd_status(_args: argparse.Namespace) -> int:
     print(f"branch: {branch}")
     print(f"marker dir: {branch_dir(branch)}")
     print()
+    policy = resolve_policy()
+    print(f"profile: {policy.profile} ({policy.reason})")
     all_ok = True
-    for kind in KINDS.values():
+    for original in KINDS.values():
+        kind = policy_kind(original, policy)
+        if kind.name not in policy.markers:
+            print(f"  [ OPTIONAL] {kind.name}")
+            continue
         ok, detail, size, path = marker_status(kind, branch)
         all_ok = all_ok and ok
         mark = "ok " if ok else detail.upper()
@@ -1711,7 +1733,7 @@ def cmd_status(_args: argparse.Namespace) -> int:
         )
         return 1
     if all_ok:
-        print("all markers satisfied")
+        print("all required markers satisfied")
     else:
         print("gate would BLOCK: fill the missing/stale markers")
         print(
@@ -1741,9 +1763,13 @@ def cmd_check(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    policy = gh_context(args.gh_args)[0] if args.gh_args is not None else resolve_policy()
+    if not policy.markers:
+        return 0
     branch = current_branch()
     failures = []
-    for kind in KINDS.values():
+    for name in policy.markers:
+        kind = policy_kind(KINDS[name], policy)
         ok, detail, _size, path = marker_status(kind, branch)
         if not ok:
             failures.append((detail, kind, path))
@@ -1780,6 +1806,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_write.add_argument(
         "file", nargs="?", default="-", help="file to read (default: stdin)"
     )
+    p_write.add_argument("--repo", help="additional PR target used to select marker requirements")
     p_write.add_argument(
         "--models",
         default=None,
@@ -1801,10 +1828,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_write.set_defaults(func=cmd_write)
 
-    p_status = sub.add_parser("status", help="show all markers and whether each passes")
+    p_status = sub.add_parser("status", help="show required and optional marker status")
     p_status.set_defaults(func=cmd_status)
 
-    p_check = sub.add_parser("check", help="exit 0 only if every marker passes")
+    p_check = sub.add_parser("check", help="exit 0 only if required markers pass")
     projection = p_check.add_mutually_exclusive_group()
     projection.add_argument(
         "--print-publication-repository",
@@ -1821,6 +1848,10 @@ def build_parser() -> argparse.ArgumentParser:
         nargs=argparse.REMAINDER,
         metavar="GH_ARGV",
         help="check the native-located handoff against actual gh argv; imports no caller proof",
+    )
+    p_check.add_argument(
+        "--gh-args", nargs=argparse.REMAINDER,
+        help="resolve policy from actual gh pr create arguments",
     )
     p_check.set_defaults(func=cmd_check)
 
@@ -1841,8 +1872,8 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="COMMAND",
         help=(
-            "a check command to run (repeatable), e.g. "
-            "--cmd 'make test' --cmd 'make lint'"
+            "a relevant test, lint, type-check, or build command "
+            "for the changed targets/packages (repeatable)"
         ),
     )
     p_run.add_argument(
@@ -1854,8 +1885,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--narrow",
         default=None,
         help=(
-            "record an explicit infeasibility narrowing "
-            "(genuine infeasibility only, never slowness)"
+            "record why a relevant check could not run; selecting "
+            "relevant targets/packages does not require this option"
         ),
     )
     p_run.add_argument(
@@ -1896,13 +1927,13 @@ def _reorder_write_argv(argv: list[str]) -> list[str]:
     i = 0
     while i < len(rest):
         arg = rest[i]
-        if arg in ("--models", "--convergence-rounds"):
+        if arg in ("--models", "--convergence-rounds", "--repo"):
             option_tokens.append(arg)
             if i + 1 < len(rest):
                 option_tokens.append(rest[i + 1])
                 i += 2
                 continue
-        elif arg.startswith("--models=") or arg.startswith("--convergence-rounds="):
+        elif arg.startswith(("--models=", "--convergence-rounds=", "--repo=")):
             option_tokens.append(arg)
         else:
             others.append(arg)

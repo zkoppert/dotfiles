@@ -66,8 +66,9 @@ class PiTreehouseTests(unittest.TestCase):
         )
         script.chmod(0o755)
 
-    def run_wrapper(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def run_wrapper(self, *args: str, overrides: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
+        env.pop("PI_TREEHOUSE_BYPASS", None)
         env.update(
             HOME=str(self.home),
             USER="fixture",
@@ -75,6 +76,7 @@ class PiTreehouseTests(unittest.TestCase):
             TREEHOUSE_FAKE_STATUS=self.fake_status,
             TREEHOUSE_FAKE_ALLOCATION=self.fake_allocation,
         )
+        env.update(overrides or {})
         return subprocess.run(
             [str(WRAPPER), *args],
             cwd=self.repo,
@@ -108,6 +110,35 @@ class PiTreehouseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn(f"cwd={self.repo.resolve()}", result.stdout)
         self.assertFalse(self.treehouse_log.exists())
+
+    def test_path_lookup_skips_the_shim_and_survives_relocation(self) -> None:
+        (self.bin / "pi").symlink_to(WRAPPER.resolve())
+        later = self.repo / "npm-bin"
+        later.mkdir()
+        (later / "pi").symlink_to(self.fake_pi)
+        for directory in (str(later), "npm-bin"):
+            with self.subTest(directory=directory):
+                result = self.run_wrapper("work", overrides={
+                    "PI_REAL_PI": "",
+                    "PATH": f"{self.bin}{os.pathsep}{directory}{os.pathsep}{os.environ['PATH']}",
+                })
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"cwd={self.worktree}", result.stdout)
+                self.assertIn("args=work", result.stdout)
+
+    def test_missing_or_recursive_real_pi_stops_before_treehouse(self) -> None:
+        shim = self.bin / "pi"
+        shim.symlink_to(WRAPPER.resolve())
+        for configured in ("", str(shim), str(self.root / "missing-pi")):
+            with self.subTest(configured=configured):
+                result = self.run_wrapper("work", overrides={
+                    "PI_REAL_PI": configured, "PATH": str(self.bin),
+                })
+
+                self.assertEqual(result.returncode, 127, result.stderr)
+                self.assertIn("real Pi not found", result.stderr)
+                self.assertFalse(self.treehouse_log.exists())
 
     def test_existing_managed_slot_does_not_nest(self) -> None:
         self.write_treehouse(managed=True)

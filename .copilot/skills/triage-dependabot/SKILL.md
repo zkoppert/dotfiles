@@ -1,118 +1,46 @@
 ---
 name: triage-dependabot
-description: Triggers when the user says "triage dependabot", "review my dependabot PRs", "what dependency updates are waiting", "merge safe dependabot bumps", or any similar request to process Dependabot PRs surfaced via GitHub notifications. Runs the dotfiles tool which filters notifications to Dependabot-authored PRs, evaluates each PR against a five-outcome decision tree (auto-merge, request rebase, label-and-merge for security releases, close-prerelease for alpha/beta/rc/dev target versions, or flag for human review in ~/repos/zkoppert-todo/todo.yml), and skips PRs that another human is already engaged on or whose CI is still pending. Safe to re-run; per-PR cooldown prevents double-acting within an hour.
+description: Preview or handle Dependabot PRs using the private repository policy, dependency security review, and deduplicated macOS help alerts. Use for Dependabot triage, upgrade review, and routine dependency approval requests.
 ---
 
-# Triage Dependabot PRs
+# Handle Dependabot updates safely
 
-## When to use this skill
+## Use the guarded entrypoint
 
-Use whenever the user asks any of:
+Use `~/.local/bin/triage-dependabot --dry-run` for inspection and preview requests.
+If the launcher is missing, stop and report the installation gap.
+Never fall back to the historical notification runner for mutating operations.
 
-- "triage dependabot"
-- "review my dependabot PRs"
-- "what dependency updates are waiting?"
-- "merge safe dependabot bumps"
-- "any dependabot PRs ready to ship?"
+Read [the repository-mode guide](../../../docs/dependabot-automerge.md) before installation, policy changes, or activation.
+Private scope lives in `~/.config/dependabot-automerge/config.yml`, outside Git.
+Don't copy private repository names into public files or drafts.
 
-Also offer this when the user mentions being behind on dependency
-upgrades or seeing a backlog of dependabot notifications.
+The `launchd` job runs hourly from a fixed release snapshot.
+Don't resume a paused job without new approval.
+Don't set `enabled: true` or request GitHub mutations without the required approval.
 
-## What it does
+## Preserve the security gate
 
-1. Fetches all unread notifications via `gh api /notifications --paginate`.
-2. Filters to notifications whose subject is a PullRequest authored by
-   `dependabot[bot]` (or `dependabot-preview[bot]`).
-3. Skips repos whose owner is not `github`, `github-community-projects`,
-   or `zkoppert`; passive notifications are marked done, direct pings stay in
-   the inbox, and no todo is created.
-4. For each remaining PR, fetches metadata (`gh pr view --json`) and decides one
-   of five outcomes:
-   - `merge` - approve, then enable `gh pr merge --auto --squash --delete-branch`
-     (synchronous merge fallback when the repo disallows auto-merge).
-   - `rebase` - comment `@dependabot rebase` (suppressed when a prior
-     rebase request is newer than the most recent dependabot push).
-   - `label-and-merge` - add the `release` label (if the repo defines
-     one), then approve and merge, for changes the Copilot sub-agent or
-     fallback regex classifies as security-related.
-   - `close-prerelease` - force-close via
-     `gh pr close --delete-branch` when the target version is a
-     prerelease (alpha / beta / rc / dev / preview). Catches PRs like
-     `bump python from 3.14.5-slim to 3.15.0b2-slim` that should
-     never auto-merge. The direct API close exists because Dependabot
-     has historically ignored `@dependabot close` comments for hours.
-   - `flag-for-review` - write a Q1 entry to
-     `~/repos/zkoppert-todo/todo.yml` for human attention.
-5. Marks the notification done on GitHub when an action runs.
-6. Persists a per-PR cooldown timestamp in
-   `~/Library/Logs/triage-dependabot-state.json` so re-runs within an
-   hour do not double-act.
-7. Writes `todo.yml` through an exclusive `todo.yml.lock`, fresh re-read,
-   delta apply, and atomic replace. Any resulting change is committed in
-   the todo repo, followed by a best-effort pull and push.
-8. Sends one clickable macOS notification for each newly added
-   `flag-for-review` entry. Selecting it opens the PR URL. Routine actions,
-   already tracked flags, no-op runs, and dry runs stay silent.
+All stable patch, minor, and major upgrades use the same gate.
+The runner requires passing checks, complete dependency evidence, current advisory checks, and an evidence-bound source review.
+Incomplete evidence, security findings, invalid reviewer output, and reviewer failures must prevent approval.
+Don't bypass review because an update looks small or CI passes.
 
-A launchd job (`com.zkoppert.triage-dependabot.plist`) runs this every
-hour on weekdays from 08:00 through 18:00. This skill is for ad-hoc runs
-in between.
+Approvals and merge requests must reference the evaluated commit.
+Human comments and reviews, including the operator's manual feedback, stop automation.
+Only recognized machine-generated activity is exempt.
+Don't resolve human feedback or bypass branch protection.
 
-## How to run
+## Report the result
 
-Default run writes to `~/repos/zkoppert-todo/todo.yml`, calls mutating
-GitHub endpoints, and sends clickable alerts only for PRs that need human
-attention:
+Read the printed JSON and diagnostic output.
+Distinguish completed merges from proposed actions in dry runs.
+Report actionable holds and worker errors without claiming that pending work succeeded.
 
-```bash
-python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py
-```
-
-Preview without mutations (no merges, no comments, no labels, no todo
-writes, no DELETE on the notification):
-
-```bash
-python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py \
-  --dry-run --verbose
-```
-
-Restrict to specific repos inside the owned-owner allowlist:
-
-```bash
-python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py \
-  --allowed-repo zkoppert/dotfiles \
-  --allowed-repo github-community-projects/contributors
-```
-
-Disable the Copilot CLI sub-agent (use regex-only security
-classification):
-
-```bash
-python3 ~/repos/dotfiles/.copilot/skills/triage-dependabot/triage_dependabot.py \
-  --no-copilot-subagent
-```
-
-## After running
-
-1. Read the printed summary
-   (`fetched=N dependabot=N merged=N labeled=N rebased=N flagged=N
-   skipped=N cooldown=N already_tracked=N`).
-2. If any PRs were flagged, tell the user which repos and why so they
-   know what awaits review.
-3. If `ERROR:` lines appear on stderr, surface them (most commonly an
-   expired `gh auth` token or `copilot` not on `PATH`).
-
-## What this skill must NOT do
-
-- Do not modify `todo.yml` directly. The script handles atomic writes.
-- Do not edit `todo.yml` outside the script's lock plus fresh re-read path.
-- Do not fail the triage run just because the best-effort git pull or push
-  could not complete.
-- Do not relax the five-outcome decision tree without explicit approval.
-  Routing to `flag-for-review` is the safe default whenever any
-  uncertainty exists (sub-agent failure, unknown bump kind, missing
-  coverage signal).
-- Do not auto-merge PRs that show any human review or comment activity.
-- Do not spam `@dependabot rebase` comments. The script suppresses the
-  comment when a prior rebase request is newer than the latest
-  dependabot push.
+Normal runs send one macOS summary that opens a secret gist for new or changed actionable problems.
+Secret gists are unlisted; anyone with the URL can read them.
+Affected repository names and PR links can include private repositories.
+Anyone with the URL can also read earlier gist revisions.
+The report shows reasons, next steps, and PR links without uploading the full scope, raw logs, or source patches.
+Routine waits and unchanged problems stay silent.
+Dry runs never send alerts or mutate GitHub, but can invoke Copilot and populate the review cache.

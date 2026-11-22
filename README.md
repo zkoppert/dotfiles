@@ -15,7 +15,125 @@ My personal configuration for macOS and GitHub Codespaces.
 | Additional private skills | Installs `gh-axi`, investigation, release, and production database helpers. |
 | `gho11y` plugin | Supports GitHub observability investigations and production-signal analysis. |
 
-`record-demo` still owns pre-PR before/after evidence and the required `demo` marker. `validate-pr-with-codespace` validates an already-open PR and does not satisfy that marker. The `gho11y` plugin covers observability, while accessibility findings use `remediate-accessibility-audit`. `session-portability` handles general development handoffs, while specialized handoff skills keep their narrower workflows.
+`record-demo` still owns pre-PR before/after evidence and the required `demo` marker. `ui-screenshot-presentation` defines how to present authentic UI captures in PR descriptions. `validate-pr-with-codespace` validates an already-open PR and does not satisfy the demo marker. The `gho11y` plugin covers observability, while accessibility findings use `remediate-accessibility-audit`. `session-portability` handles general development handoffs, while specialized handoff skills keep their narrower workflows.
+
+## How do background agents report progress?
+
+Background agents can stop without notifying their parent session. The `subagent-monitor` skill requires registration whenever an agent starts background work.
+
+On macOS, `install.sh` installs `pi-subagent-monitor` and a user LaunchAgent. The watcher checks registered batches every minute, without Pi cron or model calls.
+
+The monitor never sends macOS desktop notifications. A Pi extension delivers pending updates into the registered parent conversation when that conversation is idle. Existing sessions need `/reload` once after installation. Future sessions load the extension automatically.
+
+The installer keeps one skill file under `~/.copilot/skills/subagent-monitor`. The `~/.agents/skills` entry links to that file, which prevents duplicate-name warnings in Pi.
+
+The watcher distinguishes blocked agents, inactive processes, stale activity, PR creation, and reported completion. It never treats process exit or PR creation as successful validation. Completion reports include an evidence path; the parent must verify that evidence.
+
+Run `pi-subagent-monitor status` to inspect the last snapshot. State lives in `~/.local/state/pi-subagent-monitor`, and logs live in `~/Library/Logs/pi-subagent-monitor`. The installer honors `PI_CODING_AGENT_DIR` for extension placement.
+
+The LaunchAgent runs while the user is logged in. Sleeping computers resume checks after waking. Pending session updates survive Pi closure and watcher restarts. Monitoring never grants publication or restart authority.
+
+Use these focused checks when changing the monitor:
+
+```bash
+# Exercise real processes, inbox retry, silent polling, and installation.
+python3 -m unittest scripts.test_pi_subagent_monitor
+# Exercise delivery through Pi's extension API contract.
+node --test tests/pi_subagent_monitor.test.mjs
+```
+
+The extension test requires a Node.js release with native TypeScript support. The installed extension uses Pi's normal TypeScript loader.
+
+## How are global instructions organized?
+
+The global file keeps rules that apply to every session. Task-specific guidance lives in skills that load before the related action.
+
+`install.sh` links the same global file for Copilot and Pi. It links local skills into `~/.copilot/skills` and `~/.agents/skills`, then mirrors installed catalog skills into `~/.agents/skills`. The linking steps preserve existing non-symlink paths.
+
+`verify-codespace-copilot-env` requires repository skills to resolve to this checkout and Pi catalog mirrors to resolve to their Copilot source. It checks Pi's first available context file, including `AGENTS.override.md`, against the shared instructions. Both the installer and verifier honor `PI_CODING_AGENT_DIR`; the default is `~/.pi/agent`. Use an absolute path, `~`, or a path starting with `~/`.
+
+The verifier uses Pi's installed software development kit (SDK) to resolve user skills, installed packages, and settings filters. Each required skill must remain enabled and resolve to its managed source. Native discovery follows Pi's Markdown, symlink, ignore, directory-name fallback, and traversal rules. Unrelated user skills remain unchanged.
+
+SDK discovery and catalog metadata validation require a working Pi executable and Node.js 22.19.0 or later. Both support npm installations and Homebrew's `libexec/lib/node_modules` layout, including executables behind the Treehouse wrapper. The wrapper honors `PI_REAL_PI`; otherwise, it selects the next Pi executable on `PATH`.
+
+The installer and environment verifier share the SDK-based metadata validator in `scripts/skill_metadata.py`. Its SDK resolver rejects unsupported or unverifiable Node.js versions before metadata parsing or discovery on every platform. Node.js provisioning remains Linux-only. Valid nested metadata remains unchanged. Incorrect names, empty descriptions, malformed YAML, and disabled model invocation still fail validation. If validation is unavailable, setup warns, preserves existing catalog skills, and leaves their Pi mirrors unchanged.
+
+The metadata CLI returns `0` for valid metadata, `1` for invalid metadata, and `2` when validation is unavailable.
+
+Discovery runs offline without loading extensions or installing packages. Project resources, extension-added skills, and command-line overrides remain outside this check.
+
+The `pr-marker-tests` continuous integration (CI) workflow installs Node.js 22.19.0 and Pi 1.3.0 to test the minimum supported runtime. CI runs the metadata and Treehouse launcher suites alongside installer and environment tests. SDK integration tests fail when Pi or Node.js is unavailable instead of skipping.
+
+Run the preservation check after changing global instructions or moving guidance:
+
+```bash
+python3 scripts/verify_instruction_migration.py
+```
+
+The check compares each original section with its runtime owner. It also validates skill metadata, routing entries, compatibility headings, and the migration baseline. The routing manifest binds each action trigger to an ordered list of explicitly read skills. Fenced examples and HTML comments cannot satisfy a route, including during acknowledged rebaselining. Only repository migration contracts require flat, single-line frontmatter fields, including plain or quoted strings and boolean invocation flags. The preservation check rejects unsupported YAML forms rather than guessing their meaning. Installed catalog and client skills use Pi's YAML parser, including nested metadata and multiline descriptions.
+
+After an intentional guidance edit, review the content diff and refresh the hashes:
+
+```bash
+python3 scripts/verify_instruction_migration.py --update-baseline --acknowledge-guidance-changes
+```
+
+## How do I choose repository safeguards?
+
+Small personal changes don't always need the same checks as production changes. `repo-guards` selects quality requirements from private, user-owned assignments.
+
+| Profile | Required evidence | Direct default-branch pushes |
+| --- | --- | --- |
+| `relaxed` | None | Allowed for ordinary fast-forward updates |
+| `standard` | HEAD-pinned self-review and successful local checks | Blocked |
+| `strict` | Current plan, code, demo, PR-description, and test markers | Blocked |
+
+Unlisted repositories stay strict. Invalid configuration also selects strict. The resolver never prints the assignment inventory.
+
+Create `~/.config/repo-guards/config.yaml` outside any Git checkout. Use this fictional example as a starting point:
+
+```bash
+mkdir -p "$HOME/.config/repo-guards"
+chmod 700 "$HOME/.config/repo-guards"
+# Keep real repository assignments outside this public repository.
+(umask 077; printf 'version: 1\nrepositories:\n  example/personal: relaxed\n  example/library: standard\n' > "$HOME/.config/repo-guards/config.yaml")
+```
+
+The supported YAML subset has `version: 1`, followed by `repositories:` and two-space-indented `repository: profile` entries. Blank lines and comments are allowed. Use unquoted scalar values, exact names, and one space after each colon. Other YAML features are rejected rather than interpreted.
+
+Keys accept `owner/repository` for GitHub.com or `host/owner/repository`. Names are case-insensitive; duplicate normalized identities invalidate the whole file. Wildcards and configurable defaults aren't supported. The file must have mode `0600`, belong to the current user, and be a regular file. Symlinks and files larger than 64 KiB are rejected.
+
+Inspect the current checkout or an additional target:
+
+```bash
+repo-guards show --json
+repo-guards show --repo example/library --json
+pr-marker status
+```
+
+Multiple repository identities use the strictest applicable profile. Worktrees share remote identity but keep separate marker evidence. `gh pr create` also checks explicit `--repo` selectors and `GH_REPO`. Explicit selectors take precedence over `GH_REPO`; `GH_HOST` qualifies unqualified selectors. Uncertain arguments cannot grant reduced safeguards. Implicit PR targets use GitHub CLI resolution, including fork parents and configured default repositories. Lookup failures select strict.
+
+For standard work, record an actual self-review and local checks:
+
+```bash
+# Supply your review file, not placeholder evidence.
+pr-marker write code-review review.md
+pr-marker run-tests --cmd 'python3 -m unittest discover'
+```
+
+For a different PR target, add `--repo OWNER/REPOSITORY` to `pr-marker write`. The writer applies the stricter checkout or target profile.
+
+Standard PR creation requires `--draft`. Strict keeps its existing marker and native proof contracts. Relaxed marker checks are optional, not fabricated passes. After required checks pass, agents may push the working branch and open a draft PR without separate human approval. Direct default-branch pushes and human-feedback fixes still need approval. Non-draft creation, readiness changes, PR approvals, merges, and deployments retain their approval requirements. Explicitly requested checks still apply.
+
+`gh pr create --draft` doesn't need `ZACK_CONFIRMED_PR_CREATE`. Non-draft creation still requires confirmation. Draft creation keeps body linting, privacy checks, size limits, repository hooks, and applicable evidence checks. Strict marker checks apply in interactive and non-interactive shells. Native proof verification keeps the v1 `create_confirmation_env` field for compatibility, but checks that variable only for non-draft creation.
+
+The pre-push hook checks the actual network destination's live default branch. Missing default-branch evidence blocks branch pushes. Relaxed permits initial branch creation only after a successful lookup confirms no remote branches exist. Default-branch deletion and history rewriting remain blocked even for relaxed repositories. Feature-branch pushes retain existing size, privacy, and repository-hook checks. Marker certification stays at PR creation, not in the push hook. Tags and local pipeline transports retain their existing handling.
+
+Existing automation that pushes directly to a default branch needs an explicit relaxed assignment before installation. Review those assignments locally; don't publish the inventory. Native pipeline publication still requires its original strict proof and custody checks.
+
+Installation links the read-only resolver but never creates or changes assignments. Removing an assignment restores strict behavior. Copy private configuration separately between machines; the installer doesn't synchronize it.
+
+These tools prevent accidental shortcuts. They aren't a security boundary against edited policy files, bypassed Git hooks, or direct executable paths.
 
 ## How do I install it?
 
@@ -29,6 +147,12 @@ export COPILOT_SKILL_CATALOG_REPO="OWNER/REPOSITORY"
 For existing catalog tools, see [the update instructions](#how-do-i-update-catalog-tools). Missing CLIs, authentication failures, or unavailable catalog tools produce warnings without stopping the rest of dotfiles setup.
 
 Open a new shell after installation to load the `~/.local/bin` PATH change.
+
+## How are Python package downloads guarded?
+
+On macOS, the installer puts guarded `pip`, pip-tools, `uv`, and `uvx` shims before normal package tools on interactive shell `PATH`. Package-resolving commands fail unless GitHub Central Feed Services (CFS) supplies its feed environment. Use `gh cfs -- <command>` for package downloads.
+
+The guard prevents common accidental bypasses. It is not egress enforcement. After CFS configures a command, explicit source options, project settings, requirements directives, and direct URLs can still select another source. The conservative allowlist requires CFS for status commands such as `pip list` and `uv pip list`. It also does not intercept absolute paths, virtual-environment executables, `python -m pip`, or LaunchAgents. Persistent automation must call CFS explicitly.
 
 ## How do I start a named local Copilot session?
 
@@ -158,6 +282,74 @@ Candidate self-improvements must have persistent tests and independent review. T
 
 For a scheduler-only update during active work, use the `install-future` CLI action. It publishes a new immutable release without changing the active worker's files, state, policy, extension, or LaunchAgent settings. Existing workers keep their resolved release; later scheduler invocations follow the updated pointer. Policy or extension changes require the normal idle installation path. Set the private `schedule_changed_at` timestamp when changing schedule times to prevent an immediate catch-up for a pre-change slot. The timestamp must include its UTC offset. Unfinished runs can still recover without waiting for the new daily time.
 
+## How do dotfiles and skills stay updated?
+
+The `com.zkoppert.dotfiles-sync` LaunchAgent checks this laptop's `~/repos/dotfiles` checkout daily at 09:00 and when loaded. It extends the existing job rather than adding another updater.
+
+The scheduled runner uses an approved copy outside the checkout, with isolated Python startup. It never imports Python packages from the working tree. Dirty checkouts, another active branch, or unfinished Git operations cause a skipped update and a clickable Mac notification. Local edits remain untouched; nothing is stashed or restored.
+
+The updater requires a clean `main` checkout before updating. It fetches `origin main` and merges its explicit remote-tracking ref instead of shared `FETCH_HEAD`. Fast-forward flags prevent rebasing, automatic stashing, and overwriting ignored files. Authentication must work without interactive prompts. Git commands have a two-minute timeout, and timed-out process groups are terminated.
+
+The job requires Git, Pi, Node.js 22.19.0 or later, and Homebrew's `terminal-notifier`. The plist supplies the notifier path explicitly. After updating, it validates tracked skill metadata with the existing Pi SDK parser. It creates missing links in `~/.copilot/skills` and `~/.agents/skills` and ensures the shared instruction links. `PI_CODING_AGENT_DIR` selects the Pi instruction directory; `--pi-agent-dir` overrides it. The default is `~/.pi/agent`.
+
+Existing files, directories, and conflicting symlinks remain unchanged and cause a reported failure. Broken links require manual resolution. Private catalog skills and removed repository skills aren't deleted. The updater doesn't run the broad installer or restore Git history after a failed validation. Existing links follow trusted merged checkout contents, as they do after a manual pull.
+
+The runner and metadata helper are copied from committed Git blobs into a versioned private directory. Updating dotfiles doesn't automatically replace that approved runner. Reinstall it from reviewed, clean `main` when either file changes. Old versions remain available for rollback.
+
+Inspect an installed runner without fetching, creating links, taking the update lock, or sending notifications:
+
+```bash
+runner="$HOME/Library/Application Support/dotfiles-sync/runtime/current/dotfiles_sync.py"
+python3 -I -S -B "$runner" --repository "$HOME/repos/dotfiles" --branch main --check
+```
+
+Check mode makes no remote-freshness claim. Exit status `2` means links are missing; status `1` reports a refusal or failure. A scheduled skip returns success only if the notification command accepts the request. Failed notification requests return status `1`. JSON distinguishes `skipped` from a completed update. Repeated alerts replace the same notification group, and clicking opens the checkout. A normal run creates missing links. Its nonblocking lock coordinates manual and scheduled runs; it doesn't lock out unrelated Git commands. Use Treehouse worktrees for feature work. Avoid other Git mutations in this managed checkout while an update runs.
+
+### Upgrade the existing laptop agent
+
+Merge and pull the reviewed installer before deploying the plist. Run the installer by its explicit path with `-I -S`, not through a checkout package. This plist uses absolute laptop paths and a Homebrew Python interpreter. Adjust those paths for another machine or a custom Pi agent directory. Confirm the current agent isn't running before reloading it. Loading the agent starts one immediate sync.
+
+The following upgrade preserves the original plist and restores it if loading the replacement fails:
+
+```bash
+(
+set -eu
+repo="$HOME/repos/dotfiles"
+target="$HOME/Library/LaunchAgents/com.zkoppert.dotfiles-sync.plist"
+backup_dir="$HOME/Library/Application Support/dotfiles-sync"
+backup="$backup_dir/agent.$(date -u +%Y%m%dT%H%M%SZ).plist"
+test -f "$target"
+test ! -L "$target"
+test ! -e "$backup"
+plutil -lint "$repo/LaunchAgents/com.zkoppert.dotfiles-sync.plist"
+mkdir -p "$HOME/Library/Logs" "$backup_dir"
+cp -p "$target" "$backup"
+current="$HOME/Library/Application Support/dotfiles-sync/runtime/current"
+previous_runtime=""
+if [ -L "$current" ]; then previous_runtime="$(readlink "$current")"; fi
+launchctl bootout "gui/$(id -u)/com.zkoppert.dotfiles-sync"
+if /opt/homebrew/bin/python3 -I -S -B "$repo/scripts/dotfiles_sync.py" \
+     --repository "$repo" --branch main --install-runtime &&
+   cp -p "$repo/LaunchAgents/com.zkoppert.dotfiles-sync.plist" "$target" &&
+   launchctl bootstrap "gui/$(id -u)" "$target"; then
+  launchctl print "gui/$(id -u)/com.zkoppert.dotfiles-sync"
+else
+  if [ -n "$previous_runtime" ]; then ln -sfn "$previous_runtime" "$current"; fi
+  cp -p "$backup" "$target"
+  launchctl bootstrap "gui/$(id -u)" "$target"
+  exit 1
+fi
+)
+```
+
+Results are timestamped JSON lines in `~/Library/Logs/dotfiles-sync.log`. Repeated runs create no duplicate links. No packages, hooks, shell startup files, or unrelated agents are installed. Rerun the upgrade when the runner, metadata helper, or plist changes. Updating the checkout alone doesn't replace the trusted runtime or reload launchd configuration.
+
+Disable future runs without changing the checkout:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.zkoppert.dotfiles-sync"
+```
+
 ## How do I run Copilot in a durable Codespace session?
 
 Install dotfiles on the laptop and [configure the Codespace](#how-do-i-configure-copilot-tools-in-a-codespace). The laptop needs Python 3.9 or later, OpenSSH, and an authenticated GitHub CLI. Then run:
@@ -259,7 +451,7 @@ export PATH="$HOME/.local/bin:$PATH"
 bootstrap-copilot-mcp
 ```
 
-On Linux x86_64 and ARM64, the installer adds Node.js 22 when Node.js is missing or older. Installation requires `curl`, Python 3, and `tar` with xz support. Azure MCP requires Node.js 22 or later. The installer preserves existing files that are not symlinks in `~/.local/bin`; resolve any reported command conflicts before continuing.
+On Linux x86_64 and ARM64, the installer adds a supported Node.js 22 release when Node.js is missing or older than 22.19.0. Node setup runs before SDK-backed catalog validation. Installation requires `curl`, Python 3, and `tar` with xz support. Pi `1.3.0` requires Node.js `22.19.0` or later. The installer preserves existing files that are not symlinks in `~/.local/bin`; resolve any reported command conflicts before continuing.
 
 The Linux installer places a missing `1up` in `~/.local/bin`. This step requires Go and access to the private module.
 
@@ -281,7 +473,7 @@ Never copy `~/.copilot/mcp-config.json`, its backup files, `mcp-oauth-config`, s
 
 ## How do I update catalog tools?
 
-The install-once checks do not update existing catalog tools. Update a skill by name, using the `CATALOG_SKILLS` list in [the installer](install.sh) for other names:
+The install-once checks leave valid catalog skills unchanged. Only confirmed metadata errors trigger automatic reinstallation. Update a skill by name, using the `CATALOG_SKILLS` list in [the installer](install.sh) for other names:
 
 ```bash
 gh skill update validate-pr-with-codespace

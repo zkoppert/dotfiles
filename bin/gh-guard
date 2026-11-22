@@ -14,13 +14,13 @@
 #                                                >=3 models, clean convergence)
 #        - demo/before-after     demo.md         (>=120 bytes)
 #        - PR-description review pr-review.md    (>=120 bytes, >=3 models)
-#        - full test suite       tests.md        (>=120 bytes, HEAD-pinned,
+#        - relevant test checks  tests.md        (>=120 bytes, HEAD-pinned,
 #                                                machine-produced by run-tests)
 #      Write them with the bin/pr-marker helper. The code-review and tests
 #      markers are HEAD-pinned: they record the reviewed/tested commit and are
 #      rejected as STALE once HEAD moves past it, so late commits force a
 #      re-review and a re-run. The code-review marker must record a final clean
-#      convergence round from 1 through 5. The three review markers must also
+#      convergence round from 1 through 10. The three review markers must also
 #      declare >=3 distinct non-Gemini models in a reviewed-by-models header
 #      (pr-marker `--models a,b,c`), so a single-pass self-review or a prohibited
 #      Gemini reviewer cannot satisfy the gate. Additionally, the PR body is
@@ -35,9 +35,8 @@
 #      edits would otherwise bypass the `pr create` lint.
 #
 # Behavior:
-#   - In an interactive shell (TTY): prompt for confirmation before running.
-#   - In a non-interactive shell (e.g., an agent's bash tool): refuse unless
-#     the per-command confirmation condition is met.
+#   - Draft creation needs evidence, not human confirmation, in any shell.
+#   - Non-draft creation and readiness changes still require confirmation.
 #
 # Per-command confirmation:
 #   - `gh pr ready`:  set ZACK_CONFIRMED_PR_READY=1 in the same invocation.
@@ -46,17 +45,16 @@
 #   - `gh pr create`: write all five per-branch review/demo/tests markers under
 #       <git-dir>/copilot-pr-review/ (use `pr-marker write <kind> -`, and
 #       `pr-marker run-tests` for the tests marker)
-#     AND set ZACK_CONFIRMED_PR_CREATE=1 in the same invocation. `<git-dir>` is
+#     For non-draft creation, also confirm interactively or set
+#     ZACK_CONFIRMED_PR_CREATE=1 in the same invocation. `<git-dir>` is
 #     the per-checkout git directory as reported by `git rev-parse
 #     --absolute-git-dir`, so worktrees resolve to the per-worktree gitdir
 #     (e.g. `<main>/.git/worktrees/<name>/copilot-pr-review/`) rather than the
 #     gitlink file at `<worktree>/.git`. Each marker must meet its byte floor
 #     so a bare `touch` does not satisfy it - actual review/demo content has to
-#     land there before the PR can be opened. Both conditions are required
-#     when invoked inside a git checkout. If the wrapper cannot resolve the
-#     current repo or branch (e.g., `gh pr create` invoked outside a checkout
-#     or on detached HEAD), the env var alone is accepted as a fallback
-#     because no marker path can be derived.
+#     land there before the PR can be opened. Evidence is required in both
+#     interactive and non-interactive shells. If the checkout or branch cannot
+#     be resolved, strict publication is blocked because evidence cannot be checked.
 #
 # Known limitations (PATH-shim is a soft guard, not adversarial):
 #   - `gh api repos/.../pulls` and `gh api graphql` createPullRequest mutations
@@ -380,7 +378,7 @@ sys.stdout.buffer.write(b"\0".join(context[key].encode("utf-8") for key in ("rep
 fi
 
 # Native calls lint the verified file; legacy calls extract the body from
-# --body / --body-file flags. A failed lint blocks either calling subcommand.
+# --body / --body-file flags and their short aliases. A failed lint blocks either calling subcommand.
 # Only legacy calls may skip lint when no body flag is present (e.g., an edit
 # that only changes labels, or a create that opens the editor).
 #
@@ -405,7 +403,8 @@ lint_pr_body_or_die() {
     body_source="verified --body-file $native_body_file"
   else
     for arg in "$@"; do
-      case "$prev_arg" in
+      if [ -n "$prev_arg" ]; then
+        case "$prev_arg" in
         --body)
           body_content="$arg"
           body_source="--body"
@@ -420,14 +419,31 @@ lint_pr_body_or_die() {
             body_skip_reason="--body-file $arg (file not found)"
           fi
           ;;
-      esac
+        esac
+        prev_arg=""
+        continue
+      fi
       case "$arg" in
+        --body|-b) prev_arg="--body" ;;
+        --body-file|-F) prev_arg="--body-file" ;;
+        -a|--assignee|--attach|-B|--base|-H|--head|-l|--label|-m|--milestone|-p|--project|--recover|-r|--reviewer|-R|--repo|-T|--template|-t|--title|--hostname|--token|--add-assignee|--remove-assignee|--add-label|--remove-label|--add-project|--remove-project|--add-reviewer|--remove-reviewer)
+          prev_arg="ignore"
+          ;;
         --body=*)
           body_content="${arg#--body=}"
           body_source="--body="
           ;;
-        --body-file=*)
+        -b?*)
+          body_content="${arg#-b}"
+          body_content="${body_content#=}"
+          body_source="-b"
+          ;;
+        --body-file=*|-F?*)
           path="${arg#--body-file=}"
+          if [[ "$arg" == -F* ]]; then
+            path="${arg#-F}"
+            path="${path#=}"
+          fi
           if [ "$path" = "-" ]; then
             body_skip_reason="--body-file=- (stdin; cannot safely re-read)"
           elif [ -f "$path" ]; then
@@ -438,7 +454,6 @@ lint_pr_body_or_die() {
           fi
           ;;
       esac
-      prev_arg="$arg"
     done
   fi
 
@@ -449,28 +464,23 @@ lint_pr_body_or_die() {
     # to block references to private/internal repos in the PR body.
     local visibility_flag=""
     local target_repo=""
-    # Try -R/--repo flag first
-    local prev=""
-    for arg in "$@"; do
-      case "$prev" in
-        -R|--repo) target_repo="$arg" ;;
-      esac
-      case "$arg" in
-        --repo=*) target_repo="${arg#--repo=}" ;;
-        -R=*) target_repo="${arg#-R=}" ;;
-      esac
-      prev="$arg"
-    done
-    # Native targets come from the verified binding, not option-looking values.
     if [ "$native_publication" = "1" ]; then
       target_repo="$native_repository"
-    elif [ -z "$target_repo" ] && git rev-parse --show-toplevel >/dev/null 2>&1; then
-      target_repo="$("$REAL_GH" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || true)"
+    else
+      local lint_context
+      lint_context="$(python3 "$SELF_REAL_PATH/repo-guards" gh-context -- "$@")"
+      target_repo="${lint_context#*$'\t'}"
+      target_repo="${target_repo%$'\t'*}"
+      target_repo="${target_repo#github.com/}"
+      if [ -z "$target_repo" ]; then
+        echo 'gh-guard: cannot resolve PR target for body visibility; refusing publication.' >&2
+        exit 1
+      fi
     fi
     if [ -n "$target_repo" ]; then
       local repo_vis=""
       local visibility_args=(api "repos/$target_repo" --jq .visibility)
-      if [ "$native_publication" = "1" ]; then
+      if [[ "$target_repo" == */*/* ]] || [ "$native_publication" = "1" ]; then
         visibility_args=(repo view --json visibility --jq '.visibility | ascii_downcase' -- "$target_repo")
       fi
       if repo_vis="$("$REAL_GH" "${visibility_args[@]}" 2>/dev/null)"; then
@@ -524,6 +534,46 @@ if [ "$native_publication" = "1" ]; then
     exit 1
   fi
   exec "$REAL_GH" "$@"
+fi
+
+confirm_non_draft_create() {
+  [ "${policy_context##*$'\t'}" = "1" ] && return 0
+  if [ -t 0 ] && [ -t 1 ]; then
+    printf "Open a non-draft PR? [y/N] " >&2
+    read -r ans
+    case "$ans" in
+      y|Y|yes|YES|Yes) return 0 ;;
+      *) echo "Aborted." >&2; exit 1 ;;
+    esac
+  fi
+  if [ "${ZACK_CONFIRMED_PR_CREATE:-}" != "1" ]; then
+    echo 'gh-guard: non-draft creation requires approval and ZACK_CONFIRMED_PR_CREATE=1; use --draft for automatic creation.' >&2
+    exit 1
+  fi
+}
+
+# Native proof above always takes precedence over user quality profiles.
+if [ "$is_pr_create" = "1" ]; then
+  policy_context="$(python3 "$SELF_REAL_PATH/repo-guards" gh-context -- "$@")"
+  quality_profile="${policy_context%%$'\t'*}"
+  case "$quality_profile" in
+    relaxed|standard)
+      lint_pr_body_or_die "gh pr create" "$@"
+      if [ "$quality_profile" = "standard" ] && [ "${policy_context##*$'\t'}" != "1" ]; then
+        echo 'gh-guard: standard requires --draft when creating a PR.' >&2
+        exit 1
+      fi
+      if ! "$SELF_REAL_PATH/pr-marker" check --gh-args "$@"; then
+        echo "gh-guard: $quality_profile marker requirements are not satisfied." >&2
+        exit 1
+      fi
+      confirm_non_draft_create
+      echo "gh-guard: quality profile $quality_profile" >&2
+      exec "$REAL_GH" "$@"
+      ;;
+    strict) ;;
+    *) echo 'gh-guard: invalid quality policy result.' >&2; exit 1 ;;
+  esac
 fi
 
 # Minimum accepted size (bytes) for each PR-readiness marker. These MUST match
@@ -735,9 +785,7 @@ if [ "$is_pr_create" = "1" ]; then
   # them. The lint runs for both TTY and non-TTY paths -- the rule is hard.
   lint_pr_body_or_die "gh pr create" "$@"
 
-  # Try to resolve the current repo and branch so we can check the per-branch
-  # review marker. If either lookup fails, the marker check is skipped and we
-  # fall back to the env var alone.
+  # Strict publication cannot substitute confirmation for missing evidence.
   repo_root=""
   branch=""
   git_dir=""
@@ -746,7 +794,7 @@ if [ "$is_pr_create" = "1" ]; then
     # Use symbolic-ref (not rev-parse --abbrev-ref) so the branch name matches
     # what bin/pr-marker resolves; the two must agree or a marker written by
     # pr-marker lands where the gate does not look. On a detached HEAD this
-    # exits non-zero and leaves branch empty, so in_repo stays 0 (env-var path).
+    # exits non-zero and leaves branch empty, which blocks strict publication.
     branch="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
     # --absolute-git-dir returns the per-worktree gitdir, so this works for
     # both plain checkouts (`<repo>/.git`) and worktrees (where `<repo>/.git`
@@ -770,56 +818,29 @@ if [ "$is_pr_create" = "1" ]; then
 
     # Start optimistic; any failing eval_marker clears the flag. All five must
     # pass, so their order here is cosmetic (shown in workflow order). This block
-    # runs before the TTY/non-TTY split, so it feeds both the soft prompt and the
-    # non-TTY hard gate.
+    # applies in both interactive and non-interactive shells.
     marker_all_ok=1
     eval_marker "plan review"          "$marker_base/plan.md"        "$PLAN_MIN_BYTES"        0 1 0 0
     eval_marker "code review"          "$marker_base/code-review.md" "$CODE_REVIEW_MIN_BYTES" 1 1 0 1
     eval_marker "demo/before-after"    "$marker_base/demo.md"        "$DEMO_MIN_BYTES"        0 0 0 0
     eval_marker "PR-description review" "$marker_base/pr-review.md"  "$PR_REVIEW_MIN_BYTES"   0 1 0 0
-    eval_marker "full test suite"      "$marker_base/tests.md"       "$TESTS_MIN_BYTES"       1 0 1 0
+    eval_marker "relevant test checks" "$marker_base/tests.md"       "$TESTS_MIN_BYTES"       1 0 1 0
   fi
 
-  if [ -t 0 ] && [ -t 1 ]; then
-    echo "About to run: gh $*" >&2
-    if [ "$marker_all_ok" = "1" ]; then
-      echo "All five PR-readiness markers present (plan, code, demo, PR-description, tests)." >&2
-    else
-      echo "Missing PR-readiness markers (Zack's staged change workflow):" >&2
-      printf '%s' "$status_lines" >&2
-      echo "Run the plan review, code review, demo/before-after capture, PR-description review, and the full test suite (pr-marker run-tests), then write each with pr-marker." >&2
-    fi
-    printf "Continue? [y/N] " >&2
-    read -r ans
-    case "$ans" in
-      y|Y|yes|YES|Yes) ;;
-      *) echo "Aborted." >&2; exit 1 ;;
-    esac
-  else
-    pass=0
-    if [ "$in_repo" = "1" ]; then
-      # Inside a resolvable repo: require ALL five markers and the env var.
-      if [ "$marker_all_ok" = "1" ] && [ "${ZACK_CONFIRMED_PR_CREATE:-}" = "1" ]; then
-        pass=1
-      fi
-    else
-      # Outside a resolvable repo (no checkout, detached HEAD): no marker path
-      # can be derived, so the env var alone is the only available signal.
-      if [ "${ZACK_CONFIRMED_PR_CREATE:-}" = "1" ]; then
-        pass=1
-      fi
-    fi
+  if [ "$in_repo" != "1" ]; then
+    echo 'gh-guard: strict publication requires a checkout and attached branch for marker evidence.' >&2
+    exit 1
+  fi
 
-    if [ "$pass" = "0" ]; then
-      if [ "$in_repo" = "1" ]; then
-        cat >&2 <<EOF
+  if [ "$marker_all_ok" != "1" ]; then
+    cat >&2 <<EOF
 gh-guard: \`gh pr create\` blocked.
 
 Reason: Zack's staged change workflow requires five artifacts before a PR is
 opened: a multi-model review of the PLAN, a multi-model review of the CODE, a
 demo + before/after capture (or an explicit N/A justification), a multi-model
-review of the PR DESCRIPTION, and a full CI-equivalent test run (tests, lint,
-type-check, build) passing green in a Codespace. Each is a marker file under
+review of the PR DESCRIPTION, and change-relevant checks (tests and applicable
+lint, type-check, build targets) passing in a Codespace. Each is a marker file under
 $git_dir/copilot-pr-review/.
 
 Marker status this invocation:
@@ -833,7 +854,7 @@ the correct per-branch path:
   <synthesized code review>        | pr-marker write code-review --models a,b,c --convergence-rounds N -
   <demo summary + image/video paths, or N/A justification> | pr-marker write demo -
   <synthesized PR-description review> | pr-marker write pr-review --models a,b,c -
-  pr-marker run-tests --cmd '<full test/lint/type/build command>' [--cmd ...]
+  pr-marker run-tests --cmd '<relevant test/lint/type/build command>' [--cmd ...]
 
 The plan, code-review, and PR-description markers each require a multi-model
 review: pass >=3 distinct models via --models (e.g. --models
@@ -841,7 +862,7 @@ opus-4.8,sonnet-4.6,gpt-5.5). A "1-MODEL" status above means the marker declares
 fewer than 3 models; re-run the review across different models and rewrite it.
 The code-review marker also requires --convergence-rounds N, where N identifies
 the final panel round that found no new verified findings. The standard workflow
-is capped at 5 rounds; values through 99 record explicitly authorized extra
+is capped at 10 rounds; values through 99 record explicitly authorized extra
 confirmation rounds.
 
 For the demo marker, use the record-demo skill (codespace + playwright,
@@ -853,39 +874,24 @@ The tests marker is machine-produced: \`pr-marker run-tests\` runs the check
 commands in a Codespace and writes it only if every command exits 0, so a bare
 touch or a self-reported note does not pass. A deliberate hand-forge of the
 header is out of scope: the gate guards against accidental shortcuts, not
-self-forgery. Slowness is never a reason to narrow the suite; only genuine
-infeasibility, recorded via --narrow.
+self-forgery. Selecting relevant targets and packages is the default, not a
+narrowing exception. Run repository-wide checks only for repository-wide impact
+or Zack's explicit request. Use --narrow to record relevant checks that could
+not run.
 
 A STALE code-review or tests marker means HEAD moved since it was written (the
 artifact never saw the shipping commits). Re-run it and rewrite so it re-pins to
 the current HEAD.
 
-Then set the explicit confirmation env var in the same invocation:
+Once all five markers pass, create the draft without a confirmation variable:
 
-  ZACK_CONFIRMED_PR_CREATE=1 gh pr create <args>
+  gh pr create --draft <args>
 
-Both all five markers AND the env var are required inside a git checkout.
-ZACK_CONFIRMED_PR_CREATE='${ZACK_CONFIRMED_PR_CREATE:-}'.
+Non-draft creation still requires explicit approval.
 EOF
-      else
-        cat >&2 <<EOF
-gh-guard: \`gh pr create\` blocked.
-
-Reason: Zack's staged change workflow requires plan review, code review,
-demo/before-after capture, PR-description review, and a full test-suite run
-before a PR is opened. This wrapper prevents skipping those steps from
-automation.
-
-You appear to be running outside a resolvable git checkout (no repo root or
-branch detectable; branch was '${branch:-}'). The marker-file checks are
-unavailable, so the only signal is the env var. Set it explicitly:
-
-  ZACK_CONFIRMED_PR_CREATE=1 gh pr create <args>
-EOF
-      fi
-      exit 1
-    fi
+    exit 1
   fi
+  confirm_non_draft_create
 fi
 
 # --- gh pr edit ----------------------------------------------------------

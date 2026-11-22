@@ -118,11 +118,22 @@ case "$1" in
   set-option)
     shift
     expand=0
-    if [ "$1" = -F ]; then expand=1; shift; fi
+    quiet=0
+    while true; do
+      case "$1" in
+        -F) expand=1; shift ;;
+        -q) quiet=1; shift ;;
+        *) break ;;
+      esac
+    done
     case "$1" in
       -s|-as)
         case "$2 $3" in
-          "extended-keys on"|"extended-keys-format csi-u"|"terminal-features ,xterm*:extkeys"|"set-clipboard on") exit 0 ;;
+          "extended-keys-format csi-u")
+            [ "${FAKE_TMUX_EXTENDED_KEYS_FORMAT_UNSUPPORTED:-0}" = 1 ] && [ "$quiet" != 1 ] && exit 1
+            exit 0
+            ;;
+          "extended-keys on"|"terminal-features ,xterm*:extkeys"|"set-clipboard on") exit 0 ;;
           *) exit 90 ;;
         esac
         ;;
@@ -460,7 +471,7 @@ os.fsync = fsync
         self.assertIn("new-session -d -s review-one", calls)
         self.assertIn("exec copilot --allow-all", calls)
         self.assertIn("set-option -s extended-keys on", calls)
-        self.assertIn("set-option -s extended-keys-format csi-u", calls)
+        self.assertIn("set-option -q -s extended-keys-format csi-u", calls)
         self.assertIn("set-option -as terminal-features ,xterm*:extkeys", calls)
         self.assertIn("set-option -s set-clipboard on", calls)
         self.assertIn("set-option -t =review-one: mouse on", calls)
@@ -474,6 +485,19 @@ os.fsync = fsync
             "test-invocation",
         )
 
+    def test_unsupported_extended_keys_format_does_not_abort_creation(self) -> None:
+        self.env["FAKE_TMUX_EXTENDED_KEYS_FORMAT_UNSUPPORTED"] = "1"
+
+        result = self.run_helper("review-one")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.home / "tmux-session").is_file())
+        self.assertEqual(
+            self.read_state("review-one"),
+            {"identity": "test-invocation", "invocations": {"test-invocation": "test-invocation"}},
+        )
+        self.assertEqual((self.home / "tmux-origin").read_text(encoding="utf-8").strip(), "%0 1234")
+
     def test_real_tmux_enables_modified_keys_and_clipboard_copy(self) -> None:
         self.use_real_tmux()
 
@@ -481,9 +505,10 @@ os.fsync = fsync
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.tmux_output("show-options", "-sv", "extended-keys"), "on")
-        self.assertEqual(
-            self.tmux_output("show-options", "-sv", "extended-keys-format"), "csi-u"
+        extended_keys_format = self.tmux_output(
+            "show-options", "-qsv", "extended-keys-format"
         )
+        self.assertIn(extended_keys_format, ("", "csi-u"))
         self.assertEqual(self.tmux_output("show-options", "-sv", "set-clipboard"), "on")
         self.assertEqual(
             self.tmux_output("show-options", "-v", "-t", "=review-one:", "mouse"),

@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
+import shlex
+import shutil
 import stat
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -14,6 +18,42 @@ from pathlib import Path
 
 class CopilotEnvironmentTest(unittest.TestCase):
     """Exercise MCP bootstrap and environment verification safely."""
+
+    DISCOVERY_ROOTS = {"Copilot": ".copilot/skills", "Pi": ".agents/skills"}
+    REPOSITORY_SKILLS = (
+        "actions-security",
+        "code-review-workflow",
+        "engineering-practices",
+        "feature-flag-rollout",
+        "github-operations",
+        "memory-sweep",
+        "nux-fr-handoff",
+        "open-source-actions-maintenance",
+        "playwright",
+        "pr-body-render-check",
+        "proxima-review-lab",
+        "pull-request-workflow",
+        "record-demo",
+        "spreadsheet-report-generation",
+        "subagent-monitor",
+        "test-quality",
+        "treehouse-workflow",
+        "triage-dependabot",
+        "triage-notifications",
+        "ui-screenshot-presentation",
+        "validate-style",
+    )
+    CATALOG_SKILLS = (
+        "cleanup-worktrees",
+        "gh-axi",
+        "graphql-availability-investigator",
+        "milestone-release-tracking",
+        "prod-explain",
+        "remediate-accessibility-audit",
+        "session-portability",
+        "validate-pr-with-codespace",
+    )
+    EXPECTED_SKILLS = REPOSITORY_SKILLS + CATALOG_SKILLS
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -196,43 +236,27 @@ class CopilotEnvironmentTest(unittest.TestCase):
         self.assertFalse((self.home / ".copilot" / "mcp-config.json").exists())
 
     def prepare_complete_environment(self) -> dict[str, str]:
-        required_skills = {
-            "actions-security",
-            "cleanup-worktrees",
-            "feature-flag-rollout",
-            "gh-axi",
-            "graphql-availability-investigator",
-            "memory-sweep",
-            "milestone-release-tracking",
-            "nux-fr-handoff",
-            "pr-body-render-check",
-            "prod-explain",
-            "record-demo",
-            "remediate-accessibility-audit",
-            "session-portability",
-            "test-quality",
-            "triage-dependabot",
-            "triage-notifications",
-            "validate-pr-with-codespace",
-            "validate-style",
-        }
-        skills_dir = self.home / ".copilot" / "skills"
-        for skill in required_skills:
-            (skills_dir / skill).mkdir(parents=True)
-            (skills_dir / skill / "SKILL.md").write_text(
-                f"---\nname: {skill}\ndescription: Test skill\n---\n# {skill}\n",
-                encoding="utf-8",
-            )
-        test_quality = skills_dir / "test-quality"
-        for child in test_quality.iterdir():
-            child.unlink()
-        test_quality.rmdir()
-        test_quality.symlink_to(
-            Path(__file__).resolve().parent
-            / ".copilot"
-            / "skills"
-            / "test-quality"
-        )
+        source_root = Path(__file__).resolve().parent
+        for client, relative_path in self.DISCOVERY_ROOTS.items():
+            skills_dir = self.home / relative_path
+            skills_dir.mkdir(parents=True)
+            for name in self.EXPECTED_SKILLS:
+                skill = skills_dir / name
+                if name in self.REPOSITORY_SKILLS:
+                    skill.symlink_to(source_root / ".copilot" / "skills" / name)
+                elif client == "Pi":
+                    skill.symlink_to(self.home / ".copilot" / "skills" / name)
+                else:
+                    skill.mkdir()
+                    (skill / "SKILL.md").write_text(
+                        "---\ndescription: Test skill\nmetadata:\n"
+                        f"  github-path: skills/{name}\n"
+                        "  github-ref: refs/heads/main\n"
+                        "  github-repo: https://example.invalid/catalog\n"
+                        "  hermes:\n    tags: [git, automation]\n"
+                        f"name: {name}\n---\n# {name}\n",
+                        encoding="utf-8",
+                    )
 
         remote_command = self.bin_dir / "copilot-codespace-session"
         remote_command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -240,12 +264,10 @@ class CopilotEnvironmentTest(unittest.TestCase):
         remote_helper = self.home / ".local" / "bin" / "copilot-codespace-session"
         remote_helper.parent.mkdir(parents=True)
         remote_helper.symlink_to(remote_command)
-        instructions = self.home / ".copilot" / "copilot-instructions.md"
-        instructions.symlink_to(
-            Path(__file__).resolve().parent
-            / ".github"
-            / "copilot-instructions.md"
-        )
+        for relative_path in (".copilot/copilot-instructions.md", ".pi/agent/AGENTS.md"):
+            instructions = self.home / relative_path
+            instructions.parent.mkdir(parents=True, exist_ok=True)
+            instructions.symlink_to(source_root / ".github" / "copilot-instructions.md")
         gh_guard = Path(__file__).resolve().parent / "bin" / "gh-guard"
         (remote_helper.parent / "gh").symlink_to(gh_guard)
         pr_marker = Path(__file__).resolve().parent / "bin" / "pr-marker"
@@ -315,12 +337,32 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 else:
                     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             path.chmod(0o755)
+        self.pi_package = self.root / "npm" / "lib" / "node_modules" / "@earendil-works" / "pi-coding-agent"
+        (self.pi_package / "dist" / "bundle").mkdir(parents=True)
+        (self.pi_package / "package.json").write_text(json.dumps({
+            "name": "@earendil-works/pi-coding-agent", "type": "module", "main": "./dist/index.js",
+        }), encoding="utf-8")
+        (self.pi_package / "dist" / "index.js").write_text("export {};\n", encoding="utf-8")
+        cli = self.pi_package / "dist" / "bundle" / "cli.js"
+        cli.write_text("#!/bin/sh\nprintf 'fixture-pi\\n'\n", encoding="utf-8")
+        cli.chmod(0o755)
+        (self.bin_dir / "pi").symlink_to(cli)
         node = self.bin_dir / "node"
         node.write_text(
             "#!/bin/sh\n"
-            '[ "$#" -eq 1 ] && [ "$1" = --version ] || exit 2\n'
-            'printf \'%s\\n\' "$FAKE_NODE_VERSION"\n'
-            'exit "$FAKE_NODE_EXIT"\n',
+            'if [ "$#" -eq 1 ] && [ "$1" = --version ]; then\n'
+            '  printf \'%s\\n\' "$FAKE_NODE_VERSION"\n'
+            '  exit "$FAKE_NODE_EXIT"\n'
+            'fi\n'
+            ': > "$HOME/node-sdk-used"\n'
+            'if [ -n "$REAL_NODE" ]; then exec "$REAL_NODE" "$@"; fi\n'
+            '[ "$1" = --input-type=module ] || exit 2\n'
+            'if [ "$#" -eq 4 ]; then\n'
+            f"  exec {shlex.quote(sys.executable)} -c 'import json, sys; "
+            "print(json.dumps({path: [] for path in json.load(sys.stdin)}))'\n"
+            'fi\n'
+            'printf \'%s\\n\' "$FAKE_PI_SKILLS_JSON"\n'
+            'exit "${FAKE_PI_STATUS:-0}"\n',
             encoding="utf-8",
         )
         node.chmod(0o755)
@@ -335,6 +377,8 @@ class CopilotEnvironmentTest(unittest.TestCase):
         copilot.chmod(0o755)
 
         env = dict(os.environ)
+        for name in ("PI_CODING_AGENT_DIR", "PI_REAL_PI", "REAL_NODE", "FAKE_PI_STATUS"):
+            env.pop(name, None)
         env.update(
             {
                 "HOME": str(self.home),
@@ -346,8 +390,16 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 "COPILOT_SKILL_CATALOG_REPO": "private/catalog",
                 "COPILOT_MCP_SPLUNK_BEARER_TOKEN": "not-printed",
                 "COPILOT_MCP_SPLUNK_HOST": "internal.example",
-                "FAKE_NODE_VERSION": "v22.0.0",
+                "FAKE_NODE_VERSION": "v22.19.0",
                 "FAKE_NODE_EXIT": "0",
+                "FAKE_PI_SKILLS_JSON": json.dumps([
+                    {
+                        "name": name,
+                        "filePath": str(self.home / ".agents" / "skills" / name / "SKILL.md"),
+                        "disableModelInvocation": False,
+                    }
+                    for name in self.EXPECTED_SKILLS
+                ]),
                 "FAKE_PLUGINS_JSON": json.dumps(
                     [{"name": "gho11y", "version": "1.0.0", "enabled": True}]
                 ),
@@ -356,9 +408,105 @@ class CopilotEnvironmentTest(unittest.TestCase):
         )
         return env
 
+    def use_real_pi_sdk(self, env: dict[str, str]) -> None:
+        if shutil.which("pi") is None or shutil.which("node") is None:
+            self.fail("Pi and Node.js are required for SDK discovery regressions")
+        sdk = runpy.run_path(str(self.verifier))["pi_sdk_path"]()
+        env["REAL_NODE"] = shutil.which("node")
+        (self.pi_package / "dist" / "index.js").write_text(
+            f"export {{ DefaultResourceLoader, SettingsManager, parseFrontmatter }} from {json.dumps(sdk.as_uri())};\n",
+            encoding="utf-8",
+        )
+
+    def use_homebrew_pi_layout(self) -> None:
+        formula = self.root / "Cellar" / "pi-coding-agent" / "1.3.0"
+        package = formula / "libexec" / "lib" / "node_modules" / "@earendil-works" / "pi-coding-agent"
+        package.parent.mkdir(parents=True)
+        self.pi_package.rename(package)
+        self.pi_package = package
+        (formula / "libexec" / "bin").mkdir()
+        (formula / "libexec" / "bin" / "pi").symlink_to(package / "dist" / "bundle" / "cli.js")
+        launcher = formula / "bin" / "pi"
+        launcher.parent.mkdir()
+        launcher.write_text(
+            f'#!/bin/bash\nPI_SKIP_VERSION_CHECK="1" exec "{formula}/libexec/bin/pi" "$@"\n',
+            encoding="utf-8",
+        )
+        launcher.chmod(0o755)
+        (self.bin_dir / "pi").unlink()
+        (self.bin_dir / "pi").symlink_to(launcher)
+
+    def test_verifier_requires_pi_and_a_working_sdk(self) -> None:
+        env = self.prepare_complete_environment()
+        (self.bin_dir / "python3").symlink_to(sys.executable)
+        for command in ("dirname", "readlink"):
+            executable = shutil.which(command)
+            self.assertIsNotNone(executable, f"{command} is required by the gh wrapper fixture")
+            (self.bin_dir / command).symlink_to(executable)
+        env["PATH"] = f"{self.home / '.local' / 'bin'}{os.pathsep}{self.bin_dir}"
+        executable = self.bin_dir / "pi"
+        target = executable.readlink()
+        executable.unlink()
+
+        missing = subprocess.run([str(self.verifier)], env=env, capture_output=True, text=True, check=False)
+
+        self.assertEqual(missing.returncode, 1, missing.stdout + missing.stderr)
+        self.assertIn("Pi executable is missing from PATH", missing.stdout)
+        self.assertNotIn("environment is ready", missing.stdout)
+        executable.symlink_to(target)
+        (self.pi_package / "dist" / "index.js").unlink()
+
+        missing_sdk = subprocess.run([str(self.verifier)], env=env, capture_output=True, text=True, check=False)
+
+        self.assertEqual(missing_sdk.returncode, 1, missing_sdk.stdout + missing_sdk.stderr)
+        self.assertIn("cannot locate the installed Pi SDK", missing_sdk.stdout)
+        self.assertNotIn("environment is ready", missing_sdk.stdout)
+
+    def test_verifier_rejects_unavailable_or_invalid_sdk_inventory(self) -> None:
+        env = self.prepare_complete_environment()
+        for inventory, status in (("[]", "0"), ("{}", "0"), ("not JSON", "0"), (env["FAKE_PI_SKILLS_JSON"], "1")):
+            with self.subTest(inventory=inventory, status=status):
+                env.update(FAKE_PI_SKILLS_JSON=inventory, FAKE_PI_STATUS=status)
+
+                result = subprocess.run([str(self.verifier)], env=env, capture_output=True, text=True, check=False)
+
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("environment is ready", result.stdout)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_real_sdk_resolves_npm_and_homebrew_behind_treehouse(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        shim = self.home / ".local" / "bin" / "pi"
+        shim.symlink_to(self.verifier.with_name("pi-treehouse"))
+        for layout in ("npm", "homebrew"):
+            if layout == "homebrew":
+                self.use_homebrew_pi_layout()
+            for explicit in (False, True):
+                with self.subTest(layout=layout, explicit=explicit):
+                    if explicit:
+                        env["PI_REAL_PI"] = str(self.bin_dir / "pi")
+                    else:
+                        env.pop("PI_REAL_PI", None)
+
+                    launched = subprocess.run(
+                        [str(shim), "--version"], env=env, capture_output=True, text=True, check=False,
+                    )
+                    result = subprocess.run([str(self.verifier)], env=env, capture_output=True, text=True, check=False)
+
+                    self.assertEqual(launched.returncode, 0, launched.stderr)
+                    self.assertEqual(launched.stdout, "fixture-pi\n")
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(f"Pi effective skills: {len(self.EXPECTED_SKILLS)}", result.stdout)
+                    self.assertIn("environment is ready", result.stdout)
+        env["PI_REAL_PI"] = str(self.root / "missing-pi")
+        unavailable = subprocess.run([str(self.verifier)], env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(unavailable.returncode, 1, unavailable.stdout + unavailable.stderr)
+        self.assertIn("Pi executable behind the Treehouse wrapper is unavailable", unavailable.stdout)
+
     def test_verifier_reports_complete_environment(self) -> None:
         env = self.prepare_complete_environment()
-        for version in ("v22.0.0", "v23.0.0", "v24.1.0"):
+        for version in ("v22.19.0", "v22.19.1", "v22.20.0", "v23.0.0", "v24.1.0"):
             with self.subTest(version=version):
                 env["FAKE_NODE_VERSION"] = version
 
@@ -372,6 +520,11 @@ class CopilotEnvironmentTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("environment is ready", result.stdout)
+                for client in self.DISCOVERY_ROOTS:
+                    self.assertIn(
+                        f"{client} installed skills: {len(self.EXPECTED_SKILLS)}",
+                        result.stdout,
+                    )
                 self.assertNotIn("not-printed", result.stdout)
                 self.assertNotIn("internal.example", result.stdout)
 
@@ -492,7 +645,7 @@ class CopilotEnvironmentTest(unittest.TestCase):
 
     def test_verifier_rejects_unsupported_node_versions(self) -> None:
         env = self.prepare_complete_environment()
-        for version in ("v20.19.0", "v21.7.3"):
+        for version in ("v20.19.0", "v21.7.3", "v22.0.0", "v22.18.0", "v22.18.12"):
             with self.subTest(version=version):
                 env["FAKE_NODE_VERSION"] = version
 
@@ -505,16 +658,16 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn(
-                    f"Node.js 22 or later is required (found {version})",
-                    result.stdout,
-                )
+                error = f"Node.js 22.19.0 or later is required (found {version})"
+                self.assertIn(f"cannot validate installed skill metadata: {error}", result.stdout)
+                self.assertIn(f"cannot verify Pi effective skills: {error}", result.stdout)
+                self.assertFalse((self.home / "node-sdk-used").exists())
                 self.assertNotIn("environment is ready", result.stdout)
                 self.assertNotIn("Traceback", result.stderr)
 
     def test_verifier_reports_unverifiable_node_versions(self) -> None:
         env = self.prepare_complete_environment()
-        for version, status in (("", 0), ("invalid", 0), ("v22.0.0", 1)):
+        for version, status in (("", 0), ("invalid", 0), ("v22.19.0-rc.1", 0), ("v22.19.0", 1)):
             with self.subTest(version=version, status=status):
                 env["FAKE_NODE_VERSION"] = version
                 env["FAKE_NODE_EXIT"] = str(status)
@@ -528,8 +681,10 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn("cannot verify Node.js version", result.stdout)
-                self.assertIn("install Node.js 22 or later", result.stdout)
+                error = "cannot verify Node.js version; install Node.js 22.19.0 or later"
+                self.assertIn(f"cannot validate installed skill metadata: {error}", result.stdout)
+                self.assertIn(f"cannot verify Pi effective skills: {error}", result.stdout)
+                self.assertFalse((self.home / "node-sdk-used").exists())
                 self.assertNotIn("environment is ready", result.stdout)
                 self.assertNotIn("Traceback", result.stderr)
 
@@ -569,37 +724,42 @@ class CopilotEnvironmentTest(unittest.TestCase):
 
     def test_verifier_requires_instructions_from_the_dotfiles_checkout(self) -> None:
         env = self.prepare_complete_environment()
-        instructions = self.home / ".copilot" / "copilot-instructions.md"
+        for client, relative_path in (
+            ("Copilot", ".copilot/copilot-instructions.md"),
+            ("Pi", ".pi/agent/AGENTS.md"),
+        ):
+            with self.subTest(client=client):
+                instructions = self.home / relative_path
+                source = instructions.readlink()
+                instructions.unlink()
+                instructions.write_text("# stale instructions\n", encoding="utf-8")
+                try:
+                    result = subprocess.run(
+                        [str(self.verifier)],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
 
-        instructions.unlink()
-        instructions.write_text("# stale instructions\n", encoding="utf-8")
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(
+                        f"{client} instructions do not resolve to the dotfiles checkout",
+                        result.stdout,
+                    )
+                    self.assertNotIn("environment is ready", result.stdout)
+                finally:
+                    instructions.unlink()
+                    instructions.symlink_to(source)
 
-        result = subprocess.run(
-            [str(self.verifier)],
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn(
-            "Copilot instructions do not resolve to the dotfiles checkout",
-            result.stdout,
-        )
-        self.assertNotIn("environment is ready", result.stdout)
-
-    def test_verifier_rejects_skills_without_skill_files(self) -> None:
+    def test_verifier_requires_ui_screenshot_presentation(self) -> None:
         env = self.prepare_complete_environment()
-        skill = self.home / ".copilot" / "skills" / "gh-axi"
-        (skill / "SKILL.md").unlink()
-        for condition in ("empty directory", "broken symlink", "directory artifact"):
+        skill = self.home / ".copilot" / "skills" / "ui-screenshot-presentation"
+        skill.unlink()
+        for condition in ("missing", "empty directory"):
             with self.subTest(condition=condition):
-                if condition == "broken symlink":
-                    skill.rmdir()
-                    skill.symlink_to(self.root / "missing-skill")
-                elif condition == "directory artifact":
-                    (skill / "SKILL.md").mkdir()
+                if condition == "empty directory":
+                    skill.mkdir()
 
                 result = subprocess.run(
                     [str(self.verifier)],
@@ -610,37 +770,560 @@ class CopilotEnvironmentTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn("missing skills: gh-axi", result.stdout)
+                self.assertIn(
+                    "  - Copilot missing skills: ui-screenshot-presentation",
+                    result.stdout.splitlines(),
+                )
                 self.assertNotIn("environment is ready", result.stdout)
-                if skill.is_symlink():
-                    skill.unlink()
-                    skill.mkdir()
 
-    def test_verifier_requires_test_quality_from_the_dotfiles_checkout(self) -> None:
+    def test_verifier_rejects_pi_context_overrides_without_mutation(self) -> None:
         env = self.prepare_complete_environment()
-        skill = self.home / ".copilot" / "skills" / "test-quality"
+        agent_dir = self.home / ".pi" / "agent"
+        instructions = agent_dir / "AGENTS.md"
+        original_link = instructions.readlink()
+        override = agent_dir / "AGENTS.override.md"
+        owned = self.root / "owned-override.md"
+        owned.write_text("Keep my custom instructions.\n", encoding="utf-8")
+        for kind in ("empty file", "stale file", "symlink"):
+            with self.subTest(kind=kind):
+                if kind == "symlink":
+                    override.symlink_to(owned)
+                else:
+                    override.write_text("" if kind == "empty file" else "Old guidance.\n", encoding="utf-8")
+                before = override.read_bytes()
+                try:
+                    result = subprocess.run(
+                        [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+                    )
 
-        skill.unlink()
-        skill.mkdir()
-        (skill / "SKILL.md").write_text(
-            "---\nname: test-quality\n---\n",
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(f"Pi instructions do not resolve to the dotfiles checkout: {override}", result.stdout)
+                    self.assertNotIn("environment is ready", result.stdout)
+                    self.assertEqual(override.read_bytes(), before)
+                    self.assertEqual(instructions.readlink(), original_link)
+                    if kind == "symlink":
+                        self.assertEqual(override.readlink(), owned)
+                finally:
+                    override.unlink()
+        self.assertEqual(owned.read_text(encoding="utf-8"), "Keep my custom instructions.\n")
+
+    def test_verifier_uses_the_first_available_pi_context_file(self) -> None:
+        env = self.prepare_complete_environment()
+        agent_dir = self.home / ".pi" / "agent"
+        primary = agent_dir / "AGENTS.md"
+        source = primary.readlink()
+        primary.unlink()
+        for filename in ("AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"):
+            with self.subTest(filename=filename):
+                candidate = agent_dir / filename
+                candidate.symlink_to(source)
+                if filename == "AGENTS.override.md":
+                    primary.write_text("Unused old guidance.\n", encoding="utf-8")
+                try:
+                    result = subprocess.run(
+                        [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("environment is ready", result.stdout)
+                    self.assertEqual(candidate.readlink(), source)
+                    if filename == "AGENTS.override.md":
+                        self.assertEqual(primary.read_text(encoding="utf-8"), "Unused old guidance.\n")
+                finally:
+                    candidate.unlink()
+                    if filename == "AGENTS.override.md":
+                        primary.unlink()
+
+    def test_verifier_ignores_non_file_pi_overrides(self) -> None:
+        env = self.prepare_complete_environment()
+        override = self.home / ".pi" / "agent" / "AGENTS.override.md"
+        for kind in ("directory", "broken symlink"):
+            with self.subTest(kind=kind):
+                if kind == "directory":
+                    override.mkdir()
+                else:
+                    override.symlink_to(self.root / "missing-override")
+                try:
+                    result = subprocess.run(
+                        [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("environment is ready", result.stdout)
+                    if kind == "directory":
+                        self.assertTrue(override.is_dir())
+                    else:
+                        self.assertEqual(override.readlink(), self.root / "missing-override")
+                finally:
+                    if override.is_symlink():
+                        override.unlink()
+                    else:
+                        override.rmdir()
+
+    def test_verifier_rejects_native_pi_skill_name_collisions(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        native = self.home / ".pi" / "agent" / "skills" / "renamed"
+        native.mkdir(parents=True)
+        skill = native / "SKILL.md"
+        content = b"---\nname: gh-axi\ndescription: Older native skill\n---\n# Old guidance\n"
+        skill.write_bytes(content)
+
+        result = subprocess.run(
+            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"Pi gh-axi resolves to unexpected skill: {skill}", result.stdout)
+        self.assertNotIn("environment is ready", result.stdout)
+        self.assertEqual(skill.read_bytes(), content)
+
+    def test_verifier_accepts_unrelated_native_pi_skills(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        native = self.home / ".pi" / "agent" / "skills" / "personal-helper"
+        native.mkdir(parents=True)
+        (native / "SKILL.md").write_text(
+            "---\nname: personal-helper\ndescription: Personal helper\n---\n# Helper\n",
             encoding="utf-8",
         )
 
         result = subprocess.run(
-            [str(self.verifier)],
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
+            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
         )
 
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn(
-            "test-quality does not resolve to the dotfiles checkout",
-            result.stdout,
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("environment is ready", result.stdout)
+
+    def test_verifier_checks_the_configured_pi_agent_directory(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        default = self.home / ".pi" / "agent"
+        source = (default / "AGENTS.md").readlink()
+        (default / "AGENTS.override.md").write_text("Unused default override.\n", encoding="utf-8")
+        (default / "skills").mkdir()
+        (default / "skills" / "SKILL.md").write_text("Unused default skill.\n", encoding="utf-8")
+        active = self.home / "custom-agent"
+        active.mkdir()
+        env["PI_CODING_AGENT_DIR"] = "~/custom-agent"
+
+        missing = subprocess.run(
+            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
         )
-        self.assertNotIn("environment is ready", result.stdout)
+
+        self.assertEqual(missing.returncode, 1, missing.stdout + missing.stderr)
+        self.assertIn(f"Pi instructions do not resolve to the dotfiles checkout: {active / 'AGENTS.md'}", missing.stdout)
+
+        (active / "AGENTS.md").symlink_to(source)
+        for setting in (str(active), "~/custom-agent"):
+            with self.subTest(setting=setting):
+                env["PI_CODING_AGENT_DIR"] = setting
+                complete = subprocess.run(
+                    [str(self.verifier)], cwd=self.home, env=env, capture_output=True, text=True, check=False,
+                )
+
+                self.assertEqual(complete.returncode, 0, complete.stdout + complete.stderr)
+        env["PI_CODING_AGENT_DIR"] = "relative-agent"
+        relative = subprocess.run(
+            [str(self.verifier)], cwd=self.home, env=env, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(relative.returncode, 1, relative.stdout + relative.stderr)
+        self.assertIn("PI_CODING_AGENT_DIR must be absolute or start with ~/", relative.stdout)
+
+        env["PI_CODING_AGENT_DIR"] = "~/custom-agent"
+        for relative_path in ("AGENTS.override.md", "skills/gh-axi/SKILL.md"):
+            with self.subTest(path=relative_path):
+                shadow = active / relative_path
+                shadow.parent.mkdir(parents=True, exist_ok=True)
+                content = b"---\nname: gh-axi\ndescription: Stale active guidance\n---\n# Old guidance\n"
+                shadow.write_bytes(content)
+                try:
+                    result = subprocess.run(
+                        [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertNotIn("environment is ready", result.stdout)
+                    self.assertIn(str(active), result.stdout)
+                    self.assertEqual(shadow.read_bytes(), content)
+                finally:
+                    shadow.unlink()
+
+    def test_real_sdk_detects_native_markdown_symlinks_and_fallback_names(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        native_root = self.home / ".pi" / "agent" / "skills"
+        native_root.mkdir()
+        for kind in ("direct markdown", "directory fallback", "directory symlink", "markdown symlink"):
+            with self.subTest(kind=kind):
+                owned = self.root / "owned-skill"
+                owned.mkdir()
+                content = (
+                    "---\ndescription: >\n  Native guidance\n  with a multiline description.\n---\n# Skill\n"
+                    if kind == "directory fallback"
+                    else "---\nname: gh-axi\ndescription: Native guidance\n---\n# Skill\n"
+                )
+                skill = owned / "SKILL.md"
+                skill.write_text(content, encoding="utf-8")
+                if kind == "direct markdown":
+                    skill.rename(native_root / "legacy.md")
+                elif kind == "directory fallback":
+                    owned.rename(native_root / "gh-axi")
+                elif kind == "directory symlink":
+                    (native_root / "renamed").symlink_to(owned)
+                else:
+                    (native_root / "legacy.md").symlink_to(skill)
+                try:
+                    result = subprocess.run([str(self.verifier)], env=env, capture_output=True, text=True, check=False)
+
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("Pi gh-axi resolves to unexpected skill:", result.stdout)
+                    self.assertNotIn("environment is ready", result.stdout)
+                    loaded = (
+                        native_root / "gh-axi" / "SKILL.md" if kind == "directory fallback"
+                        else native_root / "legacy.md" if kind == "direct markdown"
+                        else skill
+                    )
+                    self.assertEqual(loaded.read_text(encoding="utf-8"), content)
+                finally:
+                    shutil.rmtree(native_root)
+                    native_root.mkdir()
+                    if owned.exists():
+                        shutil.rmtree(owned)
+
+    def test_real_sdk_ignores_unloadable_and_unreachable_native_skills(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        root = self.home / ".pi" / "agent" / "skills"
+        content = "---\nname: gh-axi\ndescription: Unreachable guidance\n---\n# Skill\n"
+        for kind in (".gitignore", ".ignore", ".fdignore", "parent skill", "hidden", "node_modules", "no description", "invalid yaml"):
+            with self.subTest(kind=kind):
+                root.mkdir()
+                directory = ".hidden" if kind == "hidden" else "node_modules" if kind == "node_modules" else "outer"
+                skill = root / directory / "gh-axi" / "SKILL.md"
+                skill.parent.mkdir(parents=True)
+                skill.write_text(content, encoding="utf-8")
+                if kind in (".gitignore", ".ignore", ".fdignore"):
+                    (root / kind).write_text("outer/\n", encoding="utf-8")
+                elif kind == "parent skill":
+                    (root / "outer" / "SKILL.md").write_text(
+                        "---\nname: personal-helper\ndescription: Parent skill\n---\n# Helper\n", encoding="utf-8",
+                    )
+                elif kind == "no description":
+                    skill.write_text("---\nname: gh-axi\n---\n# No description\n", encoding="utf-8")
+                elif kind == "invalid yaml":
+                    skill.write_text("---\nname: gh-axi\ndescription: [invalid\n---\n", encoding="utf-8")
+                before = skill.read_bytes()
+                try:
+                    result = subprocess.run([str(self.verifier)], env=env, capture_output=True, text=True, check=False)
+
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("environment is ready", result.stdout)
+                    self.assertEqual(skill.read_bytes(), before)
+                finally:
+                    shutil.rmtree(root)
+
+    def test_real_sdk_applies_user_settings_to_managed_skills(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        self.use_homebrew_pi_layout()
+        (self.home / ".local" / "bin" / "pi").symlink_to(self.verifier.with_name("pi-treehouse"))
+        agent_dir = self.home / ".pi" / "agent"
+        settings = agent_dir / "settings.json"
+        for patterns, expected_status in (
+            (["-skills/gh-axi"], 1),
+            (["-skills/gh-axi/SKILL.md"], 1),
+            (["!**/gh-axi/**"], 1),
+            (["!skills/gh-axi", "+skills/gh-axi"], 0),
+            (["-skills/unrelated"], 0),
+        ):
+            with self.subTest(patterns=patterns):
+                settings.write_text(json.dumps({"skills": patterns}), encoding="utf-8")
+                before = settings.read_bytes()
+
+                result = subprocess.run([str(self.verifier)], env=env, capture_output=True, text=True, check=False)
+
+                self.assertEqual(result.returncode, expected_status, result.stdout + result.stderr)
+                if expected_status:
+                    self.assertIn("Pi effective skills missing: gh-axi", result.stdout)
+                    self.assertNotIn("environment is ready", result.stdout)
+                else:
+                    self.assertIn("environment is ready", result.stdout)
+                self.assertEqual(settings.read_bytes(), before)
+
+    def test_real_sdk_settings_winners_and_invocation_flags_are_checked(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        agent_dir = self.home / ".pi" / "agent"
+        extra = agent_dir / "external" / "skills" / "gh-axi" / "SKILL.md"
+        extra.parent.mkdir(parents=True)
+        for disabled in (False, True):
+            for resource in ("skills", "packages"):
+                with self.subTest(disabled=disabled, resource=resource):
+                    extra.write_text(
+                        "---\nname: gh-axi\ndescription: Alternate guidance\n"
+                        f"disable-model-invocation: {str(disabled).lower()}\n---\n# Alternate\n", encoding="utf-8",
+                    )
+                    config = {"skills": ["external/skills"]} if resource == "skills" else {
+                        "packages": ["./external"], "skills": ["-skills/gh-axi"],
+                    }
+                    settings = agent_dir / "settings.json"
+                    settings.write_text(json.dumps(config), encoding="utf-8")
+                    before = settings.read_bytes()
+
+                    result = subprocess.run([str(self.verifier)], env=env, capture_output=True, text=True, check=False)
+
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(f"Pi gh-axi resolves to unexpected skill: {extra}", result.stdout)
+                    if disabled:
+                        self.assertIn("Pi gh-axi is unavailable for model invocation", result.stdout)
+                    self.assertNotIn("environment is ready", result.stdout)
+                    self.assertEqual(settings.read_bytes(), before)
+
+    def test_real_sdk_never_executes_extensions_or_installs_packages(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        agent_dir = self.home / ".pi" / "agent"
+        extensions = agent_dir / "extensions"
+        extensions.mkdir()
+        marker = self.root / "extension-ran"
+        (extensions / "probe.js").write_text(
+            f"import {{ writeFileSync }} from 'node:fs'; writeFileSync({json.dumps(str(marker))}, 'ran');\n",
+            encoding="utf-8",
+        )
+        settings = agent_dir / "settings.json"
+        settings.write_text(json.dumps({"packages": ["git:github.com/example/missing-package"]}), encoding="utf-8")
+        before = settings.read_bytes()
+
+        result = subprocess.run([str(self.verifier)], env=env, capture_output=True, text=True, check=False)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(marker.exists())
+        self.assertFalse((agent_dir / "git").exists())
+        self.assertEqual(settings.read_bytes(), before)
+        settings.write_text('{"skills": ["fixture-secret"', encoding="utf-8")
+        malformed = subprocess.run([str(self.verifier)], env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(malformed.returncode, 1, malformed.stdout + malformed.stderr)
+        self.assertIn("Pi SDK discovery failed", malformed.stdout)
+        self.assertNotIn("fixture-secret", malformed.stdout + malformed.stderr)
+
+    def test_verifier_requires_every_globally_routed_skill(self) -> None:
+        env = self.prepare_complete_environment()
+        manifest_path = (
+            Path(__file__).with_name("tests")
+            / "fixtures"
+            / "instruction-migration"
+            / "manifest.json"
+        )
+        routes = json.loads(manifest_path.read_text(encoding="utf-8"))["pre_action_routes"]
+        routed_skills = {name for names in routes.values() for name in names}
+        for client, relative_path in self.DISCOVERY_ROOTS.items():
+            for name in routed_skills:
+                with self.subTest(client=client, skill=name):
+                    skill = self.home / relative_path / name
+                    saved = self.root / "removed-skill"
+                    skill.rename(saved)
+                    try:
+                        result = subprocess.run(
+                            [str(self.verifier)],
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn(f"{client} missing skills: {name}", result.stdout)
+                        self.assertNotIn("environment is ready", result.stdout)
+                    finally:
+                        saved.rename(skill)
+
+        restored = subprocess.run(
+            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+
+    def test_verifier_rejects_missing_discovery_roots(self) -> None:
+        env = self.prepare_complete_environment()
+        for client, relative_path in self.DISCOVERY_ROOTS.items():
+            with self.subTest(client=client):
+                skills = self.home / relative_path
+                saved = self.root / "removed-skills"
+                skills.rename(saved)
+                try:
+                    result = subprocess.run(
+                        [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+                    )
+
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(
+                        f"{client} missing skills: {', '.join(sorted(self.EXPECTED_SKILLS))}",
+                        result.stdout,
+                    )
+                    self.assertNotIn("environment is ready", result.stdout)
+                finally:
+                    saved.rename(skills)
+
+    def test_verifier_rejects_skills_without_skill_files(self) -> None:
+        env = self.prepare_complete_environment()
+        for client, relative_path in self.DISCOVERY_ROOTS.items():
+            skill = self.home / relative_path / "gh-axi"
+            for condition in ("empty directory", "broken symlink", "directory artifact"):
+                with self.subTest(client=client, condition=condition):
+                    saved = self.root / "removed-skill"
+                    skill.rename(saved)
+                    if condition == "broken symlink":
+                        skill.symlink_to(self.root / "missing-skill")
+                    else:
+                        skill.mkdir()
+                        if condition == "directory artifact":
+                            (skill / "SKILL.md").mkdir()
+                    try:
+                        result = subprocess.run(
+                            [str(self.verifier)],
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn(f"{client} missing skills: gh-axi", result.stdout)
+                        self.assertNotIn("environment is ready", result.stdout)
+                    finally:
+                        if skill.is_symlink():
+                            skill.unlink()
+                        else:
+                            if (skill / "SKILL.md").is_dir():
+                                (skill / "SKILL.md").rmdir()
+                            skill.rmdir()
+                        saved.rename(skill)
+
+    def test_verifier_accepts_nested_catalog_metadata_in_both_clients(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        originals = {
+            name: (self.home / ".copilot" / "skills" / name / "SKILL.md").read_bytes()
+            for name in self.CATALOG_SKILLS
+        }
+
+        result = subprocess.run([str(self.verifier)], env=env, capture_output=True, text=True, check=False)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("environment is ready", result.stdout)
+        for name, content in originals.items():
+            for root in self.DISCOVERY_ROOTS.values():
+                self.assertEqual((self.home / root / name / "SKILL.md").read_bytes(), content)
+
+    def test_verifier_rejects_undiscoverable_skill_metadata(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        skill_file = self.home / ".copilot" / "skills" / "gh-axi" / "SKILL.md"
+        original = skill_file.read_text(encoding="utf-8")
+        cases = (
+            ("---\nname: gh-axi\nmetadata: [invalid\n---\n", "has invalid skill metadata"),
+            ("---\nname: old-gh-axi\ndescription: Fixture\n---\n# Skill\n", "declares the wrong skill name"),
+            ("---\nname: gh-axi\ndescription:\n---\n# Skill\n", "has no skill description"),
+            (
+                "---\nname: gh-axi\ndescription: Fixture\ndisable-model-invocation: true\n---\n# Skill\n",
+                "is unavailable for model invocation",
+            ),
+        )
+        for content, diagnostic in cases:
+            with self.subTest(diagnostic=diagnostic):
+                skill_file.write_text(content, encoding="utf-8")
+                try:
+                    result = subprocess.run(
+                        [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(f"Copilot gh-axi {diagnostic}", result.stdout)
+                    self.assertNotIn("environment is ready", result.stdout)
+                finally:
+                    skill_file.write_text(original, encoding="utf-8")
+
+    def test_verifier_requires_managed_skills_from_their_sources(self) -> None:
+        env = self.prepare_complete_environment()
+        targets = [
+            (client, relative_path, name, "the dotfiles checkout")
+            for client, relative_path in self.DISCOVERY_ROOTS.items()
+            for name in self.REPOSITORY_SKILLS
+        ] + [
+            ("Pi", self.DISCOVERY_ROOTS["Pi"], name, "the Copilot source")
+            for name in self.CATALOG_SKILLS
+        ]
+        for client, relative_path, name, owner in targets:
+            for kind in ("directory copy", "unrelated symlink"):
+                with self.subTest(client=client, skill=name, kind=kind):
+                    skill = self.home / relative_path / name
+                    saved = self.root / "removed-skill"
+                    skill.rename(saved)
+                    replacement = skill if kind == "directory copy" else self.root / "stale-skill"
+                    replacement.mkdir()
+                    (replacement / "SKILL.md").write_text(
+                        f"---\nname: {name}\ndescription: Stale copy\n---\n# Old guidance\n",
+                        encoding="utf-8",
+                    )
+                    original = (replacement / "SKILL.md").read_bytes()
+                    if kind == "unrelated symlink":
+                        skill.symlink_to(replacement)
+                    try:
+                        result = subprocess.run(
+                            [str(self.verifier)],
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertIn(f"{client} {name} does not resolve to {owner}", result.stdout)
+                        self.assertNotIn("environment is ready", result.stdout)
+                        self.assertEqual((replacement / "SKILL.md").read_bytes(), original)
+                        if kind == "unrelated symlink":
+                            self.assertEqual(skill.readlink(), replacement)
+                        else:
+                            self.assertFalse(skill.is_symlink())
+                    finally:
+                        if skill.is_symlink():
+                            skill.unlink()
+                        (replacement / "SKILL.md").unlink()
+                        replacement.rmdir()
+                        saved.rename(skill)
+
+        restored = subprocess.run(
+            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+
+    def test_verifier_accepts_catalog_sources_installed_through_symlinks(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        skill = self.home / ".copilot" / "skills" / "gh-axi"
+        source = self.root / "catalog-source"
+        skill.rename(source)
+        skill.symlink_to(source)
+
+        result = subprocess.run(
+            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("environment is ready", result.stdout)
+
+    def test_verifier_accepts_a_shared_skill_root(self) -> None:
+        env = self.prepare_complete_environment()
+        self.use_real_pi_sdk(env)
+        pi_skills = self.home / ".agents" / "skills"
+        pi_skills.rename(self.root / "pi-skill-links")
+        pi_skills.symlink_to(self.home / ".copilot" / "skills")
+
+        result = subprocess.run(
+            [str(self.verifier)], env=env, capture_output=True, text=True, check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("environment is ready", result.stdout)
 
     def test_verifier_requires_the_exact_enabled_plugin(self) -> None:
         env = self.prepare_complete_environment()
