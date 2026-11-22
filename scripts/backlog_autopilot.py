@@ -48,6 +48,10 @@ class InfrastructureError(RuntimeError):
     """A dependency failed, rather than the tracked application behavior."""
 
 
+class TailscaleProfileChanged(InfrastructureError):
+    """The operator selected a profile outside this worker's network session."""
+
+
 class WorkerBusy(RuntimeError):
     """The stable worker lock belongs to another process."""
 
@@ -361,7 +365,7 @@ def tailscale_command(settings, *args):
     )
 
 
-def active_tailscale_profile(settings):
+def tailscale_profiles(settings):
     rows = json.loads(tailscale_command(settings, "switch", "--list", "--json"))
     if not isinstance(rows, list) or any(
         not isinstance(row, dict)
@@ -380,7 +384,31 @@ def active_tailscale_profile(settings):
         raise InfrastructureError(
             "Cannot verify the configured Tailscale profiles and active selection"
         )
-    return selected[0]
+    return rows
+
+
+def active_tailscale_profile(settings):
+    return next(row["id"] for row in tailscale_profiles(settings) if row["selected"])
+
+
+def personal_tailscale_ready(settings):
+    selected = next(row for row in tailscale_profiles(settings) if row["selected"])
+    if selected["id"] != settings["restore_profile"]:
+        return False
+    tailnet = selected.get("tailnet")
+    if not isinstance(tailnet, str) or not tailnet:
+        raise InfrastructureError(
+            "Cannot verify the personal Tailscale tailnet identity"
+        )
+    status = json.loads(tailscale_command(settings, "status", "--json"))
+    connected = status.get("CurrentTailnet") if isinstance(status, dict) else None
+    return (
+        isinstance(status, dict)
+        and status.get("BackendState") == "Running"
+        and isinstance(connected, dict)
+        and connected.get("Name") == tailnet
+        and active_tailscale_profile(settings) == settings["restore_profile"]
+    )
 
 
 def select_tailscale_profile(settings, profile):
@@ -402,17 +430,36 @@ def restore_tailscale(config):
         raise InfrastructureError(
             "Pending Tailscale restoration does not match configuration; reconcile it before continuing"
         )
-    selected = active_tailscale_profile(settings)
-    if selected not in (settings["work_profile"], settings["restore_profile"]):
-        raise InfrastructureError(
-            "Tailscale profile changed manually; restoration needs operator review"
-        )
     receipt["phase"] = "restoring"
     atomic_json(path, receipt)
-    select_tailscale_profile(settings, settings["restore_profile"])
-    path.unlink()
-    LOG.info("Restored the configured personal Tailscale profile")
-    return True
+    for attempt in range(3):
+        try:
+            selected = active_tailscale_profile(settings)
+            if selected not in (settings["work_profile"], settings["restore_profile"]):
+                raise TailscaleProfileChanged(
+                    "Tailscale profile changed manually; restoration needs operator review"
+                )
+            if selected != settings["restore_profile"]:
+                tailscale_command(settings, "switch", settings["restore_profile"])
+            if not personal_tailscale_ready(settings):
+                raise InfrastructureError(
+                    "Personal Tailscale profile is not connected to its tailnet"
+                )
+            path.unlink()
+            LOG.info("Restored and verified the configured personal Tailscale profile")
+            return True
+        except TailscaleProfileChanged:
+            raise
+        except (InfrastructureError, json.JSONDecodeError) as error:
+            if attempt == 2:
+                raise InfrastructureError(
+                    "Personal Tailscale restoration remains pending after three attempts"
+                ) from error
+            LOG.warning(
+                "Personal Tailscale restoration attempt %s failed; retrying",
+                attempt + 1,
+            )
+            time.sleep(2**attempt)
 
 
 def recover_tailscale(config, state, state_path, scheduled):
@@ -513,6 +560,59 @@ def notify(message):
             LOG.error("macOS notification failed with exit code %s", result.returncode)
         return result.returncode == 0
     return False
+
+
+def notify_completed_run(config, state):
+    last_run = state.get("last_run")
+    if not last_run:
+        return False
+    directory = Path(last_run)
+    if directory.resolve().parent != (Path(config["state_dir"]) / "runs").resolve():
+        raise InfrastructureError(
+            "Completion notification points outside worker run storage"
+        )
+    run_path = directory / "run.json"
+    if not run_path.exists():
+        return False
+    run = read_json(run_path)
+    if not run.get("finished_at") or not run.get("completion_notification_pending"):
+        return False
+    if (Path(config["state_dir"]) / "tailscale-session.json").exists():
+        return False
+    settings = config.get("tailscale")
+    if settings:
+        try:
+            if not personal_tailscale_ready(settings):
+                LOG.warning(
+                    "Completion notification deferred: personal Tailscale is not ready"
+                )
+                return False
+        except (InfrastructureError, json.JSONDecodeError):
+            LOG.warning(
+                "Completion notification deferred: personal Tailscale cannot be verified"
+            )
+            return False
+    counts = {
+        name: run.get("outcome_counts", {}).get(name) or "none" for name in OUTCOMES
+    }
+    suffix = " Personal Tailscale profile verified and connected." if settings else ""
+    message = (
+        f"Pass finished: {counts['resolved']} closed; {counts['awaiting_review']} ready; "
+        f"{counts['awaiting_ci']} awaiting CI; {counts['blocked']} blocked; "
+        f"{counts['infrastructure_error']} infrastructure errors. Report: {directory / 'report.md'}."
+        f"{suffix}"
+    )
+    try:
+        delivered = notify(message)
+    except Exception:
+        LOG.exception("Completion notification failed; delivery remains pending")
+        return False
+    if not delivered:
+        return False
+    run.pop("completion_notification_pending")
+    run["completion_notified_at"] = now().isoformat()
+    atomic_json(run_path, run)
+    return True
 
 
 def notify_ready_pull_requests(directory, items, config=None):
@@ -1195,6 +1295,7 @@ def execute(config, state, state_path, lock_fd, runtime):
                 "Three consecutive dependency failures. The pass is checkpointed for retry."
             )
     run["finished_at"] = now().isoformat()
+    run["completion_notification_pending"] = True
     run.pop("current_issue", None)
     run["outcome_counts"] = dict(
         Counter(item["outcome"] for item in run["items"].values())
@@ -1204,13 +1305,7 @@ def execute(config, state, state_path, lock_fd, runtime):
     state["last_run"] = str(directory)
     state["active_run"] = None
     atomic_json(state_path, state)
-    report = write_report(directory, run)
-    counts = {name: run["outcome_counts"].get(name) or "none" for name in OUTCOMES}
-    notify(
-        f"Pass finished: {counts.get('resolved', 0)} closed; {counts.get('awaiting_review', 0)} ready; "
-        f"{counts.get('awaiting_ci', 0)} awaiting CI; {counts.get('blocked', 0)} blocked; "
-        f"{counts.get('infrastructure_error', 0)} infrastructure errors. Report: {report}"
-    )
+    write_report(directory, run)
 
 
 def install(config_path, config, runtime, future_only=False):
@@ -1457,6 +1552,7 @@ def main(argv=None):
                 config, state, state_path, scheduled=args.action == "scheduled"
             ):
                 return 0
+            notify_completed_run(config, state)
             if (root / "paused").exists():
                 return 0
             if args.action == "scheduled":
@@ -1475,6 +1571,7 @@ def main(argv=None):
                         state["last_slot"] = slot.isoformat()
                         atomic_json(state_path, state)
                     execute(config, state, state_path, lock_fd, runtime)
+                notify_completed_run(config, state)
             except Exception:
                 failures = min(state.get("consecutive_failures", 0) + 1, 5)
                 state["consecutive_failures"] = failures
