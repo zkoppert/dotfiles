@@ -172,6 +172,116 @@ Pi help/version, package/configuration commands, and session resume/fork/export 
 
 Treehouse must be installed at `~/.local/bin/treehouse`. The wrapper fails closed when a repository session needs isolation and Treehouse is unavailable.
 
+## How do I schedule a Pi backlog worker?
+
+The local worker analyzes all open tracking issues before it works on titles containing the exact substring `[Sentry]`. It saves issue snapshots, context notes, sessions, and outcomes outside Git checkouts.
+
+The schedule is daily at 03:00 in `America/Los_Angeles`, independent of the Mac's time zone. A minute timer checks whether work is due. Missed days collapse into one catch-up pass. The Mac must be running and connected; the job does not wake a powered-off Mac.
+
+Keep private repository names in a local mode-0600 JSON file. Create the configuration with your actual repository values:
+
+```bash
+# Keep configuration and evidence private to your local account.
+mkdir -p "$HOME/.config/backlog-autopilot"
+chmod 700 "$HOME/.config/backlog-autopilot"
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+home = Path.home()
+config = {
+    "repository": "OWNER/TRACKER",
+    "allowed_repositories": ["OWNER/TRACKER", "OWNER/APPLICATION"],
+    "implementation_checkouts": {"OWNER/APPLICATION": str(home / "repos/APPLICATION")},
+    "checkout": str(home / "repos/TRACKER"),
+    "agent_dir": str(home / ".pi/agent"),
+    "state_dir": str(home / ".local/share/backlog-autopilot"),
+    "model": "PROVIDER/MODEL",
+    "assignee": "YOUR-LOGIN",
+}
+path = home / ".config/backlog-autopilot/config.json"
+path.touch(mode=0o600, exist_ok=False)
+path.write_text(json.dumps(config, indent=2) + "\n")
+PY
+```
+
+Use Python 3.9 or later, Node.js, authenticated `gh-axi`, Pi, Treehouse, and the operator's validation skills. Configure the `pi` executable path if it differs from `/opt/homebrew/bin/pi`. The extension uses `python3`, unless configuration sets `python`. Optional `source_checkout` identifies the worker's source repository for candidate improvements.
+
+From the dotfiles checkout, validate and install:
+
+```bash
+# Validate contracts before installing a copied runtime release.
+python3 -m pytest scripts/test_backlog_autopilot.py
+node --test scripts/test_backlog_autopilot_extension.cjs
+python3 scripts/backlog_autopilot.py install
+python3 scripts/backlog_autopilot.py dry-run
+plutil -lint "$HOME/Library/LaunchAgents/com.zkoppert.backlog-autopilot.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.zkoppert.backlog-autopilot.plist"
+```
+
+Installation does not start remediation or consume the next daily run. The dry run fetches real issues and comments without launching models or changing GitHub. It writes evidence under the private state directory.
+
+Run `/reload` in Pi to load `/autopilot status`, `/autopilot pause`, and `/autopilot resume`. Pause takes effect between analysis batches or issues, not during active tool calls. The CLI provides the same controls:
+
+```bash
+# Inspect or resume saved progress without changing the daily schedule.
+python3 "$HOME/.local/share/backlog-autopilot/current/backlog_autopilot.py" status
+python3 "$HOME/.local/share/backlog-autopilot/current/backlog_autopilot.py" run
+```
+
+The worker retains a lock across its Pi child process. It also stops surviving processes in the owned process group before network restoration, even if Pi has already exited. Failed process cleanup keeps restoration pending. An overlapping manual invocation fails; scheduled ticks defer quietly. Interrupted runs retain their sessions, worktrees, and receipts. Scheduled ticks resume unfinished work after a retry delay, without waiting for the next daily slot. Delays start at five minutes and increase to one hour. Manual `run` bypasses the delay. Recovery preserves invalid analysis receipts and regenerates the affected batch. Clean coordinator worktrees return to Treehouse after completion; dirty or unmerged work stays intact.
+
+Repeated startup errors notify once for each daily slot and error. Pause prevents recovery until you resume. Read-only GitHub requests use CFS, with up to three attempts and short delays. Commands have timeouts and save bounded stdout and stderr diagnostics with common credential patterns removed. Three consecutive dependency failures checkpoint the pass for later recovery. Issue results distinguish `infrastructure_error` from application or ownership blockers.
+
+The `preflight` CLI action checks required executables, GitHub access, repository-specific Treehouse capacity, and configured Splunk and Sentry hostnames. The scheduler refreshes these checks before each new issue investigation, not only at startup. DNS checks do not prove telemetry authentication or query access. Telemetry and capacity warnings accompany each task so independent investigations can continue without repeating known failures.
+
+The optional `implementation_checkouts` map names existing local roots for allowlisted repositories. The scheduler verifies each origin before inspecting its pool. Tracking repository capacity is separate from application repository capacity. A pool without idle slots is not exhausted when it can create another slot under its configured limit. Python 3.11 or later reads user and repository TOML settings to determine that limit. Earlier runtimes report unknown limits without claiming exhaustion. Missing mappings or unverifiable checkouts also produce an unknown result. Treehouse acquisition remains the final capacity check.
+
+The `status` action includes the last child heartbeat, activity time, stage, and report path. Running children update `progress.json` each minute. Two hours without output triggers one stall notification for that child, without stopping work. Each pass writes a private `report.md` with outcome counts, PR URLs, dependency warnings, and next actions. Inspect `launchd.log` and the report before retrying. Evidence and release archives have no automatic retention policy; review them before manual cleanup.
+
+On macOS, notifications use the title **Sentry issue worker**. The scheduler includes each PR URL when it validates an `awaiting_review` result, before starting the next issue. It does not send review-ready alerts for `awaiting_ci`, blocked, or resolved results. The private `pr-notifications.json` file suppresses repeat alerts across resumed runs and later passes. Failed notification commands remain eligible for retry when execution revisits the saved result. macOS notification settings still control banner visibility. The end-of-pass summary remains separate.
+
+There is no runtime or spending cap. The worker records recoverable blockers and moves to independent issues. Draft PRs remain unresolved until the fixes land and current evidence confirms resolution. A completed pass means every matching snapshot issue has an outcome, not that every issue is resolved. New issues wait for the next snapshot.
+
+Before a review handoff, the scheduler matches the remote PR commit and repository to a clean, Treehouse-managed certification checkout. It runs `pr-marker check` and checks all reported GitHub check runs and commit statuses. Missing, pending, or unsuccessful CI results keep the outcome at `awaiting_ci`. A remote commit change during verification prevents the handoff. The scheduler does not change manual PR readiness.
+
+The policy permits fully certified draft PRs and evidence-based stale-issue closure. Existing review, Codespace tests, demo, style, and `pr-marker` gates remain mandatory. A missing gate blocks publication. Merge approval remains human.
+
+This worker uses the existing Pi profile and account credentials. Neither its prompt policy nor Treehouse provides a security sandbox. Use a dedicated account or isolated environment when issue sources are not trusted. Do not copy credentials into configuration or snapshots.
+
+Worker children set `BACKLOG_AUTOPILOT_CHILD=1` to prevent nested control commands. They also set `PI_CRON_DISABLED=1` to disable the existing in-session scheduler. These variables are coordination guards, not security boundaries.
+
+### How do I select the work Tailscale profile automatically?
+
+Profile switching changes the whole Mac's private-network connection. Keep profile IDs in the private worker configuration, not in this repository. Add an optional `tailscale` object with these fields:
+
+| Field | Value |
+| --- | --- |
+| `executable` | Absolute Tailscale CLI path, such as `/Applications/Tailscale.app/Contents/MacOS/Tailscale`. |
+| `work_profile` | Saved GitHub work profile ID. |
+| `restore_profile` | Saved personal profile ID to select after each execution attempt. |
+
+Find the IDs without changing profiles:
+
+```bash
+# Read saved account IDs and the current selection.
+/Applications/Tailscale.app/Contents/MacOS/Tailscale switch --list --json
+```
+
+The worker sets `TAILSCALE_BE_CLI=1` only for Tailscale commands, so the app CLI works without a terminal. It verifies the selected work profile and matching running tailnet before investigation. It restores the configured personal profile after completion, a pause, or an execution failure. Restoration also happens when work began with the GitHub profile already selected. Missing profiles or a disconnected work profile prevent execution instead of triggering login or changing credentials.
+
+The worker saves `tailscale-session.json` before switching. On `SIGTERM` or `SIGINT`, the worker stops its child before restoring the profile. A later scheduled check recovers pending restoration after an abrupt crash, once no worker child holds the execution lock. Recovery also runs while paused or when no daily pass is due. Power loss or a forced kill cannot restore the network immediately. Failed restoration retains its receipt and reports an error. Scheduled checks retry after delays of one minute, two minutes, then five minutes. Manual `run` bypasses this restoration delay, including while paused. Work cannot resume before pending restoration succeeds. An unrelated profile selected manually is not overwritten; operator review is required.
+
+Completion notifications wait until the personal profile is selected and its backend reports a running connection to the matching tailnet. Restoration makes up to three attempts before leaving the receipt for scheduled recovery. Delayed backend transitions and ambiguous CLI failures do not count as success without verification. Manual selection of another profile stops automatic restoration instead of overriding that choice.
+
+A finished pass retains a pending completion notification if restoration fails. A later scheduler tick can verify restoration and deliver that notification without repeating the completed investigations. Failed notification delivery remains in a private queue independent of the latest run pointer. Later passes cannot replace that retry state. A scheduled tick that delivers a deferred completion waits until the next tick before starting another pass. Older completed passes do not generate new completion alerts after an upgrade.
+
+Ticks without pending restoration or due work do not switch profiles. The `status`, `preflight`, and control commands do not initiate switching. The `status` output includes any pending network session. Automatic switching is disabled when the `tailscale` object is absent.
+
+Candidate self-improvements must have persistent tests and independent review. The worker cannot activate candidates through its control interface. Review candidates before running `install` again. Set `source_checkout` to the maintained source checkout before installation. When configured, the installer refuses another source checkout. Each release records its source commit, checkout, and runtime hashes in `release.json`. Installation retains prior releases; it does not change the saved daily slot or run history.
+
+For a scheduler-only update during active work, use the `install-future` CLI action. It publishes a new immutable release without changing the active worker's files, state, policy, extension, or LaunchAgent settings. Existing workers keep their resolved release; later scheduler invocations follow the updated pointer. Policy or extension changes require the normal idle installation path. Set the private `schedule_changed_at` timestamp when changing schedule times to prevent an immediate catch-up for a pre-change slot. The timestamp must include its UTC offset. Unfinished runs can still recover without waiting for the new daily time.
+
 ## How do dotfiles and skills stay updated?
 
 The `com.zkoppert.dotfiles-sync` LaunchAgent checks this laptop's `~/repos/dotfiles` checkout daily at 09:00 and when loaded. It extends the existing job rather than adding another updater.

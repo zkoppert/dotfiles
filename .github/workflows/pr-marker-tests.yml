@@ -56,3 +56,10 @@ jobs:
         run: python3 -m pip install pytest==8.4.2
       - name: Run accessibility picker tests
         run: python3 -m pytest -q scripts/test_accessibility_issue_picker.py scripts/test_resume_accessibility_session.py
+      - name: Run backlog worker tests
+        run: python3 -m pytest -q scripts/test_backlog_autopilot.py
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Run Pi backlog extension tests
+        run: node --test scripts/test_backlog_autopilot_extension.cjs
