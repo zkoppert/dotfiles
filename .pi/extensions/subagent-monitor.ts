@@ -46,6 +46,33 @@ export function deliverPending(pi: ExtensionAPI, ctx: ExtensionContext, root: st
 }
 
 export default function(pi: ExtensionAPI) {
+  pi.registerMessageRenderer('subagent-monitor', (message, {expanded}, theme) => {
+    if (expanded || typeof message.content !== 'string') return
+    const separator = message.content.indexOf('\n\n')
+    if (separator < 0) return
+    let updates: unknown
+    try {
+      updates = JSON.parse(message.content.slice(separator + 2))
+    } catch {
+      return
+    }
+    if (!Array.isArray(updates) || updates.length === 0
+        || !updates.every(update => update && typeof update === 'object' && states.has(update.state))) return
+    const counts = new Map<string, number>()
+    for (const update of updates) counts.set(update.state, (counts.get(update.state) ?? 0) + 1)
+    const descriptions = [...states].filter(state => counts.has(state)).map(state => {
+      const label = state === 'complete_reported' ? 'reported complete' : state.replaceAll('_', ' ')
+      return `${counts.get(state)} ${label}`
+    })
+    const summary = `Subagents: ${updates.length} update${updates.length === 1 ? '' : 's'} (${descriptions.join(', ')}); expand for details`
+    return {
+      render(width: number) {
+        // Fixed ASCII labels let us clip before adding theme escapes, without a runtime TUI dependency.
+        return width > 0 ? [theme.fg('muted', summary.slice(0, width))] : []
+      },
+      invalidate() {},
+    }
+  })
   let timer: ReturnType<typeof setInterval> | undefined
   let lastError = ''
   const stop = () => {
