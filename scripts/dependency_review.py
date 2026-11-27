@@ -293,11 +293,13 @@ def action_versions(pairs, consumer):
                 raise ReviewBlocked(
                     "Action reference lacks matching dependency graph evidence"
                 )
-            versions.setdefault(name, set()).add((before[5], after[5]))
+            versions.setdefault((name, before[3], after[3]), set()).add(
+                (before[5], after[5])
+            )
         manifests.add(patch["path"])
     resolved = []
     for old, new in pairs:
-        candidates = versions.get(new["name"], set())
+        candidates = versions.get((new["name"], old["version"], new["version"]), set())
         if len(candidates) != 1 or new["manifest"] not in manifests:
             raise ReviewBlocked("Action version comments are missing or inconsistent")
         before, after = next(iter(candidates))

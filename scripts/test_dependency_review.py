@@ -447,6 +447,39 @@ class EvidenceTests(unittest.TestCase):
         )
         self.assertEqual({patch["path"], duplicate["path"]}, manifests)
 
+    def test_distinct_commit_pairs_for_one_action_remain_separate_across_workflows(
+        self,
+    ):
+        first = self.action_fixture()
+        other_old, other_new = "e" * 40, "f" * 40
+        second = {
+            **first,
+            "path": ".github/workflows/other.yml",
+            "patch": first["patch"]
+            .replace(OLD, other_old)
+            .replace(NEW, other_new)
+            .replace("v2.32.3", "v3.0.0")
+            .replace("v2.32.4", "v3.0.1"),
+        }
+        other_changes = [
+            {**entry, "manifest": second["path"], "version": sha}
+            for entry, sha in zip(self.api.changes, (other_old, other_new))
+        ]
+        pairs, manifests = security.action_versions(
+            security.dependency_pairs(self.api.changes + other_changes), [first, second]
+        )
+        self.assertEqual(
+            [
+                ("v2.32.3", "v2.32.4", OLD, NEW),
+                ("v3.0.0", "v3.0.1", other_old, other_new),
+            ],
+            [
+                (old["version"], new["version"], old["pinned_sha"], new["pinned_sha"])
+                for old, new in pairs
+            ],
+        )
+        self.assertEqual({first["path"], second["path"]}, manifests)
+
     def test_pinned_actions_cannot_cover_code_changes_or_conflicting_comments(self):
         patch = self.action_fixture()
         for bad in (
