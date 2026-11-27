@@ -66,8 +66,20 @@ class EvidenceAPI:
         self.advisory_reads = 0
         self.modes = {}
         self.consumer_base = PR["base"]["sha"]
+        self.checks = [
+            {
+                "name": "consumer lint",
+                "head_sha": PR["head"]["sha"],
+                "status": "completed",
+                "conclusion": "success",
+            }
+        ]
 
-    def pages(self, path):
+    def pages(self, path, expression="."):
+        if "/check-runs?" in path:
+            return copy.deepcopy(self.checks)
+        if path.endswith("/statuses"):
+            return []
         if path.startswith("/advisories?"):
             self.advisory_reads += 1
             self.advisory_paths.append(path)
@@ -764,6 +776,32 @@ class ReviewerTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.cache = Path(self.directory.name)
         self.api = EvidenceAPI()
+
+    def test_consumer_ci_evidence_changes_invalidate_an_otherwise_matching_review(self):
+        with mock.patch.object(
+            security.subprocess, "run", side_effect=reviewer_result
+        ) as run:
+            first = security.review(self.api, "example/repo", PR, self.cache)
+            self.api.checks.append(
+                {**self.api.checks[0], "name": "additional contract check"}
+            )
+            second = security.review(self.api, "example/repo", PR, self.cache)
+        self.assertNotEqual(first["evidence_sha256"], second["evidence_sha256"])
+        self.assertEqual(
+            self.api.checks, second["evidence"]["consumer_context"]["checks"]
+        )
+        self.assertEqual(2, run.call_count)
+
+    def test_wrong_revision_ci_cannot_reuse_a_cached_allow(self):
+        with mock.patch.object(security.subprocess, "run", side_effect=reviewer_result):
+            security.review(self.api, "example/repo", PR, self.cache)
+        self.api.checks[0]["head_sha"] = "e" * 40
+        with (
+            mock.patch.object(security.subprocess, "run") as run,
+            self.assertRaisesRegex(ValueError, "different revision"),
+        ):
+            security.review(self.api, "example/repo", PR, self.cache)
+        run.assert_not_called()
 
     def test_tool_free_review_is_cached_but_advisories_are_always_checked_again(self):
         with mock.patch.object(

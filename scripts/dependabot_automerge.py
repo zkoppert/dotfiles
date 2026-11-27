@@ -93,7 +93,7 @@ def check_state(client: GitHub, repo: str, sha: str) -> str:
     for status in statuses:
         latest.setdefault(status["context"], status["state"])
     if any(check.get("head_sha") != sha for check in checks):
-        return "failing"
+        return "inconsistent"
     passing = {"success", "neutral", "skipped"}
     if any(
         check.get("conclusion") not in passing | {None, ""} for check in checks
@@ -150,7 +150,22 @@ def evaluate(
             author.get("type") != "Bot" and not automation
         ):
             return "hold", "human activity or requested changes"
-    if pr.get("mergeable_state") in {"behind", "dirty"}:
+    needs_rebase = pr.get("mergeable_state") in {"behind", "dirty"}
+    if not needs_rebase:
+        checks = check_state(client, repo, pr["head"]["sha"])
+        if checks == "failing":
+            comparison = client.request(
+                "GET",
+                f"{root}/compare/{pr['base']['sha']}...{pr['head']['sha']}",
+                expression="{merge_base: .merge_base_commit.sha}",
+            )
+            merge_base = comparison.get("merge_base")
+            if not isinstance(merge_base, str) or not merge_base:
+                raise AutomationError("CI recovery comparison lacks a merge base")
+            needs_rebase = merge_base != pr["base"]["sha"]
+        if checks != "passing" and not needs_rebase:
+            return "wait" if checks == "pending" else "hold", f"CI checks {checks}"
+    if needs_rebase:
         marker = f"<!-- dependabot-automerge:{pr['head']['sha']} -->"
         if any(
             marker in item.get("body", "")
@@ -159,9 +174,6 @@ def evaluate(
         ):
             return "wait", "rebase already requested for this revision"
         return "rebase", "branch needs a Dependabot rebase"
-    checks = check_state(client, repo, pr["head"]["sha"])
-    if checks != "passing":
-        return "wait" if checks == "pending" else "hold", f"CI checks {checks}"
     if pr.get("mergeable") is not True:
         return "wait", "mergeability not confirmed"
     return "merge", "stable upgrade with passing checks"

@@ -50,11 +50,14 @@ class FakeGitHub:
         self.statuses = []
         self.writes = []
         self.merge_response = {"merged": True}
+        self.comparison_base = None
 
     def request(self, method, path, payload=None, expression="."):
         if method != "GET":
             self.writes.append((method, path, payload))
             return self.merge_response if path.endswith("/merge") else {}
+        if "/compare/" in path:
+            return {"merge_base": self.comparison_base or self.pr["base"]["sha"]}
         return copy.deepcopy(self.pr)
 
     def pages(self, path, expression="."):
@@ -184,6 +187,24 @@ class SafetyTests(unittest.TestCase):
             self.client.pr["title"] = f"Bump package from 1.0.0 to {target}"
             result = self.handle(dry_run=True)
             self.assertEqual(("merge", kind), (result["action"], result["bump"]))
+        self.assertEqual([], self.client.writes)
+
+    def test_reports_never_publish_the_consumer_configuration_payload(self):
+        self.review.return_value = {
+            "decision": "allow",
+            "summary": "Reviewed",
+            "findings": [],
+            "evidence": {
+                "dependencies": [],
+                "consumer_context": {
+                    "files": [{"content": "private-configuration-canary"}]
+                },
+            },
+        }
+        result = self.handle(dry_run=True)
+        self.assertEqual("merge", result["action"])
+        self.assertNotIn("private-configuration-canary", json.dumps(result))
+        self.assertNotIn("evidence", result["security_review"])
         self.assertEqual([], self.client.writes)
 
     def test_security_findings_or_incomplete_review_prevent_all_writes(self):
@@ -468,6 +489,80 @@ class SafetyTests(unittest.TestCase):
         result = self.handle()
         self.assertEqual("wait", result["action"])
         self.assertEqual({}, alerts.actionable({"decisions": [result], "errors": []}))
+        self.assertEqual([], self.client.writes)
+
+    def test_failed_checks_on_an_outdated_base_request_one_rebase_without_approval(
+        self,
+    ):
+        self.client.comparison_base = "older-base"
+        self.client.checks[0]["conclusion"] = "failure"
+        result = self.handle()
+        self.assertEqual("rebase", result["action"])
+        self.assertEqual(1, len(self.client.writes))
+        self.assertEqual(
+            ("POST", f"/repos/{REPO}/issues/7/comments"), self.client.writes[0][:2]
+        )
+        self.assertEqual(
+            "@dependabot rebase\n\n<!-- dependabot-automerge:abc123 -->",
+            self.client.writes[0][2]["body"],
+        )
+        self.review.assert_not_called()
+        self.client.comments = [
+            {
+                "user": {"login": "operator", "type": "User"},
+                "body": self.client.writes[0][2]["body"],
+            }
+        ]
+        self.client.writes.clear()
+        self.assertEqual("wait", self.handle()["action"])
+        self.assertEqual([], self.client.writes)
+
+    def test_failed_checks_after_reaching_the_latest_base_do_not_loop_rebases(self):
+        self.client.pr["head"]["sha"] = "def456"
+        self.client.checks[0].update(head_sha="def456", conclusion="failure")
+        result = self.handle()
+        self.assertEqual(
+            ("hold", "CI checks failing"), (result["action"], result["reason"])
+        )
+        self.assertEqual([], self.client.writes)
+        self.review.assert_not_called()
+
+    def test_stale_check_evidence_never_triggers_recovery_or_approval(self):
+        self.client.comparison_base = "older-base"
+        self.client.checks[0]["head_sha"] = "other-head"
+        result = self.handle()
+        self.assertEqual(
+            ("hold", "CI checks inconsistent"), (result["action"], result["reason"])
+        )
+        self.assertEqual([], self.client.writes)
+
+    def test_failed_ci_recovery_preview_makes_no_writes_and_preserves_human_stops(self):
+        self.client.comparison_base = "older-base"
+        self.client.checks[0]["conclusion"] = "failure"
+        self.assertEqual("rebase", self.handle(dry_run=True)["action"])
+        self.assertEqual([], self.client.writes)
+        self.client.comments = [
+            {"user": {"login": "reviewer", "type": "User"}, "body": "Please wait"}
+        ]
+        self.assertEqual("hold", self.handle()["action"])
+        self.assertEqual([], self.client.writes)
+
+    def test_incomplete_recovery_comparison_stops_without_a_rebase(self):
+        self.client.checks[0]["conclusion"] = "failure"
+        original = self.client.request
+        with (
+            mock.patch.object(
+                self.client,
+                "request",
+                side_effect=lambda method, path, *args, **kwargs: (
+                    {}
+                    if "/compare/" in path
+                    else original(method, path, *args, **kwargs)
+                ),
+            ),
+            self.assertRaisesRegex(bot.AutomationError, "lacks a merge base"),
+        ):
+            self.handle()
         self.assertEqual([], self.client.writes)
 
     def test_rebase_is_requested_only_once_for_each_commit(self):
