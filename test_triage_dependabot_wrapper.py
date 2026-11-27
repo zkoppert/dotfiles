@@ -86,6 +86,59 @@ class TriageDependabotWrapperTest(unittest.TestCase):
             self.log.read_text(encoding="utf-8").strip(),
         )
 
+    def preparation_fixture(self):
+        shell_env = self.root / "prepare-env"
+        shell_env.write_text(
+            "function /opt/homebrew/bin/uv {\n"
+            '  printf "uv %s\\n" "$*" >> "$WRAPPER_TEST_LOG"\n'
+            '  if [ "${PREPARE_FAIL_STAGE:-}" = venv ]; then return 42; fi\n'
+            "}\n"
+        )
+        self.gh.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\n" "$*" >> "$WRAPPER_TEST_LOG"\n'
+            'case "$*" in\n'
+            '  *"uv pip install"*) stage=pip ;;\n'
+            '  *"npm install"*) stage=npm ;;\n'
+            "  *) exit 99 ;;\n"
+            "esac\n"
+            'if [ "${PREPARE_FAIL_STAGE:-}" = "$stage" ]; then exit 42; fi\n'
+        )
+        self.env["BASH_ENV"] = str(shell_env)
+
+    def test_preparation_routes_pinned_installs_through_cfs_without_starting_worker(
+        self,
+    ):
+        self.preparation_fixture()
+        result = self.run_wrapper("--prepare-runtime")
+        self.assertEqual(0, result.returncode, result.stderr)
+        runtime = self.installation / ".dependabot-runtime"
+        self.assertEqual(
+            [
+                f"uv venv --python /opt/homebrew/bin/python3 {runtime}/python",
+                f"cfs -- /opt/homebrew/bin/uv pip install --python {runtime}/python/bin/python PyYAML==6.0.3 ruamel.yaml==0.18.16",
+                f"cfs -- /opt/homebrew/bin/npm install --prefix {runtime}/node --no-save --ignore-scripts --no-audit --no-fund gh-axi@0.1.35",
+            ],
+            self.log.read_text().splitlines(),
+        )
+        self.assertFalse(
+            (self.root / "home/Library/Logs/dependabot-automerge.json").exists()
+        )
+
+    def test_preparation_stops_at_each_failed_install_and_preserves_its_exit_status(
+        self,
+    ):
+        self.preparation_fixture()
+        for stage, count in (("venv", 1), ("pip", 2), ("npm", 3)):
+            with self.subTest(stage=stage):
+                self.log.unlink(missing_ok=True)
+                self.env["PREPARE_FAIL_STAGE"] = stage
+                result = self.run_wrapper("--prepare-runtime")
+                self.assertEqual(42, result.returncode, result.stderr)
+                lines = self.log.read_text().splitlines()
+                self.assertEqual(count, len(lines))
+                self.assertNotIn("dependabot_automerge.py", "\n".join(lines))
+
     def test_worker_failure_is_preserved(self) -> None:
         self.env["WRAPPER_TEST_EXIT"] = "42"
 
