@@ -27,6 +27,14 @@ def _diagnostics(stdout: Any, stderr: Any) -> str:
     return "\n".join(streams)
 
 
+def latest_statuses(statuses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the first status for each context from GitHub's newest-first response."""
+    latest = {}
+    for status in statuses:
+        latest.setdefault(status["context"], status)
+    return list(latest.values())
+
+
 def run_command(command, *, input=None, timeout=90):
     with subprocess.Popen(
         command,

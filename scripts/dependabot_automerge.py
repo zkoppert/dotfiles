@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 from dependabot_alerts import publish
-from dependabot_api import AutomationError, GitHub
+from dependabot_api import AutomationError, GitHub, latest_statuses
 from dependabot_scope import in_scope
 from dependency_review import review
 
@@ -89,9 +89,9 @@ def check_state(client: GitHub, repo: str, sha: str) -> str:
         f"/repos/{repo}/commits/{sha}/check-runs?filter=latest", ".check_runs"
     )
     statuses = client.pages(f"/repos/{repo}/commits/{sha}/statuses")
-    latest = {}
-    for status in statuses:
-        latest.setdefault(status["context"], status["state"])
+    latest = {
+        status["context"]: status["state"] for status in latest_statuses(statuses)
+    }
     if any(check.get("head_sha") != sha for check in checks):
         return "inconsistent"
     passing = {"success", "neutral", "skipped"}

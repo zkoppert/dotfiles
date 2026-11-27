@@ -19,6 +19,27 @@ class ApiTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_newest_first_statuses_preserve_current_failures_and_drop_old_results(self):
+        statuses = [
+            {"context": "lint", "state": "success", "id": 4},
+            {"context": "security", "state": "failure", "id": 3},
+            {"context": "lint", "state": "failure", "id": 2},
+            {"context": "build", "state": "success", "id": 1},
+        ]
+        result = api.latest_statuses(statuses)
+        self.assertEqual(
+            [
+                ("lint", "success", 4),
+                ("security", "failure", 3),
+                ("build", "success", 1),
+            ],
+            [(item["context"], item["state"], item["id"]) for item in result],
+        )
+        self.assertEqual(4, len(statuses))
+
+    def test_empty_status_history_stays_empty(self):
+        self.assertEqual([], api.latest_statuses([]))
+
     def test_secret_gist_json_and_readback_preserve_boolean_types(self):
         expected = {
             "public": False,

@@ -8,6 +8,8 @@ import json
 import re
 from typing import Any
 
+from dependabot_api import latest_statuses
+
 MAX_CONTEXT_BYTES = 64_000
 CONFIGURATION = {
     "Makefile",
@@ -74,7 +76,7 @@ def collect_context(client: Any, repo: str, head: str) -> dict[str, Any]:
     )
     if any(check.get("head_sha") != head for check in checks):
         raise ValueError("consumer CI evidence belongs to a different revision")
-    statuses = client.pages(f"/repos/{repo}/commits/{head}/statuses")
+    statuses = latest_statuses(client.pages(f"/repos/{repo}/commits/{head}/statuses"))
     context = {
         "head_sha": head,
         "scope": "Selected configuration and workflow files, not a complete usage inventory.",

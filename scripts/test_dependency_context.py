@@ -142,6 +142,15 @@ class ContextTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.collect()
 
+    def test_retried_statuses_include_only_the_latest_result_for_each_context(self):
+        self.api.statuses = [
+            {"context": "tests", "state": "success"},
+            {"context": "build", "state": "failure"},
+            {"context": "tests", "state": "failure"},
+            {"context": "build", "state": "success"},
+        ]
+        self.assertEqual(self.api.statuses[:2], self.collect()["statuses"])
+
     def test_checks_for_another_revision_cannot_support_compatibility(self):
         self.api.checks[0]["head_sha"] = "b" * 40
         with self.assertRaisesRegex(ValueError, "different revision"):
