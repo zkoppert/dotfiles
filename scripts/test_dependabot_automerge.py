@@ -176,7 +176,21 @@ class SafetyTests(unittest.TestCase):
         self.addCleanup(self.reviewer.stop)
 
     def handle(self, dry_run=False):
-        return bot.handle(self.client, CONFIG, REPO, 7, "operator", dry_run)
+        def review_with_ci(client, repo, pr):
+            verdict = copy.deepcopy(self.review(client, repo, pr))
+            if isinstance(verdict, dict) and verdict.get("decision") == "allow":
+                evidence = verdict.setdefault("evidence", {})
+                context = evidence.setdefault("consumer_context", {})
+                if not {"head_sha", "checks", "statuses"} <= context.keys():
+                    for key, value in bot.collect_ci_context(
+                        client, repo, pr["head"]["sha"]
+                    ).items():
+                        context.setdefault(key, value)
+                evidence.setdefault("dependencies", [])
+            return verdict
+
+        with mock.patch.object(bot, "review", side_effect=review_with_ci):
+            return bot.handle(self.client, CONFIG, REPO, 7, "operator", dry_run)
 
     def test_all_stable_upgrade_kinds_are_eligible_without_a_coverage_setting(self):
         for target, kind in (
@@ -187,6 +201,69 @@ class SafetyTests(unittest.TestCase):
             self.client.pr["title"] = f"Bump package from 1.0.0 to {target}"
             result = self.handle(dry_run=True)
             self.assertEqual(("merge", kind), (result["action"], result["bump"]))
+        self.assertEqual([], self.client.writes)
+
+    def test_same_head_ci_change_after_review_prevents_approval_and_merge(self):
+        self.client.checks[0]["name"] = "lint"
+        self.client.checks.append({**self.client.checks[0], "name": "tests"})
+        proof = {
+            "head_sha": "abc123",
+            "checks": copy.deepcopy(self.client.checks),
+            "statuses": [],
+        }
+
+        def review_then_change(*args):
+            self.client.checks[0]["conclusion"] = "skipped"
+            return {
+                "decision": "allow",
+                "summary": "Reviewed",
+                "evidence": {"dependencies": [], "consumer_context": proof},
+            }
+
+        self.review.side_effect = review_then_change
+        result = self.handle()
+        self.assertEqual("wait", result["action"])
+        self.assertIn("CI evidence changed", result["reason"])
+        self.assertEqual([], self.client.writes)
+
+    def test_same_head_ci_change_after_approval_prevents_the_merge_write(self):
+        self.client.checks[0]["name"] = "lint"
+        self.client.checks.append({**self.client.checks[0], "name": "tests"})
+        self.review.return_value = {
+            "decision": "allow",
+            "summary": "Reviewed",
+            "evidence": {
+                "dependencies": [],
+                "consumer_context": {
+                    "head_sha": "abc123",
+                    "checks": copy.deepcopy(self.client.checks),
+                    "statuses": [],
+                },
+            },
+        }
+        request = self.client.request
+
+        def approve_then_change(method, path, *args, **kwargs):
+            result = request(method, path, *args, **kwargs)
+            if method == "POST" and path.endswith("/reviews"):
+                self.client.checks[0]["conclusion"] = "skipped"
+            return result
+
+        with mock.patch.object(self.client, "request", side_effect=approve_then_change):
+            result = self.handle()
+        self.assertEqual("wait", result["action"])
+        self.assertIn("CI evidence changed", result["reason"])
+        self.assertEqual(
+            [("POST", f"/repos/{REPO}/pulls/7/reviews")],
+            [write[:2] for write in self.client.writes],
+        )
+
+    def test_an_allow_without_reviewed_ci_evidence_never_authorizes_a_write(self):
+        self.review.return_value = {"decision": "allow", "summary": "Missing evidence"}
+        with self.assertRaisesRegex(
+            bot.AutomationError, "lacks current-head CI evidence"
+        ):
+            bot.handle(self.client, CONFIG, REPO, 7, "operator", False)
         self.assertEqual([], self.client.writes)
 
     def test_reports_never_publish_the_consumer_configuration_payload(self):

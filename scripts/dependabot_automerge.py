@@ -19,6 +19,7 @@ import yaml
 from dependabot_alerts import publish
 from dependabot_api import AutomationError, GitHub, latest_statuses
 from dependabot_scope import in_scope
+from dependency_context import collect_ci_context
 from dependency_review import review
 
 sys.path.insert(
@@ -179,6 +180,21 @@ def evaluate(
     return "merge", "stable upgrade with passing checks"
 
 
+def reviewed_ci_matches(
+    client: GitHub, repo: str, sha: str, security: dict[str, Any]
+) -> bool:
+    evidence = security.get("evidence")
+    context = evidence.get("consumer_context") if isinstance(evidence, dict) else None
+    if (
+        not isinstance(context, dict)
+        or context.get("head_sha") != sha
+        or any(not isinstance(context.get(key), list) for key in ("checks", "statuses"))
+    ):
+        raise AutomationError("security review lacks current-head CI evidence")
+    expected = {key: context[key] for key in ("head_sha", "checks", "statuses")}
+    return collect_ci_context(client, repo, sha) == expected
+
+
 def handle(
     client: GitHub,
     config: dict[str, Any],
@@ -252,6 +268,11 @@ def handle(
         and review.get("state") != "COMMENTED"
     ]
     if not own or own[-1].get("state") != "APPROVED" or own[-1].get("commit_id") != sha:
+        if not reviewed_ci_matches(client, repo, sha, security):
+            result.update(
+                action="wait", reason="CI evidence changed since security review"
+            )
+            return result
         client.request(
             "POST",
             f"{path}/reviews",
@@ -280,6 +301,9 @@ def handle(
         return result
     if ready.get("mergeable_state") != "clean":
         result.update(action="hold", reason="waiting for branch policy after approval")
+        return result
+    if not reviewed_ci_matches(client, repo, sha, security):
+        result.update(action="wait", reason="CI evidence changed since security review")
         return result
     response = client.request(
         "PUT", f"{path}/merge", {"sha": sha, "merge_method": "squash"}

@@ -787,7 +787,7 @@ class ReviewerTests(unittest.TestCase):
             )
             second = security.review(self.api, "example/repo", PR, self.cache)
         self.assertNotEqual(first["evidence_sha256"], second["evidence_sha256"])
-        self.assertEqual(
+        self.assertCountEqual(
             self.api.checks, second["evidence"]["consumer_context"]["checks"]
         )
         self.assertEqual(2, run.call_count)

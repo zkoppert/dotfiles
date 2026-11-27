@@ -52,6 +52,8 @@ Compatibility findings must identify a changed contract and a reachable consumer
 Patch breadth, expected diagnostic fixes, and hypothetical uses alone do not establish a breaking change.
 Passing CI can support compatibility analysis, but it never overrides security findings or incomplete source evidence.
 The context and policy enter the review hash, so earlier verdicts cannot authorize different evidence.
+Approval and merge each recheck the normalized CI snapshot against the reviewed evidence.
+A changed snapshot waits for another review, even when aggregate CI eligibility still passes.
 All model tools, including shell, file, and network tools, are disabled through an explicit nonmatching catalog selector.
 An empty `--available-tools=` restores this CLI's default catalog and must not replace the nonmatching selector.
 The reviewer uses temporary configuration directories and an explicit environment allowlist, without approval-token environment variables.

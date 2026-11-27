@@ -149,7 +149,17 @@ class ContextTests(unittest.TestCase):
             {"context": "tests", "state": "failure"},
             {"context": "build", "state": "success"},
         ]
-        self.assertEqual(self.api.statuses[:2], self.collect()["statuses"])
+        self.assertCountEqual(self.api.statuses[:2], self.collect()["statuses"])
+
+    def test_equivalent_current_ci_records_have_one_order_independent_snapshot(self):
+        self.api.checks.append({**self.api.checks[0], "name": "build"})
+        self.api.statuses.append({"context": "lint", "state": "success"})
+        first = context.collect_ci_context(self.api, "example/repo", HEAD)
+        self.api.checks.reverse()
+        self.api.statuses.reverse()
+        self.assertEqual(
+            first, context.collect_ci_context(self.api, "example/repo", HEAD)
+        )
 
     def test_checks_for_another_revision_cannot_support_compatibility(self):
         self.api.checks[0]["head_sha"] = "b" * 40

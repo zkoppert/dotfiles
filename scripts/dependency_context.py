@@ -26,6 +26,36 @@ CONFIGURATION = {
 }
 
 
+def collect_ci_context(client: Any, repo: str, head: str) -> dict[str, Any]:
+    checks = client.pages(
+        f"/repos/{repo}/commits/{head}/check-runs?filter=latest", ".check_runs"
+    )
+    if any(check.get("head_sha") != head for check in checks):
+        raise ValueError("consumer CI evidence belongs to a different revision")
+    statuses = latest_statuses(client.pages(f"/repos/{repo}/commits/{head}/statuses"))
+    canonical = lambda records: sorted(
+        records, key=lambda item: json.dumps(item, sort_keys=True)
+    )
+    return {
+        "head_sha": head,
+        "checks": canonical(
+            [
+                {
+                    key: check.get(key)
+                    for key in ("name", "head_sha", "status", "conclusion")
+                }
+                for check in checks
+            ]
+        ),
+        "statuses": canonical(
+            [
+                {key: status.get(key) for key in ("context", "state")}
+                for status in statuses
+            ]
+        ),
+    }
+
+
 def collect_context(client: Any, repo: str, head: str) -> dict[str, Any]:
     tree = client.request("GET", f"/repos/{repo}/git/trees/{head}?recursive=1")
     if tree.get("truncated") is not False:
@@ -71,27 +101,10 @@ def collect_context(client: Any, repo: str, head: str) -> dict[str, Any]:
             )
         files.append({"path": path, "blob_sha": sha, "content": raw.decode("utf-8")})
         total += size
-    checks = client.pages(
-        f"/repos/{repo}/commits/{head}/check-runs?filter=latest", ".check_runs"
-    )
-    if any(check.get("head_sha") != head for check in checks):
-        raise ValueError("consumer CI evidence belongs to a different revision")
-    statuses = latest_statuses(client.pages(f"/repos/{repo}/commits/{head}/statuses"))
     context = {
-        "head_sha": head,
+        **collect_ci_context(client, repo, head),
         "scope": "Selected configuration and workflow files, not a complete usage inventory.",
         "files": sorted(files, key=lambda item: item["path"]),
-        "checks": [
-            {
-                key: check.get(key)
-                for key in ("name", "head_sha", "status", "conclusion")
-            }
-            for check in checks
-        ],
-        "statuses": [
-            {key: status.get(key) for key in ("context", "state")}
-            for status in statuses
-        ],
     }
     if len(json.dumps(context).encode()) > MAX_CONTEXT_BYTES:
         raise ValueError("complete consumer context exceeds the review limit")
