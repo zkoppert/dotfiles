@@ -4,6 +4,8 @@ import ast
 import base64
 import json
 import subprocess
+import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -12,6 +14,11 @@ import dependabot_api as api
 
 
 class ApiTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(api.Path, "is_file", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_secret_gist_json_and_readback_preserve_boolean_types(self):
         expected = {
             "public": False,
@@ -20,8 +27,8 @@ class ApiTests(unittest.TestCase):
         encoded = base64.b64encode(json.dumps(expected).encode()).decode()
         output = f"api_response:\n  body: {encoded}\n  truncated: false\n"
         with mock.patch.object(
-            api.subprocess,
-            "run",
+            api,
+            "run_command",
             return_value=subprocess.CompletedProcess([], 0, output),
         ) as run:
             self.assertEqual(expected, api.GitHub().request("POST", "/gists", expected))
@@ -51,7 +58,7 @@ class ApiTests(unittest.TestCase):
         )
         with (
             mock.patch.object(
-                api.subprocess, "run", side_effect=[failed, failed, succeeded]
+                api, "run_command", side_effect=[failed, failed, succeeded]
             ) as run,
             mock.patch("time.sleep") as sleep,
         ):
@@ -75,7 +82,7 @@ class ApiTests(unittest.TestCase):
             for index in range(1, 4)
         ]
         with (
-            mock.patch.object(api.subprocess, "run", side_effect=failures) as run,
+            mock.patch.object(api, "run_command", side_effect=failures) as run,
             mock.patch("time.sleep") as sleep,
             self.assertRaises(api.AutomationError) as error,
         ):
@@ -94,8 +101,8 @@ class ApiTests(unittest.TestCase):
         output = "api_response:\n  body: e30=\n  truncated: false\n"
         with (
             mock.patch.object(
-                api.subprocess,
-                "run",
+                api,
+                "run_command",
                 side_effect=[
                     subprocess.TimeoutExpired("gh", 90),
                     subprocess.CompletedProcess([], 0, output, ""),
@@ -119,7 +126,7 @@ class ApiTests(unittest.TestCase):
             ):
                 with (
                     self.subTest(method=method, failure=type(failure).__name__),
-                    mock.patch.object(api.subprocess, "run") as run,
+                    mock.patch.object(api, "run_command") as run,
                     mock.patch("time.sleep") as sleep,
                 ):
                     if isinstance(failure, Exception):
@@ -139,7 +146,7 @@ class ApiTests(unittest.TestCase):
     def test_timeout_exhaustion_remains_a_failure(self):
         with (
             mock.patch.object(
-                api.subprocess, "run", side_effect=subprocess.TimeoutExpired("gh", 90)
+                api, "run_command", side_effect=subprocess.TimeoutExpired("gh", 90)
             ) as run,
             mock.patch("time.sleep") as sleep,
             self.assertRaises(api.AutomationError) as error,
@@ -159,8 +166,8 @@ class ApiTests(unittest.TestCase):
             with (
                 self.subTest(output=output),
                 mock.patch.object(
-                    api.subprocess,
-                    "run",
+                    api,
+                    "run_command",
                     return_value=subprocess.CompletedProcess([], 0, output, ""),
                 ) as run,
                 mock.patch("time.sleep") as sleep,
@@ -169,6 +176,68 @@ class ApiTests(unittest.TestCase):
                     api.GitHub().request("GET", "/user")
                 run.assert_called_once()
                 sleep.assert_not_called()
+
+    def test_prepared_cli_avoids_cfs_and_npm_during_api_requests(self):
+        output = "api_response:\n  body: e30=\n  truncated: false\n"
+        with (
+            mock.patch.object(api.Path, "is_file", return_value=True),
+            mock.patch.object(
+                api,
+                "run_command",
+                return_value=subprocess.CompletedProcess([], 0, output),
+            ) as run,
+        ):
+            self.assertEqual({}, api.GitHub().request("GET", "/user"))
+        command = run.call_args.args[0]
+        self.assertTrue(
+            command[0].endswith("/.dependabot-runtime/node/node_modules/.bin/gh-axi")
+        )
+        self.assertEqual("api", command[1])
+        self.assertNotIn("cfs", command)
+        self.assertNotIn("npx", command)
+
+    def test_timeout_kills_descendants_before_collecting_output(self):
+        process = mock.MagicMock()
+        process.pid = 123
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired("command", 90),
+            ("out", "err"),
+        ]
+        with (
+            mock.patch.object(api.subprocess, "Popen") as popen,
+            mock.patch.object(api.os, "killpg") as kill,
+        ):
+            popen.return_value.__enter__.return_value = process
+            with self.assertRaises(subprocess.TimeoutExpired) as error:
+                api.run_command(["command"], input=None)
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        kill.assert_called_once_with(123, api.signal.SIGKILL)
+        self.assertEqual("out", error.exception.stdout)
+        self.assertEqual("err", error.exception.stderr)
+
+    def test_real_timeout_stops_a_descendant_holding_the_output_pipe(self):
+        start = time.monotonic()
+        command = [
+            sys.executable,
+            "-c",
+            "import subprocess,sys; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); print('started', flush=True)",
+        ]
+        with self.assertRaises(subprocess.TimeoutExpired) as error:
+            api.run_command(command, timeout=0.5)
+        self.assertIn("started", error.exception.stdout)
+        self.assertLess(time.monotonic() - start, 10)
+
+    def test_real_command_preserves_json_streams_and_exit_status(self):
+        result = api.run_command(
+            [
+                sys.executable,
+                "-c",
+                "import sys; print('out'); print('err', file=sys.stderr); sys.exit(7)",
+            ]
+        )
+        self.assertEqual(
+            (7, "out\n", "err\n"), (result.returncode, result.stdout, result.stderr)
+        )
 
     def test_api_module_supports_the_bootstrap_python_syntax(self):
         ast.parse(Path(api.__file__).read_text(), feature_version=(3, 8))

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
+import signal
 import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
 
@@ -24,19 +27,51 @@ def _diagnostics(stdout: Any, stderr: Any) -> str:
     return "\n".join(streams)
 
 
+def run_command(command, *, input=None, timeout=90):
+    with subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            # Descendants can keep captured pipes open after the parent exits.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            exc.stdout, exc.stderr = process.communicate()
+            raise
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
 class GitHub:
     """Preserve structured JSON responses through gh-axi's text renderer."""
 
     def request(
         self, method: str, path: str, payload: Any = None, expression: str = "."
     ) -> Any:
-        command = [
-            "gh",
-            "cfs",
-            "--",
-            "npx",
-            "-y",
-            "gh-axi@0.1.35",
+        executable = (
+            Path(__file__).resolve().parents[1]
+            / ".dependabot-runtime/node/node_modules/.bin/gh-axi"
+        )
+        launcher = (
+            [str(executable)]
+            if executable.is_file()
+            else [
+                "gh",
+                "cfs",
+                "--",
+                "npx",
+                "-y",
+                "gh-axi@0.1.35",
+            ]
+        )
+        command = launcher + [
             "api",
             "--hostname",
             "github.com",
@@ -52,13 +87,9 @@ class GitHub:
         failures = []
         for attempt in range(1, attempts + 1):
             try:
-                result = subprocess.run(
+                result = run_command(
                     command,
                     input=json.dumps(payload) if payload is not None else None,
-                    capture_output=True,
-                    text=True,
-                    timeout=90,
-                    check=False,
                 )
             except subprocess.TimeoutExpired as exc:
                 detail = (

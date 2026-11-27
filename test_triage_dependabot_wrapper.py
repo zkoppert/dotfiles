@@ -37,7 +37,19 @@ class TriageDependabotWrapperTest(unittest.TestCase):
                 "WRAPPER_TEST_LOG": str(self.log),
             }
         )
-        self.wrapper = Path(__file__).with_name("bin") / "triage-dependabot"
+        self.source_wrapper = Path(__file__).with_name("bin") / "triage-dependabot"
+        self.installation = self.root / "installation"
+        (self.installation / "bin").mkdir(parents=True)
+        self.wrapper = self.installation / "bin/triage-dependabot"
+        shutil.copy2(self.source_wrapper, self.wrapper)
+        self.python = self.installation / ".dependabot-runtime/python/bin/python"
+        self.python.parent.mkdir(parents=True)
+        shutil.copy2(self.gh, self.python)
+        self.axi = (
+            self.installation / ".dependabot-runtime/node/node_modules/.bin/gh-axi"
+        )
+        self.axi.parent.mkdir(parents=True)
+        shutil.copy2(self.gh, self.axi)
 
     def run_wrapper(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -50,7 +62,7 @@ class TriageDependabotWrapperTest(unittest.TestCase):
 
     def test_historical_command_refuses_execution_before_optional_dependencies(self):
         legacy = (
-            self.wrapper.parent.parent
+            self.source_wrapper.parent.parent
             / ".copilot/skills/triage-dependabot/triage_dependabot.py"
         )
         result = subprocess.run(
@@ -63,31 +75,33 @@ class TriageDependabotWrapperTest(unittest.TestCase):
         self.assertEqual(1, result.returncode)
         self.assertIn("Use the guarded runner", result.stderr)
 
-    def test_dynamic_dependencies_are_resolved_through_cfs(self) -> None:
+    def test_scheduled_worker_uses_prepared_python_without_package_resolution(
+        self,
+    ) -> None:
         result = self.run_wrapper("--dry-run")
 
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(
-            "cfs -- /opt/homebrew/bin/uv run --no-project "
-            "--python /opt/homebrew/bin/python3 --with PyYAML==6.0.3 "
-            "--with ruamel.yaml==0.18.16 -- "
             f"{self.wrapper.parent.parent}/scripts/dependabot_automerge.py --dry-run",
             self.log.read_text(encoding="utf-8").strip(),
         )
 
-    def test_cfs_failure_is_preserved(self) -> None:
+    def test_worker_failure_is_preserved(self) -> None:
         self.env["WRAPPER_TEST_EXIT"] = "42"
 
         result = self.run_wrapper("--dry-run")
 
         self.assertEqual(42, result.returncode)
 
+    def test_missing_runtime_stops_before_worker_execution(self):
+        self.axi.unlink()
+        result = self.run_wrapper("--dry-run")
+        self.assertEqual(1, result.returncode)
+        self.assertIn("--prepare-runtime", result.stderr)
+        self.assertFalse(self.log.exists())
+
     def bootstrap_fixture(self):
-        root = self.root / "installation"
-        (root / "bin").mkdir(parents=True)
-        target = root / "bin/triage-dependabot"
-        shutil.copy2(self.wrapper, target)
-        self.wrapper = target
+        root = self.installation
         (root / "scripts").mkdir()
         (root / "scripts/dependabot_alerts.py").write_text(
             "import json, os, sys\nfrom pathlib import Path\n"
