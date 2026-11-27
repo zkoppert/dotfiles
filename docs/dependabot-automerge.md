@@ -75,7 +75,9 @@ It doesn't verify published package archives, signatures, or package-to-source p
 It checks the PR author, but it doesn't verify who pushed each commit or validate commit signatures.
 The base branch can advance after revalidation. GitHub's configured branch rules decide whether that requires new checks.
 Source patches and selected consumer configuration enter the authenticated Copilot service.
-Reports keep review identities, revision IDs, and findings, not source patches or configuration contents.
+Private JSON reports omit raw evidence payloads but retain reviewer summaries and findings verbatim.
+Reviewer text can quote source or configuration, so the private report is not a redacted document.
+Help gists use fixed reason summaries, not reviewer text or raw evidence.
 Don't publish private reports or Copilot session logs.
 The GitHub API adapter pins `gh-axi@0.1.35` through Central Feed Services (CFS).
 Run `bin/triage-dependabot --prepare-runtime` once in each fixed release before activation.
