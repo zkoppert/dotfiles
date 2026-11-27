@@ -9,6 +9,21 @@ permissions:
   contents: read
 
 jobs:
+  dependabot:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Install Dependabot test dependencies
+        run: python3 -m pip install PyYAML==6.0.3 ruamel.yaml==0.18.16
+      - name: Test Dependabot evidence and safety gates
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_depend*.py'
+          python3 test_triage_dependabot_wrapper.py
   test:
     # Keep Python 3.9 coverage on a runner with published interpreter builds.
     runs-on: ubuntu-24.04

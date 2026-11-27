@@ -34,6 +34,9 @@ Merge queues and unsupported merge policies remain exceptions; the runner doesn'
 
 ## Review dependency security
 The approval gate compares dependency graph snapshots and resolves old and new stable versions to upstream GitHub commits.
+When both graph entries omit a Python source URL, it checks version-specific PyPI metadata for both releases.
+Both releases must identify the same GitHub source repository and match the requested package and exact version.
+Missing, conflicting, redirected, oversized, or unavailable metadata still prevents approval.
 Consumer patches also come from an immutable base/head comparison, not the live PR-files endpoint.
 Immutable Git trees supply file modes. Mode changes, symlinks, submodules, and incomplete tree data require manual review.
 It checks reviewed, unreviewed, and malware advisories for each target version, independently of CI.
@@ -43,7 +46,11 @@ An empty `--available-tools=` restores this CLI's default catalog and must not r
 The reviewer uses temporary configuration directories and an explicit environment allowlist, without approval-token environment variables.
 
 Missing source links, new or removed packages, unresolved tags, divergent histories, incomplete patches, and oversized changes require manual review.
-Every consumer file must be a graph-covered manifest. Mixed or partially mapped updates require manual review.
+Every consumer file must have matching dependency evidence. Mixed or partially mapped updates require manual review.
+Exact dependency replacements in `pyproject.toml` can use the adjacent `uv.lock` graph entries.
+Commit-pinned Actions require exact version comments, matching upstream tags, and complete graph coverage.
+The runner checks each changed workflow reference, including repeated references across files.
+Other workflow edits and Action references missing from the graph still require manual review.
 The graph supplies dependency mappings; the model cross-checks the full covered manifest patch against that list.
 This is not an independent deterministic parser for every manifest format.
 Findings, invalid model responses, and reviewer failures also prevent approval.
@@ -58,13 +65,19 @@ It checks the PR author, but it doesn't verify who pushed each commit or validat
 The base branch can advance after revalidation. GitHub's configured branch rules decide whether that requires new checks.
 Source patches enter the authenticated Copilot service. Reports keep review identities, revision IDs, and findings, not source patches.
 Don't publish private reports or Copilot session logs.
-The GitHub API adapter pins `gh-axi@0.1.35` through Central Feed Services.
+The GitHub API adapter pins `gh-axi@0.1.35` through Central Feed Services (CFS).
+Run `bin/triage-dependabot --prepare-runtime` once in each fixed release before activation.
+Preparation installs Python dependencies and the GitHub CLI into the ignored `.dependabot-runtime` directory through CFS.
+Scheduled runs use those installed executables without package resolution or CFS authentication.
+A missing runtime stops the worker and requests help. Preparation does not approve or merge updates.
+The standalone alert helper retains CFS-based CLI resolution when no prepared CLI exists.
 
 ## Recover failed lookups
 A failed API command or timeout gets up to three attempts for `GET` requests only.
 The adapter waits one second before the second attempt and two seconds before the third.
 Each attempt has a 90-second timeout, so one lookup can take about 273 seconds before process cleanup overhead.
-CFS can hide the underlying failure, so this bounded policy also retries persistent access failures.
+Timeout cleanup kills the command's process group so descendants cannot keep output pipes open indefinitely.
+The bounded retry policy also covers persistent access failures.
 Successful commands with invalid or truncated responses still stop processing without a retry.
 Write requests never retry, including approval, merge, rebase, and gist publication requests.
 A lost write response can leave the action completed on GitHub, so a retry could repeat that action.
@@ -115,10 +128,12 @@ The opt-in test checks malicious patch instructions, synthetic file reads, and u
 A separate positive control confirms that the canary file becomes readable only when the read restrictions are removed.
 
 ## Preview and activate
-Run `bin/triage-dependabot --dry-run` from the reviewed checkout.
+Run `bin/triage-dependabot --prepare-runtime`, then `bin/triage-dependabot --dry-run` from the reviewed checkout.
 The preview permits disabled configuration and prints a JSON report without GitHub mutations or a saved report.
 A local lock prevents overlapping scans. Preview mode also uses the lock.
-After approval, install a fixed release snapshot and point both the LaunchAgent and local launcher at that version.
+After approval, install a fixed release snapshot and prepare its runtime with `bin/triage-dependabot --prepare-runtime`.
+Run that snapshot's `bin/triage-dependabot --dry-run` before changing either launcher.
+Then point both the LaunchAgent and local launcher at that version.
 Route the installed triage skill to the same snapshot; don't fall back to the historical notification runner.
 Set `enabled: true` and enable `com.zkoppert.triage-dependabot` with `launchctl`.
 The existing LaunchAgent runs hourly, including weekends, and loading it doesn't start an immediate scan.

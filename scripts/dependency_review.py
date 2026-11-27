@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
+from urllib.request import urlopen
 
 CACHE = Path.home() / "Library/Caches/dependabot-automerge/reviews"
 MODEL = "gpt-5.3-codex"
@@ -141,13 +142,23 @@ def dependency_pairs(
         if new["ecosystem"] not in ECOSYSTEMS:
             raise ReviewBlocked(f"unsupported advisory ecosystem: {new['ecosystem']}")
         for entry in (old, new):
-            if not re.fullmatch(r"v?\d+(?:\.\d+){1,3}(?:\.post\d+)?", entry["version"]):
+            if not (
+                re.fullmatch(r"v?\d+(?:\.\d+){1,3}(?:\.post\d+)?", entry["version"])
+                or entry["ecosystem"] == "actions"
+                and re.fullmatch(r"[a-f0-9]{40}", entry["version"])
+            ):
                 raise ReviewBlocked(
                     f"exact stable version unavailable: {entry['name']}"
                 )
-        if not old.get("source_repository_url") or old[
-            "source_repository_url"
-        ] != new.get("source_repository_url"):
+        registry_fallback = (
+            new["ecosystem"] == "pip"
+            and not old.get("source_repository_url")
+            and not new.get("source_repository_url")
+        )
+        if not registry_fallback and (
+            not old.get("source_repository_url")
+            or old["source_repository_url"] != new.get("source_repository_url")
+        ):
             raise ReviewBlocked(f"upstream source missing or changed: {new['name']}")
         result.append((old, new))
     return result
@@ -166,6 +177,150 @@ def source_repo(url: str) -> str:
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*/[a-zA-Z0-9][a-zA-Z0-9_.-]*", name):
         raise ReviewBlocked("invalid upstream repository")
     return name
+
+
+def pypi_source(name: str, version: str) -> str:
+    url = f"https://pypi.org/pypi/{quote(name, safe='')}/{quote(version, safe='')}/json"
+    with urlopen(url, timeout=30) as response:
+        if response.geturl() != url:
+            raise ReviewBlocked("PyPI metadata redirected unexpectedly")
+        raw = response.read(1_000_001)
+    if len(raw) > 1_000_000:
+        raise ReviewBlocked("PyPI metadata is too large")
+    info = json.loads(raw)["info"]
+    normalize = lambda value: re.sub(r"[-_.]+", "-", value).lower()
+    if normalize(info["name"]) != normalize(name) or info["version"] != version:
+        raise ReviewBlocked("PyPI metadata does not match the exact dependency")
+    sources = {
+        source_repo(url).lower()
+        for label, url in (info.get("project_urls") or {}).items()
+        if label.lower() in {"source", "source code", "repository"}
+    }
+    if len(sources) != 1:
+        raise ReviewBlocked(f"PyPI source missing or ambiguous: {name}")
+    return "https://github.com/" + sources.pop()
+
+
+def companion_manifests(pairs, consumer):
+    covered = set()
+    for patch in consumer:
+        path = Path(patch["path"])
+        if path.name != "pyproject.toml" or patch["previous_path"]:
+            continue
+        lockfile = str(path.with_name("uv.lock"))
+        replacements = {
+            (f"{old['name']}=={old['version']}", f"{new['name']}=={new['version']}")
+            for old, new in pairs
+            if new["ecosystem"] == "pip" and new["manifest"] == lockfile
+        }
+        sides = []
+        for marker in ("-", "+"):
+            sides.append(
+                [
+                    line[1:]
+                    for line in patch["patch"].split("\n")
+                    if line.startswith(marker)
+                ]
+            )
+        if not sides[0] or len(sides[0]) != len(sides[1]):
+            continue
+        for before, after in zip(*sides):
+            old = re.fullmatch(r"""(\s*["'])([^"']+)(["'],?\s*)""", before)
+            new = re.fullmatch(r"""(\s*["'])([^"']+)(["'],?\s*)""", after)
+            if (
+                not old
+                or not new
+                or old[1] != new[1]
+                or old[3] != new[3]
+                or (old[2], new[2]) not in replacements
+            ):
+                break
+        else:
+            covered.add(patch["path"])
+    return covered
+
+
+def action_versions(pairs, consumer):
+    pinned = [pair for pair in pairs if pair[1]["ecosystem"] == "actions"]
+    if not any(re.fullmatch(r"[a-f0-9]{40}", new["version"]) for _, new in pinned):
+        return pairs, set()
+    if len(pinned) != len(pairs):
+        raise ReviewBlocked(
+            "mixed pinned Action and package updates require manual review"
+        )
+    pattern = re.compile(
+        r"(\s*(?:-\s*)?uses:\s*)([\w.-]+/[\w.-]+)@([a-f0-9]{40})"
+        r"(\s+#\s*)(v?\d+\.\d+\.\d+)(\s*)"
+    )
+    versions = {}
+    manifests = set()
+    graph_manifests = {new["manifest"] for _, new in pairs}
+    observed = set()
+    for patch in consumer:
+        if (
+            not re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", patch["path"])
+            or patch["previous_path"]
+        ):
+            raise ReviewBlocked(
+                "pinned Action updates require unchanged workflow paths"
+            )
+        sides = []
+        for marker in ("-", "+"):
+            lines = [
+                line[1:]
+                for line in patch["patch"].split("\n")
+                if line.startswith(marker)
+            ]
+            matches = [pattern.fullmatch(line) for line in lines]
+            if not matches or not all(matches):
+                raise ReviewBlocked(
+                    "workflow contains changes beyond pinned Action references"
+                )
+            sides.append(matches)
+        if len(sides[0]) != len(sides[1]):
+            raise ReviewBlocked("Action references were added or removed")
+        for before, after in zip(*sides):
+            if any(before[i] != after[i] for i in (1, 2, 4, 6)):
+                raise ReviewBlocked("Action reference structure changed")
+            name = after[2]
+            matching = [
+                (old, new)
+                for old, new in pinned
+                if new["name"] == name
+                and (
+                    patch["path"] not in graph_manifests
+                    or new["manifest"] == patch["path"]
+                )
+                and source_repo(new["source_repository_url"]) == name
+                and old["version"] == before[3]
+                and new["version"] == after[3]
+            ]
+            if not matching:
+                raise ReviewBlocked(
+                    "Action reference lacks matching dependency graph evidence"
+                )
+            observed.add((patch["path"], name, before[3], after[3]))
+            versions.setdefault((name, before[3], after[3]), set()).add(
+                (before[5], after[5])
+            )
+        manifests.add(patch["path"])
+    resolved = []
+    for old, new in pairs:
+        candidates = versions.get((new["name"], old["version"], new["version"]), set())
+        if (
+            len(candidates) != 1
+            or (new["manifest"], new["name"], old["version"], new["version"])
+            not in observed
+        ):
+            raise ReviewBlocked("Action version comments are missing or inconsistent")
+        before, after = next(iter(candidates))
+        resolved.append(
+            tuple(
+                {**entry, "pinned_sha": entry["version"], "version": version}
+                for entry, version in ((old, before), (new, after))
+            )
+        )
+    return resolved, manifests
 
 
 def resolve_tag(client: Any, repo: str, version: str) -> str:
@@ -255,10 +410,14 @@ def collect(client: Any, repo: str, pr: dict[str, Any]) -> dict[str, Any]:
         checked_patches(comparison["files"], pr["changed_files"]),
     )
     changes = client.request(
-        "GET", f"/repos/{repo}/dependency-graph/compare/{base}...{head}"
+        "GET", f"/repos/{repo}/dependency-graph/compare/{consumer_base}...{head}"
     )
-    pairs = dependency_pairs(changes)
-    manifests = {new["manifest"] for _, new in pairs}
+    pairs, action_manifests = action_versions(dependency_pairs(changes), consumer)
+    manifests = (
+        {new["manifest"] for _, new in pairs}
+        | action_manifests
+        | companion_manifests(pairs, consumer)
+    )
     uncovered = {
         path
         for patch in consumer
@@ -288,9 +447,19 @@ def collect(client: Any, repo: str, pr: dict[str, Any]) -> dict[str, Any]:
             raise ReviewBlocked(
                 f"vulnerability advisory affects {new['name']}@{new['version']}: {active}"
             )
-        upstream = source_repo(new["source_repository_url"])
+        source = new.get("source_repository_url")
+        if not source:
+            source = pypi_source(old["name"], old["version"])
+            if source != pypi_source(new["name"], new["version"]):
+                raise ReviewBlocked(f"PyPI upstream source changed: {new['name']}")
+        upstream = source_repo(source)
         before = resolve_tag(client, upstream, old["version"])
         after = resolve_tag(client, upstream, new["version"])
+        if any(
+            entry.get("pinned_sha", sha) != sha
+            for entry, sha in ((old, before), (new, after))
+        ):
+            raise ReviewBlocked("Action version tag does not match its pinned commit")
         comparison = client.request(
             "GET", f"/repos/{upstream}/compare/{before}...{after}?per_page=100"
         )

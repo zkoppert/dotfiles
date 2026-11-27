@@ -2,6 +2,7 @@
 
 import concurrent.futures
 import copy
+import io
 import json
 import re
 import secrets
@@ -285,6 +286,299 @@ class EvidenceTests(unittest.TestCase):
                 self.assertRaises(security.ReviewBlocked),
             ):
                 security.collect(self.api, "example/repo", PR)
+
+    def test_missing_pip_sources_resolve_both_exact_registry_versions(self):
+        for entry in self.api.changes:
+            entry["source_repository_url"] = None
+
+        def metadata(url, timeout):
+            version = url.split("/")[-2]
+            response = io.BytesIO(
+                json.dumps(
+                    {
+                        "info": {
+                            "name": "requests",
+                            "version": version,
+                            "project_urls": {
+                                "Source Code": "https://github.com/psf/requests"
+                            },
+                        }
+                    }
+                ).encode()
+            )
+            response.geturl = lambda: url
+            return response
+
+        with mock.patch.object(security, "urlopen", side_effect=metadata) as fetch:
+            result = security.collect(self.api, "example/repo", PR)
+        self.assertEqual("psf/requests", result["dependencies"][0]["repository"])
+        self.assertEqual(NEW, result["dependencies"][0]["new_sha"])
+        self.assertEqual(2, fetch.call_count)
+        self.assertTrue(
+            all(call.kwargs == {"timeout": 30} for call in fetch.call_args_list)
+        )
+
+    def test_registry_identity_conflicts_and_missing_sources_block(self):
+        valid = {
+            "name": "requests",
+            "version": "2.32.4",
+            "project_urls": {"Source": "https://github.com/psf/requests"},
+        }
+        for replacement in (
+            {"name": "different"},
+            {"version": "2.32.5"},
+            {"project_urls": None},
+            {"project_urls": {"Source": "https://evil.example/a/b"}},
+            {
+                "project_urls": {
+                    "Source": "https://github.com/a/b",
+                    "Repository": "https://github.com/c/d",
+                }
+            },
+        ):
+            response = io.BytesIO(
+                json.dumps({"info": {**valid, **replacement}}).encode()
+            )
+            response.geturl = lambda: "https://pypi.org/pypi/requests/2.32.4/json"
+            with (
+                mock.patch.object(security, "urlopen", return_value=response),
+                self.assertRaises(security.ReviewBlocked),
+            ):
+                security.pypi_source("requests", "2.32.4")
+        for entry in self.api.changes:
+            entry["source_repository_url"] = None
+        with (
+            mock.patch.object(
+                security,
+                "pypi_source",
+                side_effect=["https://github.com/a/b", "https://github.com/c/d"],
+            ),
+            self.assertRaisesRegex(security.ReviewBlocked, "source changed"),
+        ):
+            security.collect(self.api, "example/repo", PR)
+
+    def action_fixture(self):
+        for entry, sha in zip(self.api.changes, (OLD, NEW)):
+            entry.update(
+                ecosystem="actions",
+                name="example/source",
+                version=sha,
+                manifest=".github/workflows/test.yml",
+                source_repository_url="https://github.com/example/source",
+            )
+        patch = {
+            "path": ".github/workflows/test.yml",
+            "previous_path": "",
+            "patch": f"@@ -1 +1 @@\n-  - uses: example/source@{OLD} # v2.32.3\n+  - uses: example/source@{NEW} # v2.32.4",
+        }
+        return patch
+
+    def test_companion_pyproject_only_covers_exact_lockfile_dependency_replacements(
+        self,
+    ):
+        patch = {
+            "path": "pyproject.toml",
+            "previous_path": "",
+            "patch": '@@ -1 +1 @@\n-    "requests==2.32.3",\n+    "requests==2.32.4",',
+        }
+        pairs = security.dependency_pairs(self.api.changes)
+        self.assertEqual(
+            {"pyproject.toml"}, security.companion_manifests(pairs, [patch])
+        )
+        for bad in (
+            {**patch, "patch": patch["patch"].replace("2.32.4", "2.32.5")},
+            {**patch, "patch": patch["patch"] + '\n+    "unmapped-package==1.0.0",'},
+            {**patch, "path": "other/pyproject.toml"},
+            {**patch, "previous_path": "old.toml"},
+            {
+                **patch,
+                "patch": patch["patch"]
+                + '\n-build-backend="safe"\n+build-backend="unsafe"',
+            },
+        ):
+            self.assertEqual(set(), security.companion_manifests(pairs, [bad]))
+
+    def test_registry_redirects_oversized_metadata_and_failures_cannot_authorize_review(
+        self,
+    ):
+        for body, url in (
+            (b"{}", "https://elsewhere.invalid/data"),
+            (b" " * 1_000_001, "https://pypi.org/pypi/requests/2.32.4/json"),
+        ):
+            response = io.BytesIO(body)
+            response.geturl = lambda url=url: url
+            with (
+                mock.patch.object(security, "urlopen", return_value=response),
+                self.assertRaises(security.ReviewBlocked),
+            ):
+                security.pypi_source("requests", "2.32.4")
+        with (
+            mock.patch.object(
+                security, "urlopen", side_effect=TimeoutError("lookup failed")
+            ),
+            self.assertRaises(TimeoutError),
+        ):
+            security.pypi_source("requests", "2.32.4")
+
+    def test_graph_uses_the_same_immutable_merge_base_as_consumer_patches(self):
+        self.api.consumer_base = "e" * 40
+        request = self.api.request
+        with mock.patch.object(self.api, "request", side_effect=request) as calls:
+            evidence = security.collect(self.api, "example/repo", PR)
+        self.assertEqual("e" * 40, evidence["consumer_base_sha"])
+        self.assertIn(
+            mock.call(
+                "GET",
+                f"/repos/example/repo/dependency-graph/compare/{self.api.consumer_base}...{PR['head']['sha']}",
+            ),
+            calls.call_args_list,
+        )
+
+    def test_pinned_actions_map_duplicate_workflows_to_verified_version_comments(self):
+        patch = self.action_fixture()
+        duplicate = {**patch, "path": ".github/workflows/other.yaml"}
+        pairs, manifests = security.action_versions(
+            security.dependency_pairs(self.api.changes), [patch, duplicate]
+        )
+        old, new = pairs[0]
+        self.assertEqual(
+            ("v2.32.3", "v2.32.4", OLD, NEW),
+            (old["version"], new["version"], old["pinned_sha"], new["pinned_sha"]),
+        )
+        self.assertEqual({patch["path"], duplicate["path"]}, manifests)
+
+    def test_distinct_commit_pairs_for_one_action_remain_separate_across_workflows(
+        self,
+    ):
+        first = self.action_fixture()
+        other_old, other_new = "e" * 40, "f" * 40
+        second = {
+            **first,
+            "path": ".github/workflows/other.yml",
+            "patch": first["patch"]
+            .replace(OLD, other_old)
+            .replace(NEW, other_new)
+            .replace("v2.32.3", "v3.0.0")
+            .replace("v2.32.4", "v3.0.1"),
+        }
+        other_changes = [
+            {**entry, "manifest": second["path"], "version": sha}
+            for entry, sha in zip(self.api.changes, (other_old, other_new))
+        ]
+        pairs, manifests = security.action_versions(
+            security.dependency_pairs(self.api.changes + other_changes), [first, second]
+        )
+        self.assertEqual(
+            [
+                ("v2.32.3", "v2.32.4", OLD, NEW),
+                ("v3.0.0", "v3.0.1", other_old, other_new),
+            ],
+            [
+                (old["version"], new["version"], old["pinned_sha"], new["pinned_sha"])
+                for old, new in pairs
+            ],
+        )
+        self.assertEqual({first["path"], second["path"]}, manifests)
+
+    def test_workflows_cannot_exchange_graph_scoped_commit_pairs(self):
+        first = self.action_fixture()
+        other_old, other_new = "e" * 40, "f" * 40
+        second = {
+            **first,
+            "path": ".github/workflows/other.yml",
+            "patch": first["patch"]
+            .replace(OLD, other_old)
+            .replace(NEW, other_new)
+            .replace("v2.32.3", "v3.0.0")
+            .replace("v2.32.4", "v3.0.1"),
+        }
+        other_changes = [
+            {**entry, "manifest": second["path"], "version": sha}
+            for entry, sha in zip(self.api.changes, (other_old, other_new))
+        ]
+        with self.assertRaises(security.ReviewBlocked):
+            security.action_versions(
+                security.dependency_pairs(self.api.changes + other_changes),
+                [
+                    {**first, "patch": second["patch"]},
+                    {**second, "patch": first["patch"]},
+                ],
+            )
+
+    def test_each_graph_pair_requires_evidence_in_its_own_workflow(self):
+        first = self.action_fixture()
+        other = {
+            **first,
+            "path": ".github/workflows/other.yml",
+            "patch": first["patch"].replace("example/source", "other/source"),
+        }
+        extra_changes = [
+            {
+                **entry,
+                "name": "other/source",
+                "source_repository_url": "https://github.com/other/source",
+            }
+            for entry in self.api.changes
+        ]
+        with self.assertRaises(security.ReviewBlocked):
+            security.action_versions(
+                security.dependency_pairs(self.api.changes + extra_changes),
+                [
+                    {**first, "patch": other["patch"]},
+                    {**first, "path": ".github/workflows/duplicate.yml"},
+                ],
+            )
+
+    def test_pinned_actions_cannot_cover_code_changes_or_conflicting_comments(self):
+        patch = self.action_fixture()
+        for bad in (
+            {**patch, "patch": patch["patch"] + "\n+  run: unsafe-command"},
+            {**patch, "path": "README.md"},
+            {**patch, "previous_path": "old.yml"},
+            {**patch, "patch": patch["patch"].replace(" # v2.32.4", "")},
+            {
+                **patch,
+                "patch": patch["patch"].replace(
+                    "+  - uses: example/source", "+  - uses: other/source"
+                ),
+            },
+            {**patch, "patch": patch["patch"].replace(NEW, "e" * 40)},
+        ):
+            with self.subTest(patch=bad), self.assertRaises(security.ReviewBlocked):
+                security.action_versions(
+                    security.dependency_pairs(self.api.changes), [bad]
+                )
+        conflicting = {
+            **patch,
+            "path": ".github/workflows/other.yml",
+            "patch": patch["patch"].replace("v2.32.4", "v2.32.5"),
+        }
+        with self.assertRaises(security.ReviewBlocked):
+            security.action_versions(
+                security.dependency_pairs(self.api.changes), [patch, conflicting]
+            )
+
+    def test_pinned_action_comment_cannot_substitute_for_a_matching_commit(self):
+        self.action_fixture()
+        self.api.files = [{**PATCH, "filename": ".github/workflows/test.yml"}]
+        pairs = [
+            (
+                dict(self.api.changes[0], version="v2.32.3", pinned_sha=OLD),
+                dict(self.api.changes[1], version="v2.32.4", pinned_sha="e" * 40),
+            )
+        ]
+        with (
+            mock.patch.object(
+                security, "action_versions", return_value=(pairs, {"uv.lock"})
+            ),
+            mock.patch.object(
+                security,
+                "checked_modes",
+                side_effect=lambda client, repo, before, after, patches: patches,
+            ),
+            self.assertRaisesRegex(security.ReviewBlocked, "tag does not match"),
+        ):
+            security.collect(self.api, "example/repo", PR)
 
     def test_advisory_queries_bind_the_target_package_version_and_ecosystem(self):
         self.api.advisories = [{"ghsa_id": "GHSA-target-only", "withdrawn_at": None}]

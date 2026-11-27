@@ -2,8 +2,7 @@
 # launchd uses an isolated Python environment and private repository policy.
 set -euo pipefail
 
-# Brew prepends /opt/homebrew/bin in interactive shells; replicate here
-# so `gh`, `copilot`, and `uv` are on PATH when launchd invokes us directly.
+# launchd does not inherit the interactive Homebrew path.
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 find_gh() {
@@ -22,11 +21,18 @@ find_gh() {
   exit 1
 }
 
-# Homebrew Python intentionally has no project-local YAML dependencies, while
-# macOS system Python is too old for this tool's supported runtime. Let uv own
-# a cached, isolated environment so launchd always gets the same interpreter
-# and exact dependency versions without mutating global site-packages.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+RUNTIME="$ROOT/.dependabot-runtime"
+if [ "${1:-}" = "--prepare-runtime" ]; then
+  GH="$(find_gh)"
+  umask 077
+  /opt/homebrew/bin/uv venv --python /opt/homebrew/bin/python3 "$RUNTIME/python"
+  "$GH" cfs -- /opt/homebrew/bin/uv pip install --python "$RUNTIME/python/bin/python" \
+    'PyYAML==6.0.3' 'ruamel.yaml==0.18.16'
+  "$GH" cfs -- /opt/homebrew/bin/npm install --prefix "$RUNTIME/node" \
+    --no-save --ignore-scripts --no-audit --no-fund 'gh-axi@0.1.35'
+  exit 0
+fi
 quiet=false
 report=""
 expect_report=false
@@ -72,10 +78,10 @@ export DEPENDABOT_WORKER_STARTED="$receipt_dir/started"
 export DEPENDABOT_FAILURE_REPORTED="$receipt_dir/reported"
 export DEPENDABOT_FALLBACK_ALERT_SENT="$receipt_dir/emergency"
 trap 'rm -f "$receipt_dir/started" "$receipt_dir/reported" "$receipt_dir/emergency"; rmdir "$receipt_dir" 2>/dev/null || true' EXIT
-if GH="$(find_gh)" && "$GH" cfs -- /opt/homebrew/bin/uv run --no-project \
-  --python /opt/homebrew/bin/python3 \
-  --with 'PyYAML==6.0.3' --with 'ruamel.yaml==0.18.16' -- \
-  "$ROOT/scripts/dependabot_automerge.py" "$@"; then
+if [ ! -x "$RUNTIME/python/bin/python" ] || [ ! -x "$RUNTIME/node/node_modules/.bin/gh-axi" ]; then
+  echo "Dependabot runtime missing; run $0 --prepare-runtime through CFS first." >&2
+  status=1
+elif "$RUNTIME/python/bin/python" "$ROOT/scripts/dependabot_automerge.py" "$@"; then
   status=0
 else
   status=$?

@@ -530,9 +530,9 @@ class SafetyTests(unittest.TestCase):
                     self.client.checks = [
                         {
                             "head_sha": "abc123",
-                            "status": "in_progress"
-                            if conclusion is None
-                            else "completed",
+                            "status": (
+                                "in_progress" if conclusion is None else "completed"
+                            ),
                             "conclusion": conclusion,
                         }
                     ]
@@ -639,9 +639,8 @@ class ClientTests(unittest.TestCase):
         output = "api_response:\n  body: e30=\n  truncated: false\n"
         with (
             mock.patch.dict(bot.os.environ, {"GH_HOST": "unintended.example"}),
-            mock.patch.object(
-                bot.subprocess,
-                "run",
+            mock.patch(
+                "dependabot_api.run_command",
                 return_value=subprocess.CompletedProcess([], 0, output),
             ) as run,
         ):
@@ -841,9 +840,8 @@ class ClientTests(unittest.TestCase):
         encoded = base64.b64encode(json.dumps({"login": "operator"}).encode()).decode()
         for body in (encoded, json.dumps(encoded)):
             output = f"api_response:\n  body: {body}\n  truncated: false\n"
-            with mock.patch.object(
-                bot.subprocess,
-                "run",
+            with mock.patch(
+                "dependabot_api.run_command",
                 return_value=subprocess.CompletedProcess([], 0, output),
             ):
                 self.assertEqual(
@@ -857,18 +855,16 @@ class ClientTests(unittest.TestCase):
             "api_response:\n  body: e30=\n  truncated: true",
         ):
             with (
-                mock.patch.object(
-                    bot.subprocess,
-                    "run",
+                mock.patch(
+                    "dependabot_api.run_command",
                     return_value=subprocess.CompletedProcess([], 0, output),
                 ),
                 self.assertRaises((bot.AutomationError, ValueError)),
             ):
                 bot.GitHub().request("GET", "/user")
         with (
-            mock.patch.object(
-                bot.subprocess,
-                "run",
+            mock.patch(
+                "dependabot_api.run_command",
                 return_value=subprocess.CompletedProcess([], 1, "", "HTTP 404"),
             ),
             self.assertRaisesRegex(bot.AutomationError, "HTTP 404"),
