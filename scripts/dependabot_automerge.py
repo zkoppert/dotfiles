@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 from dependabot_alerts import publish
-from dependabot_api import AutomationError, GitHub, latest_statuses
+from dependabot_api import AutomationError, GitHub, classify_ci
 from dependabot_scope import in_scope
 from dependency_context import collect_ci_context
 from dependency_review import review
@@ -90,25 +90,7 @@ def check_state(client: GitHub, repo: str, sha: str) -> str:
         f"/repos/{repo}/commits/{sha}/check-runs?filter=latest", ".check_runs"
     )
     statuses = client.pages(f"/repos/{repo}/commits/{sha}/statuses")
-    latest = {
-        status["context"]: status["state"] for status in latest_statuses(statuses)
-    }
-    if any(check.get("head_sha") != sha for check in checks):
-        return "inconsistent"
-    passing = {"success", "neutral", "skipped"}
-    if any(
-        check.get("conclusion") not in passing | {None, ""} for check in checks
-    ) or any(state not in passing | {"pending"} for state in latest.values()):
-        return "failing"
-    if (
-        any(check.get("status") != "completed" for check in checks)
-        or "pending" in latest.values()
-    ):
-        return "pending"
-    conclusions = [check.get("conclusion") for check in checks] + list(latest.values())
-    if any(value not in passing for value in conclusions):
-        return "failing"
-    return "passing" if "success" in conclusions else "absent"
+    return classify_ci(checks, statuses, sha)
 
 
 def evaluate(
@@ -192,7 +174,11 @@ def reviewed_ci_matches(
     ):
         raise AutomationError("security review lacks current-head CI evidence")
     expected = {key: context[key] for key in ("head_sha", "checks", "statuses")}
-    return collect_ci_context(client, repo, sha) == expected
+    current = collect_ci_context(client, repo, sha)
+    return (
+        current == expected
+        and classify_ci(current["checks"], current["statuses"], sha) == "passing"
+    )
 
 
 def handle(
@@ -269,9 +255,7 @@ def handle(
     ]
     if not own or own[-1].get("state") != "APPROVED" or own[-1].get("commit_id") != sha:
         if not reviewed_ci_matches(client, repo, sha, security):
-            result.update(
-                action="wait", reason="CI evidence changed since security review"
-            )
+            result.update(action="wait", reason="CI evidence changed or is not passing")
             return result
         client.request(
             "POST",
@@ -303,7 +287,7 @@ def handle(
         result.update(action="hold", reason="waiting for branch policy after approval")
         return result
     if not reviewed_ci_matches(client, repo, sha, security):
-        result.update(action="wait", reason="CI evidence changed since security review")
+        result.update(action="wait", reason="CI evidence changed or is not passing")
         return result
     response = client.request(
         "PUT", f"{path}/merge", {"sha": sha, "merge_method": "squash"}

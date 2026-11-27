@@ -37,6 +37,29 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(4, len(statuses))
 
+    def test_ci_classification_requires_current_completed_passing_evidence(self):
+        check = {"head_sha": "abc123", "status": "completed", "conclusion": "success"}
+        cases = [
+            ([check], [], "passing"),
+            ([], [], "absent"),
+            ([{**check, "conclusion": "skipped"}], [], "absent"),
+            ([{**check, "status": "in_progress", "conclusion": None}], [], "pending"),
+            ([{**check, "conclusion": "failure"}], [], "failing"),
+            ([{**check, "head_sha": "other"}], [], "inconsistent"),
+            ([check], [{"context": "tests", "state": "failure"}], "failing"),
+            (
+                [check],
+                [
+                    {"context": "tests", "state": "success"},
+                    {"context": "tests", "state": "failure"},
+                ],
+                "passing",
+            ),
+        ]
+        for checks, statuses, expected in cases:
+            with self.subTest(expected=expected, checks=checks, statuses=statuses):
+                self.assertEqual(expected, api.classify_ci(checks, statuses, "abc123"))
+
     def test_empty_status_history_stays_empty(self):
         self.assertEqual([], api.latest_statuses([]))
 

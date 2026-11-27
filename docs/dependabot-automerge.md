@@ -53,6 +53,7 @@ Patch breadth, expected diagnostic fixes, and hypothetical uses alone do not est
 Passing CI can support compatibility analysis, but it never overrides security findings or incomplete source evidence.
 The context and policy enter the review hash, so earlier verdicts cannot authorize different evidence.
 Approval and merge each recheck the normalized CI snapshot against the reviewed evidence.
+That same snapshot must satisfy the CI gate. A separate passing observation cannot authorize a write.
 A changed snapshot waits for another review, even when aggregate CI eligibility still passes.
 All model tools, including shell, file, and network tools, are disabled through an explicit nonmatching catalog selector.
 An empty `--available-tools=` restores this CLI's default catalog and must not replace the nonmatching selector.

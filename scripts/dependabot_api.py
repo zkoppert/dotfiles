@@ -35,6 +35,30 @@ def latest_statuses(statuses: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(latest.values())
 
 
+def classify_ci(
+    checks: list[dict[str, Any]], statuses: list[dict[str, Any]], sha: str
+) -> str:
+    latest = {
+        status["context"]: status["state"] for status in latest_statuses(statuses)
+    }
+    if any(check.get("head_sha") != sha for check in checks):
+        return "inconsistent"
+    passing = {"success", "neutral", "skipped"}
+    if any(
+        check.get("conclusion") not in passing | {None, ""} for check in checks
+    ) or any(state not in passing | {"pending"} for state in latest.values()):
+        return "failing"
+    if (
+        any(check.get("status") != "completed" for check in checks)
+        or "pending" in latest.values()
+    ):
+        return "pending"
+    conclusions = [check.get("conclusion") for check in checks] + list(latest.values())
+    if any(value not in passing for value in conclusions):
+        return "failing"
+    return "passing" if "success" in conclusions else "absent"
+
+
 def run_command(command, *, input=None, timeout=90):
     with subprocess.Popen(
         command,

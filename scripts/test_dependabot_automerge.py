@@ -258,6 +258,62 @@ class SafetyTests(unittest.TestCase):
             [write[:2] for write in self.client.writes],
         )
 
+    def test_matching_but_nonpassing_reviewed_ci_never_authorizes_either_write(self):
+        for conclusion in ("failure", None):
+            for approved in (False, True):
+                with self.subTest(conclusion=conclusion, approved=approved):
+                    self.client = FakeGitHub()
+                    self.client.checks[0]["name"] = "lint"
+                    self.client.checks.append(
+                        {**self.client.checks[0], "name": "tests"}
+                    )
+                    checks = copy.deepcopy(self.client.checks)
+                    checks[0].update(
+                        conclusion=conclusion,
+                        status="in_progress" if conclusion is None else "completed",
+                    )
+                    producer = FakeGitHub()
+                    producer.checks = copy.deepcopy(checks)
+                    proof = bot.collect_ci_context(producer, REPO, "abc123")
+                    self.review.return_value = {
+                        "decision": "allow",
+                        "summary": "Source reviewed",
+                        "evidence": {"dependencies": [], "consumer_context": proof},
+                    }
+                    if approved:
+                        self.client.reviews = [
+                            {
+                                "user": {"login": "operator", "type": "User"},
+                                "state": "APPROVED",
+                                "commit_id": "abc123",
+                                "body": "<!-- dependabot-automerge:review:abc123 -->",
+                            }
+                        ]
+                    pages = self.client.pages
+                    reads = 0
+
+                    def current_snapshot(
+                        path,
+                        expression=".",
+                        *,
+                        approved=approved,
+                        checks=checks,
+                        pages=pages,
+                    ):
+                        nonlocal reads
+                        if "/check-runs?" in path:
+                            reads += 1
+                            if reads == (4 if approved else 3):
+                                return copy.deepcopy(checks)
+                        return pages(path, expression)
+
+                    with mock.patch.object(
+                        self.client, "pages", side_effect=current_snapshot
+                    ):
+                        result = self.handle()
+                    self.assertEqual("wait", result["action"])
+                    self.assertEqual([], self.client.writes)
+
     def test_an_allow_without_reviewed_ci_evidence_never_authorizes_a_write(self):
         self.review.return_value = {"decision": "allow", "summary": "Missing evidence"}
         with self.assertRaisesRegex(
