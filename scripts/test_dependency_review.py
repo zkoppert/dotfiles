@@ -480,6 +480,55 @@ class EvidenceTests(unittest.TestCase):
         )
         self.assertEqual({first["path"], second["path"]}, manifests)
 
+    def test_workflows_cannot_exchange_graph_scoped_commit_pairs(self):
+        first = self.action_fixture()
+        other_old, other_new = "e" * 40, "f" * 40
+        second = {
+            **first,
+            "path": ".github/workflows/other.yml",
+            "patch": first["patch"]
+            .replace(OLD, other_old)
+            .replace(NEW, other_new)
+            .replace("v2.32.3", "v3.0.0")
+            .replace("v2.32.4", "v3.0.1"),
+        }
+        other_changes = [
+            {**entry, "manifest": second["path"], "version": sha}
+            for entry, sha in zip(self.api.changes, (other_old, other_new))
+        ]
+        with self.assertRaises(security.ReviewBlocked):
+            security.action_versions(
+                security.dependency_pairs(self.api.changes + other_changes),
+                [
+                    {**first, "patch": second["patch"]},
+                    {**second, "patch": first["patch"]},
+                ],
+            )
+
+    def test_each_graph_pair_requires_evidence_in_its_own_workflow(self):
+        first = self.action_fixture()
+        other = {
+            **first,
+            "path": ".github/workflows/other.yml",
+            "patch": first["patch"].replace("example/source", "other/source"),
+        }
+        extra_changes = [
+            {
+                **entry,
+                "name": "other/source",
+                "source_repository_url": "https://github.com/other/source",
+            }
+            for entry in self.api.changes
+        ]
+        with self.assertRaises(security.ReviewBlocked):
+            security.action_versions(
+                security.dependency_pairs(self.api.changes + extra_changes),
+                [
+                    {**first, "patch": other["patch"]},
+                    {**first, "path": ".github/workflows/duplicate.yml"},
+                ],
+            )
+
     def test_pinned_actions_cannot_cover_code_changes_or_conflicting_comments(self):
         patch = self.action_fixture()
         for bad in (

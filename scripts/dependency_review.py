@@ -254,6 +254,8 @@ def action_versions(pairs, consumer):
     )
     versions = {}
     manifests = set()
+    graph_manifests = {new["manifest"] for _, new in pairs}
+    observed = set()
     for patch in consumer:
         if (
             not re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", patch["path"])
@@ -285,6 +287,10 @@ def action_versions(pairs, consumer):
                 (old, new)
                 for old, new in pinned
                 if new["name"] == name
+                and (
+                    patch["path"] not in graph_manifests
+                    or new["manifest"] == patch["path"]
+                )
                 and source_repo(new["source_repository_url"]) == name
                 and old["version"] == before[3]
                 and new["version"] == after[3]
@@ -293,6 +299,7 @@ def action_versions(pairs, consumer):
                 raise ReviewBlocked(
                     "Action reference lacks matching dependency graph evidence"
                 )
+            observed.add((patch["path"], name, before[3], after[3]))
             versions.setdefault((name, before[3], after[3]), set()).add(
                 (before[5], after[5])
             )
@@ -300,7 +307,11 @@ def action_versions(pairs, consumer):
     resolved = []
     for old, new in pairs:
         candidates = versions.get((new["name"], old["version"], new["version"]), set())
-        if len(candidates) != 1 or new["manifest"] not in manifests:
+        if (
+            len(candidates) != 1
+            or (new["manifest"], new["name"], old["version"], new["version"])
+            not in observed
+        ):
             raise ReviewBlocked("Action version comments are missing or inconsistent")
         before, after = next(iter(candidates))
         resolved.append(
