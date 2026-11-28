@@ -50,11 +50,14 @@ class FakeGitHub:
         self.statuses = []
         self.writes = []
         self.merge_response = {"merged": True}
+        self.comparison_base = None
 
     def request(self, method, path, payload=None, expression="."):
         if method != "GET":
             self.writes.append((method, path, payload))
             return self.merge_response if path.endswith("/merge") else {}
+        if "/compare/" in path:
+            return {"merge_base": self.comparison_base or self.pr["base"]["sha"]}
         return copy.deepcopy(self.pr)
 
     def pages(self, path, expression="."):
@@ -173,7 +176,21 @@ class SafetyTests(unittest.TestCase):
         self.addCleanup(self.reviewer.stop)
 
     def handle(self, dry_run=False):
-        return bot.handle(self.client, CONFIG, REPO, 7, "operator", dry_run)
+        def review_with_ci(client, repo, pr):
+            verdict = copy.deepcopy(self.review(client, repo, pr))
+            if isinstance(verdict, dict) and verdict.get("decision") == "allow":
+                evidence = verdict.setdefault("evidence", {})
+                context = evidence.setdefault("consumer_context", {})
+                if not {"head_sha", "checks", "statuses"} <= context.keys():
+                    for key, value in bot.collect_ci_context(
+                        client, repo, pr["head"]["sha"]
+                    ).items():
+                        context.setdefault(key, value)
+                evidence.setdefault("dependencies", [])
+            return verdict
+
+        with mock.patch.object(bot, "review", side_effect=review_with_ci):
+            return bot.handle(self.client, CONFIG, REPO, 7, "operator", dry_run)
 
     def test_all_stable_upgrade_kinds_are_eligible_without_a_coverage_setting(self):
         for target, kind in (
@@ -184,6 +201,143 @@ class SafetyTests(unittest.TestCase):
             self.client.pr["title"] = f"Bump package from 1.0.0 to {target}"
             result = self.handle(dry_run=True)
             self.assertEqual(("merge", kind), (result["action"], result["bump"]))
+        self.assertEqual([], self.client.writes)
+
+    def test_same_head_ci_change_after_review_prevents_approval_and_merge(self):
+        self.client.checks[0]["name"] = "lint"
+        self.client.checks.append({**self.client.checks[0], "name": "tests"})
+        proof = {
+            "head_sha": "abc123",
+            "checks": copy.deepcopy(self.client.checks),
+            "statuses": [],
+        }
+
+        def review_then_change(*args):
+            self.client.checks[0]["conclusion"] = "skipped"
+            return {
+                "decision": "allow",
+                "summary": "Reviewed",
+                "evidence": {"dependencies": [], "consumer_context": proof},
+            }
+
+        self.review.side_effect = review_then_change
+        result = self.handle()
+        self.assertEqual("wait", result["action"])
+        self.assertIn("CI evidence changed", result["reason"])
+        self.assertEqual([], self.client.writes)
+
+    def test_same_head_ci_change_after_approval_prevents_the_merge_write(self):
+        self.client.checks[0]["name"] = "lint"
+        self.client.checks.append({**self.client.checks[0], "name": "tests"})
+        self.review.return_value = {
+            "decision": "allow",
+            "summary": "Reviewed",
+            "evidence": {
+                "dependencies": [],
+                "consumer_context": {
+                    "head_sha": "abc123",
+                    "checks": copy.deepcopy(self.client.checks),
+                    "statuses": [],
+                },
+            },
+        }
+        request = self.client.request
+
+        def approve_then_change(method, path, *args, **kwargs):
+            result = request(method, path, *args, **kwargs)
+            if method == "POST" and path.endswith("/reviews"):
+                self.client.checks[0]["conclusion"] = "skipped"
+            return result
+
+        with mock.patch.object(self.client, "request", side_effect=approve_then_change):
+            result = self.handle()
+        self.assertEqual("wait", result["action"])
+        self.assertIn("CI evidence changed", result["reason"])
+        self.assertEqual(
+            [("POST", f"/repos/{REPO}/pulls/7/reviews")],
+            [write[:2] for write in self.client.writes],
+        )
+
+    def test_matching_but_nonpassing_reviewed_ci_never_authorizes_either_write(self):
+        for conclusion in ("failure", None):
+            for approved in (False, True):
+                with self.subTest(conclusion=conclusion, approved=approved):
+                    self.client = FakeGitHub()
+                    self.client.checks[0]["name"] = "lint"
+                    self.client.checks.append(
+                        {**self.client.checks[0], "name": "tests"}
+                    )
+                    checks = copy.deepcopy(self.client.checks)
+                    checks[0].update(
+                        conclusion=conclusion,
+                        status="in_progress" if conclusion is None else "completed",
+                    )
+                    producer = FakeGitHub()
+                    producer.checks = copy.deepcopy(checks)
+                    proof = bot.collect_ci_context(producer, REPO, "abc123")
+                    self.review.return_value = {
+                        "decision": "allow",
+                        "summary": "Source reviewed",
+                        "evidence": {"dependencies": [], "consumer_context": proof},
+                    }
+                    if approved:
+                        self.client.reviews = [
+                            {
+                                "user": {"login": "operator", "type": "User"},
+                                "state": "APPROVED",
+                                "commit_id": "abc123",
+                                "body": "<!-- dependabot-automerge:review:abc123 -->",
+                            }
+                        ]
+                    pages = self.client.pages
+                    reads = 0
+
+                    def current_snapshot(
+                        path,
+                        expression=".",
+                        *,
+                        approved=approved,
+                        checks=checks,
+                        pages=pages,
+                    ):
+                        nonlocal reads
+                        if "/check-runs?" in path:
+                            reads += 1
+                            if reads == (4 if approved else 3):
+                                return copy.deepcopy(checks)
+                        return pages(path, expression)
+
+                    with mock.patch.object(
+                        self.client, "pages", side_effect=current_snapshot
+                    ):
+                        result = self.handle()
+                    self.assertEqual("wait", result["action"])
+                    self.assertEqual([], self.client.writes)
+
+    def test_an_allow_without_reviewed_ci_evidence_never_authorizes_a_write(self):
+        self.review.return_value = {"decision": "allow", "summary": "Missing evidence"}
+        with self.assertRaisesRegex(
+            bot.AutomationError, "lacks current-head CI evidence"
+        ):
+            bot.handle(self.client, CONFIG, REPO, 7, "operator", False)
+        self.assertEqual([], self.client.writes)
+
+    def test_reports_never_publish_the_consumer_configuration_payload(self):
+        self.review.return_value = {
+            "decision": "allow",
+            "summary": "Reviewed",
+            "findings": [],
+            "evidence": {
+                "dependencies": [],
+                "consumer_context": {
+                    "files": [{"content": "private-configuration-canary"}]
+                },
+            },
+        }
+        result = self.handle(dry_run=True)
+        self.assertEqual("merge", result["action"])
+        self.assertNotIn("private-configuration-canary", json.dumps(result))
+        self.assertNotIn("evidence", result["security_review"])
         self.assertEqual([], self.client.writes)
 
     def test_security_findings_or_incomplete_review_prevent_all_writes(self):
@@ -468,6 +622,80 @@ class SafetyTests(unittest.TestCase):
         result = self.handle()
         self.assertEqual("wait", result["action"])
         self.assertEqual({}, alerts.actionable({"decisions": [result], "errors": []}))
+        self.assertEqual([], self.client.writes)
+
+    def test_failed_checks_on_an_outdated_base_request_one_rebase_without_approval(
+        self,
+    ):
+        self.client.comparison_base = "older-base"
+        self.client.checks[0]["conclusion"] = "failure"
+        result = self.handle()
+        self.assertEqual("rebase", result["action"])
+        self.assertEqual(1, len(self.client.writes))
+        self.assertEqual(
+            ("POST", f"/repos/{REPO}/issues/7/comments"), self.client.writes[0][:2]
+        )
+        self.assertEqual(
+            "@dependabot rebase\n\n<!-- dependabot-automerge:abc123 -->",
+            self.client.writes[0][2]["body"],
+        )
+        self.review.assert_not_called()
+        self.client.comments = [
+            {
+                "user": {"login": "operator", "type": "User"},
+                "body": self.client.writes[0][2]["body"],
+            }
+        ]
+        self.client.writes.clear()
+        self.assertEqual("wait", self.handle()["action"])
+        self.assertEqual([], self.client.writes)
+
+    def test_failed_checks_after_reaching_the_latest_base_do_not_loop_rebases(self):
+        self.client.pr["head"]["sha"] = "def456"
+        self.client.checks[0].update(head_sha="def456", conclusion="failure")
+        result = self.handle()
+        self.assertEqual(
+            ("hold", "CI checks failing"), (result["action"], result["reason"])
+        )
+        self.assertEqual([], self.client.writes)
+        self.review.assert_not_called()
+
+    def test_stale_check_evidence_never_triggers_recovery_or_approval(self):
+        self.client.comparison_base = "older-base"
+        self.client.checks[0]["head_sha"] = "other-head"
+        result = self.handle()
+        self.assertEqual(
+            ("hold", "CI checks inconsistent"), (result["action"], result["reason"])
+        )
+        self.assertEqual([], self.client.writes)
+
+    def test_failed_ci_recovery_preview_makes_no_writes_and_preserves_human_stops(self):
+        self.client.comparison_base = "older-base"
+        self.client.checks[0]["conclusion"] = "failure"
+        self.assertEqual("rebase", self.handle(dry_run=True)["action"])
+        self.assertEqual([], self.client.writes)
+        self.client.comments = [
+            {"user": {"login": "reviewer", "type": "User"}, "body": "Please wait"}
+        ]
+        self.assertEqual("hold", self.handle()["action"])
+        self.assertEqual([], self.client.writes)
+
+    def test_incomplete_recovery_comparison_stops_without_a_rebase(self):
+        self.client.checks[0]["conclusion"] = "failure"
+        original = self.client.request
+        with (
+            mock.patch.object(
+                self.client,
+                "request",
+                side_effect=lambda method, path, *args, **kwargs: (
+                    {}
+                    if "/compare/" in path
+                    else original(method, path, *args, **kwargs)
+                ),
+            ),
+            self.assertRaisesRegex(bot.AutomationError, "lacks a merge base"),
+        ):
+            self.handle()
         self.assertEqual([], self.client.writes)
 
     def test_rebase_is_requested_only_once_for_each_commit(self):

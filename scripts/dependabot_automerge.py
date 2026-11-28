@@ -17,8 +17,9 @@ from typing import Any
 
 import yaml
 from dependabot_alerts import publish
-from dependabot_api import AutomationError, GitHub
+from dependabot_api import AutomationError, GitHub, classify_ci
 from dependabot_scope import in_scope
+from dependency_context import collect_ci_context
 from dependency_review import review
 
 sys.path.insert(
@@ -89,25 +90,7 @@ def check_state(client: GitHub, repo: str, sha: str) -> str:
         f"/repos/{repo}/commits/{sha}/check-runs?filter=latest", ".check_runs"
     )
     statuses = client.pages(f"/repos/{repo}/commits/{sha}/statuses")
-    latest = {}
-    for status in statuses:
-        latest.setdefault(status["context"], status["state"])
-    if any(check.get("head_sha") != sha for check in checks):
-        return "failing"
-    passing = {"success", "neutral", "skipped"}
-    if any(
-        check.get("conclusion") not in passing | {None, ""} for check in checks
-    ) or any(state not in passing | {"pending"} for state in latest.values()):
-        return "failing"
-    if (
-        any(check.get("status") != "completed" for check in checks)
-        or "pending" in latest.values()
-    ):
-        return "pending"
-    conclusions = [check.get("conclusion") for check in checks] + list(latest.values())
-    if any(value not in passing for value in conclusions):
-        return "failing"
-    return "passing" if "success" in conclusions else "absent"
+    return classify_ci(checks, statuses, sha)
 
 
 def evaluate(
@@ -150,7 +133,22 @@ def evaluate(
             author.get("type") != "Bot" and not automation
         ):
             return "hold", "human activity or requested changes"
-    if pr.get("mergeable_state") in {"behind", "dirty"}:
+    needs_rebase = pr.get("mergeable_state") in {"behind", "dirty"}
+    if not needs_rebase:
+        checks = check_state(client, repo, pr["head"]["sha"])
+        if checks == "failing":
+            comparison = client.request(
+                "GET",
+                f"{root}/compare/{pr['base']['sha']}...{pr['head']['sha']}",
+                expression="{merge_base: .merge_base_commit.sha}",
+            )
+            merge_base = comparison.get("merge_base")
+            if not isinstance(merge_base, str) or not merge_base:
+                raise AutomationError("CI recovery comparison lacks a merge base")
+            needs_rebase = merge_base != pr["base"]["sha"]
+        if checks != "passing" and not needs_rebase:
+            return "wait" if checks == "pending" else "hold", f"CI checks {checks}"
+    if needs_rebase:
         marker = f"<!-- dependabot-automerge:{pr['head']['sha']} -->"
         if any(
             marker in item.get("body", "")
@@ -159,12 +157,28 @@ def evaluate(
         ):
             return "wait", "rebase already requested for this revision"
         return "rebase", "branch needs a Dependabot rebase"
-    checks = check_state(client, repo, pr["head"]["sha"])
-    if checks != "passing":
-        return "wait" if checks == "pending" else "hold", f"CI checks {checks}"
     if pr.get("mergeable") is not True:
         return "wait", "mergeability not confirmed"
     return "merge", "stable upgrade with passing checks"
+
+
+def reviewed_ci_matches(
+    client: GitHub, repo: str, sha: str, security: dict[str, Any]
+) -> bool:
+    evidence = security.get("evidence")
+    context = evidence.get("consumer_context") if isinstance(evidence, dict) else None
+    if (
+        not isinstance(context, dict)
+        or context.get("head_sha") != sha
+        or any(not isinstance(context.get(key), list) for key in ("checks", "statuses"))
+    ):
+        raise AutomationError("security review lacks current-head CI evidence")
+    expected = {key: context[key] for key in ("head_sha", "checks", "statuses")}
+    current = collect_ci_context(client, repo, sha)
+    return (
+        current == expected
+        and classify_ci(current["checks"], current["statuses"], sha) == "passing"
+    )
 
 
 def handle(
@@ -240,6 +254,9 @@ def handle(
         and review.get("state") != "COMMENTED"
     ]
     if not own or own[-1].get("state") != "APPROVED" or own[-1].get("commit_id") != sha:
+        if not reviewed_ci_matches(client, repo, sha, security):
+            result.update(action="wait", reason="CI evidence changed or is not passing")
+            return result
         client.request(
             "POST",
             f"{path}/reviews",
@@ -268,6 +285,9 @@ def handle(
         return result
     if ready.get("mergeable_state") != "clean":
         result.update(action="hold", reason="waiting for branch policy after approval")
+        return result
+    if not reviewed_ci_matches(client, repo, sha, security):
+        result.update(action="wait", reason="CI evidence changed or is not passing")
         return result
     response = client.request(
         "PUT", f"{path}/merge", {"sha": sha, "merge_method": "squash"}

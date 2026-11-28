@@ -24,6 +24,9 @@ Missing, invalid, or empty scope stops processing.
 - The existing dependency exclusion still applies.
 - The runner requests a Dependabot rebase once for each head revision that needs one.
 - Rebase recovery takes precedence over stale CI failures; passing checks remain mandatory before approval or merge.
+- Failed checks on an older base trigger one Dependabot rebase, even when GitHub reports a clean merge state.
+- A failure on the current base remains blocked. The runner does not repeat rebases to hide a persistent failure.
+- Checks from a different revision cannot trigger recovery or approval.
 - Approvals reference the evaluated commit; merge requests require that same commit.
 - The runner requires a clean merge state after approval and never requests a branch-policy bypass.
 - Only a successful merge response counts as a completed merge.
@@ -41,6 +44,17 @@ Consumer patches also come from an immutable base/head comparison, not the live 
 Immutable Git trees supply file modes. Mode changes, symlinks, submodules, and incomplete tree data require manual review.
 It checks reviewed, unreviewed, and malware advisories for each target version, independently of CI.
 A tool-free Copilot reviewer examines the consuming PR patches and upstream code patches before approval.
+It also receives selected consumer configuration, workflow files, and CI results for the evaluated revision.
+The collector verifies each configuration file against its immutable Git blob identity.
+Configuration context has a separate 64 KB limit; the existing source-patch limit remains unchanged.
+The selected configuration is not a complete usage inventory.
+Compatibility findings must identify a changed contract and a reachable consumer failure.
+Patch breadth, expected diagnostic fixes, and hypothetical uses alone do not establish a breaking change.
+Passing CI can support compatibility analysis, but it never overrides security findings or incomplete source evidence.
+The context and policy enter the review hash, so earlier verdicts cannot authorize different evidence.
+Approval and merge each recheck the normalized CI snapshot against the reviewed evidence.
+That same snapshot must satisfy the CI gate. A separate passing observation cannot authorize a write.
+A changed snapshot waits for another review, even when aggregate CI eligibility still passes.
 All model tools, including shell, file, and network tools, are disabled through an explicit nonmatching catalog selector.
 An empty `--available-tools=` restores this CLI's default catalog and must not replace the nonmatching selector.
 The reviewer uses temporary configuration directories and an explicit environment allowlist, without approval-token environment variables.
@@ -63,7 +77,10 @@ The review adds evidence, not a security guarantee.
 It doesn't verify published package archives, signatures, or package-to-source provenance.
 It checks the PR author, but it doesn't verify who pushed each commit or validate commit signatures.
 The base branch can advance after revalidation. GitHub's configured branch rules decide whether that requires new checks.
-Source patches enter the authenticated Copilot service. Reports keep review identities, revision IDs, and findings, not source patches.
+Source patches and selected consumer configuration enter the authenticated Copilot service.
+Private JSON reports omit raw evidence payloads but retain reviewer summaries and findings verbatim.
+Reviewer text can quote source or configuration, so the private report is not a redacted document.
+Help gists use fixed reason summaries, not reviewer text or raw evidence.
 Don't publish private reports or Copilot session logs.
 The GitHub API adapter pins `gh-axi@0.1.35` through Central Feed Services (CFS).
 Run `bin/triage-dependabot --prepare-runtime` once in each fixed release before activation.

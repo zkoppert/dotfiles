@@ -20,6 +20,8 @@ from typing import Any
 from urllib.parse import quote, urlparse
 from urllib.request import urlopen
 
+from dependency_context import collect_context
+
 CACHE = Path.home() / "Library/Caches/dependabot-automerge/reviews"
 MODEL = "gpt-5.3-codex"
 # An empty selector restores CLI defaults instead of removing tools.
@@ -46,6 +48,12 @@ Inspect every consuming PR patch and upstream patch, not just titles or changelo
 Cross-check consumer dependency changes against the supplied dependency list. Hold if any dependency change lacks matching upstream evidence.
 Check credential exfiltration, install hooks, network destinations, dynamic execution,
 authentication, validation, cryptography, permissions, and behavior changes.
+For compatibility, identify a concrete changed contract and a reachable consumer failure using the supplied configuration and CI evidence.
+Expected bug fixes, changed lint diagnostics, patch breadth, and hypothetical uses alone do not establish a breaking change.
+A CLI rejecting invalid inputs is not automatically a break of supported consumer usage.
+Consumer context is a selected configuration inventory, not proof that other usage is absent.
+Passing CI can support compatibility analysis but must never override a credible security finding or missing source evidence.
+When reporting a finding, cite the affected code, the triggering condition, and the consumer impact or security threat.
 For Actions, check event-data injection, mutable action references, secret exposure,
 excessive token permissions, and untrusted execution with pull_request_target/workflow_run.
 Return hold for suspicious changes, missing context, or uncertainty. Tests aren't proof of safety.
@@ -647,6 +655,7 @@ def review(
     client: Any, repo: str, pr: dict[str, Any], cache: Path = CACHE
 ) -> dict[str, Any]:
     evidence = collect(client, repo, pr)
+    evidence["consumer_context"] = collect_context(client, repo, pr["head"]["sha"])
     serialized = json.dumps(evidence, sort_keys=True)
     digest = hashlib.sha256((POLICY + MODEL + serialized).encode()).hexdigest()
     path = cache / f"{digest}.json"
